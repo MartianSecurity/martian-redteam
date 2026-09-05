@@ -1,0 +1,9 @@
+martian-redteam
+Copyright 2026 MorningHQ / Martian Security
+
+This product includes taxonomy identifiers and labels derived from DeepTeam
+(https://github.com/confident-ai/deepteam), Copyright Confident AI, licensed
+under the Apache License, Version 2.0.
+
+Simulation and evaluation prompts in this project are authored by Martian
+Security and are not copies of DeepTeam template corpora.
