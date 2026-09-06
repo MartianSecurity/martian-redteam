@@ -9,6 +9,8 @@ shared staging API key until per-tenant identity exists on the service.
 
 **Documentation:** [docs/](docs/README.md) (architecture, protocol, catalog, gate, security).
 
+**CI/CD:** this repo’s GitHub Actions are lint, types, and pytest only (Python 3.12/3.13, no live Martian Agents, no `OPENAI_API_KEY`). Customer pipelines should `validate` on PRs, then `run … -c 2 -a 1` as a fail-closed local gate — not DeepTeam’s upload-then-`deepeval gate` model. See [docs/gate-and-ci.md](docs/gate-and-ci.md).
+
 ## Install
 
 ```bash
@@ -40,7 +42,8 @@ Inside an existing event loop, use `await a_red_team(...)` instead of `red_team(
 
 ```bash
 uv run martian-redteam catalog
-uv run martian-redteam run examples/config.yaml -o results/
+uv run martian-redteam validate examples/config.yaml
+uv run martian-redteam run examples/config.yaml -o results/ -c 2 -a 1
 ```
 
 The target callback is never invoked from Martian's network. Evaluator calls

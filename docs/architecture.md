@@ -136,9 +136,9 @@ Until Phase 0 lands, `Client.simulate` / `Client.evaluate` will 404 or fail sche
 
 | Field | Who sets it | Meaning |
 | --- | --- | --- |
-| `catalog_version` | SDK (`0.1.0`) | Vulnerability/attack ID table in this package |
+| `catalog_version` | SDK (`0.2.0`) | Vulnerability/attack ID table in this package |
 | `graph_revision` | Service, if returned on graph state | Prompt/graph image digest. Recorded on `RiskAssessment` when present |
-| Package version | `pyproject.toml` / `__version__` | SDK release. Not the same as catalog_version, though they match at 0.1.0 |
+| Package version | `pyproject.toml` / `__version__` | SDK release (`0.1.0`). Not the same as catalog_version |
 
 If the SDK catalog is newer than the service (unknown vulnerability id on the graph), fail closed. The SDK already rejects unknown **local** catalog names. Unknown ids that pass the SDK but are rejected by the graph surface as HTTP/schema `ClientError`.
 

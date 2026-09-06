@@ -74,11 +74,15 @@ class RiskAssessment(BaseModel):
     target_errors: int = 0
 
     def save(self, to: str | Path) -> Path:
-        """Write this assessment as JSON. Returns the written path."""
+        """Write JSON and Markdown reports. Returns the JSON path."""
         directory = Path(to)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "risk-assessment.json"
         path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        from martian_redteam.report import append_github_summary, write_markdown
+
+        write_markdown(self, directory)
+        append_github_summary(self)
         return path
 
 

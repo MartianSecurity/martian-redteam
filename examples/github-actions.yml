@@ -1,10 +1,24 @@
-# Example customer GitHub Action. Requires MARTIAN_API_KEY in repo secrets.
-# GitHub-hosted runner IPs are shared; keep concurrency low.
-# See docs/gate-and-ci.md and docs/security-and-data.md.
+# Example customer workflow using the composite action.
+# Copy into .github/workflows/ in your repository and override `config`.
+# See docs/gate-and-ci.md.
+#
+# The local `martian-redteam run` exit code is the gate (1 = fail closed).
+# Do not use continue-on-error or a remote Confident AI / deepeval gate.
+#
+# GitHub-hosted runner IPs are shared. martian-agents WAF is 2000 requests /
+# 5 minutes / IP; two workflows on the same NAT can 429. Keep
+# system_config.max_concurrent at 2 or 1 in your YAML.
+#
+# Pin third-party actions to SHAs (already done below). Pin
+# MorningHQ/martian-redteam to a tag or SHA in production instead of @main.
+#
+# For the reusable-workflow style, see examples/reusable-workflow.yml.
+
 name: Red team
 
 on:
   workflow_dispatch:
+  # pull_request:
 
 permissions:
   contents: read
@@ -17,19 +31,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Run martian-redteam
+        uses: MorningHQ/martian-redteam@main # pin to a SHA or tag in production
         with:
-          version: "0.10.0"
-      - name: Install
-        run: uv sync --locked
-      - name: Run assessment
+          config: examples/config.yaml
+          output: results
+          # max-concurrent: "2"
+          # attacks-per-vuln: "1"
         env:
-          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
           MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
-        run: uv run martian-redteam run examples/config.yaml -o results
+          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: red-team-results
           path: results/
+          if-no-files-found: ignore

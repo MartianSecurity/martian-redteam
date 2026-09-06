@@ -1,0 +1,97 @@
+# Reusable workflow for customer repositories (workflow_call).
+# Also runnable via workflow_dispatch on this repo; a missing MARTIAN_API_KEY
+# fails closed (ClientError / exit 1). Not used on pull_request here.
+# Callers should pin this workflow to a tag or SHA instead of @main.
+# See docs/gate-and-ci.md.
+name: Martian Red Team
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path to the YAML assessment config in the caller repository
+        type: string
+        required: false
+        default: examples/config.yaml
+      output:
+        description: Directory for risk-assessment.json and related artifacts
+        type: string
+        required: false
+        default: results
+      python-version:
+        description: Python version for setup-uv (package requires >=3.12)
+        type: string
+        required: false
+        default: "3.12"
+      timeout-minutes:
+        description: Job timeout in minutes
+        type: number
+        required: false
+        default: 30
+      sdk-ref:
+        description: >
+          Git ref of MorningHQ/martian-redteam to install. Default main is a
+          moving target; pin a tag or SHA in production.
+        type: string
+        required: false
+        default: main
+      max-concurrent:
+        description: Override system_config.max_concurrent (CLI -c). Empty uses YAML.
+        type: string
+        required: false
+        default: ""
+      attacks-per-vuln:
+        description: Override system_config.attacks_per_vulnerability_type (CLI -a). Empty uses YAML.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      MARTIAN_API_KEY:
+        description: Martian Agents API key sent as X-API-Key
+        required: true
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  red-team:
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes || 30 }}
+    steps:
+      - name: Check out caller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.0"
+          python-version: ${{ inputs.python-version || '3.12' }}
+
+      - name: Install martian-redteam
+        # Pin sdk-ref to a tag or SHA in production; @main moves.
+        run: uv pip install --system "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${{ inputs.sdk-ref || 'main' }}"
+
+      - name: Run assessment
+        env:
+          MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
+          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
+        run: |
+          extra=()
+          if [ -n "${{ inputs.max-concurrent }}" ]; then
+            extra+=(-c "${{ inputs.max-concurrent }}")
+          fi
+          if [ -n "${{ inputs.attacks-per-vuln }}" ]; then
+            extra+=(-a "${{ inputs.attacks-per-vuln }}")
+          fi
+          martian-redteam run "${{ inputs.config || 'examples/config.yaml' }}" -o "${{ inputs.output || 'results' }}" "${extra[@]}"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: red-team-results
+          path: ${{ inputs.output || 'results' }}
+          if-no-files-found: ignore

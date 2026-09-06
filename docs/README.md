@@ -11,10 +11,10 @@ This repository is an **internal scaffold** until martian-agents exposes dedicat
 3. [Agent Protocol](agent-protocol.md) — `POST /runs/wait` contracts, graph state, retries
 4. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
 5. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
-6. [Configuration](configuration.md) — env vars, YAML schema, CLI
-7. [Gate and CI](gate-and-ci.md) — pass/fail matrix, GitHub Actions, WAF
+6. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
+7. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, WAF
 8. [Security and data](security-and-data.md) — tenancy blockers, what leaves the customer network
-9. [Development](development.md) — layout, tests, release checklist
+9. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
 
 ## Repository
 

@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  python:
-    name: Python checks
+  lint:
+    name: Lint
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -28,6 +28,7 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.10.0"
+          python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -40,11 +41,90 @@ jobs:
       - name: Lint Python
         run: uv run ruff check src tests examples
 
+  types:
+    name: Types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
       - name: Type-check Python
         run: uv run mypy src
 
-      - name: Run Python tests
-        run: uv run pytest -q
-
       - name: Compile source
         run: uv run python -m compileall -q src
+
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.0"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Run Python tests
+        run: >
+          uv run pytest -q
+          --cov=martian_redteam
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --junitxml=junit.xml
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-python-${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            junit.xml
+          if-no-files-found: error
+
+  ci:
+    name: CI
+    if: always()
+    needs: [lint, types, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check required jobs
+        run: |
+          lint_result="${{ needs.lint.result }}"
+          types_result="${{ needs.types.result }}"
+          test_result="${{ needs.test.result }}"
+          echo "lint=${lint_result} types=${types_result} test=${test_result}"
+          if [ "$lint_result" != "success" ] || [ "$types_result" != "success" ] || [ "$test_result" != "success" ]; then
+            echo "One or more required jobs failed" >&2
+            exit 1
+          fi

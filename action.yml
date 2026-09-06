@@ -1,0 +1,59 @@
+# Composite action for customer repositories.
+# Callers must check out their repo first. Pass MARTIAN_API_KEY (required) and
+# optional MARTIAN_API_URL via env on the job or this step — not as action inputs.
+# This action does not upload artifacts; the caller should upload the output
+# folder with if: always() so a failed local gate still leaves results.
+# See docs/gate-and-ci.md.
+name: Martian Red Team
+description: Run martian-redteam YAML assessment and fail closed on the local gate
+
+inputs:
+  config:
+    description: >
+      Path to the YAML assessment config, relative to the caller workspace.
+      Default matches this repository (examples/config.yaml); customer repos
+      should override (for example redteam.yaml).
+    required: true
+    default: examples/config.yaml
+  output:
+    description: Directory for risk-assessment.json and related artifacts
+    required: false
+    default: results
+  max-concurrent:
+    description: >
+      Override system_config.max_concurrent (CLI -c). Keep at 2 or 1 on
+      GitHub-hosted runners because of shared WAF IP limits.
+    required: false
+    default: ""
+  attacks-per-vuln:
+    description: Override system_config.attacks_per_vulnerability_type (CLI -a)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        version: "0.10.0"
+        python-version: "3.12"
+
+    - name: Install martian-redteam
+      shell: bash
+      run: uv pip install --system "${{ github.action_path }}"
+
+    - name: Run assessment
+      shell: bash
+      env:
+        MARTIAN_API_KEY: ${{ env.MARTIAN_API_KEY }}
+        MARTIAN_API_URL: ${{ env.MARTIAN_API_URL }}
+      run: |
+        extra=()
+        if [ -n "${{ inputs.max-concurrent }}" ]; then
+          extra+=(-c "${{ inputs.max-concurrent }}")
+        fi
+        if [ -n "${{ inputs.attacks-per-vuln }}" ]; then
+          extra+=(-a "${{ inputs.attacks-per-vuln }}")
+        fi
+        martian-redteam run "${{ inputs.config }}" -o "${{ inputs.output }}" "${extra[@]}"

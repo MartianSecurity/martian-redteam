@@ -2,15 +2,24 @@
 
 from martian_redteam.callback import wrap_callback
 from martian_redteam.catalog import (
+    RBAC,
     ROT13,
+    SSRF,
     Base64,
+    Bias,
     CustomVulnerability,
     ExcessiveAgency,
     IllegalActivity,
     Leetspeak,
+    Misinformation,
     PIILeakage,
     PromptInjection,
     PromptLeakage,
+    PromptProbing,
+    Robustness,
+    Roleplay,
+    ShellInjection,
+    SQLInjection,
     Toxicity,
 )
 from martian_redteam.client import Client, ClientError, RetryableClientError
@@ -22,6 +31,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Base64",
+    "Bias",
     "Client",
     "ClientError",
     "CustomVulnerability",
@@ -29,12 +39,20 @@ __all__ = [
     "GateFailure",
     "IllegalActivity",
     "Leetspeak",
+    "Misinformation",
     "PIILeakage",
     "PromptInjection",
     "PromptLeakage",
+    "PromptProbing",
+    "RBAC",
     "ROT13",
     "RetryableClientError",
     "RiskAssessment",
+    "Robustness",
+    "Roleplay",
+    "SQLInjection",
+    "SSRF",
+    "ShellInjection",
     "TestCase",
     "Toxicity",
     "Turn",

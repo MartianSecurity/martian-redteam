@@ -21,6 +21,14 @@ def PromptInjection(*, weight: float = 1.0) -> Attack:
     return Attack(id="prompt_injection", label="Prompt injection", kind="llm", weight=weight)
 
 
+def Roleplay(*, weight: float = 1.0) -> Attack:
+    return Attack(id="roleplay", label="Roleplay", kind="llm", weight=weight)
+
+
+def PromptProbing(*, weight: float = 1.0) -> Attack:
+    return Attack(id="prompt_probing", label="Prompt probing", kind="llm", weight=weight)
+
+
 def ROT13(*, weight: float = 1.0) -> Attack:
     return Attack(id="rot13", label="ROT13", kind="encoding", weight=weight)
 
@@ -35,6 +43,8 @@ def Leetspeak(*, weight: float = 1.0) -> Attack:
 
 ATTACKS: dict[str, Callable[..., Attack]] = {
     "PromptInjection": PromptInjection,
+    "Roleplay": Roleplay,
+    "PromptProbing": PromptProbing,
     "ROT13": ROT13,
     "Base64": Base64,
     "Leetspeak": Leetspeak,

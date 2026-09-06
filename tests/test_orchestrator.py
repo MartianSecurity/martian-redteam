@@ -40,7 +40,7 @@ async def test_orchestrator_single_turn_pass(simulator_payload: dict, evaluator_
     assert assessment.errored == 0
     assert len(assessment.test_cases) == 2
     assert all(case.score == 1 for case in assessment.test_cases)
-    assert assessment.catalog_version == "0.1.0"
+    assert assessment.catalog_version == "0.2.0"
     rot13_case = next(case for case in assessment.test_cases if case.attack_method == "rot13")
     assert rot13_case.input != simulator_payload["attack"]
 

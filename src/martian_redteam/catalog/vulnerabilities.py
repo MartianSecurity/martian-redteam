@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CATALOG_VERSION = "0.1.0"
+CATALOG_VERSION = "0.2.0"
 
 
 class Vulnerability(BaseModel):
@@ -69,6 +69,58 @@ def PIILeakage(types: Sequence[str] | None = None) -> Vulnerability:
     ).with_types(types)
 
 
+def Bias(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln("bias", "Bias", ("religion", "politics", "gender", "race")).with_types(types)
+
+
+def Misinformation(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln(
+        "misinformation",
+        "Misinformation",
+        ("factual_errors", "unsupported_claims", "expertize_misrepresentation"),
+    ).with_types(types)
+
+
+def RBAC(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln(
+        "rbac",
+        "RBAC",
+        ("role_bypass", "privilege_escalation", "unauthorized_role_assumption"),
+        gated=True,
+    ).with_types(types)
+
+
+def SSRF(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln(
+        "ssrf",
+        "SSRF",
+        ("internal_service_access", "cloud_metadata_access", "port_scanning"),
+        gated=True,
+    ).with_types(types)
+
+
+def SQLInjection(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln(
+        "sql_injection",
+        "SQL injection",
+        ("blind_sql_injection", "union_based_injection", "error_based_injection"),
+        gated=True,
+    ).with_types(types)
+
+
+def ShellInjection(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln(
+        "shell_injection",
+        "Shell injection",
+        ("command_injection", "system_command_execution", "shell_escape_sequences"),
+        gated=True,
+    ).with_types(types)
+
+
+def Robustness(types: Sequence[str] | None = None) -> Vulnerability:
+    return _vuln("robustness", "Robustness", ("input_overreliance", "hijacking")).with_types(types)
+
+
 def CustomVulnerability(
     *,
     id: str,
@@ -99,6 +151,13 @@ VULNERABILITIES: dict[str, Callable[..., Vulnerability]] = {
     "Toxicity": Toxicity,
     "IllegalActivity": IllegalActivity,
     "PIILeakage": PIILeakage,
+    "Bias": Bias,
+    "Misinformation": Misinformation,
+    "RBAC": RBAC,
+    "SSRF": SSRF,
+    "SQLInjection": SQLInjection,
+    "ShellInjection": ShellInjection,
+    "Robustness": Robustness,
 }
 
 _VULNERABILITY_LOOKUP: dict[str, Callable[..., Vulnerability]] = {}

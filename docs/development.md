@@ -24,16 +24,48 @@ uv run pytest -q
 uv run python -m compileall -q src
 ```
 
+Optional local coverage (CI always produces XML + JUnit):
+
+```bash
+uv run pytest -q --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+```
+
 Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian_redteam`.
 
-CI runs the same sequence. Format check is `--check` (no rewrite).
+## This repository’s CI
+
+`.github/workflows/ci.yml` is split so branch protection can require a single aggregator:
+
+| Job | Command | Python |
+| --- | --- | --- |
+| `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
+| `types` | `uv sync --locked`, `mypy src`, `compileall` | 3.12 |
+| `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `ci` | Succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
+
+Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
+
+`test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_KEY` or `OPENAI_API_KEY`, and does not run `martian-redteam run`.
+
+Third-party actions are SHA-pinned. Concurrency cancels in-progress runs on the same ref.
+
+Customer red-team workflows (reusable workflow, composite action, `validate` / `run -c -a`) are documented in [gate and CI](gate-and-ci.md). They are not this repo’s unit-test pipeline.
+
+## Dependabot
+
+`.github/dependabot.yml` opens **weekly** PRs for:
+
+- `package-ecosystem: uv` — `pyproject.toml` / `uv.lock`
+- `package-ecosystem: github-actions` — action SHAs used by CI, the reusable workflow, and the composite action
+
+Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to a floating tag (`@v4`, `@main`).
 
 ## Tests
 
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
 - `pytest-asyncio` mode `auto`.
-- CLI tests use Typer’s `CliRunner` (catalog and `--version` only; `run` would need a key and mocks).
+- CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate`. `run` tests mock the client; they never need a real key or OpenAI.
 
 When martian-agents Phase 0 contract tests exist, copy real wait bodies into `tests/fixtures/` and keep envelope/heartbeat cases.
 
@@ -58,11 +90,13 @@ Internal modules (`protocol`, `config`, `catalog.get_*`) may change without a ma
 
 ## Release checklist (internal)
 
-- [ ] Tests, ruff, mypy green on `main`
-- [ ] Docs match request/response shapes
+- [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13)
+- [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions
+- [ ] Coverage / JUnit artifacts still produced; Dependabot ecosystems still `uv` + `github-actions`
 - [ ] `NOTICE` still accurate if catalog IDs change
 - [ ] Do **not** publish to PyPI until per-key identity and quotas exist on martian-agents
 - [ ] Do **not** point this package at the generic `martian_agents` assistant as a red-team target
+- [ ] Customer examples pin the SDK to a tag or SHA, not floating `@main`
 
 ## Related repos
 

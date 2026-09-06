@@ -1,4 +1,4 @@
-"""CLI: `martian-redteam run config.yaml`."""
+"""CLI: `martian-redteam run config.yaml` and `martian-redteam validate config.yaml`."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from martian_redteam import __version__
-from martian_redteam.catalog.attacks import ATTACKS, get_attack
+from martian_redteam.catalog.attacks import ATTACKS, Attack, get_attack
 from martian_redteam.catalog.frameworks import FRAMEWORKS
 from martian_redteam.catalog.vulnerabilities import VULNERABILITIES, Vulnerability, get_vulnerability
 from martian_redteam.client import Client
@@ -104,10 +104,31 @@ def _vulnerability_from_spec(spec: NamedSpec) -> Vulnerability:
     )
 
 
-async def _run_async(config: RunConfig) -> RiskAssessment:
-    callback = _load_callback(config.target.callback.file, config.target.callback.function)
+def _resolve_catalog(config: RunConfig) -> tuple[list[Vulnerability], list[Attack]]:
     vulnerabilities = [_vulnerability_from_spec(item) for item in config.vulnerabilities]
     attacks = [get_attack(item.name, weight=item.weight) for item in config.attacks]
+    return vulnerabilities, attacks
+
+
+def _apply_run_overrides(
+    config: RunConfig,
+    *,
+    max_concurrent: int | None,
+    attacks_per_vuln: int | None,
+) -> RunConfig:
+    updates: dict[str, int] = {}
+    if max_concurrent is not None:
+        updates["max_concurrent"] = max_concurrent
+    if attacks_per_vuln is not None:
+        updates["attacks_per_vulnerability_type"] = attacks_per_vuln
+    if not updates:
+        return config
+    return config.model_copy(update={"system_config": config.system_config.model_copy(update=updates)})
+
+
+async def _run_async(config: RunConfig) -> RiskAssessment:
+    callback = _load_callback(config.target.callback.file, config.target.callback.function)
+    vulnerabilities, attacks = _resolve_catalog(config)
     settings = config.settings_overlay(Settings())
     async with Client(settings=settings) as client:
         return await a_red_team(
@@ -124,10 +145,33 @@ async def _run_async(config: RunConfig) -> RiskAssessment:
 @app.command("run")
 def run_command(
     config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    output: Annotated[Path | None, typer.Option("-o", "--output")] = None,
+    max_concurrent: Annotated[
+        int | None,
+        typer.Option(
+            "-c",
+            "--max-concurrent",
+            help="Maximum concurrent operations (overrides system_config.max_concurrent).",
+        ),
+    ] = None,
+    attacks_per_vuln: Annotated[
+        int | None,
+        typer.Option(
+            "-a",
+            "--attacks-per-vuln",
+            help="Attacks per vulnerability type (overrides system_config.attacks_per_vulnerability_type).",
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Output folder path (overrides system_config.output_folder)."),
+    ] = None,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
-    config = RunConfig.from_yaml(config_path)
+    config = _apply_run_overrides(
+        RunConfig.from_yaml(config_path),
+        max_concurrent=max_concurrent,
+        attacks_per_vuln=attacks_per_vuln,
+    )
     assessment = asyncio.run(_run_async(config))
     destination = output or Path(config.system_config.output_folder)
     written = assessment.save(destination)
@@ -143,6 +187,26 @@ def run_command(
     except GateFailure as error:
         console.print(f"[red]Gate failed:[/red] {error}")
         raise typer.Exit(code=1) from error
+
+
+@app.command("validate")
+def validate_command(
+    config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+) -> None:
+    """Lint a YAML config without contacting Martian Agents."""
+    try:
+        config = RunConfig.from_yaml(config_path)
+        _load_callback(config.target.callback.file, config.target.callback.function)
+        vulnerabilities, attacks = _resolve_catalog(config)
+    except Exception as error:
+        console.print(f"[red]Validation failed:[/red] {error}")
+        raise typer.Exit(code=1) from error
+    console.print(
+        f"OK: {len(vulnerabilities)} vulnerabilities, {len(attacks)} attacks, callback {config.target.callback.file}",
+        no_wrap=True,
+        overflow="ignore",
+        crop=False,
+    )
 
 
 @app.command("catalog")

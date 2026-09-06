@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION, Vulnerability, get_vulnerability
 
 
 class FrameworkMap(BaseModel):
@@ -24,11 +24,21 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
         label="OWASP LLM Top 10 (2025 compatibility subset)",
         source_revision="2025",
         coverage="subset",
-        vulnerability_ids=("prompt_leakage", "excessive_agency", "pii_leakage"),
+        vulnerability_ids=(
+            "prompt_leakage",
+            "excessive_agency",
+            "pii_leakage",
+            "ssrf",
+            "sql_injection",
+            "shell_injection",
+            "rbac",
+        ),
         notes=(
             "Not a complete OWASP LLM Top 10 implementation. Maps prompt leakage and "
-            "PII leakage toward sensitive-information disclosure, and excessive agency "
-            "toward LLM06. Prompt injection is an attack method, not a vulnerability row."
+            "PII leakage toward sensitive-information disclosure, excessive agency toward "
+            "LLM06, ssrf/sql_injection/shell_injection toward improper output handling, "
+            "and rbac toward authorization/agency risks. Prompt injection is an attack "
+            "method, not a vulnerability row."
         ),
     ),
     "owasp_agentic_2026": FrameworkMap(
@@ -42,7 +52,29 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
             "Multi-turn agent tool-abuse coverage is Phase 3."
         ),
     ),
+    "mitre_atlas_2026": FrameworkMap(
+        id="mitre_atlas_2026",
+        label="MITRE ATLAS (2026 compatibility subset)",
+        source_revision="2026",
+        coverage="subset",
+        vulnerability_ids=("ssrf", "prompt_leakage", "excessive_agency"),
+        notes=(
+            "Placeholder subset. Not a full MITRE ATLAS mapping or scoring implementation. "
+            "Includes a few catalog ids that loosely correspond to prompt extraction, "
+            "agency/tool misuse, and server-side request risks."
+        ),
+    ),
 }
+
+
+def vulnerabilities_for(framework_id: str) -> list[Vulnerability]:
+    """Instantiate catalog vulnerabilities for a framework map using default types."""
+    try:
+        framework = FRAMEWORKS[framework_id]
+    except KeyError:
+        raise KeyError(f"unknown framework: {framework_id}") from None
+    return [get_vulnerability(vulnerability_id) for vulnerability_id in framework.vulnerability_ids]
+
 
 # Catalog version is the SDK map version, not the upstream standard edition.
 assert CATALOG_VERSION

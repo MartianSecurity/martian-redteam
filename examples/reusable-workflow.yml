@@ -1,0 +1,26 @@
+# Example customer workflow that calls this repository's reusable workflow.
+# Copy into .github/workflows/ in your repository.
+# See docs/gate-and-ci.md.
+#
+# The called workflow installs martian-redteam from git, runs the local gate
+# (exit 1 on failure; no continue-on-error), and uploads results always.
+# Pin @main to a tag or SHA in production.
+#
+# GitHub-hosted runner IPs are shared; keep system_config.max_concurrent at 2 or 1.
+
+name: Red team
+
+on:
+  workflow_dispatch:
+  # pull_request:
+
+jobs:
+  red-team:
+    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@main
+    with:
+      config: examples/config.yaml
+      # sdk-ref: v0.1.0  # pin a tag or SHA instead of default main
+      # max-concurrent: "2"
+      # attacks-per-vuln: "1"
+    secrets:
+      MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}

@@ -32,7 +32,7 @@ Threaded `POST /threads/{thread_id}/runs/wait` is not used. Stateless wait mints
   "on_completion": "delete",
   "metadata": {
     "sdk": "martian-redteam",
-    "catalog_version": "0.1.0"
+    "catalog_version": "0.2.0"
   }
 }
 ```
