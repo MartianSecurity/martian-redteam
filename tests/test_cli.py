@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -5,6 +6,7 @@ from typer.testing import CliRunner
 from martian_redteam.cli import app
 
 runner = CliRunner()
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def test_catalog_command_lists_builtins() -> None:
@@ -24,10 +26,10 @@ def test_version_option() -> None:
 def test_run_help_mentions_concurrency_overrides() -> None:
     result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
-    help_text = "".join(result.stdout.split())
-    assert "-c" in result.stdout
+    help_text = "".join(_ANSI_ESCAPE.sub("", result.stdout).split())
+    assert "-c" in help_text
     assert "--max-concurrent" in help_text
-    assert "-a" in result.stdout
+    assert "-a" in help_text
     assert "--attacks-per-vuln" in help_text
 
 
