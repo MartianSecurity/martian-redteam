@@ -24,10 +24,11 @@ def test_version_option() -> None:
 def test_run_help_mentions_concurrency_overrides() -> None:
     result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
+    help_text = "".join(result.stdout.split())
     assert "-c" in result.stdout
-    assert "--max-concurrent" in result.stdout
+    assert "--max-concurrent" in help_text
     assert "-a" in result.stdout
-    assert "--attacks-per-vuln" in result.stdout
+    assert "--attacks-per-vuln" in help_text
 
 
 def test_validate_example_config_succeeds() -> None:

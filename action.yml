@@ -41,7 +41,11 @@ runs:
 
     - name: Install martian-redteam
       shell: bash
-      run: uv pip install --system "${{ github.action_path }}"
+      run: |
+        set -euo pipefail
+        uv venv "${RUNNER_TEMP}/martian-redteam"
+        uv pip install --python "${RUNNER_TEMP}/martian-redteam" "${{ github.action_path }}"
+        echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
     - name: Run assessment
       shell: bash

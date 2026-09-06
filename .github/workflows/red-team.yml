@@ -72,7 +72,12 @@ jobs:
 
       - name: Install martian-redteam
         # Pin sdk-ref to a tag or SHA in production; @main moves.
-        run: uv pip install --system "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${{ inputs.sdk-ref || 'main' }}"
+        run: |
+          set -euo pipefail
+          uv venv "${RUNNER_TEMP}/martian-redteam"
+          uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
+            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${{ inputs.sdk-ref || 'main' }}"
+          echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Run assessment
         env:

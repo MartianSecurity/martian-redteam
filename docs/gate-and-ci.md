@@ -197,7 +197,11 @@ jobs:
           version: "0.10.0"
 
       - name: Install martian-redteam
-        run: uv pip install --system "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam.git@v0.1.0"
+        run: |
+          uv venv "${RUNNER_TEMP}/martian-redteam"
+          uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
+            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam.git@v0.1.0"
+          echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Validate config
         run: martian-redteam validate config.yaml
