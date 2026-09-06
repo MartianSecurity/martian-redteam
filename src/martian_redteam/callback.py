@@ -13,15 +13,20 @@ AsyncTarget = Callable[[str, Sequence[Turn] | None], Awaitable[Turn]]
 
 
 def wrap_callback(callback: TargetCallback) -> AsyncTarget:
-    """Accept str or Turn, sync or async, with optional turns."""
+    """Accept str or Turn, sync or async, with optional turns.
+
+    Phase 1 probes pass ``turns=None``. Callables that declare a ``turns``
+    parameter receive it; everyone else is called with the prompt only.
+    """
+
+    try:
+        parameters = inspect.signature(callback).parameters
+        accepts_turns = "turns" in parameters
+    except (TypeError, ValueError):
+        accepts_turns = False
 
     async def wrapped(prompt: str, turns: Sequence[Turn] | None = None) -> Turn:
-        result: Any
-        try:
-            signature = inspect.signature(callback)
-            result = callback(prompt, turns) if "turns" in signature.parameters else callback(prompt)
-        except TypeError:
-            result = callback(prompt)
+        result: Any = callback(prompt, turns) if accepts_turns else callback(prompt)
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, Turn):

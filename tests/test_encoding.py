@@ -1,3 +1,5 @@
+import pytest
+
 from martian_redteam.encoding import apply_encoding
 
 
@@ -14,9 +16,5 @@ def test_base64_and_leetspeak() -> None:
 
 
 def test_unknown_encoding() -> None:
-    try:
+    with pytest.raises(ValueError, match="unknown encoding"):
         apply_encoding("x", "rot14")
-    except ValueError as error:
-        assert "unknown encoding" in str(error)
-    else:
-        raise AssertionError("expected ValueError")

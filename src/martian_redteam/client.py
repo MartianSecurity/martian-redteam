@@ -6,17 +6,21 @@ from typing import Any
 
 import httpx
 from pydantic import ValidationError
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.config import Settings
+from martian_redteam.protocol import (
+    extract_graph_revision,
+    failed_run_status,
+    graph_state,
+    parse_retry_after,
+    parse_wait_body,
+)
 from martian_redteam.types import EvaluatorContext, EvaluatorOutput, SimulatorContext, SimulatorOutput
 
 _RETRYABLE_STATUS = frozenset({429, 503})
+_WAIT_BACKOFF = wait_exponential(multiplier=0.5, min=0.5, max=8)
 
 
 class ClientError(RuntimeError):
@@ -26,17 +30,34 @@ class ClientError(RuntimeError):
 class RetryableClientError(ClientError):
     """Transient failure that may be retried (connect, 429, 503)."""
 
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, RetryableClientError)
 
 
+def _retry_wait(retry_state: RetryCallState) -> float:
+    exception = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    if isinstance(exception, RetryableClientError) and exception.retry_after is not None:
+        return min(exception.retry_after, 30.0)
+    return float(_WAIT_BACKOFF(retry_state))
+
+
 def _status_error(assistant_id: str, response: httpx.Response) -> ClientError:
-    retry_after = response.headers.get("Retry-After")
-    suffix = f" (Retry-After: {retry_after})" if retry_after else ""
-    message = f"{assistant_id} run failed: HTTP {response.status_code}{suffix}"
+    retry_after = parse_retry_after(response.headers.get("Retry-After"))
+    suffix = f" (Retry-After: {retry_after:.0f}s)" if retry_after is not None else ""
+    if response.status_code == 429:
+        message = (
+            f"{assistant_id} run failed: HTTP 429{suffix}. "
+            "This may be a per-key quota or a shared WAF limit (GitHub-hosted runners share IPs)."
+        )
+    else:
+        message = f"{assistant_id} run failed: HTTP {response.status_code}{suffix}"
     if response.status_code in _RETRYABLE_STATUS:
-        return RetryableClientError(message)
+        return RetryableClientError(message, retry_after=retry_after)
     return ClientError(message)
 
 
@@ -59,7 +80,7 @@ class Client:
             "Accept": "application/json",
         }
         self._http = httpx.AsyncClient(
-            base_url=str(self.settings.api_url).rstrip("/"),
+            base_url=self.settings.api_url,
             headers=headers,
             timeout=timeout,
             transport=transport,
@@ -104,7 +125,7 @@ class Client:
     @retry(
         retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        wait=_retry_wait,
         reraise=True,
     )
     async def _wait(self, assistant_id: str, content: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -112,6 +133,11 @@ class Client:
             "assistant_id": assistant_id,
             "input": {"messages": [{"role": "human", "content": content}]},
             "context": context,
+            "on_completion": "delete",
+            "metadata": {
+                "sdk": "martian-redteam",
+                "catalog_version": CATALOG_VERSION,
+            },
         }
         try:
             response = await self._http.post("/runs/wait", json=body)
@@ -128,9 +154,16 @@ class Client:
             raise ClientError(f"{assistant_id} request failed: {error}") from error
 
         try:
-            payload = response.json()
+            envelope = parse_wait_body(response.text)
         except ValueError as error:
             raise ClientError(f"{assistant_id} returned non-JSON") from error
-        if not isinstance(payload, dict):
-            raise ClientError(f"{assistant_id} returned a non-object JSON body")
-        return payload
+
+        status = failed_run_status(envelope)
+        if status is not None:
+            raise ClientError(f"{assistant_id} run ended with status {status}")
+
+        state = graph_state(envelope)
+        revision = extract_graph_revision(state) or extract_graph_revision(envelope)
+        if revision:
+            state = {**state, "graph_revision": revision}
+        return state

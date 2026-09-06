@@ -15,6 +15,7 @@ class FrameworkMap(BaseModel):
     source_revision: str
     coverage: str
     vulnerability_ids: tuple[str, ...]
+    notes: str
 
 
 FRAMEWORKS: dict[str, FrameworkMap] = {
@@ -24,6 +25,22 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
         source_revision="2025",
         coverage="subset",
         vulnerability_ids=("prompt_leakage", "excessive_agency", "pii_leakage"),
+        notes=(
+            "Not a complete OWASP LLM Top 10 implementation. Maps prompt leakage and "
+            "PII leakage toward sensitive-information disclosure, and excessive agency "
+            "toward LLM06. Prompt injection is an attack method, not a vulnerability row."
+        ),
+    ),
+    "owasp_agentic_2026": FrameworkMap(
+        id="owasp_agentic_2026",
+        label="OWASP Agentic Top 10 (2026 compatibility subset)",
+        source_revision="2026",
+        coverage="subset",
+        vulnerability_ids=("excessive_agency", "prompt_leakage"),
+        notes=(
+            "Placeholder subset for agentic agency and instruction-leakage risks. "
+            "Multi-turn agent tool-abuse coverage is Phase 3."
+        ),
     ),
 }
 

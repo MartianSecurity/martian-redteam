@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Attack(BaseModel):
@@ -14,7 +14,7 @@ class Attack(BaseModel):
     id: str
     label: str
     kind: Literal["encoding", "llm"]
-    weight: float = 1.0
+    weight: float = Field(default=1.0, gt=0)
 
 
 def PromptInjection(*, weight: float = 1.0) -> Attack:
@@ -40,9 +40,15 @@ ATTACKS: dict[str, Callable[..., Attack]] = {
     "Leetspeak": Leetspeak,
 }
 
+_ATTACK_LOOKUP: dict[str, Callable[..., Attack]] = {}
+for _name, _factory in ATTACKS.items():
+    _ATTACK_LOOKUP[_name.lower()] = _factory
+    _ATTACK_LOOKUP[_factory().id] = _factory
+
 
 def get_attack(name: str, *, weight: float | None = None) -> Attack:
-    factory = ATTACKS.get(name)
+    key = name.strip().lower().replace("-", "_")
+    factory = _ATTACK_LOOKUP.get(key)
     if factory is None:
         raise KeyError(f"unknown attack: {name}")
     if weight is None:

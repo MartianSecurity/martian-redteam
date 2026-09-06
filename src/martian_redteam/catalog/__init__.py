@@ -12,6 +12,7 @@ from martian_redteam.catalog.frameworks import FRAMEWORKS
 from martian_redteam.catalog.vulnerabilities import (
     CATALOG_VERSION,
     VULNERABILITIES,
+    CustomVulnerability,
     ExcessiveAgency,
     IllegalActivity,
     PIILeakage,
@@ -25,6 +26,7 @@ __all__ = [
     "CATALOG_VERSION",
     "FRAMEWORKS",
     "VULNERABILITIES",
+    "CustomVulnerability",
     "Base64",
     "ExcessiveAgency",
     "IllegalActivity",

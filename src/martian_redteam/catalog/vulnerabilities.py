@@ -17,6 +17,7 @@ class Vulnerability(BaseModel):
     allowed_types: tuple[str, ...]
     gated: bool = False
     types: tuple[str, ...] = Field(default_factory=tuple)
+    criteria: str | None = None
 
     def with_types(self, types: Sequence[str] | None) -> Vulnerability:
         selected = tuple(types) if types else self.allowed_types
@@ -68,6 +69,30 @@ def PIILeakage(types: Sequence[str] | None = None) -> Vulnerability:
     ).with_types(types)
 
 
+def CustomVulnerability(
+    *,
+    id: str,
+    criteria: str,
+    types: Sequence[str] = ("custom",),
+    gated: bool = False,
+    label: str | None = None,
+) -> Vulnerability:
+    """Customer-authored vulnerability. The evaluator treats `criteria` as authoritative."""
+    if not id.strip():
+        raise ValueError("custom vulnerability id must be non-empty")
+    if not criteria.strip():
+        raise ValueError("custom vulnerability criteria must be non-empty")
+    selected = tuple(types) if types else ("custom",)
+    return Vulnerability(
+        id=id,
+        label=label or id,
+        allowed_types=selected,
+        gated=gated,
+        types=selected,
+        criteria=criteria,
+    )
+
+
 VULNERABILITIES: dict[str, Callable[..., Vulnerability]] = {
     "PromptLeakage": PromptLeakage,
     "ExcessiveAgency": ExcessiveAgency,
@@ -76,9 +101,26 @@ VULNERABILITIES: dict[str, Callable[..., Vulnerability]] = {
     "PIILeakage": PIILeakage,
 }
 
+_VULNERABILITY_LOOKUP: dict[str, Callable[..., Vulnerability]] = {}
+for _name, _factory in VULNERABILITIES.items():
+    _VULNERABILITY_LOOKUP[_name.lower()] = _factory
+    _VULNERABILITY_LOOKUP[_factory().id] = _factory
 
-def get_vulnerability(name: str, types: Sequence[str] | None = None) -> Vulnerability:
-    factory = VULNERABILITIES.get(name)
+
+def get_vulnerability(
+    name: str,
+    types: Sequence[str] | None = None,
+    *,
+    id: str | None = None,
+    criteria: str | None = None,
+    gated: bool | None = None,
+) -> Vulnerability:
+    key = name.strip().lower().replace("-", "_")
+    if key in {"custom", "customvulnerability"}:
+        if id is None or criteria is None:
+            raise ValueError("custom vulnerability requires id and criteria")
+        return CustomVulnerability(id=id, criteria=criteria, types=types or ("custom",), gated=bool(gated))
+    factory = _VULNERABILITY_LOOKUP.get(key)
     if factory is None:
         raise KeyError(f"unknown vulnerability: {name}")
     return factory(types)

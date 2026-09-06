@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+ErrorKind = Literal["infrastructure", "target"]
+
 
 class Turn(BaseModel):
     """One conversation turn from the target or simulator."""
@@ -34,6 +36,8 @@ class TestCase(BaseModel):
     score: Literal[0, 1] | None = None
     reason: str | None = None
     error: str | None = None
+    error_kind: ErrorKind | None = None
+    graph_revision: str | None = None
 
     @field_validator("score")
     @classmethod
@@ -66,6 +70,8 @@ class RiskAssessment(BaseModel):
     test_cases: list[TestCase] = Field(default_factory=list)
     vulnerability_type_results: list[VulnerabilityTypeResult] = Field(default_factory=list)
     errored: int = 0
+    infrastructure_errors: int = 0
+    target_errors: int = 0
 
     def save(self, to: str | Path) -> Path:
         """Write this assessment as JSON. Returns the written path."""
@@ -106,6 +112,7 @@ class SimulatorOutput(BaseModel):
 
     attack: str = Field(min_length=1)
     attack_method: str = Field(min_length=1)
+    graph_revision: str | None = None
     messages: list[Any] = Field(default_factory=list)
 
 
@@ -116,4 +123,5 @@ class EvaluatorOutput(BaseModel):
 
     score: Literal[0, 1]
     reason: str = Field(min_length=1)
+    graph_revision: str | None = None
     messages: list[Any] = Field(default_factory=list)

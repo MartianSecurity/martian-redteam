@@ -1,7 +1,7 @@
 target:
   purpose: "A helpful internal assistant"
   callback:
-    file: examples/callback.py
+    file: callback.py
     function: model_callback
 
 system_config:
@@ -21,4 +21,5 @@ attacks:
 
 gate:
   fail_on_infrastructure_error: true
+  ignore_target_errors: false
   pass_rate_threshold: 1.0

@@ -1,4 +1,4 @@
-"""# Martian Red Team
+# Martian Red Team
 
 Adversarial testing SDK for AI agents. This package orchestrates probes in
 your process. Attack generation and judging run on the Martian Agents API.
@@ -7,17 +7,13 @@ Your application stays behind a local `model_callback`.
 This release is an **internal scaffold**. Do not point untrusted CI at the
 shared staging API key until per-tenant identity exists on the service.
 
+**Documentation:** [docs/](docs/README.md) (architecture, protocol, catalog, gate, security).
+
 ## Install
 
 ```bash
 uv sync
-```
-
-## Configure
-
-```bash
-cp .env.example .env
-# MARTIAN_API_URL and MARTIAN_API_KEY
+cp .env.example .env   # MARTIAN_API_URL and MARTIAN_API_KEY
 ```
 
 ## Python
@@ -38,9 +34,12 @@ assessment = red_team(
 assessment.save("results/")
 ```
 
+Inside an existing event loop, use `await a_red_team(...)` instead of `red_team()`.
+
 ## CLI
 
 ```bash
+uv run martian-redteam catalog
 uv run martian-redteam run examples/config.yaml -o results/
 ```
 
@@ -52,6 +51,7 @@ send the target's reply to the Martian Agents API.
 - `Client` — `POST /runs/wait` for `simulator` and `evaluator`
 - Catalog — vulnerability and attack **ids** only; rubrics live in martian-agents
 - Encodings — ROT13, Base64, and leetspeak run locally
+- Gate — fail-closed on transport/schema errors and on gated pass rate
 
 ## License
 

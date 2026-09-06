@@ -1,5 +1,6 @@
 # Example customer GitHub Action. Requires MARTIAN_API_KEY in repo secrets.
 # GitHub-hosted runner IPs are shared; keep concurrency low.
+# See docs/gate-and-ci.md and docs/security-and-data.md.
 name: Red team
 
 on:
