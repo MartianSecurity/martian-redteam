@@ -1,61 +1,21 @@
-# Martian Red Team
+# Martian Red Team SDK
 
-Adversarial testing SDK for AI agents. This package orchestrates probes in
-your process. Attack generation and judging run on the Martian Agents API.
-Your application stays behind a local `model_callback`.
+Python SDK and CLI for callback-based red teaming, with an optional customer-side MCP integration. Attack generation and response evaluation use the separate Martian Agents API.
 
-This release is an **internal scaffold**. Do not point untrusted CI at the
-shared staging API key until per-tenant identity exists on the service.
+## Start here
 
-**Documentation:** [docs/](docs/README.md) (architecture, protocol, catalog, gate, security).
+- [How to use it](docs/usage.md): prerequisites, configuration, commands and checks.
+- [Architecture](docs/architecture.md): ownership, dependencies and code map.
+- [How it works](docs/how-it-works.md): the request lifecycle and integration boundaries.
+- [Agent instructions](AGENTS.md): working rules and when documentation must change.
 
-**CI/CD:** this repo’s GitHub Actions are lint, types, and pytest only (Python 3.12/3.13, no live Martian Agents, no `OPENAI_API_KEY`). Customer pipelines should `validate` on PRs, then `run … -c 2 -a 1` as a fail-closed local gate — not DeepTeam’s upload-then-`deepeval gate` model. See [docs/gate-and-ci.md](docs/gate-and-ci.md).
+## Current behavior
 
-## Install
+- Single-turn simulate → optional encoding → target callback → evaluate is implemented.
+- CLI configuration validation, bounded concurrency, JSON/Markdown reports and local CI gates are implemented.
+- The required simulator/evaluator graphs exist in martian-agents. A particular deployment still needs compatible graphs, authentication and provider configuration.
+- The target callback executes in the caller's process; its response is sent to the remote evaluator.
+- The optional mcp extra adds runtime session configuration, multi-server bind_tools and bounded local traces. See [customer integration](docs/customer-integration.md).
+- This SDK does not itself launch sandboxes, run the signed pentest campaign workflow or verify business state.
 
-```bash
-uv sync
-cp .env.example .env   # MARTIAN_API_URL and MARTIAN_API_KEY
-```
-
-## Python
-
-```python
-from martian_redteam import Client, PromptInjection, PromptLeakage, ROT13, red_team
-
-async def model_callback(prompt: str) -> str:
-    return "I cannot help with that."
-
-assessment = red_team(
-    target=model_callback,
-    vulnerabilities=[PromptLeakage()],
-    attacks=[PromptInjection(), ROT13()],
-    client=Client(),
-    purpose="Internal assistant",
-)
-assessment.save("results/")
-```
-
-Inside an existing event loop, use `await a_red_team(...)` instead of `red_team()`.
-
-## CLI
-
-```bash
-uv run martian-redteam catalog
-uv run martian-redteam validate examples/config.yaml
-uv run martian-redteam run examples/config.yaml -o results/ -c 2 -a 1
-```
-
-The target callback is never invoked from Martian's network. Evaluator calls
-send the target's reply to the Martian Agents API.
-
-## Layout
-
-- `Client` — `POST /runs/wait` for `simulator` and `evaluator`
-- Catalog — vulnerability and attack **ids** only; rubrics live in martian-agents
-- Encodings — ROT13, Base64, and leetspeak run locally
-- Gate — fail-closed on transport/schema errors and on gated pass rate
-
-## License
-
-Apache-2.0. See `LICENSE` and `NOTICE`.
+Documentation checked against the local source on 2026-09-15. This describes implemented behavior, not a certification of a deployed environment. Recheck the affected code when making changes.
