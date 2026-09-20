@@ -19,6 +19,9 @@ dependencies = [
 [project.scripts]
 martian-redteam = "martian_redteam.cli:app"
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.1.1,<3", "httpx2>=2.12,<3", "jsonschema>=4.23,<5", "referencing>=0.36,<1"]
+
 [project.urls]
 Homepage = "https://martiansecurity.ai/"
 Repository = "https://github.com/MorningHQ/martian-redteam"
@@ -66,4 +69,5 @@ dev = [
     "respx>=0.22.0",
     "ruff>=0.16.5",
     "types-pyyaml>=6.0.12",
+    "types-jsonschema>=4.23",
 ]
