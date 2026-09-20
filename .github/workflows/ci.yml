@@ -63,7 +63,7 @@ jobs:
         run: uv sync --locked
 
       - name: Type-check Python
-        run: uv run mypy src
+        run: uv run --extra mcp mypy src
 
       - name: Compile source
         run: uv run python -m compileall -q src

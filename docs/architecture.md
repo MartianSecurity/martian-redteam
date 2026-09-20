@@ -87,6 +87,8 @@ martian-redteam/
     config.py          # MARTIAN_* env + YAML models
     cli.py             # martian-redteam run | catalog
     gate.py            # CI fail-closed policy
+    integration.py     # customer MCP session and bounded trace models
+    mcp_binding.py     # optional multi-server MCP discovery and tool calls
     types.py           # Turn, TestCase, RiskAssessment, graph I/O
   tests/               # contract fixtures, no live Bedrock in CI
   examples/            # YAML, callback, GitHub Action
@@ -156,6 +158,6 @@ Chosen to match martian-agents, not DeepTeam.
 | Retries | Tenacity | Connect/429/503 only |
 | Tests | pytest, pytest-asyncio, respx | Recorded fixtures |
 
-Runtime dependencies: `httpx`, `pydantic`, `pydantic-settings`, `pyyaml`, `typer`, `rich`, `tenacity`.
+Runtime dependencies: `httpx`, `pydantic`, `pydantic-settings`, `pyyaml`, `typer`, `rich`, `tenacity`. The optional `mcp` extra adds the MCP client, HTTP transport and JSON Schema validation used by customer applications; see [Customer MCP integration](customer-integration.md).
 
 Explicitly **not** dependencies: `deepeval`, `openai`, `grpcio`, `aiohttp`, `langgraph-sdk`, LangChain, Bedrock SDKs, Aegra.

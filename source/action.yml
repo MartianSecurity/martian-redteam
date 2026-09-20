@@ -1,0 +1,30 @@
+name: Materialize Martian Red Team SDK
+description: Copy this immutable SDK revision into a consuming workflow.
+
+inputs:
+  destination:
+    description: Destination directory for the SDK source checkout.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Copy SDK source
+      shell: bash
+      env:
+        MARTIAN_REDTEAM_ACTION_PATH: ${{ github.action_path }}
+        MARTIAN_REDTEAM_DESTINATION: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+        source_root="$(cd "$MARTIAN_REDTEAM_ACTION_PATH/.." && pwd -P)"
+        if [[ -z "$MARTIAN_REDTEAM_DESTINATION" || "$MARTIAN_REDTEAM_DESTINATION" == "/" ]]; then
+          echo "destination must be a non-root path" >&2
+          exit 1
+        fi
+        if [[ -e "$MARTIAN_REDTEAM_DESTINATION" ]]; then
+          echo "destination already exists: $MARTIAN_REDTEAM_DESTINATION" >&2
+          exit 1
+        fi
+        mkdir -p "$MARTIAN_REDTEAM_DESTINATION"
+        cp "$source_root/pyproject.toml" "$source_root/README.md" "$MARTIAN_REDTEAM_DESTINATION/"
+        cp -R "$source_root/src" "$MARTIAN_REDTEAM_DESTINATION/"

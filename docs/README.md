@@ -15,6 +15,7 @@ This repository is an **internal scaffold** until martian-agents exposes dedicat
 7. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, WAF
 8. [Security and data](security-and-data.md) — tenancy blockers, what leaves the customer network
 9. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
+10. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, expiry and bounded local traces
 
 ## Repository
 
