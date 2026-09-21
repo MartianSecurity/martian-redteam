@@ -10,4 +10,14 @@
 
 Defaults fail on infrastructure/schema errors, do not ignore target errors, and require 1.0 pass rate for gated types. API/configuration options can change policies; inspect the actual settings. The Python red_team/a_red_team APIs return an assessment; call evaluate_gate explicitly if a Python integration requires enforcement.
 
+## Visibility reports
+
+An admin creates a backend telemetry binding for a discovered record and pins a
+deployment, environment and version. The application explicitly calls
+`VisibilityClient.send()` with completed tool metadata. The backend derives identity
+from the credential, validates timing and deduplicates event IDs. It displays reports
+separately from the permission graph. No automatic retry, buffering or framework
+instrumentation is performed; a successful report is an application assertion, not
+independent evidence of business impact. Revoking the binding blocks later export.
+
 [README](../README.md) · [Architecture](architecture.md) · [Usage](usage.md)

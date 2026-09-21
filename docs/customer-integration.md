@@ -29,3 +29,5 @@ TraceRecorder holds bounded events locally (default 1000). Tool calls record sta
 The [refund customer agent](../../customer-agents/refund-support-acceptance/README.md) demonstrates Gemini model instrumentation, authenticated runtime configuration and a trace retrieval endpoint. Backend session setup/trace collection remains a follow-up integration. No new test cases or MCP test servers were introduced for this feature.
 
 Its standalone Docker build consumes this SDK as a named source context. The SDK's .dockerignore includes only package metadata, README and source; local credentials, environments and caches are excluded from the build context.
+
+Production visibility uses the separate [metadata export client](usage.md#optional-visibility-telemetry) and deployment-bound credentials. It does not reuse these assessment sessions or automatically export their traces.

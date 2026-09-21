@@ -20,4 +20,13 @@ The optional customer integration connects multiple supplied Streamable HTTP MCP
 
 The score is a remote evaluator's binary judgment of the response, not independent evidence of a sandbox side effect. Only vulnerability types marked gated participate in the score threshold; transport and target errors have separate policies.
 
+## Optional visibility export
+
+`visibility.py` provides `ToolActivity` and `VisibilityClient`. The backend owns the
+binding identity and stores reported activity; the application owns explicit emission.
+This client does not discover infrastructure, hook arbitrary framework tools, export
+TraceRecorder payloads, reuse assessment credentials or enforce runtime policy.
+Tool metadata excludes prompts, arguments, responses and arbitrary attributes.
+No additional dependency or MCP extra is needed. [Receiver contract](../../martian-collector/docs/contract.md#application-telemetry-contract-v1).
+
 [README](../README.md) · [How it works](how-it-works.md) · [Usage](usage.md)

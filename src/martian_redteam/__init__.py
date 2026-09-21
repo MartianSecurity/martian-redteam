@@ -27,10 +27,13 @@ from martian_redteam.gate import GateFailure, evaluate_gate
 from martian_redteam.integration import AssessmentSession, MCPConnection, TraceRecorder, bind_tools
 from martian_redteam.orchestrator import a_red_team, red_team
 from martian_redteam.types import RiskAssessment, TestCase, Turn
+from martian_redteam.visibility import ToolActivity, VisibilityClient
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "ToolActivity",
+    "VisibilityClient",
     "AssessmentSession",
     "MCPConnection",
     "TraceRecorder",

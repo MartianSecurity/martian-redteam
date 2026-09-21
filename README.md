@@ -16,6 +16,7 @@ Python SDK and CLI for callback-based red teaming, with an optional customer-sid
 - The required simulator/evaluator graphs exist in martian-agents. A particular deployment still needs compatible graphs, authentication and provider configuration.
 - The target callback executes in the caller's process; its response is sent to the remote evaluator.
 - The optional mcp extra adds runtime session configuration, multi-server bind_tools and bounded local traces. See [customer integration](docs/customer-integration.md).
+- Optional `VisibilityClient` exports metadata-only tool activity under a backend credential pinned to one deployment/environment/version. See [visibility telemetry](docs/usage.md#optional-visibility-telemetry). It is separate from assessments and requires no MCP extra.
 - This SDK does not itself launch sandboxes, run the signed pentest campaign workflow or verify business state.
 
-Documentation checked against the local source on 2026-09-15. This describes implemented behavior, not a certification of a deployed environment. Recheck the affected code when making changes.
+Visibility integration updated on 2026-09-18; other documented behavior was checked on 2026-09-15. This describes implemented behavior, not a certification of a deployed environment. Recheck the affected code when making changes.
