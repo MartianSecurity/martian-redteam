@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 
 from martian_redteam.integration import AssessmentSession, TraceRecorder
+
+ACTION_HEADER = "X-Martian-Action-Id"
+ACTION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
 @dataclass
@@ -93,9 +97,14 @@ async def open_tools(
     async with AsyncExitStack() as stack:
         for connection in session.mcp_connections:
             session.ensure_active()
+            headers = {key: value.get_secret_value() for key, value in connection.headers.items()}
+            # Tell the server which action (turn) these calls serve, so a gateway that
+            # records them can attribute each call. Configured headers win on a clash.
+            if ACTION_ID.fullmatch(action_id) and not any(k.lower() == ACTION_HEADER.lower() for k in headers):
+                headers[ACTION_HEADER] = action_id
             http = await stack.enter_async_context(
                 httpx2.AsyncClient(
-                    headers={key: value.get_secret_value() for key, value in connection.headers.items()},
+                    headers=headers,
                     timeout=30,
                     follow_redirects=False,
                 )
