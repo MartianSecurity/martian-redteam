@@ -6,11 +6,13 @@ Loaded from process env and optional `.env`, prefix `MARTIAN_`.
 
 | Field | Env | Default | Validation |
 | --- | --- | --- | --- |
-| `api_url` | `MARTIAN_API_URL` | `https://api.agents.martiansecurity.ai` | Must start with `http://` or `https://`; trailing slash stripped |
+| `api_url` | `MARTIAN_API_URL` | `https://api.agents.martiansecurity.ai` | Must be `https://`; `http://` only for `localhost` / `127.0.0.1`; trailing slash stripped |
 | `api_key` | `MARTIAN_API_KEY` | empty | SecretStr. `Client()` raises `ClientError` if empty |
 | `request_timeout_seconds` | `MARTIAN_REQUEST_TIMEOUT_SECONDS` | `120` | `1.0`–`240.0` inclusive |
 
 Unknown env keys are ignored (`extra="ignore"`).
+
+`MARTIAN_ALLOW_INSECURE_API_URL=1` (process environment only, development only) accepts an `http://` API URL on a non-loopback host. It is not a `Settings` field and is not read from `.env`. See [setup](setup.md#environment).
 
 In Python:
 
@@ -66,7 +68,7 @@ gate:
   pass_rate_threshold: 1.0     # must be 0.0–1.0
 
 api:
-  url: https://api.agents.martiansecurity.ai   # optional; key still from env
+  url: https://api.agents.martiansecurity.ai   # optional; https required; key still from env
 ```
 
 ### System fields
@@ -133,7 +135,7 @@ It loads the YAML with the same `RunConfig` model as `run` and fails closed on:
 - `criteria` on a built-in vulnerability (only custom vulnerabilities carry criteria)
 - Missing or unreadable `callback.file`, or a missing `callback.function`
 - `max_concurrent < 1`, `attacks_per_vulnerability_type < 1`, `target_timeout_seconds < 1`, `pass_rate_threshold` outside `0.0`–`1.0`
-- `api.url` that is not `http://` or `https://`
+- `api.url` that is not `https://` (plain `http://` passes only for `localhost` / `127.0.0.1`)
 
 Exit `0` if the file is a legal assessment config. Exit `1` if it is not.
 

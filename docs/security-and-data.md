@@ -40,6 +40,8 @@ Hard gates before a **public** SDK:
 
 Until (1) and (2) exist, this repo is **internal/staging-only**. Dogfood with the shared key is allowed. `pip install` to third parties is not.
 
+The key is sent as `X-API-Key` to the host in `MARTIAN_API_URL` or YAML `api.url`. Both must be `https://`; `http://` is accepted only for `localhost` and `127.0.0.1`, so the key cannot leave the machine in clear text. `MARTIAN_ALLOW_INSECURE_API_URL=1` lifts the rule for development and is read from the process environment only, so a committed `.env` or YAML file cannot enable it. The rule covers the scheme, not the host: a YAML change that points `api.url` at another `https://` host still sends the key there. Treat `api.url` changes in review as secret-handling changes, and do not run `run` with the secret on branches you have not reviewed.
+
 Do not log `Settings.api_key`. It is a `SecretStr`. httpx headers are set at client construction; tests assert the header on the mock transport without printing it.
 
 ## Retention and AUP

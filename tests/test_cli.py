@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from martian_redteam.cli import app
@@ -99,3 +100,13 @@ def test_validate_accepts_gated_builtin(tmp_path: Path) -> None:
     result = runner.invoke(app, ["validate", str(config_path)])
     assert result.exit_code == 0
     assert "1 vulnerabilities" in result.stdout
+
+
+def test_validate_rejects_insecure_api_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MARTIAN_ALLOW_INSECURE_API_URL", raising=False)
+    config_path = _write_config(tmp_path, "  - name: Toxicity\n")
+    with config_path.open("a", encoding="utf-8") as handle:
+        handle.write("api:\n  url: http://evil.example\n")
+    result = runner.invoke(app, ["validate", str(config_path)])
+    assert result.exit_code == 1
+    assert "api.url must use https://" in "".join(result.stdout.split("\n"))
