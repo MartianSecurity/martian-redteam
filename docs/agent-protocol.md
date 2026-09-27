@@ -101,7 +101,7 @@ Phase 1 always sends `mode=baseline`. Encoding attacks still call the simulator 
 | Input | Human message containing the attack, target reply, and `tools_called` |
 | Output state | `score: 0 \| 1`, `reason: str` (non-empty), `messages`, optional `graph_revision` |
 
-`score` is **only** `0` or `1`. `0.5`, `"pass"`, `true`, or a missing field raises `ClientError` (“schema validation”). The orchestrator records that as `error_kind=infrastructure`.
+`score` is **only** the JSON integer `0` or `1`. `0.5`, `1.0`, `"1"`, `"pass"`, `true`, or a missing field raises `ClientError` (“schema validation”). The orchestrator records that as `error_kind=infrastructure`.
 
 Built-in rubrics live in the graph. The SDK must not send criteria text for built-ins.
 
