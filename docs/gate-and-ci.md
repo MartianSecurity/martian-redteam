@@ -270,6 +270,10 @@ Typical `workflow_call` inputs (names may match the workflow file; keep concurre
 | --- | --- |
 | `MARTIAN_API_KEY` | yes for the run job |
 
+`sdk-ref` must match `^[A-Za-z0-9._/-]+$`; the job fails before installing anything if it does not.
+
+Inputs never appear inside a `run:` script in the reusable workflow or the composite action. GitHub substitutes `${{ … }}` into the script text before the shell parses it, so a crafted input value would be executed as shell. Each input is mapped to an environment variable under `env:` and the script reads `"$VAR"`. Do the same in any step you add around these.
+
 ### 3. Composite action
 
 Use when you already have a workflow and only need this repo to install the CLI and run the gate. Check out **your** repository first; the action files come from `MorningHQ/martian-redteam`. The reusable workflow runs `run` only. Keep `validate` in a prior job that has **no** API key.
