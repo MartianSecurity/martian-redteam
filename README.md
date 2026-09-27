@@ -18,6 +18,10 @@ uv sync
 cp .env.example .env   # MARTIAN_API_URL and MARTIAN_API_KEY
 ```
 
+`.env.example` also lists the optional `MARTIAN_REQUEST_TIMEOUT_SECONDS`
+(default `120`, range `1`–`240`), commented out. See
+[docs/setup.md](docs/setup.md#environment) for every variable.
+
 Applications that bind runtime-provided MCP tools use the optional extra:
 
 ```bash

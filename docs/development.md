@@ -19,7 +19,7 @@ Editable install from the repo root (`uv sync`). Package lives under `src/martia
 uv sync --locked
 uv run ruff format src tests examples
 uv run ruff check src tests examples
-uv run mypy src
+uv run --extra mcp mypy src   # the mcp extra provides the types mcp_binding.py imports
 uv run pytest -q
 uv run python -m compileall -q src
 ```
@@ -39,7 +39,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian
 | Job | Command | Python |
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `mypy src`, `compileall` | 3.12 |
+| `types` | `uv sync --locked`, `mypy src` with the `mcp` extra, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `ci` | Succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
 
@@ -65,7 +65,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
 - `pytest-asyncio` mode `auto`.
-- CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate`. `run` tests mock the client; they never need a real key or OpenAI.
+- CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 When martian-agents Phase 0 contract tests exist, copy real wait bodies into `tests/fixtures/` and keep envelope/heartbeat cases.
 

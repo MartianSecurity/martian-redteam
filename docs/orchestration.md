@@ -8,7 +8,7 @@ The Phase 1 loop is **simulate → encode → target → evaluate**, once per (v
 | --- | --- |
 | `a_red_team(...)` | Async callers. Requires an already-open `Client`. |
 | `red_team(...)` | Sync wrapper via `asyncio.run`. Raises if an event loop is already running; use `a_red_team` then. |
-| `martian-redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes JSON, applies the gate. |
+| `martian-redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes the JSON and Markdown reports, applies the gate. |
 
 `Client` is an async context manager. The CLI uses a single `asyncio.run` so `aclose()` happens on the same loop that ran the probes. Do not create a `Client`, call `red_team()`, then `asyncio.run(client.aclose())` — that second loop will fail.
 
@@ -79,7 +79,7 @@ GitHub-hosted runners share NAT IPs. martian-agents WAF is **2000 requests / 5 m
 
 Pass rate for a type is `passing / (passing + failing)`. Error-only types have pass rate `0.0` and are still caught by the infrastructure/target error gates.
 
-`assessment.save(directory)` writes `directory/risk-assessment.json` (creates the directory). The CLI prints a Rich overview table plus a table of failed or errored probes.
+`assessment.save(directory)` creates the directory, writes `directory/risk-assessment.json` and `directory/risk-assessment.md`, and appends the Markdown to `$GITHUB_STEP_SUMMARY` when that variable is set. It returns the JSON path. The CLI prints a Rich overview table plus a table of failed or errored probes.
 
 ## What Phase 1 does not do
 

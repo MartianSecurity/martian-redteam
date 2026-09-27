@@ -66,6 +66,7 @@ Outputs:
 
 - Terminal tables (per-type pass rate, then failed/errored probes)
 - `results/risk-assessment.json`
+- `results/risk-assessment.md` (also appended to `$GITHUB_STEP_SUMMARY` when that variable is set)
 
 Exit code `1` if the gate fails.
 

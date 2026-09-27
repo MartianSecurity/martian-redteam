@@ -85,7 +85,7 @@ martian-redteam/
     encoding.py        # ROT13, Base64, leetspeak (no LLM)
     catalog/           # ids, types, gate flags, framework subsets
     config.py          # MARTIAN_* env + YAML models
-    cli.py             # martian-redteam run | catalog
+    cli.py             # martian-redteam run | validate | catalog
     gate.py            # CI fail-closed policy
     integration.py     # customer MCP session and bounded trace models
     mcp_binding.py     # optional multi-server MCP discovery and tool calls
@@ -127,7 +127,7 @@ See [gate and CI](gate-and-ci.md) for the full matrix.
 | Phase | Status in this repo | Notes |
 | --- | --- | --- |
 | **0** | Blocked on martian-agents | Register `simulator` / `evaluator` in `aegra.json`, pin `context_schema`, structured output, contract tests |
-| **1** | This scaffold | Client against recorded `/runs/wait` fixtures, five vulns, four attacks, fail-closed gate |
+| **1** | This scaffold | Client against recorded `/runs/wait` fixtures, 12 vulnerabilities, 6 attacks (catalog `0.2.0`), fail-closed gate |
 | **2** | YAML + CLI + example Action present | Still internal until tenancy exists |
 | **3** | Catalog stubs only | OWASP maps labelled as subsets; multi-turn; optional enhance |
 | **4** | Out of scope | Guardrails, scanners, dataset frameworks, DeepTeam shims |
@@ -154,7 +154,7 @@ Chosen to match martian-agents, not DeepTeam.
 | Packaging | uv + hatchling + `uv.lock` | Reproducible CI |
 | HTTP | httpx | One `POST /runs/wait` + `X-API-Key` |
 | Config | Pydantic v2 + pydantic-settings + PyYAML | No hand-parsed dicts |
-| CLI | Typer + Rich | `run`, `catalog`, assessment tables |
+| CLI | Typer + Rich | `run`, `validate`, `catalog`, assessment tables |
 | Retries | Tenacity | Connect/429/503 only |
 | Tests | pytest, pytest-asyncio, respx | Recorded fixtures |
 
