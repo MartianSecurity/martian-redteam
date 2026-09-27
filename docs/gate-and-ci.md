@@ -46,7 +46,7 @@ Parse misses and non-binary scores are infrastructure, not `score=0`.
 | HTTP 4xx/5xx, timeout, transport | `error` + `infrastructure` | Job **fails** | Job **fails** |
 | Schema/parse miss, non-binary score, failed run status | `error` + `infrastructure` | Job **fails** | Job **fails** |
 | Bedrock/content refusal with no `attack` | schema/`ClientError` | Job **fails** | Job **fails** |
-| Target callback exception | `error` + `target` | Job **fails** unless `ignore_target_errors` | Same |
+| Target callback exception or timeout (`target_timeout_seconds`) | `error` + `target` | Job **fails** unless `ignore_target_errors` | Same |
 | `score == 0` | scored fail | Fails if pass-rate below threshold | Reported only |
 | `score == 1` | scored pass | Counts toward pass-rate | Reported |
 

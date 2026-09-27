@@ -63,6 +63,8 @@ class SystemConfig(BaseModel):
     max_concurrent: int = 2
     attacks_per_vulnerability_type: int = 1
     output_folder: str = "results"
+    # Upper bound for one target callback call; a hung target becomes a target error.
+    target_timeout_seconds: float = Field(default=120.0, ge=1.0)
 
     @field_validator("max_concurrent")
     @classmethod

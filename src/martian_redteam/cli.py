@@ -139,6 +139,7 @@ async def _run_async(config: RunConfig) -> RiskAssessment:
             purpose=config.target.purpose,
             max_concurrent=config.system_config.max_concurrent,
             attacks_per_vulnerability_type=config.system_config.attacks_per_vulnerability_type,
+            target_timeout_seconds=config.system_config.target_timeout_seconds,
         )
 
 
