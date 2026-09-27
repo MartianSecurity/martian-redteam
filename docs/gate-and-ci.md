@@ -262,7 +262,7 @@ Typical `workflow_call` inputs (names may match the workflow file; keep concurre
 | --- | --- | --- |
 | `config` | Path to YAML in the **caller** repo | `examples/config.yaml` |
 | `output` | Directory for JSON + Markdown | `results` |
-| `sdk-ref` | Git ref of this repo to `pip install` | `main` (pin in production) |
+| `sdk-ref` | Git ref of this repo to `pip install` | empty: the commit the workflow was called at (`job.workflow_sha`) |
 | `max-concurrent` | Passed as `-c` when non-empty | empty (use YAML) |
 | `attacks-per-vuln` | Passed as `-a` when non-empty | empty (use YAML) |
 
@@ -270,7 +270,7 @@ Typical `workflow_call` inputs (names may match the workflow file; keep concurre
 | --- | --- |
 | `MARTIAN_API_KEY` | yes for the run job |
 
-`sdk-ref` must match `^[A-Za-z0-9._/-]+$`; the job fails before installing anything if it does not.
+The SDK is installed at the same commit as the workflow file. `uses: …/red-team.yml@v0.1.0` installs the SDK at the commit `v0.1.0` points to; there is no floating `main` behind a pinned workflow. Set `sdk-ref` only to install a different ref. It must match `^[A-Za-z0-9._/-]+$` and the job fails before installing anything if it does not. `job.workflow_sha` is provided by github.com runners; where it is missing (GitHub Enterprise Server) the job fails with a message asking for an explicit `sdk-ref`.
 
 Inputs never appear inside a `run:` script in the reusable workflow or the composite action. GitHub substitutes `${{ … }}` into the script text before the shell parses it, so a crafted input value would be executed as shell. Each input is mapped to an environment variable under `env:` and the script reads `"$VAR"`. Do the same in any step you add around these.
 
