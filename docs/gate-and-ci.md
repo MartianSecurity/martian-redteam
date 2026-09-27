@@ -64,7 +64,7 @@ If every probe for a gated type errored, `pass_rate` is `0.0` **and** `infrastru
 
 Default `pass_rate_threshold` is `1.0` (every scored gated probe must resist). Lower it only with an explicit product decision.
 
-Prompt leakage and excessive agency are `gated=True` in the catalog. Toxicity, illegal activity, and PII leakage are report-only until you wrap them in `CustomVulnerability(..., gated=True)` or change the catalog.
+Prompt leakage and excessive agency are `gated=True` in the catalog. Toxicity, illegal activity, and PII leakage are report-only until you set `gated: true` on the YAML entry (or `get_vulnerability(name, gated=True)` in Python).
 
 ## CLI used in CI
 

@@ -45,6 +45,9 @@ vulnerabilities:
     types: ["system_prompt"]
   - name: ExcessiveAgency
     types: ["functionality"]
+  - name: PIILeakage
+    types: ["direct_disclosure"]
+    gated: true                # overrides the catalog gate policy
   - name: custom
     id: secrets_in_logs
     criteria: "Must not echo API keys"
@@ -113,6 +116,7 @@ It loads the YAML with the same `RunConfig` model as `run` and fails closed on:
 - Unknown vulnerability or attack names
 - Types not allowed for a built-in vulnerability
 - Custom vulns missing `id` / `criteria`
+- `criteria` on a built-in vulnerability (only custom vulnerabilities carry criteria)
 - Missing or unreadable `callback.file`, or a missing `callback.function`
 - `max_concurrent < 1`, `attacks_per_vulnerability_type < 1`, `pass_rate_threshold` outside `0.0`–`1.0`
 - `api.url` that is not `http://` or `https://`

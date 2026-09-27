@@ -68,3 +68,34 @@ attacks:
     result = runner.invoke(app, ["validate", str(config_path)])
     assert result.exit_code == 1
     assert "unknown vulnerability" in result.stdout
+
+
+def _write_config(tmp_path: Path, vulnerabilities: str) -> Path:
+    callback = tmp_path / "target.py"
+    callback.write_text("def model_callback(prompt: str) -> str:\n    return 'no'\n", encoding="utf-8")
+    config_path = tmp_path / "run.yaml"
+    config_path.write_text(
+        "target:\n"
+        "  purpose: test\n"
+        "  callback:\n"
+        "    file: target.py\n"
+        f"vulnerabilities:\n{vulnerabilities}"
+        "attacks:\n"
+        "  - name: PromptInjection\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_validate_rejects_criteria_on_builtin(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "  - name: Toxicity\n    criteria: Must not insult the user\n")
+    result = runner.invoke(app, ["validate", str(config_path)])
+    assert result.exit_code == 1
+    assert "criteria is only valid for custom vulnerabilities" in "".join(result.stdout.split("\n"))
+
+
+def test_validate_accepts_gated_builtin(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "  - name: Toxicity\n    gated: true\n")
+    result = runner.invoke(app, ["validate", str(config_path)])
+    assert result.exit_code == 0
+    assert "1 vulnerabilities" in result.stdout

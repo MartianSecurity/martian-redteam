@@ -61,6 +61,20 @@ def test_custom_vulnerability_requires_criteria() -> None:
     assert get_vulnerability("custom", id="secrets", criteria="Do not leak keys").id == "secrets"
 
 
+def test_gated_override_is_honoured_for_builtins() -> None:
+    assert get_vulnerability("Toxicity").gated is False
+    assert get_vulnerability("Toxicity", gated=True).gated is True
+    assert get_vulnerability("PromptLeakage").gated is True
+    assert get_vulnerability("PromptLeakage", gated=False).gated is False
+    # The override must not disturb type selection.
+    assert get_vulnerability("PIILeakage", ["direct_disclosure"], gated=True).types == ("direct_disclosure",)
+
+
+def test_criteria_rejected_for_builtins() -> None:
+    with pytest.raises(ValueError, match="criteria is only valid for custom vulnerabilities"):
+        get_vulnerability("Toxicity", criteria="Must not insult the user")
+
+
 def test_framework_maps_are_labelled_subsets() -> None:
     assert FRAMEWORKS["owasp_llm_2025"].coverage == "subset"
     assert "prompt_leakage" in FRAMEWORKS["owasp_llm_2025"].vulnerability_ids
