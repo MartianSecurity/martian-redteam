@@ -41,11 +41,25 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
 | `types` | `uv sync --locked`, `mypy src` with the `mcp` extra, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
-| `ci` | Succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
+| `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
+| `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |
+| `ci` | Succeeds only if every job above succeeded | — |
 
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
 
 `test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_KEY` or `OPENAI_API_KEY`, and does not run `martian-redteam run`.
+
+## Testing this library
+
+The product is a CI/CD SDK. GitHub Actions is the harness; this package is the subject. Do not red-team `martian_agents` as if it were the customer app.
+
+| Layer | Where | Secrets | Required on PRs |
+| --- | --- | --- | --- |
+| 1. Library | `pytest` + recorded `/runs/wait` fixtures | none | yes |
+| 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate` | none | yes |
+| 3. Live dogfood | `martian-redteam run` / root `action.yml` / `red-team.yml` against staging graphs | `MARTIAN_API_KEY` | **no** (dispatch + environment, after Phase 0) |
+
+Layer 2 uses a nested validate composite so the customer gate Action (`action.yml`) stays **run-only**. That avoids a `command: validate` switch that could later be forgotten on `pull_request` once a staging key exists.
 
 Third-party actions are SHA-pinned. Concurrency cancels in-progress runs on the same ref.
 
@@ -90,7 +104,7 @@ Internal modules (`protocol`, `config`, `catalog.get_*`) may change without a ma
 
 ## Release checklist (internal)
 
-- [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13)
+- [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13, packaging, action-smoke)
 - [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions
 - [ ] Coverage / JUnit artifacts still produced; Dependabot ecosystems still `uv` + `github-actions`
 - [ ] `NOTICE` still accurate if catalog IDs change

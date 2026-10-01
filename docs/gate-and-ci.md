@@ -116,16 +116,13 @@ Exit codes:
 | Job | What | Python |
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `mypy src` | 3.12 |
-| `test` | `uv sync --locked`, `pytest` with coverage + JUnit, `compileall` | **matrix 3.12 and 3.13** |
-| `ci` | Aggregator: succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
+| `types` | `uv sync --locked`, `mypy src`, `compileall` | 3.12 |
+| `test` | `uv sync --locked`, `pytest` with coverage + JUnit | **matrix 3.12 and 3.13** |
+| `packaging` | `uv build`, install the wheel in a throwaway venv, `validate examples/config.yaml` | 3.12 |
+| `action-smoke` | `uses: ./.github/actions/validate` (composite install path, no API key) | 3.12 |
+| `ci` | Aggregator: succeeds only if every job above succeeded | — |
 
-Protect `main` with the single required check **`ci`**, not the matrix cells. That way a skipped/failed 3.13 cell cannot look green.
-
-`test` writes and uploads (even on failure):
-
-- `coverage.xml` (pytest-cov)
-- `junit.xml`
+Protect `main` with the single required check **`ci`**, not the matrix cells. That way a skipped/failed 3.13 cell cannot look green. The aggregator checks each `needs.*.result == success`; adding a job only to `needs` without that check would leave `ci` green on failure.
 
 This workflow does **not**:
 
@@ -133,6 +130,8 @@ This workflow does **not**:
 - Set `MARTIAN_API_KEY` or `OPENAI_API_KEY`
 - Treat `martian_agents` as a red-team target
 - Run `martian-redteam run`
+
+Live `run` dogfood (composite `action.yml` / reusable `red-team.yml` against staging graphs) is **layer 3** and is not a required PR check. See [development](development.md#testing-this-library).
 
 Concurrency cancels in-progress runs on the same ref. Third-party actions are **SHA-pinned** (tag in the comment only).
 
@@ -198,13 +197,25 @@ jobs:
           version: "0.10.0"
 
       - name: Install martian-redteam
-        run: uv pip install --system "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam.git@v0.1.0"
+        run: |
+          uv venv "${RUNNER_TEMP}/martian-redteam"
+          uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
+            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam.git@v0.1.0"
+          echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Validate config
         run: martian-redteam validate config.yaml
 ```
 
 Replace `v0.1.0` with the tag or SHA you actually depend on. Do not use `@main` once you are past dogfood.
+
+Same check via this repo’s validate composite (still no API key; the root `action.yml` stays the `run` gate):
+
+```yaml
+      - uses: MorningHQ/martian-redteam/.github/actions/validate@v0.1.0
+        with:
+          config: config.yaml
+```
 
 ### 2. Reusable workflow (recommended gate)
 

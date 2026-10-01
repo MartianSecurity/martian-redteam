@@ -90,7 +90,12 @@ jobs:
             exit 1
           fi
           echo "Installing martian-redteam at ${MARTIAN_REDTEAM_SDK_REF}"
-          uv pip install --system "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
+          # A throwaway venv, not --system: Ubuntu 24.04's interpreter is PEP 668
+          # externally managed and uv refuses to install into it.
+          uv venv "${RUNNER_TEMP}/martian-redteam"
+          uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
+            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
+          echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Run assessment
         env:

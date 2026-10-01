@@ -126,4 +126,4 @@ YAML names (`PromptLeakage`) and snake_case ids (`prompt_leakage`) both resolve.
 | `uv run martian-redteam catalog` | Prints vulns/attacks/frameworks |
 | Live `run` against staging | Fails until Phase 0 graphs exist, or succeeds against recorded-compatible graphs |
 
-Unit tests never call production. CI in this repo is lint + typecheck + pytest only.
+Unit tests never call production. CI in this repo is lint, types, pytest, packaging, and Action smoke (`validate` only); live `run` is not a required PR check.
