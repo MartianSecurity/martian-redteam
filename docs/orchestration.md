@@ -8,7 +8,7 @@ The Phase 1 loop is **simulate → encode → target → evaluate**, once per (v
 | --- | --- |
 | `a_red_team(...)` | Async callers. Requires an already-open `Client`. |
 | `red_team(...)` | Sync wrapper via `asyncio.run`. Raises if an event loop is already running; use `a_red_team` then. |
-| `martian-redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes JSON, applies the gate. |
+| `martian-redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes the JSON and Markdown reports, applies the gate. |
 
 `Client` is an async context manager. The CLI uses a single `asyncio.run` so `aclose()` happens on the same loop that ran the probes. Do not create a `Client`, call `red_team()`, then `asyncio.run(client.aclose())` — that second loop will fail.
 
@@ -22,9 +22,9 @@ for vulnerability in vulnerabilities:
         enqueue probe
 ```
 
-Defaults: `max_concurrent=2`, `attacks_per_vulnerability_type=1`.
+Defaults: `max_concurrent=2`, `attacks_per_vulnerability_type=1`, `target_timeout_seconds=120`.
 
-Empty vulnerability or attack lists, empty `purpose`, or `max_concurrent < 1` raise `ValueError` before any HTTP.
+Empty vulnerability or attack lists, empty `purpose`, `max_concurrent < 1`, or `target_timeout_seconds <= 0` raise `ValueError` before any HTTP.
 
 Example: `PromptLeakage(types=["system_prompt"])` + `[PromptInjection(), ROT13()]` → **2 probes**.
 
@@ -39,10 +39,10 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
    - Encoding attacks send `attack_method=prompt_injection` so the graph still generates natural language, then the SDK encodes.
    - `mode=baseline`.
 2. **Encode** if `attack.kind == "encoding"` (`rot13`, `base64`, `leetspeak`). Pure local transforms. Unknown methods raise `ValueError` (should be unreachable if the catalog is used).
-3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. The generated attack is still stored on `TestCase.input` so reports remain useful.
+3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. Each call has a deadline of `target_timeout_seconds` (default 120); a call that exceeds it is cancelled and recorded as `error_kind=target` (`target callback timed out after N seconds`). The generated attack is still stored on `TestCase.input` so reports remain useful.
 4. **Evaluate.** `Client.evaluate(...)` with the **encoded** payload (what the target actually saw), the reply, and `tools_called`. Custom vulns include `criteria`.
 
-`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` swallows `ClientError` and target exceptions into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process.
+`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process. Any other exception is an SDK defect and propagates out of `a_red_team` rather than being blamed on the target.
 
 ## Callback adapter
 
@@ -79,7 +79,7 @@ GitHub-hosted runners share NAT IPs. martian-agents WAF is **2000 requests / 5 m
 
 Pass rate for a type is `passing / (passing + failing)`. Error-only types have pass rate `0.0` and are still caught by the infrastructure/target error gates.
 
-`assessment.save(directory)` writes `directory/risk-assessment.json` (creates the directory). The CLI prints a Rich overview table plus a table of failed or errored probes.
+`assessment.save(directory)` creates the directory, writes `directory/risk-assessment.json` and `directory/risk-assessment.md`, and appends the Markdown to `$GITHUB_STEP_SUMMARY` when that variable is set. It returns the JSON path. The CLI prints a Rich overview table plus a table of failed or errored probes.
 
 ## What Phase 1 does not do
 

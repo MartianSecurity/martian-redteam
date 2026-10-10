@@ -13,6 +13,7 @@ dist/
 .venv/
 venv/
 env/
+.ci-wheel/
 
 # IDE
 .idea/

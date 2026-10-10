@@ -26,9 +26,10 @@ cp .env.example .env
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `MARTIAN_API_URL` | no | `https://api.agents.martiansecurity.ai` | Aegra base URL, no trailing slash |
+| `MARTIAN_API_URL` | no | `https://api.agents.martiansecurity.ai` | Aegra base URL, no trailing slash. Must be `https://`; `http://` only for `localhost` / `127.0.0.1` |
 | `MARTIAN_API_KEY` | **yes** for live runs | empty | Sent as `X-API-Key`. `Client()` raises if unset |
 | `MARTIAN_REQUEST_TIMEOUT_SECONDS` | no | `120` | httpx timeout per `/runs/wait`. Minimum 1, maximum 240 (under the ALB idle timeout of 300s) |
+| `MARTIAN_ALLOW_INSECURE_API_URL` | no | unset | Development only. Exactly `1` accepts an `http://` API URL on a non-loopback host. Read from the process environment, not from `.env` |
 
 Pydantic-settings loads `.env` automatically when constructing `Settings()`. The CLI constructs `Settings()` on each `run`.
 
@@ -42,6 +43,14 @@ api:
 ```
 
 The API key always comes from the environment. That keeps secrets out of committed YAML.
+
+The override is not harmless: the client sends `X-API-Key` to whatever host the URL names. `api.url` and `MARTIAN_API_URL` therefore must use `https://`. Plain `http://` is accepted only when the host is `localhost` or `127.0.0.1`. Anything else fails `validate` and `run` before a request is made:
+
+```text
+api.url must use https:// (http:// is accepted only for localhost and 127.0.0.1; …)
+```
+
+To reach a development server over plain HTTP on another host, export `MARTIAN_ALLOW_INSECURE_API_URL=1` in the shell that runs the CLI. Never set it in CI. Review any change to `api.url` as you would a change to where a secret is sent; `https://` does not make an unknown host trustworthy.
 
 ## First local run (dummy target)
 
@@ -57,6 +66,7 @@ Outputs:
 
 - Terminal tables (per-type pass rate, then failed/errored probes)
 - `results/risk-assessment.json`
+- `results/risk-assessment.md` (also appended to `$GITHUB_STEP_SUMMARY` when that variable is set)
 
 Exit code `1` if the gate fails.
 
@@ -116,4 +126,4 @@ YAML names (`PromptLeakage`) and snake_case ids (`prompt_leakage`) both resolve.
 | `uv run martian-redteam catalog` | Prints vulns/attacks/frameworks |
 | Live `run` against staging | Fails until Phase 0 graphs exist, or succeeds against recorded-compatible graphs |
 
-Unit tests never call production. CI in this repo is lint + typecheck + pytest only.
+Unit tests never call production. CI in this repo is lint, types, pytest, packaging, and Action smoke (`validate` only); live `run` is not a required PR check.

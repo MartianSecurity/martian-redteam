@@ -21,6 +21,12 @@ from martian_redteam.types import (
     VulnerabilityTypeResult,
 )
 
+DEFAULT_TARGET_TIMEOUT_SECONDS = 120.0
+
+
+class TargetTimeoutError(TimeoutError):
+    """The target callback did not return within ``target_timeout_seconds``."""
+
 
 async def a_red_team(
     *,
@@ -32,11 +38,20 @@ async def a_red_team(
     max_concurrent: int = 2,
     attacks_per_vulnerability_type: int = 1,
     graph_revision: str | None = None,
+    target_timeout_seconds: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
 ) -> RiskAssessment:
+    """Run every probe and return the aggregated assessment.
+
+    ``target_timeout_seconds`` bounds each call to the target callback. A call
+    that exceeds it is cancelled and recorded as ``error_kind="target"`` so a
+    hung target cannot hold the run open until the CI job is killed.
+    """
     if max_concurrent < 1:
         raise ValueError("max_concurrent must be >= 1")
     if attacks_per_vulnerability_type < 1:
         raise ValueError("attacks_per_vulnerability_type must be >= 1")
+    if target_timeout_seconds <= 0:
+        raise ValueError("target_timeout_seconds must be > 0")
     if not vulnerabilities:
         raise ValueError("at least one vulnerability is required")
     if not attacks:
@@ -64,6 +79,7 @@ async def a_red_team(
                 vuln_type=vuln_type,
                 attack=attack,
                 purpose=purpose,
+                target_timeout_seconds=target_timeout_seconds,
             )
 
     cases = await asyncio.gather(*(run_one(*job) for job in jobs))
@@ -86,6 +102,7 @@ def red_team(
     max_concurrent: int = 2,
     attacks_per_vulnerability_type: int = 1,
     graph_revision: str | None = None,
+    target_timeout_seconds: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
 ) -> RiskAssessment:
     try:
         asyncio.get_running_loop()
@@ -100,9 +117,32 @@ def red_team(
                 max_concurrent=max_concurrent,
                 attacks_per_vulnerability_type=attacks_per_vulnerability_type,
                 graph_revision=graph_revision,
+                target_timeout_seconds=target_timeout_seconds,
             )
         )
     raise RuntimeError("red_team() cannot run inside an event loop; use await a_red_team(...)")
+
+
+async def _call_target(target: AsyncTarget, payload: str, timeout_seconds: float) -> Turn:
+    """Await the target callback, cancelling it after ``timeout_seconds``.
+
+    Raises ``TargetTimeoutError`` only when this deadline expired. A
+    ``TimeoutError`` raised by the callback itself (for example its own HTTP
+    timeout) propagates unchanged so the report names the real cause.
+
+    ``asyncio.timeout`` is what ``asyncio.wait_for`` uses internally on
+    Python 3.12+; using it directly exposes ``expired()`` to tell the two
+    cases apart without wrapping the callback in an extra task.
+    """
+    try:
+        async with asyncio.timeout(timeout_seconds) as deadline:
+            return await target(payload, None)
+    except TimeoutError as error:
+        if deadline.expired():
+            raise TargetTimeoutError(
+                f"target callback timed out after {timeout_seconds:g} seconds (system_config.target_timeout_seconds)"
+            ) from error
+        raise
 
 
 async def _probe(
@@ -113,17 +153,22 @@ async def _probe(
     vuln_type: str,
     attack: Attack,
     purpose: str,
+    target_timeout_seconds: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
 ) -> TestCase:
+    """Run one probe. Each stage has its own handler so errors keep their real origin.
+
+    Only ``ClientError`` from the hosted calls is an infrastructure error and
+    only exceptions raised while awaiting the callback are target errors.
+    Anything else (for example an encoding bug) is an SDK defect and
+    propagates instead of being blamed on the customer's target.
+    """
     base = TestCase(
         vulnerability=vulnerability.id,
         vulnerability_type=vuln_type,
         attack_method=attack.id,
     )
-    payload: str | None = None
-    reply_content: str | None = None
-    reply_turn: Turn | None = None
+    llm_method = attack.id if attack.kind == "llm" else "prompt_injection"
     try:
-        llm_method = attack.id if attack.kind == "llm" else "prompt_injection"
         simulated = await client.simulate(
             SimulatorContext(
                 vulnerability=vulnerability.id,
@@ -133,12 +178,29 @@ async def _probe(
                 mode="baseline",
             )
         )
-        payload = simulated.attack
-        revision = simulated.graph_revision
-        if attack.kind == "encoding":
-            payload = apply_encoding(payload, attack.id)
-        reply_turn = await target(payload, None)
-        reply_content = reply_turn.content
+    except ClientError as error:
+        return base.model_copy(update={"error": str(error), "error_kind": "infrastructure"})
+
+    payload = simulated.attack
+    revision = simulated.graph_revision
+    if attack.kind == "encoding":
+        payload = apply_encoding(payload, attack.id)
+
+    try:
+        reply_turn = await _call_target(target, payload, target_timeout_seconds)
+    except TargetTimeoutError as error:
+        return base.model_copy(update={"input": payload, "error": str(error), "error_kind": "target"})
+    except Exception as error:  # noqa: BLE001 — target failures become case errors
+        return base.model_copy(
+            update={
+                "input": payload,
+                "error": f"target callback failed: {error}",
+                "error_kind": "target",
+            }
+        )
+
+    reply_content = reply_turn.content
+    try:
         evaluated = await client.evaluate(
             EvaluatorContext(
                 vulnerability=vulnerability.id,
@@ -150,34 +212,26 @@ async def _probe(
             target_output=reply_content,
             tools_called=reply_turn.tools_called,
         )
-        return base.model_copy(
-            update={
-                "input": payload,
-                "actual_output": reply_content,
-                "turns": [reply_turn],
-                "score": evaluated.score,
-                "reason": evaluated.reason,
-                "graph_revision": evaluated.graph_revision or revision,
-            }
-        )
     except ClientError as error:
         return base.model_copy(
             update={
                 "input": payload,
                 "actual_output": reply_content,
-                "turns": [reply_turn] if reply_turn is not None else [],
+                "turns": [reply_turn],
                 "error": str(error),
                 "error_kind": "infrastructure",
             }
         )
-    except Exception as error:  # noqa: BLE001 — target failures become case errors
-        return base.model_copy(
-            update={
-                "input": payload,
-                "error": f"target callback failed: {error}",
-                "error_kind": "target",
-            }
-        )
+    return base.model_copy(
+        update={
+            "input": payload,
+            "actual_output": reply_content,
+            "turns": [reply_turn],
+            "score": evaluated.score,
+            "reason": evaluated.reason,
+            "graph_revision": evaluated.graph_revision or revision,
+        }
+    )
 
 
 def _summarize(

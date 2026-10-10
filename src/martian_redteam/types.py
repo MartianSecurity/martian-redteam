@@ -4,11 +4,27 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 ErrorKind = Literal["infrastructure", "target"]
+
+
+def _require_exact_int(value: object) -> object:
+    """Reject anything that is not exactly ``int`` before the literal check.
+
+    Pydantic compares literals by equality, so ``True``, ``1.0`` and (in JSON)
+    ``true`` all match ``Literal[0, 1]``, and ``Field(strict=True)`` cannot be
+    applied to a literal schema. A judge that answers ``vulnerable: true``
+    style booleans must fail the schema instead of being read as a pass.
+    """
+    if value is not None and type(value) is not int:
+        raise ValueError("score must be the integer 0 or 1")
+    return value
+
+
+BinaryScore = Annotated[Literal[0, 1], BeforeValidator(_require_exact_int)]
 
 
 class Turn(BaseModel):
@@ -33,18 +49,11 @@ class TestCase(BaseModel):
     input: str | None = None
     actual_output: str | None = None
     turns: list[Turn] = Field(default_factory=list)
-    score: Literal[0, 1] | None = None
+    score: BinaryScore | None = None
     reason: str | None = None
     error: str | None = None
     error_kind: ErrorKind | None = None
     graph_revision: str | None = None
-
-    @field_validator("score")
-    @classmethod
-    def score_must_be_binary(cls, value: Literal[0, 1] | None) -> Literal[0, 1] | None:
-        if value is not None and value not in (0, 1):
-            raise ValueError("score must be 0, 1, or null")
-        return value
 
 
 class VulnerabilityTypeResult(BaseModel):
@@ -125,7 +134,7 @@ class EvaluatorOutput(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    score: Literal[0, 1]
+    score: BinaryScore
     reason: str = Field(min_length=1)
     graph_revision: str | None = None
     messages: list[Any] = Field(default_factory=list)

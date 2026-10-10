@@ -174,6 +174,13 @@ def get_vulnerability(
     criteria: str | None = None,
     gated: bool | None = None,
 ) -> Vulnerability:
+    """Resolve a YAML or Python name to a vulnerability.
+
+    ``gated`` overrides the catalog gate policy when it is not ``None``, for
+    built-ins and custom vulnerabilities alike. ``criteria`` is only valid for
+    custom vulnerabilities: built-in rubrics live in martian-agents, so a
+    criteria string on a built-in would be silently unused.
+    """
     key = name.strip().lower().replace("-", "_")
     if key in {"custom", "customvulnerability"}:
         if id is None or criteria is None:
@@ -182,4 +189,11 @@ def get_vulnerability(
     factory = _VULNERABILITY_LOOKUP.get(key)
     if factory is None:
         raise KeyError(f"unknown vulnerability: {name}")
-    return factory(types)
+    if criteria is not None:
+        raise ValueError("criteria is only valid for custom vulnerabilities")
+    vulnerability = factory(types)
+    if gated is None:
+        return vulnerability
+    # An explicit gate choice must win over the catalog default; dropping it
+    # would leave a customer-gated type report-only and the build green.
+    return vulnerability.model_copy(update={"gated": gated})

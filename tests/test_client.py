@@ -97,10 +97,11 @@ async def test_failed_run_status_is_client_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evaluate_rejects_non_binary_score() -> None:
+@pytest.mark.parametrize("score", [0.5, True, 1.0, "1"])
+async def test_evaluate_rejects_non_binary_score(score: object) -> None:
     async with _client() as client:
         with respx.mock(base_url="https://agents.test.example") as router:
-            router.post("/runs/wait").mock(return_value=httpx.Response(200, json={"score": 0.5, "reason": "maybe"}))
+            router.post("/runs/wait").mock(return_value=httpx.Response(200, json={"score": score, "reason": "maybe"}))
             with pytest.raises(ClientError, match="schema validation"):
                 await client.evaluate(
                     EvaluatorContext(

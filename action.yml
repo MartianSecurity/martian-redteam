@@ -39,21 +39,36 @@ runs:
         version: "0.10.0"
         python-version: "3.12"
 
+    # Expressions are substituted into the script text before bash parses it,
+    # so quoting cannot contain them. Every value reaches the script through
+    # env and is referenced as a quoted shell variable.
     - name: Install martian-redteam
       shell: bash
-      run: uv pip install --system "${{ github.action_path }}"
+      env:
+        MARTIAN_REDTEAM_ACTION_PATH: ${{ github.action_path }}
+      # A throwaway venv, not --system: Ubuntu 24.04's interpreter is PEP 668
+      # externally managed and uv refuses to install into it.
+      run: |
+        set -euo pipefail
+        uv venv "${RUNNER_TEMP}/martian-redteam"
+        uv pip install --python "${RUNNER_TEMP}/martian-redteam" "$MARTIAN_REDTEAM_ACTION_PATH"
+        echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
     - name: Run assessment
       shell: bash
       env:
         MARTIAN_API_KEY: ${{ env.MARTIAN_API_KEY }}
         MARTIAN_API_URL: ${{ env.MARTIAN_API_URL }}
+        MARTIAN_REDTEAM_CONFIG: ${{ inputs.config }}
+        MARTIAN_REDTEAM_OUTPUT: ${{ inputs.output }}
+        MARTIAN_REDTEAM_MAX_CONCURRENT: ${{ inputs.max-concurrent }}
+        MARTIAN_REDTEAM_ATTACKS_PER_VULN: ${{ inputs.attacks-per-vuln }}
       run: |
         extra=()
-        if [ -n "${{ inputs.max-concurrent }}" ]; then
-          extra+=(-c "${{ inputs.max-concurrent }}")
+        if [ -n "$MARTIAN_REDTEAM_MAX_CONCURRENT" ]; then
+          extra+=(-c "$MARTIAN_REDTEAM_MAX_CONCURRENT")
         fi
-        if [ -n "${{ inputs.attacks-per-vuln }}" ]; then
-          extra+=(-a "${{ inputs.attacks-per-vuln }}")
+        if [ -n "$MARTIAN_REDTEAM_ATTACKS_PER_VULN" ]; then
+          extra+=(-a "$MARTIAN_REDTEAM_ATTACKS_PER_VULN")
         fi
-        martian-redteam run "${{ inputs.config }}" -o "${{ inputs.output }}" "${extra[@]}"
+        martian-redteam run "$MARTIAN_REDTEAM_CONFIG" -o "$MARTIAN_REDTEAM_OUTPUT" "${extra[@]}"

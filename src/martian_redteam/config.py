@@ -2,12 +2,42 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Self
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ALLOW_INSECURE_API_URL_ENV = "MARTIAN_ALLOW_INSECURE_API_URL"
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1"})
+
+
+def require_secure_api_url(value: str, *, label: str) -> str:
+    """Return the normalised API URL, or raise if it would expose the API key.
+
+    The client attaches ``X-API-Key`` to every request to this URL, so a plain
+    ``http://`` URL sends the key in clear text and lets a one-line config
+    change redirect it. ``https://`` is required unless the host is loopback.
+
+    ``MARTIAN_ALLOW_INSECURE_API_URL=1`` lifts the rule for development. It is
+    read from the process environment only, never from ``.env`` or YAML, so a
+    file committed to a repository cannot switch it on.
+    """
+    trimmed = value.strip().rstrip("/")
+    parts = urlsplit(trimmed)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError(f"{label} must start with http:// or https://")
+    if parts.scheme == "https" or parts.hostname in _LOOPBACK_HOSTS:
+        return trimmed
+    if os.environ.get(ALLOW_INSECURE_API_URL_ENV) == "1":
+        return trimmed
+    raise ValueError(
+        f"{label} must use https:// (http:// is accepted only for localhost and 127.0.0.1; "
+        f"set {ALLOW_INSECURE_API_URL_ENV}=1 in the process environment for development)"
+    )
 
 
 class Settings(BaseSettings):
@@ -25,11 +55,8 @@ class Settings(BaseSettings):
 
     @field_validator("api_url")
     @classmethod
-    def api_url_must_be_http(cls, value: str) -> str:
-        trimmed = value.strip().rstrip("/")
-        if not trimmed.startswith(("http://", "https://")):
-            raise ValueError("MARTIAN_API_URL must start with http:// or https://")
-        return trimmed
+    def api_url_must_be_secure(cls, value: str) -> str:
+        return require_secure_api_url(value, label="MARTIAN_API_URL")
 
 
 class CallbackRef(BaseModel):
@@ -63,6 +90,8 @@ class SystemConfig(BaseModel):
     max_concurrent: int = 2
     attacks_per_vulnerability_type: int = 1
     output_folder: str = "results"
+    # Upper bound for one target callback call; a hung target becomes a target error.
+    target_timeout_seconds: float = Field(default=120.0, ge=1.0)
 
     @field_validator("max_concurrent")
     @classmethod
@@ -98,6 +127,15 @@ class ApiConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: HttpUrl | None = None
+
+    @field_validator("url")
+    @classmethod
+    def url_must_be_secure(cls, value: HttpUrl | None) -> HttpUrl | None:
+        # settings_overlay copies this URL into Settings without re-validating,
+        # so the YAML override has to be checked here.
+        if value is not None:
+            require_secure_api_url(str(value), label="api.url")
+        return value
 
 
 class RunConfig(BaseModel):

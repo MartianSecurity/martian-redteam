@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -70,6 +71,140 @@ async def test_target_exception_is_target_error(simulator_payload: dict) -> None
 
 
 @pytest.mark.asyncio
+async def test_hung_target_times_out_as_target_error(simulator_payload: dict) -> None:
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+    cancelled = asyncio.Event()
+
+    async def target(prompt: str) -> str:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "unreachable"
+
+    async with Client(settings=settings) as client:
+        with respx.mock(base_url="https://agents.test.example") as router:
+            route = router.post("/runs/wait").mock(return_value=httpx.Response(200, json=simulator_payload))
+            assessment = await asyncio.wait_for(
+                a_red_team(
+                    target=target,
+                    vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                    attacks=[PromptInjection()],
+                    client=client,
+                    purpose="assistant",
+                    target_timeout_seconds=0.05,
+                ),
+                timeout=5,
+            )
+
+    case = assessment.test_cases[0]
+    assert cancelled.is_set()
+    assert assessment.target_errors == 1
+    assert assessment.infrastructure_errors == 0
+    assert case.error_kind == "target"
+    assert case.error is not None
+    assert "timed out after 0.05 seconds" in case.error
+    assert case.input == simulator_payload["attack"]
+    assert case.score is None
+    # Only the simulator was called; a timed-out reply is never sent to the evaluator.
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_raised_by_target_is_not_reported_as_sdk_deadline(simulator_payload: dict) -> None:
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+
+    async def target(prompt: str) -> str:
+        raise TimeoutError("upstream model timed out")
+
+    async with Client(settings=settings) as client:
+        with respx.mock(base_url="https://agents.test.example") as router:
+            router.post("/runs/wait").mock(return_value=httpx.Response(200, json=simulator_payload))
+            assessment = await a_red_team(
+                target=target,
+                vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                attacks=[PromptInjection()],
+                client=client,
+                purpose="assistant",
+            )
+
+    assert assessment.test_cases[0].error_kind == "target"
+    assert assessment.test_cases[0].error == "target callback failed: upstream model timed out"
+
+
+@pytest.mark.asyncio
+async def test_sdk_internal_error_is_not_labelled_target_failure(
+    simulator_payload: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+
+    def broken_encoding(payload: str, method: str) -> str:
+        raise ValueError("unknown encoding")
+
+    monkeypatch.setattr("martian_redteam.orchestrator.apply_encoding", broken_encoding)
+
+    async def target(prompt: str) -> str:
+        return "no"
+
+    async with Client(settings=settings) as client:
+        with respx.mock(base_url="https://agents.test.example") as router:
+            router.post("/runs/wait").mock(return_value=httpx.Response(200, json=simulator_payload))
+            with pytest.raises(ValueError, match="unknown encoding"):
+                await a_red_team(
+                    target=target,
+                    vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                    attacks=[ROT13()],
+                    client=client,
+                    purpose="assistant",
+                )
+
+
+@pytest.mark.asyncio
+async def test_evaluator_failure_keeps_target_reply(simulator_payload: dict) -> None:
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+
+    async def target(prompt: str) -> str:
+        return "no"
+
+    async with Client(settings=settings) as client:
+        with respx.mock(base_url="https://agents.test.example") as router:
+            router.post("/runs/wait").mock(
+                side_effect=[
+                    httpx.Response(200, json=simulator_payload),
+                    httpx.Response(400, json={"detail": "bad request"}),
+                ]
+            )
+            assessment = await a_red_team(
+                target=target,
+                vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                attacks=[PromptInjection()],
+                client=client,
+                purpose="assistant",
+            )
+
+    case = assessment.test_cases[0]
+    assert case.error_kind == "infrastructure"
+    assert case.actual_output == "no"
+    assert case.input == simulator_payload["attack"]
+
+
+@pytest.mark.asyncio
+async def test_non_positive_target_timeout_rejected() -> None:
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+    async with Client(settings=settings) as client:
+        with pytest.raises(ValueError, match="target_timeout_seconds"):
+            await a_red_team(
+                target=lambda prompt: "no",
+                vulnerabilities=[PromptLeakage()],
+                attacks=[PromptInjection()],
+                client=client,
+                purpose="assistant",
+                target_timeout_seconds=0,
+            )
+
+
+@pytest.mark.asyncio
 async def test_custom_vulnerability_sends_criteria(simulator_payload: dict, evaluator_payload: dict) -> None:
     settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
 
@@ -124,7 +259,5 @@ def test_sync_red_team_rejects_running_loop() -> None:
                 client=Client(settings=Settings(api_url="https://agents.test.example", api_key=SecretStr("k"))),
                 purpose="assistant",
             )
-
-    import asyncio
 
     asyncio.run(inside())

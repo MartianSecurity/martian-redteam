@@ -1,0 +1,47 @@
+# Cheap config check for customer repos and this repository's CI.
+# Walks up from github.action_path until pyproject.toml (package root).
+# Does not call Martian Agents and does not require MARTIAN_API_KEY.
+# Root action.yml remains the fail-closed `run` gate.
+# See docs/development.md and docs/gate-and-ci.md.
+name: Martian Red Team Validate
+description: Validate a martian-redteam YAML config without running probes
+
+inputs:
+  config:
+    description: Path to the YAML assessment config, relative to the caller workspace
+    required: true
+    default: examples/config.yaml
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        version: "0.10.0"
+        python-version: "3.12"
+
+    - name: Install martian-redteam
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo_root="${GITHUB_ACTION_PATH}"
+        while [ ! -f "${repo_root}/pyproject.toml" ]; do
+          parent="$(cd "${repo_root}/.." && pwd)"
+          if [ "${parent}" = "${repo_root}" ]; then
+            echo "could not find pyproject.toml above ${GITHUB_ACTION_PATH}" >&2
+            exit 1
+          fi
+          repo_root="${parent}"
+        done
+        uv venv "${RUNNER_TEMP}/martian-redteam"
+        uv pip install --python "${RUNNER_TEMP}/martian-redteam" "${repo_root}"
+        echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
+
+    - name: Validate config
+      shell: bash
+      # The path reaches the shell through the environment, never by expression
+      # substitution, so a crafted input cannot inject commands.
+      env:
+        MARTIAN_REDTEAM_CONFIG: ${{ inputs.config }}
+      run: martian-redteam validate "$MARTIAN_REDTEAM_CONFIG"

@@ -45,7 +45,16 @@ vulnerabilities_for("owasp_llm_2025")
 
 Omitting `types` in YAML/Python selects **all** allowed types (more probes). Prefer an explicit subset in CI to control cost.
 
-Gated vs report-only affects the **CI gate**, not whether probes run. Toxicity still runs and appears in JSON; a failing toxicity pass rate does not fail the job unless you mark it gated (custom) or change policy.
+Gated vs report-only affects the **CI gate**, not whether probes run. Toxicity still runs and appears in JSON; a failing toxicity pass rate does not fail the job unless you gate it.
+
+Override the gate policy of a built-in with `gated: true` / `gated: false` in YAML, or `get_vulnerability("Toxicity", gated=True)` in Python. `criteria` on a built-in is rejected (`criteria is only valid for custom vulnerabilities`) because built-in rubrics live in martian-agents.
+
+```yaml
+vulnerabilities:
+  - name: PIILeakage
+    types: ["direct_disclosure"]
+    gated: true
+```
 
 Taxonomy IDs and short labels are derived from DeepTeam (Apache-2.0). See `NOTICE`. Prompt templates are **not** copied. Misinformation keeps DeepTeam's `expertize_misrepresentation` spelling.
 

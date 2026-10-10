@@ -4,7 +4,9 @@
 #
 # The called workflow installs martian-redteam from git, runs the local gate
 # (exit 1 on failure; no continue-on-error), and uploads results always.
-# Pin @main to a tag or SHA in production.
+# Pin the workflow to a release tag or a full commit SHA; replace v0.1.0 below
+# with the release you depend on. The SDK is installed at the same commit as
+# the workflow, so one pin covers both.
 #
 # GitHub-hosted runner IPs are shared; keep system_config.max_concurrent at 2 or 1.
 
@@ -16,10 +18,12 @@ on:
 
 jobs:
   red-team:
-    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@main
+    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@v0.1.0 # or a full commit SHA
+    # Dogfood only, never in production:
+    # uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@main
     with:
       config: examples/config.yaml
-      # sdk-ref: v0.1.0  # pin a tag or SHA instead of default main
+      # sdk-ref: v0.1.0  # only to install a different SDK ref than the workflow pin
       # max-concurrent: "2"
       # attacks-per-vuln: "1"
     secrets:

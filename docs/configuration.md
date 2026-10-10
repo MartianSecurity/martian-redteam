@@ -6,11 +6,13 @@ Loaded from process env and optional `.env`, prefix `MARTIAN_`.
 
 | Field | Env | Default | Validation |
 | --- | --- | --- | --- |
-| `api_url` | `MARTIAN_API_URL` | `https://api.agents.martiansecurity.ai` | Must start with `http://` or `https://`; trailing slash stripped |
+| `api_url` | `MARTIAN_API_URL` | `https://api.agents.martiansecurity.ai` | Must be `https://`; `http://` only for `localhost` / `127.0.0.1`; trailing slash stripped |
 | `api_key` | `MARTIAN_API_KEY` | empty | SecretStr. `Client()` raises `ClientError` if empty |
 | `request_timeout_seconds` | `MARTIAN_REQUEST_TIMEOUT_SECONDS` | `120` | `1.0`–`240.0` inclusive |
 
 Unknown env keys are ignored (`extra="ignore"`).
+
+`MARTIAN_ALLOW_INSECURE_API_URL=1` (process environment only, development only) accepts an `http://` API URL on a non-loopback host. It is not a `Settings` field and is not read from `.env`. See [setup](setup.md#environment).
 
 In Python:
 
@@ -39,12 +41,16 @@ system_config:
   max_concurrent: 2
   attacks_per_vulnerability_type: 1
   output_folder: results     # risk-assessment.json + risk-assessment.md
+  target_timeout_seconds: 120  # per callback call; must be >= 1
 
 vulnerabilities:
   - name: PromptLeakage        # or prompt_leakage
     types: ["system_prompt"]
   - name: ExcessiveAgency
     types: ["functionality"]
+  - name: PIILeakage
+    types: ["direct_disclosure"]
+    gated: true                # overrides the catalog gate policy
   - name: custom
     id: secrets_in_logs
     criteria: "Must not echo API keys"
@@ -62,8 +68,21 @@ gate:
   pass_rate_threshold: 1.0     # must be 0.0–1.0
 
 api:
-  url: https://api.agents.martiansecurity.ai   # optional; key still from env
+  url: https://api.agents.martiansecurity.ai   # optional; https required; key still from env
 ```
+
+### System fields
+
+| Field | Default | Validation | Effect |
+| --- | --- | --- | --- |
+| `max_concurrent` | `2` | `>= 1` | In-flight probes |
+| `attacks_per_vulnerability_type` | `1` | `>= 1` | Repeats per (vulnerability type × attack) |
+| `output_folder` | `results` | | Report directory (`-o` overrides) |
+| `target_timeout_seconds` | `120` | `>= 1` | Deadline for **one** call to the target callback |
+
+A callback call that exceeds `target_timeout_seconds` is cancelled and recorded as `error_kind=target` with `target callback timed out after N seconds`. The run continues, the reports are written, and the gate fails on the target error unless `ignore_target_errors` is set. Without the deadline a hung target would hold the job until the CI timeout killed it, before any report existed.
+
+The deadline cancels an `async` callback at its next `await`. A synchronous callback that blocks (for example `time.sleep` or a blocking HTTP client) occupies the event loop and cannot be interrupted; write the callback as `async def` or give its own client a timeout.
 
 ### Path resolution
 
@@ -76,7 +95,7 @@ The function is loaded with `importlib` into a private module name. The file mus
 | Field | Default | Effect |
 | --- | --- | --- |
 | `fail_on_infrastructure_error` | `true` | Any `error_kind=infrastructure` fails the process |
-| `ignore_target_errors` | `false` | When `true`, callback exceptions do not fail the gate (still recorded) |
+| `ignore_target_errors` | `false` | When `true`, callback exceptions and timeouts do not fail the gate (still recorded) |
 | `pass_rate_threshold` | `1.0` | Gated vulnerability types with `pass_rate < threshold` fail the process |
 
 There is no YAML switch that ignores HTTP/schema failures. That is intentional.
@@ -113,9 +132,10 @@ It loads the YAML with the same `RunConfig` model as `run` and fails closed on:
 - Unknown vulnerability or attack names
 - Types not allowed for a built-in vulnerability
 - Custom vulns missing `id` / `criteria`
+- `criteria` on a built-in vulnerability (only custom vulnerabilities carry criteria)
 - Missing or unreadable `callback.file`, or a missing `callback.function`
-- `max_concurrent < 1`, `attacks_per_vulnerability_type < 1`, `pass_rate_threshold` outside `0.0`–`1.0`
-- `api.url` that is not `http://` or `https://`
+- `max_concurrent < 1`, `attacks_per_vulnerability_type < 1`, `target_timeout_seconds < 1`, `pass_rate_threshold` outside `0.0`–`1.0`
+- `api.url` that is not `https://` (plain `http://` passes only for `localhost` / `127.0.0.1`)
 
 Exit `0` if the file is a legal assessment config. Exit `1` if it is not.
 
