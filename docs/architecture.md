@@ -78,24 +78,36 @@ Each probe uses Aegra’s **stateless** `POST /runs/wait`. The service mints an 
 ```text
 martian-redteam/
   src/martian_redteam/
-    client.py          # httpx POST /runs/wait, X-API-Key, retries
-    protocol.py        # wait-body parse, graph-state unwrap, Retry-After
-    orchestrator.py    # a_red_team / red_team
-    callback.py        # sync/async str|Turn adapter
-    encoding.py        # ROT13, Base64, leetspeak (no LLM)
-    catalog/           # ids, types, gate flags, framework subsets
-    config.py          # MARTIAN_* env + YAML models
-    cli.py             # martian-redteam run | validate | catalog
-    gate.py            # CI fail-closed policy
-    integration.py     # customer MCP session and bounded trace models
-    mcp_binding.py     # optional multi-server MCP discovery and tool calls
-    types.py           # Turn, TestCase, RiskAssessment, graph I/O
-  tests/               # contract fixtures, no live Bedrock in CI
-  examples/            # YAML, callback, GitHub Action
-  docs/                # this documentation
+    client.py             # httpx POST /runs/wait, X-API-Key, retries
+    protocol.py           # wait-body parse, graph-state unwrap, Retry-After
+    orchestrator.py       # a_red_team / red_team
+    callback.py           # sync/async str|Turn adapter
+    encoding.py           # ROT13, Base64, leetspeak (no LLM)
+    catalog/              # ids, types, gate flags, framework subsets
+    config.py             # MARTIAN_* env + YAML models
+    cli.py                # martian-redteam run | validate | catalog
+    gate.py               # CI fail-closed policy
+    report.py             # Rich terminal tables, risk-assessment.md, $GITHUB_STEP_SUMMARY
+    integration.py        # customer MCP session and bounded trace models
+    mcp_binding.py        # optional multi-server MCP discovery and tool calls
+    runtime.py            # opt-in deployment-bound model/tool metadata exporter
+    runtime_resources.py  # explicit response-ID resource mapping rules for v3 telemetry
+    runtime_schema.py     # strict v2/v3/v4 metadata contracts mirrored in backend
+    call_gate.py          # opt-in SDK call-entry gate client and heartbeat loop
+    call_gate_schema.py   # strict v1 call-gate contracts mirrored in backend
+    types.py              # Turn, TestCase, RiskAssessment, graph I/O
+  tests/                  # contract fixtures, no live Bedrock in CI
+  examples/               # YAML, callback, GitHub Action
+  docs/                   # this documentation
 ```
 
 Public import path is `martian_redteam`. CLI entry is `martian-redteam`. There is no `deepteam` import and no `langgraph-sdk` dependency.
+
+## Optional customer runtime reporting
+
+`RuntimeReporter` is a separate outbound observer in the customer application's process. It sends a strict metadata batch to the backend Discovery API with an `mt_` credential bound to one inventory record/deployment/environment/version. It neither invokes models nor grants assessment or infrastructure access. `RuntimeTrace.call` observes explicitly wrapped model calls; `bind_tools(..., runtime=trace)` observes MCP calls through this SDK. Other SDKs, direct HTTP, subprocesses and background work remain invisible unless explicitly instrumented.
+
+Backend owns tenant authorization, event persistence and the bounded runtime projection. The SDK owns generated correlation IDs, timing/outcome metadata and a volatile queue. The customer owns approved identifiers, mounting the credential, starting/stopping the reporter and monitoring export loss. There is no generic model monkey-patching, agentless sensor, OTel collector, durable spool, delivery retry or enforcement. The existing assessment `TraceRecorder` remains independent and is not exported by this reporter. See [integration](customer-integration.md#optional-runtime-reporting) and [data boundary](security-and-data.md#runtime-reporting-data-boundary).
 
 ## Cost model (Phase 1 probe)
 
@@ -161,3 +173,17 @@ Chosen to match martian-agents, not DeepTeam.
 Runtime dependencies: `httpx`, `pydantic`, `pydantic-settings`, `pyyaml`, `typer`, `rich`, `tenacity`. The optional `mcp` extra adds the MCP client, HTTP transport and JSON Schema validation used by customer applications; see [Customer MCP integration](customer-integration.md).
 
 Explicitly **not** dependencies: `deepeval`, `openai`, `grpcio`, `aiohttp`, `langgraph-sdk`, LangChain, Bedrock SDKs, Aegra.
+
+## Resource runtime projection
+
+The optional `runtime_resources.py` adapter maps application-configured MCP response ID fields to binding-scoped opaque references. `runtime.py` owns credential-derived reference keys and the bounded v3 export queue; `mcp_binding.py` supplies successful structured response metadata only. Backend owns validation, storage and the tenant-scoped graph. The SDK does not inspect arguments, infer effective permission, correlate identities across bindings or enforce containment. See [runtime integration](customer-integration.md#optional-runtime-reporting).
+
+Explicit v4 mode accepts caller-supplied `KubernetesRequest` metadata in wrapped tool contexts. It retains the same queue and tenant-bound credential; default mode remains v3. Backend compares exact native request/identity fields with structured collector RBAC metadata and returns evidence links, without attesting identity or authorizing requests. See [integration](customer-integration.md#explicit-kubernetes-request-reporting).
+
+`RuntimeCallGate` is a separate, explicitly configured outbound authorization
+boundary. A locally pinned assignment and `mg_` secret scope each fresh call-entry
+decision. `RuntimeTrace.guarded_call` and SDK-bound MCP tools consult it before
+opening runtime spans; synchronous `call` refuses when the gate is attached.
+Backend persists review/control/decision state; the customer wrapper refuses entry.
+No retries, cached policy, network enforcement or provider credential transfer is
+introduced. See [installation and availability](customer-integration.md#sdk-call-gate).

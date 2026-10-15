@@ -79,7 +79,7 @@ GitHub-hosted runners share NAT IPs. martian-agents WAF is **2000 requests / 5 m
 
 Pass rate for a type is `passing / (passing + failing)`. Error-only types have pass rate `0.0` and are still caught by the infrastructure/target error gates.
 
-`assessment.save(directory)` creates the directory, writes `directory/risk-assessment.json` and `directory/risk-assessment.md`, and appends the Markdown to `$GITHUB_STEP_SUMMARY` when that variable is set. It returns the JSON path. The CLI prints a Rich overview table plus a table of failed or errored probes.
+`assessment.save(directory)` writes `directory/risk-assessment.json` and `directory/risk-assessment.md` (creating the directory if needed) and appends the Markdown report to `$GITHUB_STEP_SUMMARY` when set. The CLI prints a Rich overview table plus a table of failed or errored probes.
 
 ## What Phase 1 does not do
 

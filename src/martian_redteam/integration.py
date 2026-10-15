@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, fie
 
 if TYPE_CHECKING:
     from martian_redteam.mcp_binding import BoundMCPTools
+    from martian_redteam.runtime import RuntimeTrace
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
 
@@ -120,8 +121,22 @@ class TraceRecorder:
         return {"events": list(self._events), "dropped_events": self._sequence - len(self._events)}
 
 
+def parse_session_payload(payload: dict[str, Any] | AssessmentSession) -> AssessmentSession:
+    """Parse and validate a run-scoped Martian assessment session payload."""
+    if isinstance(payload, AssessmentSession):
+        payload.ensure_active()
+        return payload
+    session = AssessmentSession.model_validate(payload)
+    session.ensure_active()
+    return session
+
+
 def bind_tools(
-    session: AssessmentSession, *, trace: TraceRecorder | None = None, action_id: str = ""
+    session: AssessmentSession,
+    *,
+    trace: TraceRecorder | None = None,
+    action_id: str = "",
+    runtime: RuntimeTrace | None = None,
 ) -> AbstractAsyncContextManager[BoundMCPTools]:
     """Open all session MCP connections in one async scope. Requires the ``mcp`` extra.
 
@@ -130,4 +145,16 @@ def bind_tools(
     """
     from martian_redteam.mcp_binding import open_tools
 
-    return open_tools(session, trace=trace, action_id=action_id)
+    return open_tools(session, trace=trace, action_id=action_id, runtime=runtime)
+
+
+def bind_sandbox_mcp(
+    payload: dict[str, Any] | AssessmentSession,
+    *,
+    trace: TraceRecorder | None = None,
+    action_id: str = "",
+    runtime: RuntimeTrace | None = None,
+) -> AbstractAsyncContextManager[BoundMCPTools]:
+    """Validate a run-scoped session payload and bind its expiring sandbox MCP gateways."""
+    session = parse_session_payload(payload)
+    return bind_tools(session, trace=trace, action_id=action_id, runtime=runtime)
