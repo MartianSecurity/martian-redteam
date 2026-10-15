@@ -28,6 +28,12 @@ Evaluator calls **do** send the target’s reply to Martian. If the target leaks
 
 The SDK does not send: customer cloud credentials, `.env` files, source trees, or conversation history beyond the single-turn probe (Phase 1).
 
+## Runtime reporting data boundary
+
+Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
+
+Strict allowlisted fields and identifier syntax limit the payload but cannot detect sensitive data deliberately placed in an identifier. The application owns safe naming and separates production and assessment bindings. The backend derives tenant/deployment/environment/version from the credential; these are declared labels, not hardware or binary attestation. Reports remain application assertions. Local buffers are volatile, bounded and single-attempt; failures and drops are counted locally, not reported as a complete backend capture. Backend time-window queries are not a retention policy; automatic expiry is not implemented. See [lifecycle and delivery limits](customer-integration.md#optional-runtime-reporting).
+
 ## API keys
 
 Today martian-agents `auth.py` has **one shared `MARTIAN_API_KEY`** and **one Aegra identity**. Every holder of that key shares threads and run history.
@@ -63,3 +69,26 @@ This SDK records whatever the graphs return. It does not filter attack text.
 ## Attribution
 
 Apache-2.0. `NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+
+## Resource runtime metadata
+
+The optional runtime reporter can export explicitly configured response-ID mappings under the v3 contract. A successful MCP structured response contributes at most ten opaque resource references with configured service/type/action, completion time and reported outcome. It does not export native IDs, arguments or response bodies. References are keyed, binding-scoped HMAC values; they are pseudonymous correlation data, not anonymous data or authorization proof. Missing/error/unmapped calls have unknown resource coverage. Credentials and references change with a new deployment binding. See [configuration and boundaries](customer-integration.md#explicit-resource-response-mappings).
+
+The separate explicit `native_kubernetes=True` mode exports v4 to `/native-events`.
+It includes native cluster alias, service-account namespace/name and named request
+coordinates. Those identifiers are **not opaque** and may reveal infrastructure
+metadata; customer approval of names and binding scope is required. It exports no
+credential/header/body/response and does not inspect an existing Kubernetes client.
+The application declares the actual identity and request, including on errors.
+See [opt-in usage](customer-integration.md#explicit-kubernetes-request-reporting).
+
+## Opt-in call control boundary
+
+The separate `mg_` gate credential exposes only configured target identifiers and
+generated process/request UUIDs. It cannot authorize assessments, telemetry, console
+reads or control administration. A customer can attach an exact target assignment
+to a reporter; selected calls then fail closed without a live decision. This changes
+application availability intentionally and remains cooperative instrumentation,
+without complete-replica attestation or resistance to direct SDK bypass. Telemetry
+revocation and gate revocation have different effects. See the [full lifecycle and
+limits](customer-integration.md#sdk-call-gate).

@@ -24,7 +24,7 @@ Applications that bind runtime-provided MCP tools use the optional extra:
 uv sync --extra mcp
 ```
 
-See [Customer MCP integration](docs/customer-integration.md) for the session, tool-binding and trace APIs.
+See [Customer MCP integration](docs/customer-integration.md) for the session, tool-binding and trace APIs. The optional [runtime reporter](docs/customer-integration.md#optional-runtime-reporting) sends model/tool metadata and explicitly configured opaque resource references to a separate discovery binding. Explicit [native Kubernetes mode](docs/customer-integration.md#explicit-kubernetes-request-reporting) additionally reports named GET coordinates and declared identity for RBAC evidence matching. The opt-in [SDK call gate](docs/customer-integration.md#sdk-call-gate) adds exact-target call-entry decisions, separate credentials and explicit fail-closed availability. These integrations are implemented in this source checkout; no package release or production rollout is implied.
 
 ## Python
 

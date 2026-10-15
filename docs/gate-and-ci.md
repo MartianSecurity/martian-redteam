@@ -116,8 +116,8 @@ Exit codes:
 | Job | What | Python |
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `mypy src` | 3.12 |
-| `test` | `uv sync --locked`, `pytest` with coverage + JUnit, `compileall` | **matrix 3.12 and 3.13** |
+| `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
+| `test` | `uv sync --locked`, `pytest` with coverage (`term-missing` + `xml:coverage.xml`) and JUnit (`junit.xml`) | **matrix 3.12 and 3.13** |
 | `ci` | Aggregator: succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
 
 Protect `main` with the single required check **`ci`**, not the matrix cells. That way a skipped/failed 3.13 cell cannot look green.
