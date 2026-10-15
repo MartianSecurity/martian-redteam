@@ -116,11 +116,9 @@ Exit codes:
 | Job | What | Python |
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `mypy src`, `compileall` | 3.12 |
-| `test` | `uv sync --locked`, `pytest` with coverage + JUnit | **matrix 3.12 and 3.13** |
-| `packaging` | `uv build`, install the wheel in a throwaway venv, `validate examples/config.yaml` | 3.12 |
-| `action-smoke` | `uses: ./.github/actions/validate` (composite install path, no API key) | 3.12 |
-| `ci` | Aggregator: succeeds only if every job above succeeded | — |
+| `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
+| `test` | `uv sync --locked`, `pytest` with coverage (`term-missing` + `xml:coverage.xml`) and JUnit (`junit.xml`) | **matrix 3.12 and 3.13** |
+| `ci` | Aggregator: succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
 
 Protect `main` with the single required check **`ci`**, not the matrix cells. That way a skipped/failed 3.13 cell cannot look green. The aggregator checks each `needs.*.result == success`; adding a job only to `needs` without that check would leave `ci` green on failure.
 

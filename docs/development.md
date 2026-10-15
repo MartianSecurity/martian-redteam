@@ -19,7 +19,7 @@ Editable install from the repo root (`uv sync`). Package lives under `src/martia
 uv sync --locked
 uv run ruff format src tests examples
 uv run ruff check src tests examples
-uv run --extra mcp mypy src   # the mcp extra provides the types mcp_binding.py imports
+uv run --extra mcp mypy src
 uv run pytest -q
 uv run python -m compileall -q src
 ```
@@ -39,7 +39,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian
 | Job | Command | Python |
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `mypy src` with the `mcp` extra, `compileall` | 3.12 |
+| `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
 | `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |

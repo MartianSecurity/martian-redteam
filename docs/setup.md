@@ -65,8 +65,7 @@ uv run martian-redteam run examples/config.yaml -o results/
 Outputs:
 
 - Terminal tables (per-type pass rate, then failed/errored probes)
-- `results/risk-assessment.json`
-- `results/risk-assessment.md` (also appended to `$GITHUB_STEP_SUMMARY` when that variable is set)
+- `results/risk-assessment.json` and `results/risk-assessment.md` (plus `$GITHUB_STEP_SUMMARY` when set in GitHub Actions)
 
 Exit code `1` if the gate fails.
 
