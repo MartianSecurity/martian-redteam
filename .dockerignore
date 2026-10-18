@@ -1,7 +1,14 @@
 **
 !pyproject.toml
+!uv.lock
 !README.md
 !src/
 !src/**
 src/**/__pycache__/
 src/**/*.pyc
+!model-lab/
+!model-lab/src/
+!model-lab/src/**
+model-lab/src/**/__pycache__/
+model-lab/src/**/*.pyc
+!model-lab/Dockerfile.dataset

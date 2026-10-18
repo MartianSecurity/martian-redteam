@@ -1,0 +1,44 @@
+[project]
+name = "martian-action-security-lab"
+version = "0.1.0"
+description = "Isolated, measured compact-model feasibility; no production decision endpoint"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "transformers==5.20.1",
+  "safetensors==0.8.0",
+  "numpy==2.5.4",
+  "pydantic==2.14.1",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.13.0"]
+cuda = ["torch==2.13.0"]
+
+[project.scripts]
+martian-model-benchmark = "action_security_lab.benchmark:main"
+
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/action_security_lab"]
+
+[tool.uv]
+conflicts = [[{extra = "cpu"}, {extra = "cuda"}]]
+
+[tool.uv.sources]
+torch = [
+  {index = "pytorch-cpu", extra = "cpu"},
+  {index = "pytorch-cu126", extra = "cuda"},
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

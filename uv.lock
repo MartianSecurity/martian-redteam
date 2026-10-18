@@ -621,6 +621,13 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+gateway = [
+    { name = "httpx2" },
+    { name = "jsonschema" },
+    { name = "mcp" },
+    { name = "referencing" },
+    { name = "uvicorn" },
+]
 mcp = [
     { name = "httpx2" },
     { name = "jsonschema" },
@@ -643,18 +650,23 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "httpx2", marker = "extra == 'gateway'", specifier = ">=2.12,<3" },
     { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.12,<3" },
+    { name = "jsonschema", marker = "extra == 'gateway'", specifier = ">=4.23,<5" },
     { name = "jsonschema", marker = "extra == 'mcp'", specifier = ">=4.23,<5" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.1.1,<3" },
+    { name = "mcp", marker = "extra == 'gateway'", specifier = ">=2.2,<3" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pydantic-settings", specifier = ">=2.10.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "referencing", marker = "extra == 'gateway'", specifier = ">=0.36,<1" },
     { name = "referencing", marker = "extra == 'mcp'", specifier = ">=0.36,<1" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tenacity", specifier = ">=9.1.0" },
     { name = "typer", specifier = ">=0.16.0" },
+    { name = "uvicorn", marker = "extra == 'gateway'", specifier = ">=0.53,<1" },
 ]
-provides-extras = ["mcp"]
+provides-extras = ["mcp", "gateway"]
 
 [package.metadata.requires-dev]
 dev = [

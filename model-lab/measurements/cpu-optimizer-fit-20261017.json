@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "purpose": "backbone capacity and compute fit; not trained security quality",
+  "input_kind": "synthetic capacity text, deliberately sized to exact token buckets",
+  "model": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/answerdotai/ModernBERT-base/tree/8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "sha256": {
+      "tokenizer_config.json": "3cd2017ff46d0a527e5d39cae39272eccfa1f19bb9f89b05d166aab2e38354e2",
+      "model.safetensors": "340ac08b74eef0d7bdec2d7981a6a3d4249bf0e6aab60634b72ad02c2b8023a9",
+      "special_tokens_map.json": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+      "config.json": "1609d59e627c33eaed524b4f01e546d42e84190a079a5a5ded84b212c41c324f",
+      "tokenizer.json": "9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1"
+    }
+  },
+  "parameters": 149014272,
+  "device": "cpu",
+  "precision": "fp32",
+  "attention": "sdpa_math",
+  "threads": 2,
+  "batch_size": 1,
+  "concurrency": 1,
+  "warmup": 1,
+  "iterations": 10,
+  "initialized_ms": 1016.185,
+  "initialization_scope": "local tokenizer and weight load plus device transfer; excludes download and checksum",
+  "platform": "Linux-7.0.12-linuxkit-x86_64-with-glibc2.41",
+  "logical_cpus": 12,
+  "dependencies": {
+    "torch": "2.13.0+cpu",
+    "transformers": "5.20.1",
+    "tokenizers": "0.23.3",
+    "numpy": "2.5.4"
+  },
+  "buckets": [
+    {
+      "tokens": 256,
+      "tokenize_transfer_forward": {
+        "p50_ms": 598.687,
+        "p95_ms": 675.737,
+        "p99_ms": 687.422
+      },
+      "forward_only": {
+        "p50_ms": 596.911,
+        "p95_ms": 673.902,
+        "p99_ms": 685.537
+      },
+      "sequential_decisions_per_second": 1.646
+    }
+  ],
+  "quality_evaluated": false,
+  "optimizer_fit": {
+    "mode": "frozen_encoder",
+    "steps": 5,
+    "tokens": 256,
+    "trainable_parameters": 769,
+    "checkpointing": false,
+    "optimizer": "AdamW fp32 states",
+    "timing": {
+      "p50_ms": 545.72,
+      "p95_ms": 590.534,
+      "p99_ms": 599.284
+    },
+    "quality_labels": "none; constant compute-probe target",
+    "checkpoint_exported": false
+  },
+  "process_peak_rss_bytes": 866951168,
+  "execution_environment": {
+    "kind": "Docker container, shared desktop host",
+    "cpu_limit": 2,
+    "memory_limit_bytes": 4294967296,
+    "network_model_download": false,
+    "image_tag": "upgrade-20261017-v2"
+  }
+}

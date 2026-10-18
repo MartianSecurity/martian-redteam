@@ -1,8 +1,17 @@
 # Martian red-team documentation
 
-`martian-redteam` is the customer-side SDK and CLI for adversarial testing of AI agents. It does **not** host models. Attack generation and judging run on [martian-agents](https://github.com/MorningHQ/martian-agents) through Aegra’s Agent Protocol. The system under test stays in the customer’s process behind a local `model_callback`.
+`martian-redteam` provides a customer-side assessment CLI and optional runtime
+integration. The CLI calls attack generation and judging on
+[martian-agents](https://github.com/MorningHQ/martian-agents); its target stays behind
+a local `model_callback`. Runtime modules separately bind MCP tools, enforce
+reviewed deterministic controls and report bounded metadata. Neither path hosts a
+production learned security model.
 
-This repository is an **internal scaffold** until martian-agents exposes dedicated `simulator` and `evaluator` graphs **and** per-key identity with quotas. Do not ship `pip install martian-redteam` to third parties against the shared staging API key.
+The assessment CLI remains **internal** until deployed per-key identity, quotas
+and service acceptance are verified. The sibling Agents source now registers the
+dedicated graphs; that is not proof of a public service release. Do not distribute
+the shared staging API key. Local runtime implementation and acceptance are
+documented independently below.
 
 ## Read in this order
 
@@ -15,7 +24,10 @@ This repository is an **internal scaffold** until martian-agents exposes dedicat
 7. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, WAF
 8. [Security and data](security-and-data.md) — tenancy blockers, what leaves the customer network
 9. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
-10. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata
+10. [Customer MCP integration](customer-integration.md) — MCP binding, operation/task permissions, shared budgets, suspensions, output checks and runtime metadata
+11. [Static artifact inspection](artifact-inspection.md) — bounded MCP/skill review, Docker/Kubernetes packaging and coverage limits
+12. [Compact model lab](../model-lab/README.md) and [model card](../model-lab/MODEL_CARD.md) — isolated experiments, measured failures and promotion criteria
+13. [Customer-managed MCP gateway](runtime-gateway.md) — separate enforcement process, trusted task configuration, credentials and Kubernetes lifecycle
 
 ## Repository
 

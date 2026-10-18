@@ -33,12 +33,32 @@ from martian_redteam.integration import (
     parse_session_payload,
 )
 from martian_redteam.orchestrator import a_red_team, red_team
+from martian_redteam.task_authorization import (
+    ActionGrant,
+    DecimalArgument,
+    ExactArgument,
+    TaskAuthorization,
+    TaskDenied,
+    TaskGuard,
+    TextArgument,
+)
+from martian_redteam.tool_operations import DispatcherRule, OperationResolutionError, ToolOperationPolicy
 from martian_redteam.types import RiskAssessment, TestCase, Turn
 
 __version__ = "0.1.0"
 
 __all__ = [
     "AssessmentSession",
+    "ActionGrant",
+    "DecimalArgument",
+    "ExactArgument",
+    "TaskAuthorization",
+    "TaskDenied",
+    "TaskGuard",
+    "TextArgument",
+    "DispatcherRule",
+    "OperationResolutionError",
+    "ToolOperationPolicy",
     "MCPConnection",
     "TraceRecorder",
     "bind_sandbox_mcp",

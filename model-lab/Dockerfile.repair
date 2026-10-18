@@ -1,0 +1,4 @@
+ARG LAB_IMAGE=martian-model-lab:upgrade-20261017-cuda-v5
+FROM ${LAB_IMAGE}
+COPY src /lab/src
+ENTRYPOINT ["python", "-m", "action_security_lab.repair_training"]

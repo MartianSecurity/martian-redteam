@@ -32,7 +32,7 @@ The SDK does not send: customer cloud credentials, `.env` files, source trees, o
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
 
-Strict allowlisted fields and identifier syntax limit the payload but cannot detect sensitive data deliberately placed in an identifier. The application owns safe naming and separates production and assessment bindings. The backend derives tenant/deployment/environment/version from the credential; these are declared labels, not hardware or binary attestation. Reports remain application assertions. Local buffers are volatile, bounded and single-attempt; failures and drops are counted locally, not reported as a complete backend capture. Backend time-window queries are not a retention policy; automatic expiry is not implemented. See [lifecycle and delivery limits](customer-integration.md#optional-runtime-reporting).
+Strict allowlisted fields and identifier syntax limit the payload but cannot detect sensitive data deliberately placed in an identifier. The application owns safe naming and separates production and assessment bindings. The backend derives tenant/deployment/environment/version from the credential; these are declared labels, not hardware or binary attestation. Reports remain application assertions. Local buffers are volatile, bounded and single-attempt; failures and drops are counted locally, not reported as a complete backend capture. Backend time-window queries are separate from the opt-in [30-day report-retention schedule](../../backend/docs/discovery.md#application-report-retention); deploying the scheduler is an operator responsibility. See [lifecycle and delivery limits](customer-integration.md#optional-runtime-reporting).
 
 ## API keys
 
@@ -92,3 +92,25 @@ application availability intentionally and remains cooperative instrumentation,
 without complete-replica attestation or resistance to direct SDK bypass. Telemetry
 revocation and gate revocation have different effects. See the [full lifecycle and
 limits](customer-integration.md#sdk-call-gate).
+
+## Explicit exact-action review export
+
+The separate [exact-action approval](customer-integration.md#exact-action-approval)
+path is disabled by default and requires a local allowlist of resolved tool targets.
+It exports complete bounded arguments, configured destination/Host, transport tool
+and metadata digest to the backend for an authenticated administrator's review.
+Arguments may contain personal or business data; selecting an operation is explicit
+consent to this processing and the task retention period. Do not select operations
+whose arguments contain credentials or disallowed content. Connection authorization
+headers are not exported. The reporter and ordinary task-allowance path remain
+metadata-only.
+
+Backend encrypts this context using its existing configured encryption provider,
+with action-specific tenant/record authentication. Only the owner/admin detail endpoint
+returns plaintext, with `no-store` and a view audit. The inventory, decision API and
+Monitoring do not return it. Encrypted records cascade with tasks 30 days after their
+expiry; view/review audit follows the 90-day administration retention. See the
+[server contract](../../backend/docs/discovery.md#exact-action-approval), including
+KMS context permissions and the separation between request approval and business-state
+constraints. A local gateway's upstream HTTP mode is intended only for an explicitly
+accepted local network boundary; use HTTPS for confidential transports.

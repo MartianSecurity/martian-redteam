@@ -1,0 +1,10 @@
+FROM python:3.12-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
+WORKDIR /lab
+COPY requirements-injection-reference.txt ./
+RUN pip install --no-cache-dir --require-hashes -r requirements-injection-reference.txt
+COPY --from=reference model.onnx tokenizer.json /model/
+COPY --from=reference LICENSE README.md /usr/share/licenses/protectai-injection-reference/
+COPY injection_reference.py injection-reference-corpus.jsonl ./
+USER 65532:65532
+ENTRYPOINT ["python", "injection_reference.py"]

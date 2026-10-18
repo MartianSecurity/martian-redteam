@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: compact-nx-reference-v1
+  namespace: martian-verify
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: evaluation
+          image: 10.96.100.100:5000/martian-model-nx:upgrade-20261017-cpu-v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --release
+            - /nx-release
+            - --release-sha256
+            - 33d850d8dbcf9e2ace2176f2e66ff21dd3ef77be2305627a656917ec0505c25e
+            - --dataset
+            - /nx-dataset
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: temporary
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: artifact-inspection-v2
+  namespace: martian-verify
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: inspection
+          image: 10.96.100.100:5000/martian-inspection:upgrade-20261017-v2
+          args: [/input/tool.json, --kind, mcp_tool]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: input
+          configMap: {name: inspection-input}
+        - name: temporary
+          emptyDir: {sizeLimit: 32Mi}

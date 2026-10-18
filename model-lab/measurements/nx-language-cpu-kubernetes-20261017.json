@@ -1,0 +1,686 @@
+{
+  "schema_version": 1,
+  "purpose": "CPU fixed-checkpoint reproduction; no training or enforcement",
+  "release_sha256": "33d850d8dbcf9e2ace2176f2e66ff21dd3ef77be2305627a656917ec0505c25e",
+  "operating_point": {
+    "temperature": 2.51855196090726,
+    "threshold": 0.7225390076637268,
+    "enforcement_approved": false
+  },
+  "splits": {
+    "evaluation": {
+      "count": 116,
+      "benign": 56,
+      "injections": 60,
+      "false_flags": 0,
+      "missed_injections": 19,
+      "false_flag_rate": 0.0,
+      "injection_recall": 0.6833333333333333,
+      "false_flag_wilson_95": [
+        6.493458987741595e-18,
+        0.0641939367187634
+      ],
+      "interval_caveat": "Row-wise interval; correlated public examples are not independent customer observations",
+      "nll": 0.17666328292798217,
+      "brier": 0.05446014390894775,
+      "ece_10_equal_width_bins": 0.09638912919972237,
+      "reliability_bins": [
+        {
+          "lower": 0.0,
+          "upper": 0.1,
+          "count": 52,
+          "mean_probability": 0.015057193401217214,
+          "injection_fraction": 0.019230769230769232
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 5,
+          "mean_probability": 0.1304043161349119,
+          "injection_fraction": 0.2
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.3,
+          "count": 1,
+          "mean_probability": 0.298391894465525,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.3,
+          "upper": 0.4,
+          "count": 5,
+          "mean_probability": 0.34242891942688436,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.4,
+          "upper": 0.5,
+          "count": 2,
+          "mean_probability": 0.4480611607787214,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.5,
+          "upper": 0.6,
+          "count": 5,
+          "mean_probability": 0.551610159126035,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.6,
+          "upper": 0.7,
+          "count": 4,
+          "mean_probability": 0.6727070678434073,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.7,
+          "upper": 0.8,
+          "count": 2,
+          "mean_probability": 0.7550510485510659,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.8,
+          "upper": 0.9,
+          "count": 7,
+          "mean_probability": 0.8572331355575751,
+          "injection_fraction": 1.0
+        },
+        {
+          "lower": 0.9,
+          "upper": 1.0,
+          "count": 33,
+          "mean_probability": 0.97316294660785,
+          "injection_fraction": 1.0
+        }
+      ]
+    },
+    "transfer": {
+      "count": 248,
+      "benign": 248,
+      "injections": 0,
+      "false_flags": 141,
+      "missed_injections": 0,
+      "false_flag_rate": 0.5685483870967742,
+      "injection_recall": null,
+      "false_flag_wilson_95": [
+        0.5063244467003145,
+        0.6286811244999672
+      ],
+      "interval_caveat": "Row-wise interval; correlated public examples are not independent customer observations",
+      "nll": 1.6832888365549576,
+      "brier": 0.5358665124476907,
+      "ece_10_equal_width_bins": 0.6645174987881329,
+      "reliability_bins": [
+        {
+          "lower": 0.0,
+          "upper": 0.1,
+          "count": 15,
+          "mean_probability": 0.052270593375613884,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 20,
+          "mean_probability": 0.15744420978777313,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.3,
+          "count": 12,
+          "mean_probability": 0.2712924367468398,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.3,
+          "upper": 0.4,
+          "count": 14,
+          "mean_probability": 0.33915984549755734,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.4,
+          "upper": 0.5,
+          "count": 12,
+          "mean_probability": 0.4532204948231955,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.5,
+          "upper": 0.6,
+          "count": 18,
+          "mean_probability": 0.5580283053831742,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.6,
+          "upper": 0.7,
+          "count": 12,
+          "mean_probability": 0.6471842918912455,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.7,
+          "upper": 0.8,
+          "count": 21,
+          "mean_probability": 0.7544034177917002,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.8,
+          "upper": 0.9,
+          "count": 43,
+          "mean_probability": 0.8561501384259227,
+          "injection_fraction": 0.0
+        },
+        {
+          "lower": 0.9,
+          "upper": 1.0,
+          "count": 81,
+          "mean_probability": 0.9500908007620817,
+          "injection_fraction": 0.0
+        }
+      ]
+    }
+  },
+  "rejected": [
+    {
+      "id": "NotInject_one-00000-of-00001-1",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-3",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-4",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-10",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-11",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-15",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-16",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-17",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-18",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-19",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-20",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-21",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-23",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-24",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-27",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-28",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-33",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-37",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-42",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-51",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-55",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-57",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-61",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-66",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-77",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-85",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-86",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-95",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_one-00000-of-00001-96",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-1",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-3",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-4",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-10",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-11",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-15",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-16",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-17",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-18",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-19",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-20",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-21",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-23",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-24",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-27",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-28",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-33",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-37",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-38",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-42",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-51",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-52",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-55",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-57",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-61",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-66",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-77",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-85",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-86",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-95",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_three-00000-of-00001-96",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-1",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-3",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-4",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-10",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-11",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-15",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-16",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-17",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-18",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-19",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-20",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-21",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-23",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-24",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-27",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-28",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-33",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-37",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-38",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-42",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-51",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-52",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-55",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-57",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-61",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-66",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-77",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-85",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-86",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-95",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    },
+    {
+      "id": "NotInject_two-00000-of-00001-96",
+      "split": "transfer",
+      "reason": "reserved_tokens"
+    }
+  ],
+  "latency": {
+    "64": {
+      "p50_ms": 25.942979998944793,
+      "p95_ms": 34.58507569939684,
+      "p99_ms": 36.386287660425296
+    },
+    "128": {
+      "p50_ms": 46.50587249852833,
+      "p95_ms": 69.76432155006475,
+      "p99_ms": 83.34973720062409
+    },
+    "256": {
+      "p50_ms": 119.32427249848843,
+      "p95_ms": 186.58210079865955,
+      "p99_ms": 217.93355014004194
+    }
+  },
+  "execution_evidence": {
+    "runtime": "Docker Desktop Kubernetes",
+    "context": "docker-desktop",
+    "namespace": "martian-verify",
+    "job": "compact-nx-reference-v1",
+    "pod_uid": "59c7a20d-7e60-48c6-b9d3-9e2ffb13fd94",
+    "image": "10.96.100.100:5000/martian-model-nx:upgrade-20261017-cpu-v1",
+    "image_id": "10.96.100.100:5000/martian-model-nx@sha256:8019f8c77a821a126ff0c8f00f49c53e5cca9b62caaa00e4aa02124f8b5a3339",
+    "resources": {
+      "limits": {
+        "cpu": "2",
+        "memory": "2Gi"
+      },
+      "requests": {
+        "cpu": "1",
+        "memory": "1Gi"
+      }
+    },
+    "exit_code": 0,
+    "started_at": "2026-10-17T15:50:10Z",
+    "finished_at": "2026-10-17T15:50:52Z"
+  }
+}

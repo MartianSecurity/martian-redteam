@@ -1,0 +1,6 @@
+# Build with --build-context dataset=/absolute/path/to/verified-dataset.
+ARG LAB_IMAGE=martian-model-lab:upgrade-20261017-cuda-v5
+FROM ${LAB_IMAGE}
+COPY src /lab/src
+COPY --from=dataset --chown=10001:10001 . /dataset
+ENTRYPOINT ["python", "-m", "action_security_lab.experiment"]

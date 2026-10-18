@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "purpose": "backbone capacity and compute fit; not trained security quality",
+  "input_kind": "synthetic capacity text, deliberately sized to exact token buckets",
+  "model": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/answerdotai/ModernBERT-base/tree/8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "sha256": {
+      "model.safetensors": "340ac08b74eef0d7bdec2d7981a6a3d4249bf0e6aab60634b72ad02c2b8023a9",
+      "tokenizer_config.json": "3cd2017ff46d0a527e5d39cae39272eccfa1f19bb9f89b05d166aab2e38354e2",
+      "tokenizer.json": "9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1",
+      "special_tokens_map.json": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+      "config.json": "1609d59e627c33eaed524b4f01e546d42e84190a079a5a5ded84b212c41c324f"
+    }
+  },
+  "parameters": 149014272,
+  "device": "cuda",
+  "precision": "fp32",
+  "attention": "sdpa_math",
+  "threads": 2,
+  "batch_size": 1,
+  "concurrency": 1,
+  "warmup": 2,
+  "iterations": 10,
+  "initialized_ms": 3430.066,
+  "initialization_scope": "local tokenizer and weight load plus device transfer; excludes download and checksum",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.41",
+  "logical_cpus": 12,
+  "dependencies": {
+    "torch": "2.13.0+cu126",
+    "transformers": "5.20.1",
+    "tokenizers": "0.23.3",
+    "numpy": "2.5.4"
+  },
+  "buckets": [
+    {
+      "tokens": 512,
+      "tokenize_transfer_forward": {
+        "p50_ms": 54.988,
+        "p95_ms": 57.633,
+        "p99_ms": 58.19
+      },
+      "forward_only": {
+        "p50_ms": 52.764,
+        "p95_ms": 55.774,
+        "p99_ms": 56.334
+      },
+      "sequential_decisions_per_second": 18.115,
+      "peak_allocated_bytes": 669543936,
+      "peak_reserved_bytes": 687865856
+    }
+  ],
+  "quality_evaluated": false,
+  "gpu": {
+    "name": "NVIDIA GeForce GTX 1660 Ti",
+    "capability": [
+      7,
+      5
+    ],
+    "build_architectures": [
+      "sm_50",
+      "sm_60",
+      "sm_70",
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_90"
+    ],
+    "free_bytes_before": 4418043904,
+    "total_bytes": 6004015104
+  },
+  "optimizer_fit": {
+    "mode": "full",
+    "steps": 5,
+    "completed_optimizer_steps": 5,
+    "skipped_optimizer_steps": 0,
+    "tokens": 512,
+    "trainable_parameters": 149015041,
+    "checkpointing": false,
+    "optimizer": "AdamW fp32 states",
+    "timing": {
+      "p50_ms": 211.378,
+      "p95_ms": 865.201,
+      "p99_ms": 995.534
+    },
+    "quality_labels": "none; constant compute-probe target",
+    "checkpoint_exported": false,
+    "peak_allocated_bytes": 3094543360,
+    "peak_reserved_bytes": 3296722944
+  },
+  "process_peak_rss_bytes": 1211469824,
+  "environment": {
+    "exit_code": 0,
+    "oom_killed": false,
+    "sampled_process_gpu_peak_mib": 3244,
+    "process_samples": 57,
+    "sampled_whole_device_peak_mib": 4104,
+    "sampling_interval_seconds_minimum": 0.1,
+    "sampling_scope": "host nvidia-smi matched to container PID; sampled lower bound, includes driver/context in process total; whole-device total also includes desktop",
+    "cpu_limit": 2,
+    "memory_limit_bytes": 4294967296,
+    "image_id": "sha256:5c2451d4b9d95c6919b739c55834d1bed908b276b6ae870a5b04bb0d35630981",
+    "measured_on": "2026-10-17",
+    "execution": "native Docker Engine",
+    "image": "martian-model-lab:upgrade-20261017-cuda-v3",
+    "source_sha256": "95ded1b87cc11fb58eb174952b5312e5485cdfba8081488b9a404fad53e4f34e",
+    "background_workloads": "Desktop application and native Minikube clusters running; shared display GPU"
+  }
+}

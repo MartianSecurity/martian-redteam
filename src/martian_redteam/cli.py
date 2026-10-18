@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -24,6 +26,37 @@ from martian_redteam.types import RiskAssessment
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
+
+
+class ArtifactKind(StrEnum):
+    mcp_tool = "mcp_tool"
+    skill = "skill"
+
+
+@app.command("inspect-artifact")
+def inspect_artifact_command(
+    path: Annotated[Path, typer.Argument(exists=True, file_okay=True, dir_okay=False, readable=True)],
+    kind: Annotated[ArtifactKind, typer.Option(help="Exact input artifact format")],
+) -> None:
+    """Inspect local MCP JSON or skill text; never execute content or fetch linked resources."""
+    try:
+        from martian_redteam.artifact_inspection import MAX_BYTES, inspect_artifact
+
+        with path.open("rb") as source:
+            raw = source.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            raise ValueError("Artifact exceeds 256 KiB")
+        text = raw.decode("utf-8")
+        result = inspect_artifact(kind.value, json.loads(text) if kind == ArtifactKind.mcp_tool else text)
+    except ImportError:
+        typer.echo("Artifact inspection requires martian-redteam[mcp].", err=True)
+        raise typer.Exit(2) from None
+    except (ValueError, OSError, RecursionError):
+        typer.echo("Artifact inspection failed: invalid, unreadable or out-of-bounds content.", err=True)
+        raise typer.Exit(2) from None
+    typer.echo(json.dumps(result, indent=2))
+    if result["status"] == "invalid":
+        raise typer.Exit(2)
 
 
 def _version_callback(value: bool) -> None:

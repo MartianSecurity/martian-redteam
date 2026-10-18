@@ -1,0 +1,99 @@
+# Replace the image with a published immutable digest and provision the private
+# Secret before use. This manifest creates no public ingress or upstream service.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: martian-runtime-gateway
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: martian-runtime-gateway
+  labels:
+    app.kubernetes.io/component: runtime-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: martian-runtime-gateway
+  template:
+    metadata:
+      labels:
+        app: martian-runtime-gateway
+    spec:
+      serviceAccountName: martian-runtime-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: gateway
+          image: registry.example.invalid/martian-runtime-gateway:replace-with-reviewed-build
+          ports:
+            - name: mcp
+              containerPort: 8400
+          env:
+            - name: MARTIAN_GATEWAY_CONFIG
+              value: /etc/martian/gateway/config.json
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: mcp
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mcp
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /etc/martian/gateway
+              readOnly: true
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: config
+          secret:
+            secretName: martian-runtime-gateway-config
+            defaultMode: 0440
+        - name: temporary
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: martian-runtime-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: martian-runtime-gateway
+  ports:
+    - name: mcp
+      port: 8400
+      targetPort: mcp

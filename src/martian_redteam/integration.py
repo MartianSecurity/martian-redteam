@@ -14,6 +14,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, fie
 if TYPE_CHECKING:
     from martian_redteam.mcp_binding import BoundMCPTools
     from martian_redteam.runtime import RuntimeTrace
+    from martian_redteam.task_authorization import TaskGuard
+    from martian_redteam.tool_operations import ToolOperationPolicy
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
 
@@ -137,6 +139,8 @@ def bind_tools(
     trace: TraceRecorder | None = None,
     action_id: str = "",
     runtime: RuntimeTrace | None = None,
+    operations: ToolOperationPolicy | None = None,
+    authorization: TaskGuard | None = None,
 ) -> AbstractAsyncContextManager[BoundMCPTools]:
     """Open all session MCP connections in one async scope. Requires the ``mcp`` extra.
 
@@ -145,7 +149,9 @@ def bind_tools(
     """
     from martian_redteam.mcp_binding import open_tools
 
-    return open_tools(session, trace=trace, action_id=action_id, runtime=runtime)
+    return open_tools(
+        session, trace=trace, action_id=action_id, runtime=runtime, operations=operations, authorization=authorization
+    )
 
 
 def bind_sandbox_mcp(
@@ -154,7 +160,11 @@ def bind_sandbox_mcp(
     trace: TraceRecorder | None = None,
     action_id: str = "",
     runtime: RuntimeTrace | None = None,
+    operations: ToolOperationPolicy | None = None,
+    authorization: TaskGuard | None = None,
 ) -> AbstractAsyncContextManager[BoundMCPTools]:
     """Validate a run-scoped session payload and bind its expiring sandbox MCP gateways."""
     session = parse_session_payload(payload)
-    return bind_tools(session, trace=trace, action_id=action_id, runtime=runtime)
+    return bind_tools(
+        session, trace=trace, action_id=action_id, runtime=runtime, operations=operations, authorization=authorization
+    )

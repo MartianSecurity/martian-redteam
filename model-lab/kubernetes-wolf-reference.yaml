@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: compact-wolf-reference-fp32
+  namespace: martian-verify
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: benchmark
+          image: 10.96.100.100:5000/martian-wolf-reference@sha256:94ecdaa893b80264fe71b98dc62e48371bd885e4a5b48e3c3f082dc879dd865d
+          imagePullPolicy: IfNotPresent
+          args: ["--variant", "fp32", "--threads", "2", "--iterations", "30"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {cpu: "2", memory: 4Gi}

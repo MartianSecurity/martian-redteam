@@ -1,0 +1,110 @@
+{
+  "numpy": "2.5.4",
+  "scope": "retained-score numerical diagnosis only; no fitting, new inference or promotion",
+  "reports": {
+    "v1": {
+      "float32": {
+        "probability_dtype": "float32",
+        "saturated_one": 1152,
+        "count": 1152,
+        "allowed": 576,
+        "violations": 576,
+        "false_blocks": 576,
+        "missed_violations": 0,
+        "false_block_rate": 1.0,
+        "violation_recall": 1.0
+      },
+      "float64": {
+        "probability_dtype": "float64",
+        "saturated_one": 1152,
+        "count": 1152,
+        "allowed": 576,
+        "violations": 576,
+        "false_blocks": 576,
+        "missed_violations": 0,
+        "false_block_rate": 1.0,
+        "violation_recall": 1.0
+      },
+      "raw_logit_diagnostic": {
+        "rank_auc": 0.9999668451003086,
+        "by_label": {
+          "0": {
+            "count": 576,
+            "minimum": 3.0591671466827393,
+            "median": 8.498562812805176,
+            "maximum": 10.698348045349121
+          },
+          "1": {
+            "count": 576,
+            "minimum": 10.522125244140625,
+            "median": 12.23263168334961,
+            "maximum": 12.589152336120605
+          }
+        },
+        "purpose": "post-result error diagnosis; no threshold fit or quality acceptance"
+      }
+    },
+    "v2": {
+      "float32": {
+        "probability_dtype": "float32",
+        "saturated_one": 490,
+        "count": 1728,
+        "allowed": 864,
+        "violations": 864,
+        "false_blocks": 37,
+        "missed_violations": 411,
+        "false_block_rate": 0.04282407407407408,
+        "violation_recall": 0.5243055555555556
+      },
+      "float64": {
+        "probability_dtype": "float64",
+        "saturated_one": 483,
+        "count": 1728,
+        "allowed": 864,
+        "violations": 864,
+        "false_blocks": 37,
+        "missed_violations": 418,
+        "false_block_rate": 0.04282407407407408,
+        "violation_recall": 0.5162037037037037
+      },
+      "raw_logit_diagnostic": {
+        "rank_auc": 0.808415584276406,
+        "by_label": {
+          "0": {
+            "count": 864,
+            "minimum": -12.86069107055664,
+            "median": -10.918082237243652,
+            "maximum": 12.624375343322754
+          },
+          "1": {
+            "count": 864,
+            "minimum": -12.790356636047363,
+            "median": 4.054242968559265,
+            "maximum": 13.0096435546875
+          }
+        },
+        "purpose": "post-result error diagnosis; no threshold fit or quality acceptance"
+      }
+    }
+  },
+  "unit_logit_at_temperature_005": {
+    "float32": 1.0,
+    "float64": 0.9999999979388463
+  },
+  "input_report_sha256": {
+    "v1": "beac9cfc5c570ee1aa96df20ddc412339e1334e047464645597a3119fd25c6cf",
+    "v2": "261ff599888fa9a9e9b9a53dd820b592bf119e930db1818dcdfeabf5bd753079"
+  },
+  "metrics_source_sha256": "6f1d527ccdb3299d77c8cbab58d4e81f265b400f25e9d413930ec891ccfa6bcb",
+  "execution": {
+    "image": "10.96.100.100:5000/martian-wolf-reference@sha256:94ecdaa893b80264fe71b98dc62e48371bd885e4a5b48e3c3f082dc879dd865d",
+    "network": "none",
+    "root_filesystem": "read_only",
+    "cpu_limit": 1,
+    "memory_limit_mib": 256,
+    "model_execution": false,
+    "metrics_source": "src/action_security_lab/metrics.py",
+    "classification": "probability(logits, 0.05) >= 1.0",
+    "rank_auc_definition": "Fraction of violation/allowed raw-logit pairs correctly ordered, with 0.5 for ties"
+  }
+}

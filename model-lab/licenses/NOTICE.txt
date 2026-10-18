@@ -1,0 +1,5 @@
+ModernBERT-base pretrained model, Answer.AI and LightOn.
+Source: https://huggingface.co/answerdotai/ModernBERT-base
+Revision: 8949b909ec900327062f0ebf497f51aef5e6f0c8
+License: Apache-2.0. Weights and tokenizer are unmodified.
+Martian uses the base encoder for a compute probe, not a trained security classifier.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -38,7 +39,13 @@ class GateUnavailable(RuntimeError):
 
 class RuntimeCallGate:
     def __init__(
-        self, backend_url: str, assignment: GateAssignment, token_file: Path, *, allow_http: bool = False
+        self,
+        backend_url: str,
+        assignment: GateAssignment,
+        token_file: Path,
+        *,
+        allow_http: bool = False,
+        kubernetes_token_file: Path | None = None,
     ) -> None:
         origin = urlsplit(backend_url)
         if (
@@ -54,6 +61,7 @@ class RuntimeCallGate:
         self.backend_url = backend_url.rstrip("/")
         self.assignment = GateAssignment.model_validate(assignment.model_dump())
         self.token_file = token_file
+        self.kubernetes_token_file = kubernetes_token_file
         self.process_id = uuid.uuid4()
         self._client: httpx.AsyncClient | None = None
         self._task: asyncio.Task[None] | None = None
@@ -71,10 +79,18 @@ class RuntimeCallGate:
             raise GateUnavailable("Start the customer call gate before using guarded calls")
         try:
             async with asyncio.timeout(3):
+                headers = {"Authorization": f"Bearer {self._credential()}", "Content-Type": "application/json"}
+                if endpoint == "heartbeat" and self.kubernetes_token_file is not None:
+                    if self.kubernetes_token_file.stat().st_size > 16 * 1024:
+                        raise ValueError("Kubernetes credential exceeds limit")
+                    pod_token = self.kubernetes_token_file.read_text().strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{32,16384}", pod_token):
+                        raise ValueError("Invalid Kubernetes credential file")
+                    headers["X-Martian-Kubernetes-Token"] = pod_token
                 async with self._client.stream(
                     "POST",
                     f"{self.backend_url}/v1/discovery/call-gates/{self.assignment.gate_id}/{endpoint}",
-                    headers={"Authorization": f"Bearer {self._credential()}", "Content-Type": "application/json"},
+                    headers=headers,
                     content=body.model_dump_json(),
                 ) as response:
                     response.raise_for_status()

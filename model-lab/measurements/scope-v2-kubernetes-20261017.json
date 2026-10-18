@@ -1,0 +1,1992 @@
+{
+  "schema_version": 1,
+  "purpose": "synthetic scope feasibility; not customer enforcement",
+  "base": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/answerdotai/ModernBERT-base/tree/8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "sha256": {
+      "model.safetensors": "340ac08b74eef0d7bdec2d7981a6a3d4249bf0e6aab60634b72ad02c2b8023a9",
+      "tokenizer_config.json": "3cd2017ff46d0a527e5d39cae39272eccfa1f19bb9f89b05d166aab2e38354e2",
+      "tokenizer.json": "9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1",
+      "special_tokens_map.json": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+      "config.json": "1609d59e627c33eaed524b4f01e546d42e84190a079a5a5ded84b212c41c324f"
+    }
+  },
+  "protocol": {
+    "dataset_manifest_sha256": "f536f6e81606dfd2c6abcdec331cac582b877cb7be44b391227f5951d964f7a7",
+    "source_sha256": {
+      "metrics.py": "6f1d527ccdb3299d77c8cbab58d4e81f265b400f25e9d413930ec891ccfa6bcb",
+      "benchmark.py": "f0ef8b55dee7810aa1e142bc1dc70f9792f6b7ba5a04c849e8dd63e603445a45",
+      "experiment.py": "c453cab96d58700046211809446cf5a35c45923b7608bd5ec60c7306018dbe87",
+      "model_spec.py": "f1a2f642b6239c0881d1c92dfd090f25aa657dc0812c182fb7bd53559db61152",
+      "__init__.py": "71ed7712af21316739a46bed4d1f6b3d83be63938103262c0244359a5cfa0d19",
+      "contracts.py": "b31eb97fb7208448e8134cb9f452f9edbfd5517ca914f0e5ea7f1a5b57268e2f",
+      "dataset.py": "f5ad8fe7956ab8c81bb21d2ee727a918ee270dcb98e6ab7f48892466af6e93f6",
+      "evaluate_challenge.py": "17ec51ecc12a106bf2e26411fdc04c62eb0ff07c50bbd8a35541ba1bc0b90dee",
+      "challenge.py": "38f9f6332818734718c257be39577d2d36559531a7080f7fc80260e4369d1b07",
+      "dataset_v2.py": "cda989a2fa19cb44db91543ee10812d8e5ec056e9366a5b7cf43e9126d3c2fbe",
+      "readout.py": "b47f1eabc864302829db5538307adb31a8588e3f706519a19a78d16a9d77e47b"
+    },
+    "seed": 17,
+    "precision": "fp32",
+    "attention": "sdpa_math",
+    "batch_size": 1,
+    "epochs": 2,
+    "full_learning_rate": 2e-05,
+    "matched_full_ablation": true,
+    "frozen_learning_rate": 0.02,
+    "frozen_steps": 400,
+    "weight_decay": 0.01,
+    "pooling": "attention_mask_mean",
+    "calibration": "temperature minimizing calibration-only NLL on fixed 241-point 0.05\u201320 log grid",
+    "threshold": "lowest validation threshold within declared false-block budget; score >= threshold flags violation",
+    "selection": "Fixed settings; no checkpoint selection or final-data tuning",
+    "gate": {
+      "max_validation_false_block_rate": 0.01,
+      "minimum_evaluation_violation_recall": 0.9,
+      "min_context_recall_gain_over_ablation": 0.05,
+      "max_gpu_p95_ms": 40,
+      "max_tokens": 512,
+      "family_bootstrap_samples": 1000,
+      "purpose": "Research screening only; never production promotion"
+    },
+    "enforcement_approved": false
+  },
+  "dataset": {
+    "schema_version": 1,
+    "dataset": "owned-synthetic-symmetric-scope-v2",
+    "license": "Apache-2.0",
+    "data_origin": "Martian-authored fictional text; no customer data or model-generated labels",
+    "generator_sha256": "cda989a2fa19cb44db91543ee10812d8e5ec056e9366a5b7cf43e9126d3c2fbe",
+    "oracle_sha256": "991e2763cfdea10550af4f94bba85da717adf0828f36cfafec26121f624d5da9",
+    "oracle_source_file": "oracle-source.txt",
+    "files": {
+      "decisions.jsonl": "290eb5b50338aaf2ed365f0c3d4ff2b7515bbad58c96d22fc3e6016d6e2f8de4"
+    },
+    "counts": {
+      "train": 1536,
+      "calibration": 384,
+      "validation": 384,
+      "evaluation": 768,
+      "transfer": 384
+    },
+    "sampling": "50% allowed in every family/workflow/dimension/direction/source; paired actions have opposite labels",
+    "split_policy": "Preassigned disjoint carrier families and world lineages; Docs/MCP descriptions reserved for transfer",
+    "limitations": [
+      "Shared generator and rule wording",
+      "Few independent authored families",
+      "Exact comparison already solved by SDK",
+      "No business effects, injection-intent, independent identity, NX, Blast or Taint labels",
+      "Operation/argument compatibility with business APIs is not measured"
+    ],
+    "gate": {
+      "max_validation_false_block_rate": 0.01,
+      "minimum_evaluation_violation_recall": 0.9,
+      "min_context_recall_gain_over_ablation": 0.05,
+      "max_gpu_p95_ms": 40,
+      "max_tokens": 512,
+      "family_bootstrap_samples": 1000,
+      "purpose": "Research screening only; never production promotion"
+    }
+  },
+  "models": {
+    "frozen_context": {
+      "temperature": 0.9753445989443437,
+      "threshold": 0.7523362636566162,
+      "splits": {
+        "calibration": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 10,
+          "missed_violations": 74,
+          "false_block_rate": 0.052083333333333336,
+          "violation_recall": 0.6145833333333334,
+          "nll": 0.4076759055758123,
+          "brier": 0.11876301259666901,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 47,
+              "mean_probability": 0.07221349061670307,
+              "violation_fraction": 0.0425531914893617
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 53,
+              "mean_probability": 0.15385744167577303,
+              "violation_fraction": 0.05660377358490566
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 39,
+              "mean_probability": 0.24214966912246425,
+              "violation_fraction": 0.1794871794871795
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 25,
+              "mean_probability": 0.3415136462380186,
+              "violation_fraction": 0.32
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 29,
+              "mean_probability": 0.45096011208114145,
+              "violation_fraction": 0.3103448275862069
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 22,
+              "mean_probability": 0.5559795037217937,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 27,
+              "mean_probability": 0.6437687200325379,
+              "violation_fraction": 0.8518518518518519
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 21,
+              "mean_probability": 0.7414425852760417,
+              "violation_fraction": 0.8571428571428571
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 27,
+              "mean_probability": 0.85227336918158,
+              "violation_fraction": 0.8518518518518519
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 94,
+              "mean_probability": 0.9796636330469985,
+              "violation_fraction": 0.9361702127659575
+            }
+          ],
+          "ece_10_equal_width_bins": 0.07027932758959707,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.10416666666666667
+            ],
+            "violation_recall": [
+              0.5104166666666666,
+              0.71875
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 3,
+              "missed_violations": 35,
+              "false_block_rate": 0.03125,
+              "violation_recall": 0.6354166666666666
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 7,
+              "missed_violations": 39,
+              "false_block_rate": 0.07291666666666667,
+              "violation_recall": 0.59375
+            }
+          }
+        },
+        "validation": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 1,
+          "missed_violations": 79,
+          "false_block_rate": 0.005208333333333333,
+          "violation_recall": 0.5885416666666666,
+          "nll": 0.3269099410456035,
+          "brier": 0.09993154490411471,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 41,
+              "mean_probability": 0.056454112607075856,
+              "violation_fraction": 0.024390243902439025
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 76,
+              "mean_probability": 0.149679577758913,
+              "violation_fraction": 0.06578947368421052
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 44,
+              "mean_probability": 0.24443905685607847,
+              "violation_fraction": 0.1590909090909091
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 33,
+              "mean_probability": 0.3425278650331512,
+              "violation_fraction": 0.3939393939393939
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 29,
+              "mean_probability": 0.4520282907366402,
+              "violation_fraction": 0.5172413793103449
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 17,
+              "mean_probability": 0.5531486500969267,
+              "violation_fraction": 0.8235294117647058
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 16,
+              "mean_probability": 0.6605856523412232,
+              "violation_fraction": 0.9375
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 25,
+              "mean_probability": 0.7513349693170605,
+              "violation_fraction": 0.76
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 22,
+              "mean_probability": 0.8540093559688663,
+              "violation_fraction": 1.0
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 81,
+              "mean_probability": 0.9705192758862645,
+              "violation_fraction": 1.0
+            }
+          ],
+          "ece_10_equal_width_bins": 0.07780418268396373,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.010416666666666666
+            ],
+            "violation_recall": [
+              0.5729166666666666,
+              0.6041666666666666
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 1,
+              "missed_violations": 39,
+              "false_block_rate": 0.010416666666666666,
+              "violation_recall": 0.59375
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 40,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.5833333333333334
+            }
+          }
+        },
+        "evaluation": {
+          "count": 768,
+          "allowed": 384,
+          "violations": 384,
+          "false_blocks": 10,
+          "missed_violations": 136,
+          "false_block_rate": 0.026041666666666668,
+          "violation_recall": 0.6458333333333334,
+          "nll": 0.3375655878653168,
+          "brier": 0.10325670608117536,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 69,
+              "mean_probability": 0.06540513284763462,
+              "violation_fraction": 0.028985507246376812
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 90,
+              "mean_probability": 0.1400581257510762,
+              "violation_fraction": 0.05555555555555555
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 119,
+              "mean_probability": 0.24603387398332466,
+              "violation_fraction": 0.13445378151260504
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 61,
+              "mean_probability": 0.3575439914221758,
+              "violation_fraction": 0.19672131147540983
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 50,
+              "mean_probability": 0.449859069246993,
+              "violation_fraction": 0.3
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 49,
+              "mean_probability": 0.543681265657515,
+              "violation_fraction": 0.5102040816326531
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 51,
+              "mean_probability": 0.6587886019725341,
+              "violation_fraction": 0.8235294117647058
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 49,
+              "mean_probability": 0.7555161850009628,
+              "violation_fraction": 0.8775510204081632
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 58,
+              "mean_probability": 0.857154124147912,
+              "violation_fraction": 0.9482758620689655
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 172,
+              "mean_probability": 0.9765279583386214,
+              "violation_fraction": 0.9825581395348837
+            }
+          ],
+          "ece_10_equal_width_bins": 0.08208785891139544,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.052083333333333336
+            ],
+            "violation_recall": [
+              0.578125,
+              0.7135416666666666
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 1,
+              "missed_violations": 66,
+              "false_block_rate": 0.005208333333333333,
+              "violation_recall": 0.65625
+            },
+            "payment": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 9,
+              "missed_violations": 70,
+              "false_block_rate": 0.046875,
+              "violation_recall": 0.6354166666666666
+            }
+          }
+        },
+        "transfer": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 50,
+          "missed_violations": 39,
+          "false_block_rate": 0.2604166666666667,
+          "violation_recall": 0.796875,
+          "nll": 0.6039966597589471,
+          "brier": 0.2104076264758545,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 12,
+              "mean_probability": 0.15527076321367625,
+              "violation_fraction": 0.0
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 11,
+              "mean_probability": 0.2684701941219148,
+              "violation_fraction": 0.0
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 23,
+              "mean_probability": 0.3462275007031394,
+              "violation_fraction": 0.043478260869565216
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 28,
+              "mean_probability": 0.434775813930372,
+              "violation_fraction": 0.17857142857142858
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 37,
+              "mean_probability": 0.5376952750239833,
+              "violation_fraction": 0.2702702702702703
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 46,
+              "mean_probability": 0.6475334115833065,
+              "violation_fraction": 0.2608695652173913
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 40,
+              "mean_probability": 0.7469411764991832,
+              "violation_fraction": 0.575
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 70,
+              "mean_probability": 0.84234798080449,
+              "violation_fraction": 0.4714285714285714
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 117,
+              "mean_probability": 0.9739123434549589,
+              "violation_fraction": 0.9230769230769231
+            }
+          ],
+          "ece_10_equal_width_bins": 0.22245934533687267,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.06770833333333333,
+              0.4427083333333333
+            ],
+            "violation_recall": [
+              0.6979166666666666,
+              0.8958333333333334
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "docs": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 50,
+              "missed_violations": 39,
+              "false_block_rate": 0.2604166666666667,
+              "violation_recall": 0.796875
+            }
+          }
+        }
+      }
+    },
+    "frozen_action_only": {
+      "temperature": 20.0,
+      "threshold": 1.0000000000000002,
+      "splits": {
+        "calibration": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6931472323644273,
+          "brier": 0.2500000259022365,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 156,
+              "mean_probability": 0.4999112885609418,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 228,
+              "mean_probability": 0.5001371315729368,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.00011746089354863071,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "validation": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6931472237625119,
+          "brier": 0.25000002160128126,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 152,
+              "mean_probability": 0.4998739914784096,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 232,
+              "mean_probability": 0.5001284778379069,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.0001275004001982984,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "evaluation": {
+          "count": 768,
+          "allowed": 384,
+          "violations": 384,
+          "false_blocks": 0,
+          "missed_violations": 384,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6931472376466422,
+          "brier": 0.25000002854334413,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 420,
+              "mean_probability": 0.4998742065292811,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 348,
+              "mean_probability": 0.5001509892468734,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.00013721030678890463,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "transfer": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6931472340211909,
+          "brier": 0.25000002673061944,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 124,
+              "mean_probability": 0.4998963701139639,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 260,
+              "mean_probability": 0.5001516185259743,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.00013612219432762528,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "docs": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        }
+      }
+    },
+    "full_action_only": {
+      "temperature": 20.0,
+      "threshold": 1.0000000000000002,
+      "splits": {
+        "calibration": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6941557186984874,
+          "brier": 0.25050376083643927,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 384,
+              "mean_probability": 0.47755538299263084,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.02244461700736916,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "validation": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6941557268356507,
+          "brier": 0.2505037648968194,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 384,
+              "mean_probability": 0.4775552925576168,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.022444707442383194,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 96,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "evaluation": {
+          "count": 768,
+          "allowed": 384,
+          "violations": 384,
+          "false_blocks": 0,
+          "missed_violations": 384,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6941557482495444,
+          "brier": 0.250503775582194,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 768,
+              "mean_probability": 0.4775550545032174,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.02244494549678261,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            },
+            "payment": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        },
+        "transfer": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 192,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.0,
+          "nll": 0.6941554496020936,
+          "brier": 0.25050362655932923,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 384,
+              "mean_probability": 0.47755837447703464,
+              "violation_fraction": 0.5
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            }
+          ],
+          "ece_10_equal_width_bins": 0.02244162552296536,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.0,
+              0.0
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "docs": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 192,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.0
+            }
+          }
+        }
+      },
+      "training": {
+        "completed_updates": 3072,
+        "trainable_parameters": 149015041,
+        "peak_allocated_bytes": 3099680768,
+        "peak_reserved_bytes": 3116367872
+      }
+    },
+    "full_context": {
+      "temperature": 0.05,
+      "threshold": 1.0,
+      "splits": {
+        "calibration": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 0,
+          "false_block_rate": 0.0,
+          "violation_recall": 1.0,
+          "nll": 3.8051219731066606e-61,
+          "brier": 9.024256939227074e-36,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 192,
+              "mean_probability": 4.248354255291588e-18,
+              "violation_fraction": 0.0
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 192,
+              "mean_probability": 1.0,
+              "violation_fraction": 1.0
+            }
+          ],
+          "ece_10_equal_width_bins": 2.124177127645794e-18,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              1.0,
+              1.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            }
+          }
+        },
+        "validation": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 0,
+          "false_block_rate": 0.0,
+          "violation_recall": 1.0,
+          "nll": 1.2183269202351863e-119,
+          "brier": 9.024256939227074e-36,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 192,
+              "mean_probability": 4.248354255291588e-18,
+              "violation_fraction": 0.0
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 192,
+              "mean_probability": 1.0,
+              "violation_fraction": 1.0
+            }
+          ],
+          "ece_10_equal_width_bins": 2.124177127645794e-18,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              1.0,
+              1.0
+            ]
+          },
+          "independent_authored_families": 2,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            },
+            "payment": {
+              "count": 192,
+              "allowed": 96,
+              "violations": 96,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            }
+          }
+        },
+        "evaluation": {
+          "count": 768,
+          "allowed": 384,
+          "violations": 384,
+          "false_blocks": 0,
+          "missed_violations": 0,
+          "false_block_rate": 0.0,
+          "violation_recall": 1.0,
+          "nll": 3.561671737404277e-99,
+          "brier": 9.024256939227074e-36,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 384,
+              "mean_probability": 4.248354255291588e-18,
+              "violation_fraction": 0.0
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 384,
+              "mean_probability": 1.0,
+              "violation_fraction": 1.0
+            }
+          ],
+          "ece_10_equal_width_bins": 2.124177127645794e-18,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              1.0,
+              1.0
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "crm": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            },
+            "payment": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 0,
+              "false_block_rate": 0.0,
+              "violation_recall": 1.0
+            }
+          }
+        },
+        "transfer": {
+          "count": 384,
+          "allowed": 192,
+          "violations": 192,
+          "false_blocks": 0,
+          "missed_violations": 63,
+          "false_block_rate": 0.0,
+          "violation_recall": 0.671875,
+          "nll": 24.858693202667087,
+          "brier": 0.15688652063903766,
+          "reliability_bins": [
+            {
+              "lower": 0.0,
+              "upper": 0.1,
+              "count": 252,
+              "mean_probability": 4.4583214815243325e-15,
+              "violation_fraction": 0.23809523809523808
+            },
+            {
+              "lower": 0.1,
+              "upper": 0.2,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.2,
+              "upper": 0.3,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.3,
+              "upper": 0.4,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.4,
+              "upper": 0.5,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.5,
+              "upper": 0.6,
+              "count": 1,
+              "mean_probability": 0.5056075188752358,
+              "violation_fraction": 1.0
+            },
+            {
+              "lower": 0.6,
+              "upper": 0.7,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.7,
+              "upper": 0.8,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.8,
+              "upper": 0.9,
+              "count": 0,
+              "mean_probability": null,
+              "violation_fraction": null
+            },
+            {
+              "lower": 0.9,
+              "upper": 1.0,
+              "count": 131,
+              "mean_probability": 0.9999999999999993,
+              "violation_fraction": 1.0
+            }
+          ],
+          "ece_10_equal_width_bins": 0.157537480419593,
+          "family_cluster_bootstrap_95_percentile": {
+            "false_block_rate": [
+              0.0,
+              0.0
+            ],
+            "violation_recall": [
+              0.6666666666666666,
+              0.6822916666666666
+            ]
+          },
+          "independent_authored_families": 4,
+          "uncertainty_warning": "Few authored families; intervals do not establish production coverage or a 1% risk bound",
+          "by_workflow": {
+            "docs": {
+              "count": 384,
+              "allowed": 192,
+              "violations": 192,
+              "false_blocks": 0,
+              "missed_violations": 63,
+              "false_block_rate": 0.0,
+              "violation_recall": 0.671875
+            }
+          }
+        }
+      },
+      "training": {
+        "completed_updates": 3072,
+        "trainable_parameters": 149015041,
+        "peak_allocated_bytes": 3097826304,
+        "peak_reserved_bytes": 3152019456
+      }
+    }
+  },
+  "dependencies": {
+    "torch": "2.13.0+cu126",
+    "transformers": "5.20.1",
+    "tokenizers": "0.23.3",
+    "numpy": "2.5.4",
+    "safetensors": "0.8.0"
+  },
+  "training": {
+    "completed_updates": 3072,
+    "trainable_parameters": 149015041,
+    "peak_allocated_bytes": 3097826304,
+    "peak_reserved_bytes": 3152019456
+  },
+  "inference": {
+    "device": "cuda",
+    "threads": 2,
+    "gpu": "NVIDIA GeForce GTX 1660 Ti",
+    "scope": "context validation, serialization, tokenization, transfer, encoder and readout; no queue or network",
+    "tokens_min": 192,
+    "tokens_max": 216,
+    "timing_ms": {
+      "p50": 26.64163000008557,
+      "p95": 28.554602400618023,
+      "p99": 29.35272984086624
+    }
+  },
+  "screening_gate": {
+    "quality": true,
+    "context_gain_frozen_matched_comparison": true,
+    "latency": true,
+    "context_gain_full_matched_comparison": true,
+    "production_promotion": false
+  },
+  "rss_peak_bytes": 1948352512,
+  "retained_artifacts": {
+    "release_manifest_sha256": "dd2b61080f877694712d10998c8bdfa5fab2d0b54a982039e436ff3e85ed7d2e",
+    "full_report_sha256": "5657196368b92ad4019e1a6e65b1e5925173df8cbd9ca7cc3ee66857276ece75",
+    "all_16_artifact_checksums_verified": true,
+    "per_row_errors": "Retained privately in the immutable experiment report; omitted from this measurement summary"
+  }
+}

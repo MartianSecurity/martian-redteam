@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: compact-model-scope-challenge-v2
+  namespace: martian-model-lab
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: challenge
+          image: martian-model-challenge:upgrade-20261017-v2
+          imagePullPolicy: Never
+          args: ["--dataset", "/dataset", "--release", "/artifacts/scope-v2", "--release-sha256", "dd2b61080f877694712d10998c8bdfa5fab2d0b54a982039e436ff3e85ed7d2e", "--device", "cuda"]
+          resources:
+            requests: {cpu: "1", memory: 2Gi, nvidia.com/gpu: 1}
+            limits: {cpu: "2", memory: 4Gi, nvidia.com/gpu: 1}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: artifacts, mountPath: /artifacts, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim: {claimName: compact-model-experiments}
+        - name: temporary
+          emptyDir: {sizeLimit: 128Mi}

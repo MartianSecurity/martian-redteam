@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "purpose": "backbone capacity and compute fit; not trained security quality",
+  "input_kind": "synthetic capacity text, deliberately sized to exact token buckets",
+  "model": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/answerdotai/ModernBERT-base/tree/8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "sha256": {
+      "model.safetensors": "340ac08b74eef0d7bdec2d7981a6a3d4249bf0e6aab60634b72ad02c2b8023a9",
+      "tokenizer_config.json": "3cd2017ff46d0a527e5d39cae39272eccfa1f19bb9f89b05d166aab2e38354e2",
+      "tokenizer.json": "9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1",
+      "special_tokens_map.json": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+      "config.json": "1609d59e627c33eaed524b4f01e546d42e84190a079a5a5ded84b212c41c324f"
+    }
+  },
+  "parameters": 149014272,
+  "device": "cuda",
+  "precision": "fp32",
+  "attention": "sdpa_math",
+  "threads": 2,
+  "batch_size": 1,
+  "concurrency": 1,
+  "warmup": 5,
+  "iterations": 30,
+  "initialized_ms": 2241.119,
+  "initialization_scope": "local tokenizer and weight load plus device transfer; excludes download and checksum",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.41",
+  "logical_cpus": 12,
+  "dependencies": {
+    "torch": "2.13.0+cu126",
+    "transformers": "5.20.1",
+    "tokenizers": "0.23.3",
+    "numpy": "2.5.4"
+  },
+  "buckets": [
+    {
+      "tokens": 256,
+      "tokenize_transfer_forward": {
+        "p50_ms": 27.439,
+        "p95_ms": 31.672,
+        "p99_ms": 32.019
+      },
+      "forward_only": {
+        "p50_ms": 26.041,
+        "p95_ms": 30.493,
+        "p99_ms": 30.733
+      },
+      "sequential_decisions_per_second": 36.006,
+      "peak_allocated_bytes": 639977984,
+      "peak_reserved_bytes": 645922816
+    },
+    {
+      "tokens": 512,
+      "tokenize_transfer_forward": {
+        "p50_ms": 55.376,
+        "p95_ms": 58.199,
+        "p99_ms": 58.356
+      },
+      "forward_only": {
+        "p50_ms": 52.732,
+        "p95_ms": 55.624,
+        "p99_ms": 55.948
+      },
+      "sequential_decisions_per_second": 17.94,
+      "peak_allocated_bytes": 670985728,
+      "peak_reserved_bytes": 692060160
+    },
+    {
+      "tokens": 1024,
+      "tokenize_transfer_forward": {
+        "p50_ms": 166.953,
+        "p95_ms": 174.398,
+        "p99_ms": 175.81
+      },
+      "forward_only": {
+        "p50_ms": 162.6,
+        "p95_ms": 170.143,
+        "p99_ms": 171.034
+      },
+      "sequential_decisions_per_second": 5.931,
+      "peak_allocated_bytes": 773764608,
+      "peak_reserved_bytes": 792723456
+    }
+  ],
+  "quality_evaluated": false,
+  "gpu": {
+    "name": "NVIDIA GeForce GTX 1660 Ti",
+    "capability": [
+      7,
+      5
+    ],
+    "build_architectures": [
+      "sm_50",
+      "sm_60",
+      "sm_70",
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_90"
+    ],
+    "free_bytes_before": 4395499520,
+    "total_bytes": 6004015104
+  },
+  "process_peak_rss_bytes": 1403043840,
+  "environment": {
+    "exit_code": 0,
+    "oom_killed": false,
+    "sampled_process_gpu_peak_mib": 848,
+    "process_samples": 89,
+    "sampled_whole_device_peak_mib": 1721,
+    "sampling_interval_seconds_minimum": 0.1,
+    "sampling_scope": "host nvidia-smi matched to container PID; sampled lower bound, includes driver/context in process total; whole-device total also includes desktop",
+    "cpu_limit": 2,
+    "memory_limit_bytes": 4294967296,
+    "image_id": "sha256:5c2451d4b9d95c6919b739c55834d1bed908b276b6ae870a5b04bb0d35630981",
+    "measured_on": "2026-10-17",
+    "execution": "native Docker Engine, default context",
+    "image": "martian-model-lab:upgrade-20261017-cuda-v3",
+    "source_sha256": "95ded1b87cc11fb58eb174952b5312e5485cdfba8081488b9a404fad53e4f34e",
+    "background_workloads": "Desktop application cluster and native Minikube cluster running; GPU image import overlapped Docker inference measurements; shared display GPU"
+  }
+}

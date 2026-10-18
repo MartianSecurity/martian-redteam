@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: compact-nx-language-v1
+  namespace: martian-model-lab
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: experiment
+          image: martian-model-nx:upgrade-20261017-v1
+          imagePullPolicy: Never
+          args:
+            - --inputs
+            - /nx-inputs
+            - --dataset
+            - /nx-dataset
+            - --output
+            - /artifacts/nx-language-v1
+            - --device
+            - cuda
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: artifacts
+              mountPath: /artifacts
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: compact-model-experiments
+        - name: temporary
+          emptyDir:
+            sizeLimit: 128Mi
