@@ -33,6 +33,13 @@ def test_failed_run_status() -> None:
     assert failed_run_status({"status": "success"}) is None
 
 
+def test_aegra_error_and_interrupt_envelopes_cannot_reuse_partial_scores() -> None:
+    partial = {"score": 1, "reason": "earlier partial result"}
+    assert failed_run_status({**partial, "__error__": {"error": "RuntimeError"}}) == "error"
+    assert failed_run_status({"values": {**partial, "__interrupt__": [{"value": "approval"}]}}) == "interrupted"
+    assert failed_run_status({"output": {**partial, "status": "canceled"}}) == "canceled"
+
+
 def test_parse_retry_after_seconds() -> None:
     assert parse_retry_after("2") == 2.0
     assert parse_retry_after(None) is None

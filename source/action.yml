@@ -26,5 +26,6 @@ runs:
           exit 1
         fi
         mkdir -p "$MARTIAN_REDTEAM_DESTINATION"
-        cp "$source_root/pyproject.toml" "$source_root/README.md" "$MARTIAN_REDTEAM_DESTINATION/"
+        cp "$source_root/pyproject.toml" "$source_root/README.md" \
+          "$source_root/LICENSE" "$source_root/NOTICE" "$MARTIAN_REDTEAM_DESTINATION/"
         cp -R "$source_root/src" "$MARTIAN_REDTEAM_DESTINATION/"

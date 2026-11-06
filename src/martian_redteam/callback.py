@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import Executor
+from contextvars import copy_context
+from functools import partial
 from typing import Any
 
 from martian_redteam.types import Turn
@@ -12,7 +16,7 @@ TargetCallback = Callable[..., str | Turn | Awaitable[str | Turn]]
 AsyncTarget = Callable[[str, Sequence[Turn] | None], Awaitable[Turn]]
 
 
-def wrap_callback(callback: TargetCallback) -> AsyncTarget:
+def wrap_callback(callback: TargetCallback, *, _executor: Executor | None = None) -> AsyncTarget:
     """Accept str or Turn, sync or async, with optional turns.
 
     Phase 1 probes pass ``turns=None``. Callables that declare a ``turns``
@@ -25,8 +29,19 @@ def wrap_callback(callback: TargetCallback) -> AsyncTarget:
     except (TypeError, ValueError):
         accepts_turns = False
 
+    async_callable = inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(type(callback).__call__)
+
     async def wrapped(prompt: str, turns: Sequence[Turn] | None = None) -> Turn:
-        result: Any = callback(prompt, turns) if accepts_turns else callback(prompt)
+        args = (prompt, turns) if accepts_turns else (prompt,)
+        # Blocking callbacks must yield the loop so its target deadline can actually fire.
+        result: Any
+        if async_callable:
+            result = callback(*args)
+        elif _executor is None:
+            result = await asyncio.to_thread(callback, *args)
+        else:
+            call = partial(copy_context().run, callback, *args)
+            result = await asyncio.get_running_loop().run_in_executor(_executor, call)
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, Turn):

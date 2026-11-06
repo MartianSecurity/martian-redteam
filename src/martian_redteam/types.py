@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator
+
+from martian._privacy import RedactionPolicy
 
 ErrorKind = Literal["infrastructure", "target"]
 
@@ -54,15 +56,18 @@ class TestCase(BaseModel):
     error: str | None = None
     error_kind: ErrorKind | None = None
     graph_revision: str | None = None
+    policy_revision: str | None = None
+    simulation_operation_id: str | None = None
+    evaluation_operation_id: str | None = None
 
 
 class VulnerabilityTypeResult(BaseModel):
     vulnerability: str
     vulnerability_type: str
-    pass_rate: float
-    passing: int
-    failing: int
-    errored: int
+    pass_rate: float = Field(ge=0, le=1)
+    passing: int = Field(ge=0)
+    failing: int = Field(ge=0)
+    errored: int = Field(ge=0)
     gated: bool
 
 
@@ -73,6 +78,7 @@ class RiskAssessment(BaseModel):
 
     catalog_version: str
     graph_revision: str | None = None
+    policy_revision: str | None = None
     purpose: str | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     run_duration_seconds: float = 0.0
@@ -81,17 +87,68 @@ class RiskAssessment(BaseModel):
     errored: int = 0
     infrastructure_errors: int = 0
     target_errors: int = 0
+    expected_probe_count: int | None = Field(default=None, ge=1)
+    _redaction: RedactionPolicy = PrivateAttr(default_factory=RedactionPolicy)
 
-    def save(self, to: str | Path) -> Path:
+    @property
+    def redaction_policy(self) -> RedactionPolicy:
+        return self._redaction
+
+    def _bind_redaction(self, policy: RedactionPolicy) -> RiskAssessment:
+        self._redaction = self._redaction.combine(policy)
+        return self
+
+    def __repr__(self) -> str:
+        from martian._privacy import safe_text
+
+        return safe_text(super().__repr__(), policy=self._redaction)
+
+    def __str__(self) -> str:
+        from martian._privacy import safe_text
+
+        return safe_text(super().__str__(), policy=self._redaction)
+
+    def for_report(self, *, include_target_content: bool = False) -> RiskAssessment:
+        """A sanitized copy; the in-memory assessment remains available to the customer."""
+        from martian._privacy import redact_data, report_text, safe_text
+
+        data = redact_data(self.model_dump(), policy=self._redaction)
+        data["purpose"] = report_text(
+            self.purpose or "",
+            include_content=include_target_content,
+            redact_env="MARTIAN_EVALS_REDACT_INPUTS",
+            policy=self._redaction,
+        )
+        for case in data["test_cases"]:
+            for field in ("input", "actual_output", "reason"):
+                if case[field] is not None:
+                    flag = "MARTIAN_EVALS_REDACT_INPUTS" if field == "input" else "MARTIAN_EVALS_REDACT_OUTPUTS"
+                    case[field] = report_text(
+                        case[field], include_content=include_target_content, redact_env=flag, policy=self._redaction
+                    )
+            if case["error"]:
+                case["error"] = f"{case['error_kind'] or 'probe'} execution failed"
+            for turn in case["turns"]:
+                turn["content"] = report_text(
+                    turn["content"],
+                    include_content=include_target_content,
+                    redact_env="MARTIAN_EVALS_REDACT_OUTPUTS",
+                    policy=self._redaction,
+                )
+                turn["tools_called"] = [safe_text(t, policy=self._redaction) for t in turn["tools_called"]]
+        return RiskAssessment.model_validate(data)._bind_redaction(self._redaction)
+
+    def save(self, to: str | Path, *, include_target_content: bool = False) -> Path:
         """Write JSON and Markdown reports. Returns the JSON path."""
         directory = Path(to)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "risk-assessment.json"
-        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        report = self.for_report(include_target_content=include_target_content)
+        path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         from martian_redteam.report import append_github_summary, write_markdown
 
-        write_markdown(self, directory)
-        append_github_summary(self)
+        write_markdown(report, directory)
+        append_github_summary(self.for_report())
         return path
 
 
@@ -126,7 +183,16 @@ class SimulatorOutput(BaseModel):
     attack: str = Field(min_length=1)
     attack_method: str = Field(min_length=1)
     graph_revision: str | None = None
+    policy_revision: str | None = None
+    operation_id: str | None = None
     messages: list[Any] = Field(default_factory=list)
+
+    @field_validator("attack", "attack_method")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
 
 
 class EvaluatorOutput(BaseModel):
@@ -137,4 +203,26 @@ class EvaluatorOutput(BaseModel):
     score: BinaryScore
     reason: str = Field(min_length=1)
     graph_revision: str | None = None
+    policy_revision: str | None = None
+    operation_id: str | None = None
     messages: list[Any] = Field(default_factory=list)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+
+class RedteamService(Protocol):
+    """Generation/judgment interface; orchestration never chooses credentials or origin."""
+
+    @property
+    def redaction_policy(self) -> RedactionPolicy: ...
+
+    async def simulate(self, context: SimulatorContext, *, prompt: str | None = None) -> SimulatorOutput: ...
+
+    async def evaluate(
+        self, context: EvaluatorContext, *, attack: str, target_output: str, tools_called: list[str] | None = None
+    ) -> EvaluatorOutput: ...

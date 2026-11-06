@@ -25,8 +25,8 @@ Responder = Callable[[httpx.Request], httpx.Response]
 
 @pytest.fixture(autouse=True)
 def _cli_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MARTIAN_API_URL", API_URL)
-    monkeypatch.setenv("MARTIAN_API_KEY", "test-key")
+    monkeypatch.setenv("MARTIAN_REDTEAM_API_URL", API_URL)
+    monkeypatch.setenv("MARTIAN_REDTEAM_API_KEY", "test-key")
     # save() appends to the job summary when this is set; keep CI's own summary clean.
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
 

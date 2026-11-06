@@ -1,0 +1,22 @@
+"""Martian evals CI kit: the MLflow regression-testing pattern with Backend-side scoring."""
+
+from martian.evals.config import KIT_VERSION as __version__
+from martian.evals.config import EvalsConfig
+from martian.evals.dataset import EvalDataset, load_dataset
+from martian.evals.evaluate import evaluate
+from martian.evals.gate import GateFailure, assert_checks, assert_gate
+from martian.evals.redteam import assert_redteam
+from martian.evals.scorers import exact_match
+
+__all__ = [
+    "EvalDataset",
+    "EvalsConfig",
+    "GateFailure",
+    "__version__",
+    "assert_checks",
+    "assert_gate",
+    "assert_redteam",
+    "exact_match",
+    "evaluate",
+    "load_dataset",
+]

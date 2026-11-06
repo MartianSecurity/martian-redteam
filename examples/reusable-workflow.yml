@@ -8,7 +8,7 @@
 # with the release you depend on. The SDK is installed at the same commit as
 # the workflow, so one pin covers both.
 #
-# GitHub-hosted runner IPs are shared; keep system_config.max_concurrent at 2 or 1.
+# Keep system_config.max_concurrent at 2 or 1 unless Backend grants larger limits.
 
 name: Red team
 
@@ -27,4 +27,4 @@ jobs:
       # max-concurrent: "2"
       # attacks-per-vuln: "1"
     secrets:
-      MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
+      MARTIAN_API_TOKEN: ${{ secrets.MARTIAN_API_TOKEN }}

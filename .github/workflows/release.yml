@@ -1,0 +1,110 @@
+name: SDK release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build, for example v0.1.0
+        type: string
+        required: true
+      publish:
+        description: Publish the verified distributions after protected-environment approval
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      PUBLISH_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+      WORKFLOW_REF: ${{ github.ref }}
+    steps:
+      - name: Validate version tag
+        run: |
+          python - <<'PY'
+          import os, re
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?", tag):
+              raise SystemExit("release_tag must be a version tag")
+          if os.environ["PUBLISH_REQUESTED"] == "true" and os.environ["WORKFLOW_REF"] != "refs/heads/main":
+              raise SystemExit("Publishing must be dispatched from main after release review")
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tagged release source
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$(git rev-parse HEAD)" = "${tag_commit}"
+          git merge-base --is-ancestor "${tag_commit}" refs/remotes/origin/main
+          printf 'Source tag: %s\nSource commit: %s\n' "${RELEASE_TAG}" "${tag_commit}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+      - run: uv sync --locked --all-extras
+      - name: Require matching version and run checks
+        run: |
+          uv run --all-extras python - <<'PY'
+          import os
+          from packaging.version import Version
+          from martian import __version__
+          version = Version(__version__)
+          if version.local is not None or str(version) != __version__:
+              raise SystemExit("SDK version must be canonical PEP 440 without a local label")
+          if os.environ["RELEASE_TAG"] != "v" + __version__:
+              raise SystemExit("tag and canonical SDK version differ")
+          PY
+          uv run --all-extras ruff format --check src tests examples scripts
+          uv run --all-extras ruff check src tests examples scripts
+          uv run --all-extras mypy src
+          uv run --all-extras pytest -q
+      - name: Build and validate distributions
+        run: |
+          uv build
+          uv run --all-extras twine check --strict dist/*
+          uv run --all-extras python scripts/check_release.py --install
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-distributions
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-release-checksums
+          path: release-checksums.json
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/martian-sdk/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-distributions
+          path: dist/
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist/
