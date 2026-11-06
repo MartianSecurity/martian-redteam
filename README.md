@@ -11,8 +11,8 @@ One Python SDK for agent evaluations and adversarial testing.
 - `martian ci`: one persisted session for evals, redteam, or both, with typed Python results.
 
 The distribution is `martian-sdk`; install its `evals` extra for both modules.
-This source implementation is internal and unpublished. Hosted use requires
-released Backend CI APIs and authorized tenant credentials.
+Use an available PyPI release or a validated wheel. Hosted use requires
+compatible Backend SDK APIs and authorized tenant credentials.
 
 ```bash
 uv sync --locked --extra evals
@@ -22,9 +22,9 @@ uv run --extra evals martian redteam validate examples/config.yaml
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --output results
 ```
 
-[Unified SDK and CI](docs/sdk-and-ci.md) documents imports, the shared connection,
+[Unified SDK and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/sdk-and-ci.md) documents imports, the shared connection,
 installation, the combined gate, compatibility and rollout limits.
-[Documentation index](docs/README.md) covers the existing redteam contracts.
+[Documentation index](https://github.com/MorningHQ/martian-redteam/blob/main/docs/README.md) covers the existing redteam contracts.
 
 The wheel retains `martian_redteam`, `martian_evals_kit` and `martian-redteam`
 for existing integrations. Both test engines run in the customer's process.
@@ -44,8 +44,9 @@ uv build
 
 The existing eval regression suite has moved into this SDK's CI. Tests use
 local MLflow and loopback service fixtures; hosted/paid execution is a separate
-qualification. See [development](docs/development.md).
+qualification. See [development](https://github.com/MorningHQ/martian-redteam/blob/main/docs/development.md).
 
 ## License
 
-Apache-2.0. See `LICENSE` and `NOTICE`.
+Apache-2.0. See [LICENSE](https://github.com/MorningHQ/martian-redteam/blob/main/LICENSE)
+and [NOTICE](https://github.com/MorningHQ/martian-redteam/blob/main/NOTICE).
