@@ -1,12 +1,62 @@
-# Agent Protocol
+# Redteam API protocol
 
-This SDK speaks Aegra’s Agent Protocol. It does **not** invent a parallel REST DTO. The only endpoint used is the **stateless wait**:
+## Customer Backend API
+
+Modern Python, YAML and CI use one Backend origin and `Authorization: Bearer`
+with the organisation API token. Requests use domain DTOs, not graph messages.
 
 ```text
-POST {MARTIAN_API_URL}/runs/wait
+POST /v1/redteam/simulate
+  {operation_id: UUID, catalog_version: "0.2.0", context:
+   {vulnerability, vulnerability_type, purpose, attack_method, mode: "baseline"|"enhance"},
+   prompt?: string, agent_id?: UUID}
+POST /v1/redteam/evaluate
+  {operation_id: UUID, catalog_version: "0.2.0", context:
+   {vulnerability, vulnerability_type, attack_method, criteria?: string},
+   attack: string, target_output: string, tools_called: string[], agent_id?: UUID}
+GET  /v1/redteam/operations/{operation_id}
+POST /v1/redteam/operations/{operation_id}/cancel
 ```
 
-Auth: header `X-API-Key: {MARTIAN_API_KEY}`.
+Contexts forbid unknown fields; built-in vulnerabilities omit `criteria`.
+Purpose is bounded to 4,096 characters, custom criteria to 8,192, attack/prompt/
+reply to 20,000, and tools to 32 identifiers of at most 128 characters. The
+service rejects oversized inputs; it never silently truncates target evidence.
+
+Responses carry correlated `operation_id`, `kind`, `state`, timezone-aware
+`deadline_at`, optional polling delay and result expiry. POST returns 200/202;
+GET returns 200, 404 for unknown/unowned IDs, or 410 with a purged no-result
+receipt. Successful results are `{attack, attack_method, graph_revision,
+policy_revision}` or `{score: 0|1, reason, graph_revision, policy_revision}`.
+The SDK rejects mismatched IDs/kinds, malformed/expired/missing results and
+non-integer judgments. Failures/unknowns are infrastructure errors, never passes.
+
+Execution POST is sent once. Ambiguous transport or gateway 5xx recovers only
+with GET of the same ID. No hidden model retries or score-to-pass retries are
+performed. Polling and requests share one absolute local wait deadline;
+`RedteamOperationError.operation_id` supports explicit later GET recovery.
+`Client.simulate/evaluate(..., operation_id=uuid)` lets callers persist their
+recovery ID before sending; otherwise the client generates one per stage.
+Cancel requests do not prove execution stopped. An on-time completion can be
+retrieved until the service's result expiry; later retrieval does not extend it.
+Backend/Agents own execution deadlines, admitted work, quotas and cleanup.
+See [SDK and CI](sdk-and-ci.md) for configuration and rollout prerequisites.
+
+## Legacy direct Agents operator protocol
+
+The remainder documents **only** `martian_redteam.Client` and the legacy
+`martian-redteam` CLI with an explicit dedicated Agents origin/key pair. This
+path never consumes the canonical Backend token and is not selected by modern
+clients, YAML/CI, authentication failures or token contents. Its native retry
+semantics below apply only to that retained compatibility adapter.
+
+The legacy adapter speaks Aegra’s Agent Protocol. It does **not** invent a parallel REST DTO. The only endpoint used is the **stateless wait**:
+
+```text
+POST {MARTIAN_REDTEAM_API_URL}/runs/wait
+```
+
+Auth: header `X-API-Key: {MARTIAN_REDTEAM_API_KEY}`.
 
 There is no `langgraph-sdk`. That client is a LangSmith/platform SDK (threads, crons, checkpoints, `LANGCHAIN_API_KEY`) for a protocol this product uses one method of. martian-agents smoke already posts `/runs/wait` with urllib; this SDK does the same with httpx.
 
@@ -88,7 +138,7 @@ If the envelope `status` is `error`, `failed`, `timeout`, `cancelled`, or `inter
 | Input | `messages` — purpose plus generation instruction |
 | Output state | `attack: str` (non-empty), `attack_method: str` (non-empty), `messages`, optional `graph_revision` |
 
-`attack` is a dedicated state channel, not “whatever the last AI message said.” Phase 0 graphs must use structured output. Empty or missing `attack` fails schema validation in the SDK.
+`attack` is a dedicated state channel, not “whatever the last AI message said.” Dedicated graphs use structured output. Empty or missing `attack` fails schema validation in the SDK.
 
 Phase 1 always sends `mode=baseline`. Encoding attacks still call the simulator with `attack_method=prompt_injection` (an LLM-generated payload), then transform locally.
 
@@ -110,7 +160,7 @@ Built-in rubrics live in the graph. The SDK must not send criteria text for buil
 | Concern | Rule |
 | --- | --- |
 | Default wait | 120s per `/runs/wait` |
-| Configurable cap | 1–240s (`MARTIAN_REQUEST_TIMEOUT_SECONDS`) |
+| Configurable cap | 1–240s (`MARTIAN_REDTEAM_REQUEST_TIMEOUT_SECONDS`) |
 | ALB idle | 300s. Stay under it. |
 | Heartbeats | Leading `\n` is ignored. Do not treat a heartbeat as a completed body. |
 | Connect timeout | Retryable |
@@ -124,7 +174,7 @@ Tenacity: 3 attempts, exponential backoff 0.5s–8s, **or** `Retry-After` when p
 | Event | Retry? |
 | --- | --- |
 | HTTP 429 | Yes (`RetryableClientError`). Message mentions per-key quota **or** shared WAF (GitHub-hosted runners share NAT IPs). |
-| HTTP 503 | Yes |
+| HTTP 503 | No — execution outcome is unknown |
 | Other 4xx/5xx | No |
 | Connect timeout / connect error | Yes |
 | Read/write/pool timeout | No |
@@ -146,7 +196,16 @@ Never coerce those into `score=0`. A judge that did not run is not evidence the 
 - `{ "output": { ... } }` envelopes
 - Heartbeat-prefixed bodies
 - Non-binary scores
-- 429/503 retry counts
+- 429 retry counts and no 503 retry
 - 500 not retried
 
-When Phase 0 lands on martian-agents, replace fixtures with bodies captured from staging contract tests. Do not guess fields the service does not return.
+Keep legacy recorded fixtures separate from typed Backend operation qualification. Do not infer hosted rollout from passing recorded contract tests.
+
+## Aegra 0.11 result failures
+
+The current Agents release pins Aegra 0.11.0. Wait responses may carry
+`__error__` or `__interrupt__` data rather than a completed graph output.
+The SDK rejects those markers, including nested envelopes with partial scores,
+and failed/canceled statuses before validating a simulator/evaluator result.
+A previous partial `score: 1` never overrides an execution failure. Blank
+attacks, attack methods and judge rationales fail the current output schema.

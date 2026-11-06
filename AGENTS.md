@@ -2,7 +2,11 @@
 
 Read README.md, then docs/README.md and docs/development.md as needed before changing this repository. docs/architecture.md, docs/agent-protocol.md and docs/gate-and-ci.md hold the contracts.
 
-This is the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; attack generation and judging run on martian-agents through `POST /runs/wait`, and the customer's model stays behind a local `model_callback`. It is an internal scaffold: do not publish to PyPI and do not point untrusted CI at the shared staging API key.
+The distribution is `martian-sdk`, with `martian.evals` and `martian.redteam`
+modules and a combined `martian ci` gate. See docs/sdk-and-ci.md. The relocated
+eval engine is canonical here; compatibility namespaces retain old imports.
+
+This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations; Agents owns attack generation and judging, and the customer's model stays behind a local `model_callback`. Publication preparation is authorized by the SDK consolidation goal; actual publication requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
 
 - The catalog holds vulnerability and attack ids only. Rubric prose belongs in the martian-agents evaluator graph, not here. Bump `CATALOG_VERSION` when ids, types or gate flags change.
 - The gate fails closed on transport/schema errors and on gated pass rate. Do not add fallback or retry-to-pass behavior unless explicitly requested.
@@ -16,15 +20,15 @@ This is the in-process adversarial-testing SDK and CLI (`martian-redteam`, Pytho
 Run from the repository root, matching `.github/workflows/ci.yml`:
 
 ```bash
-uv sync --locked
-uv run ruff format --check src tests examples
-uv run ruff check src tests examples
-uv run mypy src
-uv run pytest -q
-uv run python -m compileall -q src
+uv sync --locked --extra evals
+uv run --extra evals ruff format --check src tests examples
+uv run --extra evals ruff check src tests examples
+uv run --extra mcp --extra evals mypy src
+uv run --extra evals pytest -q
+uv run --extra evals python -m compileall -q src
 ```
 
-Tests never touch the network (`respx` fakes `/runs/wait`) and need no `MARTIAN_API_KEY` or `OPENAI_API_KEY`.
+Redteam tests cover typed Backend operations and the retained legacy `/runs/wait` adapter; eval tests use local MLflow and loopback fixtures. Neither suite uses external services or requires customer/provider credentials.
 
 ## Working preferences
 

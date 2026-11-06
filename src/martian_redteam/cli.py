@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import sys
+import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
+from martian._privacy import safe_text
+from martian.config import MartianConfig
 from martian_redteam import __version__
-from martian_redteam.catalog.attacks import ATTACKS, Attack, get_attack
+from martian_redteam.catalog.attacks import ATTACKS
 from martian_redteam.catalog.frameworks import FRAMEWORKS
-from martian_redteam.catalog.vulnerabilities import VULNERABILITIES, Vulnerability, get_vulnerability
-from martian_redteam.client import Client
-from martian_redteam.config import NamedSpec, RunConfig, Settings
+from martian_redteam.catalog.vulnerabilities import VULNERABILITIES
+from martian_redteam.config import RunConfig, Settings
 from martian_redteam.gate import GateFailure, evaluate_gate
-from martian_redteam.orchestrator import a_red_team
+from martian_redteam.runner import _load_callback, _resolve_catalog, _run_async
 from martian_redteam.types import RiskAssessment
 
-app = typer.Typer(no_args_is_help=True, add_completion=False)
+app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 console = Console()
 
 
@@ -40,20 +41,6 @@ def main(
     ] = False,
 ) -> None:
     """Martian red-team CLI. Orchestrates probes locally; simulation and judging stay on Martian Agents."""
-
-
-def _load_callback(file_path: str, function_name: str) -> Any:
-    path = Path(file_path).resolve()
-    spec = importlib.util.spec_from_file_location("martian_redteam_target", path)
-    if spec is None or spec.loader is None:
-        raise FileNotFoundError(f"cannot load callback file: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    callback = getattr(module, function_name, None)
-    if callback is None:
-        raise AttributeError(f"{path} has no function {function_name}")
-    return callback
 
 
 def _print_assessment(assessment: RiskAssessment) -> None:
@@ -94,22 +81,6 @@ def _print_assessment(assessment: RiskAssessment) -> None:
     console.print(detail)
 
 
-def _vulnerability_from_spec(spec: NamedSpec) -> Vulnerability:
-    return get_vulnerability(
-        spec.name,
-        spec.types,
-        id=spec.id,
-        criteria=spec.criteria,
-        gated=spec.gated,
-    )
-
-
-def _resolve_catalog(config: RunConfig) -> tuple[list[Vulnerability], list[Attack]]:
-    vulnerabilities = [_vulnerability_from_spec(item) for item in config.vulnerabilities]
-    attacks = [get_attack(item.name, weight=item.weight) for item in config.attacks]
-    return vulnerabilities, attacks
-
-
 def _apply_run_overrides(
     config: RunConfig,
     *,
@@ -126,25 +97,9 @@ def _apply_run_overrides(
     return config.model_copy(update={"system_config": config.system_config.model_copy(update=updates)})
 
 
-async def _run_async(config: RunConfig) -> RiskAssessment:
-    callback = _load_callback(config.target.callback.file, config.target.callback.function)
-    vulnerabilities, attacks = _resolve_catalog(config)
-    settings = config.settings_overlay(Settings())
-    async with Client(settings=settings) as client:
-        return await a_red_team(
-            target=callback,
-            vulnerabilities=vulnerabilities,
-            attacks=attacks,
-            client=client,
-            purpose=config.target.purpose,
-            max_concurrent=config.system_config.max_concurrent,
-            attacks_per_vulnerability_type=config.system_config.attacks_per_vulnerability_type,
-            target_timeout_seconds=config.system_config.target_timeout_seconds,
-        )
-
-
 @app.command("run")
 def run_command(
+    ctx: typer.Context,
     config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
     max_concurrent: Annotated[
         int | None,
@@ -168,16 +123,47 @@ def run_command(
     ] = None,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
-    config = _apply_run_overrides(
-        RunConfig.from_yaml(config_path),
-        max_concurrent=max_concurrent,
-        attacks_per_vuln=attacks_per_vuln,
-    )
-    assessment = asyncio.run(_run_async(config))
-    destination = output or Path(config.system_config.output_folder)
-    written = assessment.save(destination)
-    _print_assessment(assessment)
-    console.print(f"Wrote {written}")
+    destination = output or Path("results")
+    try:
+        config = _apply_run_overrides(
+            RunConfig.from_yaml(config_path),
+            max_concurrent=max_concurrent,
+            attacks_per_vuln=attacks_per_vuln,
+        )
+        destination = output or Path(config.system_config.output_folder)
+        modern = ctx.find_object(MartianConfig) or ctx.find_object(type) is MartianConfig
+        if modern:
+            from martian.redteam.client import Client
+
+            config.require_platform_origin()
+            connection = ctx.find_object(MartianConfig) or MartianConfig.from_env()
+
+            async def execute() -> RiskAssessment:
+                async with Client(config=connection) as client:
+                    return await _run_async(config, client=client)
+
+            assessment = asyncio.run(execute())
+        else:
+            configured = ctx.find_object(Settings) or Settings()
+            assessment = asyncio.run(_run_async(config, settings=configured))
+        written = assessment.save(destination)
+        _print_assessment(assessment.for_report())
+        console.print(f"Wrote {written}")
+    except Exception as error:
+        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (destination / "execution-error.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "failed",
+                    "error_type": type(error).__name__,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        console.print(f"[red]Assessment setup/execution failed:[/red] {type(error).__name__}")
+        raise typer.Exit(code=2) from None
     try:
         evaluate_gate(
             assessment,
@@ -192,16 +178,29 @@ def run_command(
 
 @app.command("validate")
 def validate_command(
+    ctx: typer.Context,
     config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
 ) -> None:
     """Lint a YAML config without contacting Martian Agents."""
+    stage = "configuration"
     try:
         config = RunConfig.from_yaml(config_path)
-        _load_callback(config.target.callback.file, config.target.callback.function)
+        if ctx.find_object(MartianConfig) or ctx.find_object(type) is MartianConfig:
+            config.require_platform_origin()
         vulnerabilities, attacks = _resolve_catalog(config)
+        stage = "callback"
+        _load_callback(config.target.callback.file, config.target.callback.function)
     except Exception as error:
-        console.print(f"[red]Validation failed:[/red] {error}")
-        raise typer.Exit(code=1) from error
+        if isinstance(error, ValidationError) and stage == "configuration":
+            detail = "; ".join(
+                e["msg"] for e in error.errors(include_input=False, include_context=False, include_url=False)
+            )
+        elif stage == "configuration" and isinstance(error, (ValueError, KeyError)):
+            detail = str(error)
+        else:
+            detail = type(error).__name__
+        console.print(f"[red]Validation failed:[/red] {safe_text(detail)}")
+        raise typer.Exit(code=1) from None
     console.print(
         f"OK: {len(vulnerabilities)} vulnerabilities, {len(attacks)} attacks, callback {config.target.callback.file}",
         no_wrap=True,

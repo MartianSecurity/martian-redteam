@@ -4,6 +4,21 @@ The mcp extra connects a customer agent to multiple existing MCP servers provide
 
 From this checkout, use `uv sync --locked --extra mcp`. The new API is source code in this workspace; no SDK release has been published by this change.
 
+## Target provider setup
+
+The callback owns its provider dependencies and credentials. For AWS Bedrock
+callbacks using an AWS CLI `aws login` profile (`login_session`), install
+`boto3[crt]` in the callback's environment; Boto3's optional AWS Common Runtime
+support is required for that credential provider. Plain `boto3` can raise
+`MissingDependencyException` when constructing the client. Select the authorized
+default/named profile through the normal Boto3 session configuration. See the
+official [login-session prerequisites](https://github.com/boto/boto3/blob/develop/docs/source/guide/credentials.rst)
+and [CRT installation guide](https://github.com/boto/boto3/blob/develop/docs/source/guide/quickstart.rst).
+These are customer callback dependencies; they are separate from the Martian API
+token and are not added to the Martian SDK's base dependencies.
+
+## MCP connections
+
 ```python
 from martian_redteam import AssessmentSession, TraceRecorder, bind_sandbox_mcp, bind_tools, parse_session_payload
 
@@ -18,7 +33,7 @@ async def use_connections(trusted_runtime_config: dict):
         return definitions, trace.snapshot()
 ```
 
-`parse_session_payload` validates a raw dict or `AssessmentSession` and verifies `ensure_active()`, while `bind_sandbox_mcp` combines validation with `bind_tools`. Each session requires session_id, campaign_id, target_id, expires_at and mcp_connections. Each connection requires a unique name, HTTP(S) url, explicit allowed_tools and optional headers. Headers use SecretStr in models and full runtime values on the wire. Do not pass model-generated connection configuration; the host application must authenticate the caller and approve destination hosts. URLs cannot contain embedded user credentials or fragments. This version supports Streamable HTTP, not stdio/OAuth login flows. These helpers validate and consume an existing trusted session; they do not provision twins or mint capabilities. The backend binding-bundle endpoint returns a configuration template. Actual bearer capabilities are issued for admitted runs at `/v1/assessment-sessions/{run_id}/mcp/{system}` and delivered to the approved customer session API. A local live SDK check exercised tool discovery/read, allowlist rejection, expiry and trace redaction against this gateway. See [backend binding limits](../../backend/docs/usage.md).
+`parse_session_payload` validates a raw dict or `AssessmentSession` and verifies `ensure_active()`, while `bind_sandbox_mcp` combines validation with `bind_tools`. Each session requires session_id, campaign_id, target_id, expires_at and mcp_connections. Each connection requires a unique name, HTTP(S) url, explicit allowed_tools and optional headers. Headers use SecretStr in models and full runtime values on the wire. Do not pass model-generated connection configuration; the host application must authenticate the caller and approve destination hosts. URLs cannot contain embedded user credentials or fragments. This version supports Streamable HTTP, not stdio/OAuth login flows. These helpers validate and consume an existing trusted session; they do not provision twins or mint capabilities. The backend binding-bundle endpoint returns a configuration template. Actual bearer capabilities are issued for admitted runs at `/v1/assessment-sessions/{run_id}/mcp/{system}` and delivered to the approved customer session API. A local live SDK check exercised tool discovery/read, allowlist rejection, expiry and trace redaction against this gateway. See [backend binding limits](https://github.com/MorningHQ/MartianBackend/blob/main/docs/usage.md#connect-running-sandbox-mcp-services).
 
 The binding discovers all listed servers, follows bounded tool-list pagination and rejects missing selected tools. Aliases combine the connection name with a stable hash of the remote name, allowing duplicate remote names across servers. Definitions retain the actual JSON schemas; arguments are validated locally without retrieving remote schema references. Business-schema conversion is not implemented. Protocol/application errors never trigger a switch to real services.
 
@@ -40,7 +55,7 @@ Private customer repositories can materialize a reviewed SDK revision without a 
     destination: martian-redteam
 ```
 
-The source action copies only `pyproject.toml`, `README.md` and `src`; callers should pin a full commit SHA and pass that directory as their locked Python or Docker named-context dependency.
+The source action copies only `pyproject.toml`, `README.md`, `LICENSE`, `NOTICE` and `src`; callers should pin a full commit SHA and pass that directory as their locked Python or Docker named-context dependency.
 
 ## Optional runtime reporting
 
@@ -73,7 +88,7 @@ This illustrates one invocation; a server normally starts once in its lifespan, 
 
 The exporter buffers at most 1,000 metadata events in memory and sends up to 25 v3 events every two seconds with a five-second HTTP timeout. It never retries, persists or replays uncertain delivery. Queue overflow or reporting while stopped increments `dropped`; failed/uncertain export increments `delivery_failed`; acknowledged events increment `sent`. These counters are available on the reporter and bounded metadata logs, but are not uploaded to the dashboard. Shutdown cancels export and counts queued events as dropped; it does not flush. Business calls continue independently of export failures, without re-executing tools or changing their reported application result. Invalid startup configuration fails explicitly. Monitor application delivery logs/counters; absence of backend events does not establish inactivity.
 
-The SDK now submits the [v3 contract](../../martian-collector/docs/contract.md#application-resource-runtime-contract-v3) to `/resource-events`. It retains UUID correlation, configured kind/system/name, completion time, duration and outcome, and adds bounded optional resource-response mapping. The backend keeps the earlier v2 endpoint for existing clients; there is no automatic downgrade. Names must be safe configured identifiers, not user content. This is not comprehensive PII detection. Backend and SDK schema copies must evolve together. The runtime view retains deployment/version boundaries and labels its latest-500 aggregate and latest-50 details limits. This source implementation was accepted locally on September 30 with two Bedrock calls and one commerce MCP lookup; it is not a published SDK release or agentless discovery capability.
+The SDK now submits the [v3 wire models](../src/martian_redteam/runtime_schema.py) to `/resource-events`. It retains UUID correlation, configured kind/system/name, completion time, duration and outcome, and adds bounded optional resource-response mapping. The backend keeps the earlier v2 endpoint for existing clients; there is no automatic downgrade. Names must be safe configured identifiers, not user content. This is not comprehensive PII detection. Backend and SDK schema copies must evolve together. The runtime view retains deployment/version boundaries and labels its latest-500 aggregate and latest-50 details limits. This source implementation was accepted locally on September 30 with two Bedrock calls and one commerce MCP lookup; it is not a published SDK release or agentless discovery capability.
 
 ### Explicit resource response mappings
 
@@ -99,7 +114,7 @@ For lists, set `path=("orders",)` and `many=True`. The mapper reads only the con
 
 ## Explicit Kubernetes request reporting
 
-This opt-in uses [runtime v4](../../martian-collector/docs/contract.md#application-native-request-contract-v4).
+This opt-in uses [runtime v4 wire models](../src/martian_redteam/runtime_schema.py).
 Upgrade the backend first; the reporter makes one delivery attempt with no downgrade.
 Leave `native_kubernetes=False` (default) to retain v3 and its data boundary.
 
@@ -146,7 +161,7 @@ must be recollected before they can match. The Sources credential workflow is un
 metadata export queue and the CI release gate. First enroll the deployment under
 Discovery → Kill switch. Download its non-secret assignment and separate `mg_`
 credential; mount the credential as a private file. Backend migration 0020 and the
-[gate v1 API](../../backend/docs/discovery.md#sdk-call-gate-v1) are required.
+[gate v1 API](https://github.com/MorningHQ/MartianBackend/blob/main/docs/discovery.md#sdk-call-gate-v1) are required.
 
 ```python
 from pathlib import Path

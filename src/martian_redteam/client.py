@@ -8,6 +8,7 @@ import httpx
 from pydantic import ValidationError
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from martian._privacy import RedactionPolicy
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.config import Settings
 from martian_redteam.protocol import (
@@ -19,7 +20,7 @@ from martian_redteam.protocol import (
 )
 from martian_redteam.types import EvaluatorContext, EvaluatorOutput, SimulatorContext, SimulatorOutput
 
-_RETRYABLE_STATUS = frozenset({429, 503})
+_RETRYABLE_STATUS = frozenset({429})
 _WAIT_BACKOFF = wait_exponential(multiplier=0.5, min=0.5, max=8)
 
 
@@ -28,7 +29,7 @@ class ClientError(RuntimeError):
 
 
 class RetryableClientError(ClientError):
-    """Transient failure that may be retried (connect, 429, 503)."""
+    """A failure known to precede execution (connect or admission 429)."""
 
     def __init__(self, message: str, *, retry_after: float | None = None) -> None:
         super().__init__(message)
@@ -72,7 +73,7 @@ class Client:
     ) -> None:
         self.settings = settings or Settings()
         if not self.settings.api_key.get_secret_value():
-            raise ClientError("MARTIAN_API_KEY is not set")
+            raise ClientError(f"{self.settings.model_config['env_prefix']}API_KEY is not set")
         timeout = httpx.Timeout(self.settings.request_timeout_seconds)
         headers = {
             "X-API-Key": self.settings.api_key.get_secret_value(),
@@ -84,7 +85,13 @@ class Client:
             headers=headers,
             timeout=timeout,
             transport=transport,
+            follow_redirects=False,
+            trust_env=False,
         )
+
+    @property
+    def redaction_policy(self) -> RedactionPolicy:
+        return RedactionPolicy.from_secrets(self.settings.api_key)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -103,8 +110,8 @@ class Client:
         payload = await self._wait("simulator", content, context.model_dump(exclude_none=True))
         try:
             return SimulatorOutput.model_validate(payload)
-        except ValidationError as error:
-            raise ClientError(f"simulator output failed schema validation: {error}") from error
+        except ValidationError:
+            raise ClientError("simulator output failed schema validation") from None
 
     async def evaluate(
         self,
@@ -119,8 +126,8 @@ class Client:
         payload = await self._wait("evaluator", content, context.model_dump(exclude_none=True))
         try:
             return EvaluatorOutput.model_validate(payload)
-        except ValidationError as error:
-            raise ClientError(f"evaluator output failed schema validation: {error}") from error
+        except ValidationError:
+            raise ClientError("evaluator output failed schema validation") from None
 
     @retry(
         retry=retry_if_exception(_is_retryable),
@@ -147,11 +154,11 @@ class Client:
         except httpx.ConnectTimeout as error:
             raise RetryableClientError(f"{assistant_id} connect timed out") from error
         except httpx.ConnectError as error:
-            raise RetryableClientError(f"{assistant_id} connect failed: {error}") from error
+            raise RetryableClientError(f"{assistant_id} connect failed") from error
         except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as error:
             raise ClientError(f"{assistant_id} run timed out; not retrying because success is unknown") from error
         except httpx.RequestError as error:
-            raise ClientError(f"{assistant_id} request failed: {error}") from error
+            raise ClientError(f"{assistant_id} request failed ({type(error).__name__})") from error
 
         try:
             envelope = parse_wait_body(response.text)

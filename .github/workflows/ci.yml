@@ -33,13 +33,13 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals
 
       - name: Check formatting
-        run: uv run ruff format --check src tests examples
+        run: uv run --extra evals ruff format --check src tests examples scripts
 
       - name: Lint Python
-        run: uv run ruff check src tests examples
+        run: uv run --extra evals ruff check src tests examples scripts
 
   types:
     name: Types
@@ -60,13 +60,13 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals
 
       - name: Type-check Python
-        run: uv run --extra mcp mypy src
+        run: uv run --extra mcp --extra evals mypy src
 
       - name: Compile source
-        run: uv run python -m compileall -q src
+        run: uv run --extra evals python -m compileall -q src
 
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -91,12 +91,12 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals
 
       - name: Run Python tests
         run: >
-          uv run pytest -q
-          --cov=martian_redteam
+          uv run --extra evals pytest -q
+          --cov=martian_redteam --cov=martian
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --junitxml=junit.xml
@@ -132,7 +132,10 @@ jobs:
       - name: Build wheel and validate example config
         run: |
           set -euo pipefail
+          uv sync --locked --all-extras
           uv build
+          uv run --all-extras twine check --strict dist/*
+          uv run --all-extras python scripts/check_release.py --install
           shopt -s nullglob
           wheels=(dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then
@@ -141,7 +144,10 @@ jobs:
             exit 1
           fi
           uv venv .ci-wheel
-          uv pip install --python .ci-wheel "${wheels[0]}"
+          uv pip install --python .ci-wheel "${wheels[0]}[evals]"
+          .ci-wheel/bin/martian --version
+          .ci-wheel/bin/martian redteam validate examples/config.yaml
+          .ci-wheel/bin/python -c "from martian.evals import load_dataset; from martian.redteam import red_team"
           .ci-wheel/bin/martian-redteam --version
           .ci-wheel/bin/martian-redteam catalog
           .ci-wheel/bin/martian-redteam validate examples/config.yaml

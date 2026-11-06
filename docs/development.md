@@ -1,11 +1,18 @@
 # Development
 
+The distribution is now `martian-sdk`; include `--extra evals` when syncing
+and running the SDK suite. The migrated `tests/evals` suite exercises real local
+MLflow and loopback Backend/judge fixtures. The existing redteam tests remain
+external-network-free. See [SDK and CI](sdk-and-ci.md).
+
 ## Layout
 
-Editable install from the repo root (`uv sync`). Package lives under `src/martian_redteam` (hatchling src layout).
+Editable install from the repo root (`uv sync`). Packages live under `src/martian`, `src/martian_redteam`, and `src/martian_evals_kit` (hatchling src layout).
 
 | Path | Role |
 | --- | --- |
+| `src/martian/config.py` | Immutable origin/token and separate CI attribution |
+| `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
@@ -17,8 +24,8 @@ Editable install from the repo root (`uv sync`). Package lives under `src/martia
 
 ```bash
 uv sync --locked
-uv run ruff format src tests examples
-uv run ruff check src tests examples
+uv run ruff format src tests examples scripts
+uv run ruff check src tests examples scripts
 uv run --extra mcp mypy src
 uv run pytest -q
 uv run python -m compileall -q src
@@ -30,7 +37,7 @@ Optional local coverage (CI always produces XML + JUnit):
 uv run pytest -q --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 ```
 
-Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian_redteam`.
+Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK namespaces.
 
 ## This repository’s CI
 
@@ -47,7 +54,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on `martian
 
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
 
-`test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_KEY` or `OPENAI_API_KEY`, and does not run `martian-redteam run`.
+`test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_TOKEN` or `OPENAI_API_KEY`, and does not run `martian redteam run`.
 
 ## Testing this library
 
@@ -55,9 +62,9 @@ The product is a CI/CD SDK. GitHub Actions is the harness; this package is the s
 
 | Layer | Where | Secrets | Required on PRs |
 | --- | --- | --- | --- |
-| 1. Library | `pytest` + recorded `/runs/wait` fixtures | none | yes |
+| 1. Library | `pytest` + typed operations/legacy recorded fixtures | none | yes |
 | 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate` | none | yes |
-| 3. Live dogfood | `martian-redteam run` / root `action.yml` / `red-team.yml` against staging graphs | `MARTIAN_API_KEY` | **no** (dispatch + environment, after Phase 0) |
+| 3. Live dogfood | `martian redteam run` / root `action.yml` / `red-team.yml` against staging graphs | `MARTIAN_API_TOKEN` | **no** (dispatch + environment, after coordinated single-key service qualification) |
 
 Layer 2 uses a nested validate composite so the customer gate Action (`action.yml`) stays **run-only**. That avoids a `command: validate` switch that could later be forgotten on `pull_request` once a staging key exists.
 
@@ -81,7 +88,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - `pytest-asyncio` mode `auto`.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
-When martian-agents Phase 0 contract tests exist, copy real wait bodies into `tests/fixtures/` and keep envelope/heartbeat cases.
+Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
 
 ## Adding a vulnerability
 
@@ -103,6 +110,11 @@ When martian-agents Phase 0 contract tests exist, copy real wait bodies into `te
 Internal modules (`protocol`, `config`, `catalog.get_*`) may change without a major version while the package is `0.x`.
 
 ## Release checklist (internal)
+
+The canonical release procedure is [release preparation](releasing.md). Its
+artifact guard checks and clean-installs both wheel and sdist. Strict Mypy
+now covers both SDK modules; no eval typing exemption remains.
+
 
 - [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13, packaging, action-smoke)
 - [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions

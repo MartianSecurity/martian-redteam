@@ -1,11 +1,11 @@
 # Composite action for customer repositories.
-# Callers must check out their repo first. Pass MARTIAN_API_KEY (required) and
-# optional MARTIAN_API_URL via env on the job or this step — not as action inputs.
+# Callers must check out their repo first. Pass MARTIAN_API_TOKEN (required) and
+# required MARTIAN_API_URL via env on the job or this step — not as action inputs.
 # This action does not upload artifacts; the caller should upload the output
 # folder with if: always() so a failed local gate still leaves results.
 # See docs/gate-and-ci.md.
 name: Martian Red Team
-description: Run martian-redteam YAML assessment and fail closed on the local gate
+description: Run Martian redteam YAML assessment and fail closed on the local gate
 
 inputs:
   config:
@@ -21,8 +21,8 @@ inputs:
     default: results
   max-concurrent:
     description: >
-      Override system_config.max_concurrent (CLI -c). Keep at 2 or 1 on
-      GitHub-hosted runners because of shared WAF IP limits.
+      Override system_config.max_concurrent (CLI -c). Keep at 2 or 1
+      unless the granted Backend admission limits support more.
     required: false
     default: ""
   attacks-per-vuln:
@@ -42,7 +42,7 @@ runs:
     # Expressions are substituted into the script text before bash parses it,
     # so quoting cannot contain them. Every value reaches the script through
     # env and is referenced as a quoted shell variable.
-    - name: Install martian-redteam
+    - name: Install martian-sdk
       shell: bash
       env:
         MARTIAN_REDTEAM_ACTION_PATH: ${{ github.action_path }}
@@ -57,7 +57,7 @@ runs:
     - name: Run assessment
       shell: bash
       env:
-        MARTIAN_API_KEY: ${{ env.MARTIAN_API_KEY }}
+        MARTIAN_API_TOKEN: ${{ env.MARTIAN_API_TOKEN }}
         MARTIAN_API_URL: ${{ env.MARTIAN_API_URL }}
         MARTIAN_REDTEAM_CONFIG: ${{ inputs.config }}
         MARTIAN_REDTEAM_OUTPUT: ${{ inputs.output }}
@@ -71,4 +71,4 @@ runs:
         if [ -n "$MARTIAN_REDTEAM_ATTACKS_PER_VULN" ]; then
           extra+=(-a "$MARTIAN_REDTEAM_ATTACKS_PER_VULN")
         fi
-        martian-redteam run "$MARTIAN_REDTEAM_CONFIG" -o "$MARTIAN_REDTEAM_OUTPUT" "${extra[@]}"
+        martian redteam run "$MARTIAN_REDTEAM_CONFIG" -o "$MARTIAN_REDTEAM_OUTPUT" "${extra[@]}"

@@ -3,30 +3,30 @@
 ## Trust boundary
 
 ```text
-Customer network                         Martian VPC
-─────────────────                        ────────────
-model_callback  ◄── attack string
-      │                                  POST /runs/wait (simulator)
-      │                                  POST /runs/wait (evaluator)
-      └── reply ──────────────────────►  attack + reply + tools_called
-                                         persisted in Aegra/Postgres
+Customer process             Approved Backend origin          Agents
+local target callback <--- SDK -- Bearer / typed DTOs --------> execution owner
+         |                    |                                  |
+         +-- target provider  +-- eval outputs / CI records       +-- models
 ```
 
-The customer model is **never** invoked from Martian’s VPC. Martian never receives the customer’s API keys for OpenAI/Anthropic/etc. unless the callback (wrongly) forwards them.
+Modern SDK clients call only Backend with one scoped platform token. The target
+callback remains local and owns its provider authentication. Simulation sends
+catalog IDs, purpose, method/mode and an optional prompt. Judging sends attack,
+reply, tool identifiers and optional custom criteria. These texts can contain
+sensitive target data; they cross the customer boundary and enter the service's
+controlled operation/recovery lifecycle. SDK digests do not remove data from
+actual model requests. Backend needs raw dataset outputs for canonical scoring.
 
-Evaluator calls **do** send the target’s reply to Martian. If the target leaks a system prompt, credential, or PII, that text is in the wait body and may be stored with the run. Document this to anyone enabling CI on production apps.
+Requests cannot choose model/service/target endpoints. YAML cannot override the
+platform origin. HTTPS is required except loopback; redirects and environment
+proxies are off unless proxies are explicitly opted in. Constructor connections
+must supply a complete URL/token pair. No `.env` is loaded and unused legacy
+variables are ignored; legacy auth is never selected after a failed public call.
 
-## What the SDK sends
-
-| Direction | Content |
-| --- | --- |
-| To simulator | Catalog ids, purpose string, attack method, mode, a generation instruction |
-| To target | Simulator `attack`, possibly encoded |
-| To evaluator | Attack string, target reply, `tools_called`, catalog ids, optional custom `criteria` |
-| Headers | `X-API-Key`, `Content-Type`, `Accept` |
-| Metadata | `sdk=martian-redteam`, `catalog_version` (no payloads) |
-
-The SDK does not send: customer cloud credentials, `.env` files, source trees, or conversation history beyond the single-turn probe (Phase 1).
+Reports default to content digests. Content opt-in does not disable credential
+redaction, including constructor secrets after client close and report copies.
+Explicit input/output redaction flags take precedence. Raw in-memory assessment
+fields/model dumps and private local MLflow traces are not safe public reports.
 
 ## Runtime reporting data boundary
 
@@ -36,29 +36,35 @@ Strict allowlisted fields and identifier syntax limit the payload but cannot det
 
 ## API keys
 
-Today martian-agents `auth.py` has **one shared `MARTIAN_API_KEY`** and **one Aegra identity**. Every holder of that key shares threads and run history.
+An owner/admin issues one organisation key with explicitly selected evals/CI
+and/or `redteam:run` capabilities and applicable resource restrictions. The
+plaintext is shown once; save it in a secret manager. Lists and later reads
+contain metadata only. The key cannot manage the console or mint other keys.
+Existing evals tokens retain their original capabilities; use a newly authorized
+key to add redteam. Server-side revocation/lifecycle checks apply on each call.
+Model entitlement and per-key operational limits remain server-owned.
 
-Hard gates before a **public** SDK:
+Legacy direct `martian_redteam.Client` / `martian-redteam` is an explicit operator
+compatibility path only. It requires a complete explicit `Settings` pair or
+`MARTIAN_REDTEAM_API_URL` / `MARTIAN_REDTEAM_API_KEY`, never generic platform
+variables or `.env`. Its key is bound to that selected origin and YAML cannot
+change it. Never reuse a platform token as an Agents key. The legacy development
+HTTP escape hatch does not apply to modern `MartianConfig`.
 
-1. **Per-key identity** — distinct keys map to distinct identities; org-scoped thread/run access.
-2. **Quotas** — application-level concurrency and daily caps **per key**. WAF is IP-based and will collide across GitHub-hosted runners.
-3. **Pinned graph I/O** — `simulator` / `evaluator` `context_schema` and structured output. Extra `configurable` keys currently fail coercion on the generic assistant.
-
-Until (1) and (2) exist, this repo is **internal/staging-only**. Dogfood with the shared key is allowed. `pip install` to third parties is not.
-
-The key is sent as `X-API-Key` to the host in `MARTIAN_API_URL` or YAML `api.url`. Both must be `https://`; `http://` is accepted only for `localhost` and `127.0.0.1`, so the key cannot leave the machine in clear text. `MARTIAN_ALLOW_INSECURE_API_URL=1` lifts the rule for development and is read from the process environment only, so a committed `.env` or YAML file cannot enable it. The rule covers the scheme, not the host: a YAML change that points `api.url` at another `https://` host still sends the key there. Treat `api.url` changes in review as secret-handling changes, and do not run `run` with the secret on branches you have not reviewed.
-
-Do not log `Settings.api_key`. It is a `SecretStr`. httpx headers are set at client construction; tests assert the header on the mock transport without printing it.
+The single-key contract applies to evals/redteam APIs. Target-provider, MCP,
+runtime reporting and cooperative call-gate credentials have separate scopes.
+No hosted/customer readiness is established merely by installing the wheel;
+qualify the coordinated services and auth/resource isolation before rollout.
 
 ## Retention and AUP
 
-Attack strings and replies persist in Aegra/Postgres according to the **service** retention policy (not defined in this repo). Toxicity and illegal-activity categories will produce disallowed content by design. Requirements on the service side:
+Operation payloads/results and native execution data follow the **service** retention and recovery policy. Backend/Agents must qualify database/checkpoint/Redis cleanup together; SDK local timeouts do not prove server payload deletion. Toxicity and illegal-activity categories will produce disallowed content by design. Requirements on the service side:
 
 - Acceptable-use statement for stored adversarial payloads
 - Bedrock-refusal path treated as an **error**, not a silent pass
 - Retention/deletion story before public tenants
 
-This SDK records whatever the graphs return. It does not filter attack text.
+The SDK accepts only typed operation results. It does not filter attack text or use a provider refusal as a passing judgment.
 
 ## Supply chain and CI hygiene
 
