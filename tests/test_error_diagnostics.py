@@ -94,7 +94,9 @@ def test_cli_expected_failures_are_concise_reportable_and_private(tmp_path, monk
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     callback = tmp_path / "callback.py"
     callback.write_text(
-        f"raise RuntimeError({private!r})\n" if scenario == "callback-import" else "def answer(prompt): return 'safe'\n"
+        f"raise type({private!r}, (RuntimeError,), {{}})({private!r})\n"
+        if scenario == "callback-import"
+        else "def answer(prompt): return 'safe'\n"
     )
     config = tmp_path / "redteam.yml"
     config.write_text(

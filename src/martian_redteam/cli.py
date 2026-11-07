@@ -193,7 +193,7 @@ def run_command(
                     {
                         "schema_version": 1,
                         "state": "failed",
-                        "error_type": type(error).__name__,
+                        "error_type": safe_text(type(error).__name__)[:80],
                         "error_code": code,
                         "message": detail,
                         "error_id": identifier,
