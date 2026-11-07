@@ -111,6 +111,12 @@ Internal modules (`protocol`, `config`, `catalog.get_*`) may change without a ma
 
 ## Release checklist (internal)
 
+Expected CLI error output follows the documented [Typer stderr](https://typer.tiangolo.com/tutorial/printing/)
+and [exit-code](https://typer.tiangolo.com/tutorial/terminating/) conventions.
+Keep the diagnostic boundary in `martian._errors` controlled: no raw response
+bodies, arbitrary server error codes, or callback exception text in safe reports.
+Keep report JSON compatible and test reopened/deep-copied report redaction.
+
 The canonical release procedure is [release preparation](releasing.md). Its
 artifact guard checks and clean-installs both wheel and sdist. Strict Mypy
 now covers both SDK modules; no eval typing exemption remains.

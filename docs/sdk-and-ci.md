@@ -3,11 +3,11 @@
 `martian-sdk` is the canonical Python 3.12+ distribution. It contains
 `martian.evals`, `martian.redteam`, the `martian` CLI, and the legacy import
 names. The source repository remains `MorningHQ/martian-redteam`. The package
-is a release candidate; it has not been published. Install the delivered wheel
-with its `evals` extra for the persisted CI runner:
+is published on [PyPI](https://pypi.org/project/martian-sdk/). Install an exact
+released version with its `evals` extra for the persisted CI runner:
 
 ```bash
-python -m pip install '/absolute/path/martian_sdk-0.1.0-py3-none-any.whl[evals]'
+python -m pip install 'martian-sdk[evals]==0.1.1'
 martian --version
 ```
 
@@ -211,6 +211,41 @@ not target bodies. Do not upload the private local MLflow SQLite store/traces
 as a public CI artifact: it contains prediction inputs, outputs and expectations.
 Backend still needs raw dataset outputs to score them, and Agents judging
 receives attack/reply text. See [the data boundary](security-and-data.md).
+
+## Reporting failures
+
+Expected API failures show a short explanation, an error code, and an operation
+ID when execution has an identity. Authentication, scope, request limits, expired
+results, and unknown execution outcomes have distinct guidance. For example:
+
+```text
+Permission denied. Check the key's capabilities, agent scope, and organisation access.
+[http_403; operation_id=11111111-1111-4111-8111-111111111111]
+```
+
+Python callers can inspect `RedteamOperationError.code`, `operation_id`, and the
+optional `reason_code` / UUID `request_id`. The existing `code` values remain
+compatible. An unknown execution outcome still requires `get_operation` with
+the same ID; the SDK does not replay the execution POST to obtain a pass.
+Eval upload failures retain their UUID request ID when one is available.
+
+Default redteam reports retain safe codes and existing operation-ID fields;
+`case.error_code` also reads the code from a reopened report. The JSON shape is
+unchanged, so earlier SDK versions can still load these reports. Raw provider
+bodies and callback exception text remain outside safe reports.
+
+The CLI groups repeated errors and limits terminal detail. Full safe per-probe
+references remain in `risk-assessment.json`; CI problems remain in
+`ci-session.json`. Setup failures exit with status 2 and show a local report ID
+matching `execution-error.json`, which includes the SDK version and controlled
+message. Gate failures continue to exit with status 1. Expected CLI failures do
+not print a traceback. Error receipts are local files, not automatic uploads.
+
+To report a problem, include the SDK version, error code, relevant operation or
+request ID, and the safe receipt (or workflow run link). A CLI setup report ID
+identifies its local receipt; it is not a Backend request ID. Successful commands
+do not emit extra diagnostics. Applications using the Python SDK retain control
+of their own logging and exception handling.
 
 ## Migration, release and qualification
 

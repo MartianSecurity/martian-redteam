@@ -82,7 +82,7 @@ in-memory prediction data and local MLflow traces remain private customer data.
 
 Taxonomy IDs/types live in the catalog; rubrics/model selection live in Agents.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
-Package version is `src/martian/_version.py` (currently 0.1.0); catalog version
+Package version is `src/martian/_version.py` (currently 0.1.1); catalog version
 is independently 0.2.0; graph/policy revisions come from the service.
 
 ## CI and scoring

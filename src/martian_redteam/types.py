@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator
 
+from martian._errors import error_code, saved_error_code
 from martian._privacy import RedactionPolicy
 
 ErrorKind = Literal["infrastructure", "target"]
@@ -59,6 +60,15 @@ class TestCase(BaseModel):
     policy_revision: str | None = None
     simulation_operation_id: str | None = None
     evaluation_operation_id: str | None = None
+    _error_code: str | None = PrivateAttr(default=None)
+
+    @property
+    def error_code(self) -> str | None:
+        return self._error_code or saved_error_code(self.error)
+
+    def _bind_error_code(self, code: object) -> TestCase:
+        self._error_code = error_code(code)
+        return self
 
 
 class VulnerabilityTypeResult(BaseModel):
@@ -110,6 +120,7 @@ class RiskAssessment(BaseModel):
 
     def for_report(self, *, include_target_content: bool = False) -> RiskAssessment:
         """A sanitized copy; the in-memory assessment remains available to the customer."""
+        from martian._errors import message
         from martian._privacy import redact_data, report_text, safe_text
 
         data = redact_data(self.model_dump(), policy=self._redaction)
@@ -119,7 +130,7 @@ class RiskAssessment(BaseModel):
             redact_env="MARTIAN_EVALS_REDACT_INPUTS",
             policy=self._redaction,
         )
-        for case in data["test_cases"]:
+        for original, case in zip(self.test_cases, data["test_cases"], strict=True):
             for field in ("input", "actual_output", "reason"):
                 if case[field] is not None:
                     flag = "MARTIAN_EVALS_REDACT_INPUTS" if field == "input" else "MARTIAN_EVALS_REDACT_OUTPUTS"
@@ -127,7 +138,12 @@ class RiskAssessment(BaseModel):
                         case[field], include_content=include_target_content, redact_env=flag, policy=self._redaction
                     )
             if case["error"]:
-                case["error"] = f"{case['error_kind'] or 'probe'} execution failed"
+                code = original.error_code
+                case["error"] = (
+                    message(code, operation_id=case["evaluation_operation_id"] or case["simulation_operation_id"])
+                    if code
+                    else f"{case['error_kind'] or 'probe'} execution failed"
+                )
             for turn in case["turns"]:
                 turn["content"] = report_text(
                     turn["content"],

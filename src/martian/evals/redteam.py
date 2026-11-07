@@ -7,6 +7,7 @@ from typing import Any, NoReturn
 
 from pydantic import ValidationError
 
+from martian._errors import error_code, message
 from martian._privacy import redact_data, report_text
 from martian.evals.gate import GateFailure, _clean, _safe_name
 from martian.evals.state import STATE, GateRecord
@@ -70,7 +71,12 @@ def assert_redteam(
     for case in assessment.test_cases:
         error = ""
         if case.error or case.error_kind:
-            error = f"redteam {case.error_kind or 'probe'} error"
+            code = error_code(case.error_code)
+            error = (
+                message(code, operation_id=case.evaluation_operation_id or case.simulation_operation_id)
+                if code
+                else f"redteam {case.error_kind or 'probe'} error"
+            )
         elif case.score is None or not case.input or case.actual_output is None or not case.reason:
             error = "redteam probe has incomplete input/output evidence"
         rows.append(

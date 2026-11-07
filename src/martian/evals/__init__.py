@@ -1,5 +1,11 @@
 """Martian evals CI kit: the MLflow regression-testing pattern with Backend-side scoring."""
 
+import os
+
+# The SDK owns its tracing setup; an agent-skill startup hint is unnecessary here.
+# An explicit application setting continues to take precedence.
+os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
 from martian.evals.dataset import EvalDataset, load_dataset
