@@ -61,6 +61,144 @@ For shared redteam results, use `assert_redteam(assessment)` and
 
 ## What the gate enforces
 
+### Local response-guideline judge
+
+For response-only policy checks, use the SDK-owned, versioned judge instead of
+MLflow's generic `ExpectationsGuidelines` prompt:
+
+```python
+from martian.evals import evaluate, assert_checks, response_guidelines
+
+judge = response_guidelines(
+    model="openai:/YOUR_JUDGE_MODEL",  # configure this provider's credentials locally
+    name="policy",
+    input_key="message",
+    inference_params={"temperature": 0},  # only if supported by your provider
+)
+result = evaluate(
+    data=[{
+        "inputs": {"message": "When do you open?"},
+        "outputs": "Hello! We open at nine.",  # recorded evidence; no target call
+        "expectations": {"guidelines": ["The response must include a greeting."]},
+    }],
+    scorers=[judge],
+)
+assert_checks(result)
+```
+
+This opt-in scorer does not replace arbitrary third-party scorers or the hosted
+redteam evaluator. Its policy comes only from `expectations.guidelines`; it adds
+no catalog rubrics. The request is context, and the selected response is the
+graded evidence. Other input fields, including case IDs and labels, are excluded.
+Use a string input or select a string field with `input_key` (default `message`).
+Empty replies or missing/empty guidelines are errors before any model request.
+
+`response-guidelines-v5` separates system instructions from untrusted evidence.
+Each guideline receives a reason, evidence, and one enum status: `complied`,
+`violated`, `not_applicable`, or `uncertain`. The SDK computes a boolean: any
+violation fails; all complied/not-applicable passes. Applicability alone never
+fails. The judge receives numbered `response_segments` whose text reconstructs
+the original response. For content violations it returns `evidence_ids`, with
+`evidence_kind="quote"`. The wire schema has no quote text field. The SDK retrieves the exact source
+text, avoiding model transcription, translation and Unicode-normalization errors.
+When several segments are cited, the quote includes the entire range between
+the first and last segment, preserving intervening context such as negations.
+Required-content omissions need a description in `reason` and no citation IDs.
+Unknown statuses, incomplete/duplicate checks, invalid or duplicate citation IDs,
+uncertainty and transport/schema errors are scorer errors, so the gate fails closed.
+Compliant/non-applicable checks need only a brief reason, but may also cite source
+segments or explain absent prohibited content. Evidence kind does not determine
+status: absence of required content violates a rule, while absence of prohibited
+content can comply. All supplied citations are validated regardless of status.
+The model must not supply its own quote text. The normalized
+`martian.judge.checks` metadata retains the previous check shape, with the source
+quote filled by the SDK. This changes the internal judge wire schema, not the
+public scorer arguments or the boolean gate contract.
+There is no semantic retry, verdict repair, or natural-language reason-to-verdict
+override. Evidence validation cannot establish that a model's interpretation is
+correct; calibrate on known passing and violating examples for your actual policy.
+
+Model routing and credentials use the pinned MLflow adapter. No provider/model is
+selected implicitly. Optional inference parameters are `temperature`, `top_p`,
+`max_tokens` and `seed`, subject to provider support. Omitted parameters use provider
+defaults; even temperature zero does not guarantee deterministic judgments. The
+adapter may retry without JSON Schema when the provider explicitly rejects that
+feature; the SDK still validates the returned checks. No invalid verdict is retried.
+
+Feedback metadata includes prompt version/hash, guidelines hash, model, requested
+inference parameters, validated checks, and token usage when reported by the adapter.
+`martian.judge.citation_format` is `response-segments-v1`;
+`martian.judge.citations` contains each cited guideline index, segment IDs and
+the enclosing `start`/`end` offsets in the original response. Offsets count Python
+Unicode code points (end exclusive), not UTF-8 bytes or JavaScript UTF-16 units.
+`include_judge_prompt=True` also retains the rendered messages. Local MLflow data
+contains customer content: keep it private, and do not publish it as a CI artifact.
+This metadata is the logical request/parsed evidence, not a raw HTTP transcript.
+The provider key stays in provider configuration, outside prompt metadata.
+Offline local checks (`MARTIAN_EVALS_OFFLINE=1`) need no Martian service token;
+an LLM judge still needs its provider credentials and sends evidence to that provider.
+
+### Explicit yes/no conditions
+
+For a benchmark expressed as a failure question, use `response_conditions` to
+keep answer polarity out of the model's decision. The model answers the original
+question; the SDK maps the validated answer to pass/fail using the caller's
+explicit `fail_when`. It does not extract or rewrite a question from free-form
+guidelines, and does not infer verdicts from a natural-language rationale.
+
+```python
+from martian.evals import response_conditions
+
+judge = response_conditions(model="openai:/YOUR_JUDGE_MODEL")
+feedback = judge(
+    inputs={"message": "A request to the assistant"},
+    outputs="The saved assistant reply",
+    expectations={"conditions": [
+        {"question": "Does the reply include a greeting?", "fail_when": "no"},
+    ]},
+)
+```
+
+Each condition requires a nonempty `question` and `fail_when="yes"` or `"no"`.
+The model sees the question without `fail_when`, reference labels or case IDs.
+Its `yes`/`no` answer is mapped deterministically; one failing condition fails
+the overall result. Unknown answers, missing/duplicate conditions, invalid
+citations and `uncertain` remain scorer errors and fail the gate closed.
+The `response-conditions-v1` wire schema has `condition_index`, `reason`,
+`evidence_ids` and `answer`. The SDK retrieves cited text or retains the reason
+as absence evidence when no segments are cited. It never accepts copied quote text.
+
+Both scorers default to `verify=False` and one model call. With `verify=True`,
+every valid, decisive draft receives one fixed second review against the complete original evidence, irrespective of its
+answer. The reviewer can retain or change the answer in either direction. The
+final answer is authoritative; disagreements are not settled by a retry loop or
+by parsing the rationale. An invalid/uncertain draft fails immediately, and an
+invalid/uncertain final review also fails closed. A second review can make a
+correct draft worse, so enable it only after validating its benefit for your
+model and criteria. Provider-level JSON-schema fallback
+can add an HTTP request as described above.
+
+Both modes distinguish literal occurrence, substantive discussion, and semantic
+statements; a refusal does not erase disclosed text. They preserve quantifiers,
+conjunctions and the boundary between request context and response content.
+These are interpretation instructions, not a guarantee of model correctness.
+Customers should specify exact matching versus meaning, whether quotations count,
+and what constitutes substantive content. Mistranslated or ambiguous benchmark
+questions need review; the SDK does not silently repair them to improve a score.
+
+Feedback metadata records `martian.judge.verification`, `model_calls`, and, for
+conditions, `condition_answers`, `condition_polarities` and `conditions_sha256`.
+`martian.judge.checks` retains the normalized guideline-index/status shape for
+existing consumers; its index refers to the corresponding condition. With review
+enabled, `draft`, `review_metadata` and `review_prompt_sha256` retain both stages;
+`include_judge_prompt=True` also retains `review_prompt`. `prompt_sha256` always
+identifies the first stage. Input/output token totals include both stages when
+both report usage. Review costs two model calls and can increase latency, so
+compare correctness, errors and cost on frozen examples with separate development
+and validation sets before adopting a change.
+
+### Session enforcement
+
 The plugin does nothing unless `--martian-evals-gate` is passed. With it, the session fails when:
 
 - a required variable is missing (a missing secret is a failed gate, never a skipped one) or
