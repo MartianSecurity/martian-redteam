@@ -14,7 +14,8 @@ from typer.testing import CliRunner
 from martian import __version__
 from martian.cli import app
 from martian.evals.client import Backend, BackendError
-from martian.redteam import Client, PromptInjection, PromptLeakage, RiskAssessment, a_red_team
+from martian.redteam import Client, PromptInjection, PromptLeakage, RedteamOperationError, RiskAssessment, a_red_team
+from martian_redteam.types import SimulatorContext
 
 
 def test_evals_cold_import_has_no_unsolicited_agent_instruction():
@@ -66,16 +67,20 @@ async def test_auth_error_keeps_actionable_code_and_references_in_default_report
     assert case.simulation_operation_id in reopened.test_cases[0].error
 
 
-def test_evals_error_keeps_upload_request_id_but_rejects_untrusted_header_and_body():
+@pytest.mark.parametrize("header", ["invalid", "reflected-credential"])
+def test_evals_error_keeps_upload_request_id_but_rejects_untrusted_header_and_body(header):
     request_id = str(uuid4())
     private = "raw-private-provider-response"
+    token = str(uuid4()).upper()
     requests = []
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(403, headers={"x-request-id": private}, json={"detail": private})
+        return httpx.Response(
+            403, headers={"x-request-id": private if header == "invalid" else token.lower()}, json={"detail": private}
+        )
 
-    backend = Backend("https://backend.example", "constructor-private-token", transport=httpx.MockTransport(respond))
+    backend = Backend("https://backend.example", token, transport=httpx.MockTransport(respond))
     try:
         with pytest.raises(BackendError) as failed:
             backend.upload_session({"request_id": request_id})
@@ -84,6 +89,28 @@ def test_evals_error_keeps_upload_request_id_but_rejects_untrusted_header_and_bo
     assert failed.value.code == "http_403" and failed.value.request_id == request_id
     assert "Permission denied" in str(failed.value) and request_id in str(failed.value)
     assert private not in str(failed.value) and len(requests) == 1
+    assert token.lower() not in str(failed.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_redteam_request_reference_cannot_reflect_a_constructor_credential():
+    token = str(uuid4()).upper()
+    async with Client(
+        api_url="https://backend.example",
+        token=token,
+        transport=httpx.MockTransport(lambda request: httpx.Response(403, headers={"x-request-id": token.lower()})),
+    ) as client:
+        with pytest.raises(RedteamOperationError) as failure:
+            await client.simulate(
+                SimulatorContext(
+                    vulnerability="prompt_leakage",
+                    vulnerability_type="system_prompt",
+                    purpose="Synthetic check",
+                    attack_method="prompt_injection",
+                )
+            )
+    assert failure.value.request_id is None
+    assert token.lower() not in str(failure.value).lower()
 
 
 @pytest.mark.parametrize("scenario", ["missing-token", "callback-import", "denied"])

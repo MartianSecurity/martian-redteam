@@ -54,9 +54,12 @@ def error_code(value: object) -> str | None:
     return None
 
 
-def reference(value: object) -> str | None:
+def reference(value: object, *, exclude: object = None) -> str | None:
     try:
-        return str(UUID(str(value)))
+        identifier = str(UUID(str(value)))
+        if exclude is not None and identifier == reference(exclude):
+            return None
+        return identifier
     except (ValueError, TypeError, AttributeError):
         return None
 

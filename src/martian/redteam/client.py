@@ -171,7 +171,11 @@ class Client:
         if response.status_code not in (200, 202, 410):
             # Never include vendor bodies, URLs, headers, or supplied credentials.
             raise RedteamOperationError(
-                operation_id, f"http_{response.status_code}", request_id=response.headers.get("x-request-id")
+                operation_id,
+                f"http_{response.status_code}",
+                request_id=reference(
+                    response.headers.get("x-request-id"), exclude=self.config.token.get_secret_value()
+                ),
             )
         try:
             operation = RedteamOperation.model_validate(response.json())

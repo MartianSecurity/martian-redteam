@@ -66,8 +66,9 @@ class Backend:
 
     def _send(self, method: str, path: str, *, json: dict[str, Any] | None = None, attempts: int = 1) -> dict[str, Any]:
         last = BackendError(0, "no Backend request attempted")
+        credential = self._client.headers["Authorization"].removeprefix("Bearer ")
         for attempt in range(attempts):
-            request_id = reference(json.get("request_id")) if json else None
+            request_id = reference(json.get("request_id"), exclude=credential) if json else None
             try:
                 response = self._client.request(method, path, json=json)
             except httpx.TransportError as exc:
@@ -108,7 +109,7 @@ class Backend:
                     response.status_code,
                     response.reason_phrase,
                     retry_after,
-                    request_id=reference(response.headers.get("x-request-id")) or request_id,
+                    request_id=reference(response.headers.get("x-request-id"), exclude=credential) or request_id,
                 )
                 retryable = response.status_code in RETRY_STATUS or (
                     response.status_code == 409 and RETRY_CONFLICT in detail
