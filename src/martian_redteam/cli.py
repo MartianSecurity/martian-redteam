@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
+from martian._errors import message, reference
 from martian._privacy import safe_text
-from martian.config import MartianConfig
+from martian.config import ConfigError, MartianConfig
 from martian_redteam import __version__
 from martian_redteam.catalog.attacks import ATTACKS
 from martian_redteam.catalog.frameworks import FRAMEWORKS
@@ -25,6 +28,7 @@ from martian_redteam.types import RiskAssessment
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 console = Console()
+errors = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -63,22 +67,52 @@ def _print_assessment(assessment: RiskAssessment) -> None:
             "yes" if result.gated else "no",
         )
     console.print(table)
-    failed = [case for case in assessment.test_cases if case.score == 0 or case.error]
+    infrastructure = [case for case in assessment.test_cases if case.error]
+    if infrastructure:
+        counts = Counter((case.error_code, case.error_kind) for case in infrastructure)
+        for code, kind in list(counts)[:10]:
+            sample = next(case for case in infrastructure if (case.error_code, case.error_kind) == (code, kind))
+            errors.print(
+                f"{counts[(code, kind)]} probe(s): " + (message(code) if code else sample.error or "Execution failed"),
+                markup=False,
+            )
+            if identifier := reference(sample.evaluation_operation_id or sample.simulation_operation_id):
+                errors.print("Operation ID: " + identifier, markup=False)
+        if len(counts) > 10:
+            errors.print(f"{len(counts) - 10} more error group(s); see the report.")
+    failed = [case for case in assessment.test_cases if case.score == 0 and not case.error]
     if not failed:
         return
-    detail = Table(title="Failed or errored probes")
+    detail = Table(title="Failed probes")
     detail.add_column("Vulnerability")
     detail.add_column("Attack")
     detail.add_column("Score")
     detail.add_column("Detail")
-    for case in failed:
+    for case in failed[:10]:
         detail.add_row(
             f"{case.vulnerability}/{case.vulnerability_type}",
             case.attack_method,
             "-" if case.score is None else str(case.score),
-            case.error or case.reason or "",
+            "Probe failed its evaluation policy; see the report.",
         )
     console.print(detail)
+    if len(failed) > 10:
+        console.print(f"{len(failed) - 10} more failed probe(s); see the report.")
+
+
+def _setup_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, ConfigError):
+        return "configuration_error", safe_text(error)
+    if isinstance(error, (ValidationError, ValueError, KeyError)):
+        return (
+            "configuration_error",
+            "Invalid assessment configuration. Run 'martian redteam validate' for field checks.",
+        )
+    if isinstance(error, (FileNotFoundError, ImportError, AttributeError)):
+        return "callback_load_failed", "Could not load the callback. Check its file, dependencies, and function name."
+    if isinstance(error, OSError):
+        return "file_access_failed", "Could not read or write an assessment file. Check paths and permissions."
+    return "assessment_execution_failed", "Assessment execution failed. Report the saved error receipt and SDK version."
 
 
 def _apply_run_overrides(
@@ -150,19 +184,32 @@ def run_command(
         _print_assessment(assessment.for_report())
         console.print(f"Wrote {written}")
     except Exception as error:
-        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (destination / "execution-error.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "state": "failed",
-                    "error_type": type(error).__name__,
-                }
+        code, detail = _setup_error(error)
+        identifier = str(uuid4())
+        try:
+            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (destination / "execution-error.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "failed",
+                        "error_type": safe_text(type(error).__name__)[:80],
+                        "error_code": code,
+                        "message": detail,
+                        "error_id": identifier,
+                        "sdk_version": __version__,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
+            receipt = "Receipt: " + safe_text(destination / "execution-error.json")
+        except OSError:
+            receipt = "Could not save the error receipt. Check output directory permissions."
+        errors.print(
+            f"Assessment failed [{code}]: {detail}\nReport ID: {identifier}\n{receipt}",
+            markup=False,
         )
-        console.print(f"[red]Assessment setup/execution failed:[/red] {type(error).__name__}")
         raise typer.Exit(code=2) from None
     try:
         evaluate_gate(
@@ -172,8 +219,8 @@ def run_command(
             pass_rate_threshold=config.gate.pass_rate_threshold,
         )
     except GateFailure as error:
-        console.print(f"[red]Gate failed:[/red] {error}")
-        raise typer.Exit(code=1) from error
+        errors.print("Gate failed: " + safe_text(error), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
 
 @app.command("validate")

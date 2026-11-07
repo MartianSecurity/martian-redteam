@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from martian import __version__
+from martian._errors import concise_problems
 from martian.config import MartianConfig
 from martian_redteam.cli import app as redteam_app
 
@@ -82,6 +83,6 @@ def run_ci(
     typer.echo(
         f"CI gate: {result.state}; session {result.session_id or 'not persisted'}; receipt {output / 'ci-session.json'}"
     )
-    for problem in result.problems:
+    for problem in concise_problems(result.problems):
         typer.echo(problem, err=True)
     raise typer.Exit(code=result.exit_code)

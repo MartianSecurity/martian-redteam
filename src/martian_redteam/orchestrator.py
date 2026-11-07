@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
+from martian._errors import error_code
 from martian_redteam.callback import AsyncTarget, TargetCallback, wrap_callback
 from martian_redteam.catalog.attacks import Attack
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION, Vulnerability
@@ -206,7 +207,7 @@ async def _probe(
                 "error_kind": "infrastructure",
                 "simulation_operation_id": str(operation) if operation is not None else None,
             }
-        )
+        )._bind_error_code(error_code(getattr(error, "reason_code", None)) or getattr(error, "code", None))
 
     payload = simulated.attack
     revision = simulated.graph_revision
@@ -223,8 +224,13 @@ async def _probe(
         reply_turn = await _call_target(target, payload, target_timeout_seconds)
     except TargetTimeoutError as error:
         return base.model_copy(
-            update={"input": payload, "error": str(error), "error_kind": "target", "graph_revision": revision}
-        )
+            update={
+                "input": payload,
+                "error": str(error),
+                "error_kind": "target",
+                "graph_revision": revision,
+            }
+        )._bind_error_code("target_timeout")
     except Exception as error:  # noqa: BLE001 — target failures become case errors
         return base.model_copy(
             update={
@@ -233,7 +239,7 @@ async def _probe(
                 "error_kind": "target",
                 "graph_revision": revision,
             }
-        )
+        )._bind_error_code("target_callback_failed")
 
     reply_content = reply_turn.content
     try:
@@ -260,7 +266,7 @@ async def _probe(
                 "graph_revision": revision,
                 "evaluation_operation_id": str(operation) if operation is not None else None,
             }
-        )
+        )._bind_error_code(error_code(getattr(error, "reason_code", None)) or getattr(error, "code", None))
     return base.model_copy(
         update={
             "input": payload,

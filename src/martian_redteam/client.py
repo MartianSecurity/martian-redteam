@@ -27,6 +27,8 @@ _WAIT_BACKOFF = wait_exponential(multiplier=0.5, min=0.5, max=8)
 class ClientError(RuntimeError):
     """Transport, HTTP, or schema failure talking to Martian Agents."""
 
+    code: str | None = None
+
 
 class RetryableClientError(ClientError):
     """A failure known to precede execution (connect or admission 429)."""
@@ -58,8 +60,11 @@ def _status_error(assistant_id: str, response: httpx.Response) -> ClientError:
     else:
         message = f"{assistant_id} run failed: HTTP {response.status_code}{suffix}"
     if response.status_code in _RETRYABLE_STATUS:
-        return RetryableClientError(message, retry_after=retry_after)
-    return ClientError(message)
+        error: ClientError = RetryableClientError(message, retry_after=retry_after)
+    else:
+        error = ClientError(message)
+    error.code = f"http_{response.status_code}"
+    return error
 
 
 class Client:

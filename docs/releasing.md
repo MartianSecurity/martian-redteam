@@ -1,18 +1,17 @@
-# Release preparation
+# Releasing the SDK
 
 The canonical distribution is `martian-sdk`; source stays in the
-`MorningHQ/martian-redteam` repository. This work prepares artifacts and a
-workflow. It does not publish a package, create a Git tag, or configure a PyPI
-account. The initial version is **0.1.0**, from `src/martian/_version.py`.
+`MorningHQ/martian-redteam` repository. Read the candidate version from
+`src/martian/_version.py` and verify existing Git tags and PyPI versions before
+publishing. Backward-compatible fixes use a patch bump; new functionality uses
+a minor bump. A release request authorizes only its identified repositories
+and version, not deployment of the hosted services.
 
 ## Name and ownership
 
-On 2026-11-05 the public PyPI JSON endpoint for `martian-sdk` returned **404**.
-That establishes no public allocation at that time; it does not reserve the
-name or establish account ownership. A maintainer must recheck and configure
-an owned project or pending Trusted Publisher before publication. If PyPI
-refuses the name, resolve that ownership with PyPI before changing package
-identity across the compatibility distributions.
+`martian-sdk` is an existing PyPI project. Reuse the configured Trusted Publisher;
+do not recreate account trust for each version. Confirm the project, current
+versions, publisher, and maintainer access before publishing.
 
 ## Build and inspect
 
@@ -46,7 +45,7 @@ credentials, raw live logs, local MLflow stores or browser auth state are bundle
 
 ## Trusted Publishing setup
 
-Prepare each version on `release/<version>` (initially `release/0.1.0`) and open
+Prepare each version on `release/<version>` and open
 a PR into `main`. PyPI consumes package metadata and does not require a branch
 name. After review and required CI, merge the release PR and tag the reviewed
 commit `v<version>`. Tags use the canonical PEP 440 version without a local
@@ -62,25 +61,30 @@ A maintainer with authority over the PyPI project should configure:
 | Workflow filename | `release.yml` |
 | Environment | `pypi` |
 
-Create the GitHub `pypi` environment with required maintainer reviewers and
-restricted release refs. The exact workflow filename/environment must match
-the pending publisher. No PyPI password or long-lived API token belongs in
+Honor the GitHub `pypi` environment's configured protection and restricted refs.
+Publication is explicitly dispatched from reviewed `main`; any configured
+reviewer gate still applies. Do not silently weaken controls or treat a past
+plan limitation as permanent authorization. The workflow filename/environment
+must match the publisher. No PyPI password or long-lived API token belongs in
 GitHub secrets. Only the isolated publish job has `id-token: write`.
 
 After the implementation is reviewed/committed and real model qualification
-passes, a maintainer can create an immutable `v0.1.0` tag matching the canonical
+passes, a maintainer can create an immutable `v<version>` tag matching the canonical
 version. The workflow checks out the fully qualified `refs/tags/<tag>`, verifies
 the peeled tag commit equals HEAD and belongs to `origin/main`, and records
 the source commit in its summary. A branch with the same name is not a release.
 A tag push builds/checks and retains distributions; it does **not**
 publish. To publish the reviewed tag, explicitly dispatch **SDK release** with
-that tag and `publish: true` **from `main`**, then approve the protected `pypi` environment.
+that tag and `publish: true` **from `main`**, satisfying the `pypi` environment's protection.
 The workflow rebuilds/validates the tag, clean-installs both artifacts and
-publishes them through SHA-pinned `pypa/gh-action-pypi-publish`. This is a future
-maintainer operation and requires separate publication authorization.
+publishes them through SHA-pinned `pypa/gh-action-pypi-publish`. Actual publication
+requires an explicit release request.
 
 Check PyPI's receipt/version and independently install the published package
-before announcing it. The legacy metadata-only `martian-evals-kit` package
+before announcing it. Create the matching GitHub release at that immutable tag
+with the same publishing run's wheel, sdist, and checksum manifest. Verify asset
+digests after upload. Do not rebuild a different set of files for GitHub.
+The legacy metadata-only `martian-evals-kit` package
 requires a matching available SDK version; publish its compatibility update
 only after the canonical distribution exists. Do not release another copy of
 the old eval engine.
