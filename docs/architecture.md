@@ -87,6 +87,8 @@ grading contract belongs to the SDK; MLflow supplies provider routing and tracki
 The local `response-guidelines-v5` judge cites numbered response segments. The
 SDK resolves citations to exact original text and records Unicode code-point
 offsets; it does not normalize model quotations or infer verdicts from reasons.
+The SDK invokes direct chat completions using MLflow provider routing, rejects
+tool requests before dispatch, and validates the full judgment before scoring.
 Invalid citations remain scorer errors and fail the gate closed. Citation validity
 does not prove the model interpreted a customer's criterion correctly.
 For explicit yes/no criteria, `response_conditions` keeps caller-defined

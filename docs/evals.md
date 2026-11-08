@@ -118,12 +118,19 @@ There is no semantic retry, verdict repair, or natural-language reason-to-verdic
 override. Evidence validation cannot establish that a model's interpretation is
 correct; calibrate on known passing and violating examples for your actual policy.
 
-Model routing and credentials use the pinned MLflow adapter. No provider/model is
-selected implicitly. Optional inference parameters are `temperature`, `top_p`,
-`max_tokens` and `seed`, subject to provider support. Omitted parameters use provider
-defaults; even temperature zero does not guarantee deterministic judgments. The
-adapter may retry without JSON Schema when the provider explicitly rejects that
-feature; the SDK still validates the returned checks. No invalid verdict is retried.
+Choose an explicit provider/model URI for a direct chat completion. Routing and
+credentials follow the pinned MLflow provider configuration. Optional inference
+parameters are `temperature`, `top_p`, `max_tokens` and `seed`, subject to provider
+support. Omitted parameters use provider defaults. Even temperature zero can yield
+different judgments. Each stage rejects returned tool calls and validates the
+entire JSON object before extracting its checks. An explicit provider rejection
+of JSON Schema permits one request without that format for the stage. Both
+formats use the same strict validation.
+
+Provider errors fail the gate with a short error code and the affected stage
+(draft or review). Share that code and the SDK version when reporting failures.
+The scorer keeps raw provider error text out of the MLflow error assessment and
+prevents the evaluator from replaying a failed stage.
 
 Feedback metadata includes prompt version/hash, guidelines hash, model, requested
 inference parameters, validated checks, and token usage when reported by the adapter.
