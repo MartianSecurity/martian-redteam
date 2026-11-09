@@ -91,7 +91,10 @@ Invalid citations remain scorer errors and fail the gate closed. Citation validi
 does not prove the model interpreted a customer's criterion correctly.
 For explicit yes/no criteria, `response_conditions` keeps caller-defined
 `fail_when` polarity outside the model prompt and maps answers deterministically.
-Both scorers use one model call by default. Opt-in fixed review (`verify=True`)
+For composite policies or rubrics with direct pass/fail rules and optional source/runtime
+context, `response_rubric` (`response-rubrics-v1`) evaluates `verdict="pass"|"fail"|"uncertain"`
+directly while keeping numbered segment citation validation.
+All three scorers use one model call by default. Opt-in fixed review (`verify=True`)
 uses two calls and retains both stages; it never retries until a desired outcome.
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.

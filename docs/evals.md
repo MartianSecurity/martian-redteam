@@ -178,7 +178,35 @@ correct draft worse, so enable it only after validating its benefit for your
 model and criteria. Provider-level JSON-schema fallback
 can add an HTTP request as described above.
 
-Both modes distinguish literal occurrence, substantive discussion, and semantic
+### Direct pass/fail rubrics and policies
+
+For composite rubrics, multi-step decision rules, or policies that directly specify
+pass/fail criteria (including optional background/source context), use `response_rubric`
+(`response-rubrics-v1`) so the model outputs `verdict="pass" | "fail" | "uncertain"`
+without secondary condition-to-polarity inversion:
+
+```python
+from martian.evals import response_rubric
+
+judge = response_rubric(
+    model="openai:/YOUR_JUDGE_MODEL",
+    input_key="prompt",
+    context_key="context",
+)
+feedback = judge(
+    inputs={"prompt": "User question", "context": "Optional source or runtime trace"},
+    outputs="The saved assistant reply",
+    expectations={"rubric": "Pass if grounded in context; fail if unsupported claims appear."},
+)
+```
+
+`response_rubric` separates `context`, `request`, `rubrics`, and numbered `response_segments`
+in its untrusted payload, excluding reference labels and case IDs. Each rubric check
+produces `rubric_index`, `reason`, `verdict`, and optional `evidence_ids` (bounded to
+`response_segments`). Repeated valid segment IDs in a single check are deduplicated;
+out-of-range IDs or `"uncertain"` verdicts fail closed as scorer errors.
+
+All three scorers distinguish literal occurrence, substantive discussion, and semantic
 statements; a refusal does not erase disclosed text. They preserve quantifiers,
 conjunctions and the boundary between request context and response content.
 These are interpretation instructions, not a guarantee of model correctness.
