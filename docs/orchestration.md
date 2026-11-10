@@ -60,7 +60,7 @@ Synchronous callbacks need their own network/I/O timeouts. Cancelling an await
 cannot terminate a running Python thread. The SDK awaits owned worker cleanup
 off the event loop before returning, so another CI session cannot switch its
 tracking/tenant context while callbacks are still active. Each assessment caps sync workers at
-`max_concurrent`, including after a timeout, and cancels queued work on exit. Late replies are discarded and never judged as a pass.
+`max_concurrent`, including after a timeout, and cancels queued work on exit. Cleanup waits for already-running callbacks even if the caller cancels again. Late replies are discarded and never judged as a pass.
 Use async callbacks for cooperative cancellation and make sync callbacks safe
 for the configured concurrency (or select `max_concurrent=1`).
 

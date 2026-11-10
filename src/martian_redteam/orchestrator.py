@@ -93,10 +93,7 @@ async def a_red_team(
                 on_probe(case)
             return case
 
-    tasks = [asyncio.create_task(run_one(*job)) for job in jobs]
-    try:
-        cases = await asyncio.gather(*tasks)
-    finally:
+    async def drain_probes() -> None:
         # gather propagates the first exception while siblings are still live.
         for task in tasks:
             if not task.done():
@@ -104,6 +101,25 @@ async def a_red_team(
         await asyncio.gather(*tasks, return_exceptions=True)
         # Join synchronous callbacks before returning ownership to the caller.
         await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
+    tasks = [asyncio.create_task(run_one(*job)) for job in jobs]
+    completed = False
+    try:
+        cases = await asyncio.gather(*tasks)
+        completed = True
+    finally:
+        cleanup = asyncio.create_task(drain_probes())
+        cancellation = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        cleanup.result()
+        # If gather already failed, the finally block lets that outcome propagate.
+        if completed and cancellation is not None:
+            raise cancellation
     return _summarize(
         list(cases),
         purpose=purpose,
