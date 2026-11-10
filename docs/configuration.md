@@ -6,6 +6,8 @@ Modern `martian.redteam.Client`, `martian redteam`, `martian ci` and evals share
 `MartianConfig(api_url, token, request_timeout_seconds=120, trust_env=False)`.
 Default resolution uses only `MARTIAN_API_URL` / `MARTIAN_API_TOKEN`; no `.env`.
 Supply a complete constructor pair or one config, never competing sources.
+Evals uses this timeout for each Backend HTTP phase, including dataset reads and
+session uploads. Redteam additionally applies it as an overall operation wait limit.
 `CiContext(agent_id, git_sha, repo="", ref="", run_url="")` separately attributes
 persisted sessions. Standalone redteam/dataset reads need no CI metadata.
 See [the shared connection and compatibility matrix](sdk-and-ci.md#one-customer-connection).

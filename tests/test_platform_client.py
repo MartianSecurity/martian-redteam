@@ -89,6 +89,56 @@ async def test_single_origin_domain_requests_and_local_target_no_retries(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_probe_checkpoint_failure_joins_sibling_before_returning():
+    sibling_started = asyncio.Event()
+    sibling_finished = asyncio.Event()
+    release_sibling = asyncio.Event()
+    simulations = 0
+    target_calls = []
+
+    async def transport(request):
+        nonlocal simulations
+        kind = request.url.path.rsplit("/", 1)[1]
+        if kind == "simulate":
+            simulations += 1
+            if simulations == 1:
+                await sibling_started.wait()
+            else:
+                sibling_started.set()
+                try:
+                    await release_sibling.wait()
+                finally:
+                    sibling_finished.set()
+        return httpx.Response(200, json=receipt(json.loads(request.content), kind))
+
+    async def target(prompt):
+        target_calls.append(prompt)
+        return "synthetic target response"
+
+    def checkpoint(case):
+        raise OSError("checkpoint write failed")
+
+    async with Client(
+        api_url="https://backend.example", token="test-key", transport=httpx.MockTransport(transport)
+    ) as client:
+        try:
+            with pytest.raises(OSError, match="checkpoint write failed"):
+                await a_red_team(
+                    target=target,
+                    vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                    attacks=[PromptInjection()],
+                    client=client,
+                    purpose="safe assistant",
+                    attacks_per_vulnerability_type=2,
+                    on_probe=checkpoint,
+                )
+            assert sibling_finished.is_set()
+            assert len(target_calls) == 1
+        finally:
+            release_sibling.set()
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_post_recovers_same_id_using_get_only():
     calls = []
     admitted = {}

@@ -42,7 +42,7 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
 3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. Each call has a deadline of `target_timeout_seconds` (default 120); an await that exceeds it is cancelled and recorded as `error_kind=target` (`target callback timed out after N seconds`). The generated attack is still stored on `TestCase.input` so reports remain useful.
 4. **Evaluate.** `Client.evaluate(...)` with the **encoded** payload (what the target actually saw), the reply, and `tools_called`. Custom vulns include `criteria`.
 
-`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process. Any other exception is an SDK defect and propagates out of `a_red_team` rather than being blamed on the target.
+`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process. An unexpected SDK or report callback failure cancels and joins the other probes before propagating to the caller.
 
 ## Callback adapter
 

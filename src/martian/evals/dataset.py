@@ -70,7 +70,10 @@ def load_dataset(
     owned = backend is None
     connection = config.connection if isinstance(config, KitConfig) else config
     backend = backend or Backend(
-        connection.api_url, connection.token.get_secret_value(), trust_env=connection.trust_env
+        connection.api_url,
+        connection.token.get_secret_value(),
+        timeout=connection.request_timeout_seconds,
+        trust_env=connection.trust_env,
     )
     try:
         return _from_payload(backend.pull_dataset(name))
