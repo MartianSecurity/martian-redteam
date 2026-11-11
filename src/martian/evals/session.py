@@ -157,7 +157,10 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
         None
         if kit.offline
         else Backend(
-            kit.connection.api_url, kit.connection.token.get_secret_value(), trust_env=kit.connection.trust_env
+            kit.connection.api_url,
+            kit.connection.token.get_secret_value(),
+            timeout=kit.connection.request_timeout_seconds,
+            trust_env=kit.connection.trust_env,
         )
     )
     tests: list[dict[str, Any]] = []

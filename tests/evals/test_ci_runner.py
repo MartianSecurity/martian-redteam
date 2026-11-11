@@ -105,3 +105,37 @@ def test_one_session_preserves_suite_results_errors_and_failed_upload_receipt(
         ):
             assert private not in reports
         assert (tmp_path / "results/redteam/probes.jsonl").is_file() is (interface != "evals")
+
+
+def test_evals_requests_use_connection_timeout(tmp_path):
+    (tmp_path / "test_agent.py").write_text(SAMPLE)
+    (tmp_path / "runner.py").write_text(
+        "from pathlib import Path\n"
+        "import httpx\n"
+        "from martian import CiContext, MartianConfig\n"
+        "from martian.ci import CiSuite, run\n"
+        "from os import environ\n"
+        "requests = []\n"
+        "send = httpx.Client.send\n"
+        "def check_timeout(client, request, **kwargs):\n"
+        "    if request.url.path.startswith('/v1/evals/ci/'):\n"
+        "        requests.append(request.url.path)\n"
+        "        assert set(request.extensions['timeout'].values()) == {7.0}\n"
+        "    return send(client, request, **kwargs)\n"
+        "httpx.Client.send = check_timeout\n"
+        "connection = MartianConfig(\n"
+        "    environ['MARTIAN_API_URL'], environ['MARTIAN_API_TOKEN'], request_timeout_seconds=7\n"
+        ")\n"
+        "ci = CiContext(agent_id='11111111-1111-4111-8111-111111111111', git_sha='0123456789abcdef')\n"
+        "suite = CiSuite(evals_paths=(Path('test_agent.py'),), output_dir=Path('results'))\n"
+        "result = run(suite, config=connection, ci=ci)\n"
+        "assert result.exit_code == 0, result.problems\n"
+        "assert requests == ['/v1/evals/ci/datasets/support', '/v1/evals/ci/runs', '/v1/evals/ci/sessions']\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(("MARTIAN_", "MLFLOW_", "GITHUB_"))}
+    with StubBackend() as backend:
+        environment.update(SCENARIO="pass", MARTIAN_API_URL=backend.url, MARTIAN_API_TOKEN=backend.token)
+        process = subprocess.run(
+            [sys.executable, "runner.py"], cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120
+        )
+    assert process.returncode == 0, process.stdout + process.stderr
