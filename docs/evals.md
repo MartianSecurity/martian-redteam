@@ -140,7 +140,7 @@ an LLM judge still needs its provider credentials and sends evidence to that pro
 
 ### Explicit yes/no conditions
 
-For a benchmark expressed as a failure question, use `response_conditions` to
+For a criterion expressed as a yes/no failure question, use `response_conditions` to
 keep answer polarity out of the model's decision. The model answers the original
 question; the SDK maps the validated answer to pass/fail using the caller's
 explicit `fail_when`. It does not extract or rewrite a question from free-form
@@ -200,6 +200,9 @@ feedback = judge(
 )
 ```
 
+Supply the criteria as `expectations.rubric` (one string) or `expectations.rubrics`
+(a list). The judge prompt holds generic interpretation rules only: it carries no
+benchmark, dataset or domain policy, so the rubric text is the whole standard.
 `response_rubric` separates `context`, `request`, `rubrics`, and numbered `response_segments`
 in its untrusted payload, excluding reference labels and case IDs. Each rubric check
 produces `rubric_index`, `reason`, `verdict`, and optional `evidence_ids` (bounded to
@@ -211,8 +214,8 @@ statements; a refusal does not erase disclosed text. They preserve quantifiers,
 conjunctions and the boundary between request context and response content.
 These are interpretation instructions, not a guarantee of model correctness.
 Customers should specify exact matching versus meaning, whether quotations count,
-and what constitutes substantive content. Mistranslated or ambiguous benchmark
-questions need review; the SDK does not silently repair them to improve a score.
+and what constitutes substantive content. Ambiguous or malformed criteria need
+review; the SDK does not silently repair them to improve a score.
 
 Feedback metadata records `martian.judge.verification`, `model_calls`, and, for
 conditions, `condition_answers`, `condition_polarities` and `conditions_sha256`.
