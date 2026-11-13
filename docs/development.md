@@ -126,7 +126,7 @@ now covers both SDK modules; no eval typing exemption remains.
 - [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions
 - [ ] Coverage / JUnit artifacts still produced; Dependabot ecosystems still `uv` + `github-actions`
 - [ ] `NOTICE` still accurate if catalog IDs change
-- [ ] Do **not** publish to PyPI until per-key identity and quotas exist on martian-agents
+- [ ] Publish to PyPI only through the [release procedure](releasing.md), on an explicit release request
 - [ ] Do **not** point this package at the generic `martian_agents` assistant as a red-team target
 - [ ] Customer examples pin the SDK to a tag or SHA, not floating `@main`
 

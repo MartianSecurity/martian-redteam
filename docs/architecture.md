@@ -99,8 +99,8 @@ uses two calls and retains both stages; it never retries until a desired outcome
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
-Package version is `src/martian/_version.py` (currently 0.1.1); catalog version
-is independently 0.2.0; graph/policy revisions come from the service.
+Package version is `src/martian/_version.py`; catalog version
+is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
 
 ## CI and scoring
 
@@ -125,5 +125,8 @@ covered by the single-key claim. Their host lifecycle, delivery/cancellation
 limits and instrumentation boundaries remain documented in
 [customer integration](customer-integration.md).
 
-The source candidate remains unpublished. Hosted enablement requires the
-coordinated Backend/Agents rollout and [real-service qualification](validation.md).
+These facilities are integration extras, not a Martian product line.
+
+The package is published on PyPI. Hosted use requires the SDK APIs to be enabled
+on the Backend and Agents services for the organisation; see
+[real-service qualification](validation.md).

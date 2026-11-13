@@ -2,7 +2,7 @@
 
 The mcp extra connects a customer agent to multiple existing MCP servers provided at runtime. It does not implement service-specific MCP servers or launch environments.
 
-From this checkout, use `uv sync --locked --extra mcp`. The new API is source code in this workspace; no SDK release has been published by this change.
+Install the `mcp` extra of the published package, or from this checkout use `uv sync --locked --extra mcp`. The MCP binding, runtime metadata reporter and call gate described here are integration extras with their own credentials. They are not a Martian product line and are separate from the evals and redteam modules.
 
 ## Target provider setup
 

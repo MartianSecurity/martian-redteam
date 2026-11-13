@@ -7,9 +7,11 @@ is published on [PyPI](https://pypi.org/project/martian-sdk/). Install an exact
 released version with its `evals` extra for the persisted CI runner:
 
 ```bash
-python -m pip install 'martian-sdk[evals]==0.1.1'
+python -m pip install 'martian-sdk[evals]==<version>'
 martian --version
 ```
+
+Replace `<version>` with a release listed on PyPI.
 
 `evals` includes MLflow-skinny **3.16.1**, matching the current Backend/store,
 and pytest. The base installation supports redteam callbacks and local reports.
@@ -90,8 +92,8 @@ agent-bound key supplies its immutable agent binding automatically; explicit
 the operation and does not attest the local callback identity.
 Existing evals CI tokens keep their original evals/CI grants; create a new key
 with `redteam:run` to add generation/judging. Revocation stops subsequent calls.
-The source candidate still requires coordinated Backend/Agents deployment and
-service qualification; an SDK install does not enable a hosted feature.
+Hosted features require the SDK APIs to be enabled on the Backend and Agents
+services for the organisation; an SDK install does not enable a hosted feature.
 
 `EvalsConfig(api_url=..., token=..., agent_id=..., git_sha=...)` remains an
 adapter for existing evals options/attribution. It can be passed to `run`,
