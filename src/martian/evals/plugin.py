@@ -90,8 +90,10 @@ def pytest_configure(config: pytest.Config) -> None:
 
     if mlflow.active_run() is not None:
         raise pytest.UsageError("martian-evals: finish the active MLflow run before starting CI")
+    validation_flag = "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"
+    _previous_env[validation_flag] = os.environ.get(validation_flag)
+    os.environ[validation_flag] = "true"
     for name, value in {
-        "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION": "true",
         "MLFLOW_DISABLE_TELEMETRY": "true",
         "MLFLOW_DISABLE_AGENT_HINT": "1",
     }.items():

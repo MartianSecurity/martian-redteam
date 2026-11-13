@@ -279,6 +279,10 @@ An org admin can bind a CI token to one agent and a list of dataset names when i
 reads back only its own agent's runs and sessions. Requests are limited per token (default 120 a
 minute per API replica); the kit retries a `429` after its `Retry-After`, up to 30 seconds.
 
+The plugin disables MLflow trace validation during the session to prevent an
+extra prediction on the first item. Teardown restores the previous environment
+setting.
+
 ## Parallel runs
 
 With `pytest -n N` each xdist worker uses its own local store (two workers writing one sqlite
