@@ -9,7 +9,7 @@ os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
 from martian.evals.dataset import EvalDataset, load_dataset
-from martian.evals.evaluate import evaluate
+from martian.evals.evaluate import EvaluationError, evaluate
 from martian.evals.gate import GateFailure, assert_checks, assert_gate
 from martian.evals.judges import (
     response_conditions,
@@ -21,6 +21,7 @@ from martian.evals.scorers import exact_match
 
 __all__ = [
     "EvalDataset",
+    "EvaluationError",
     "EvalsConfig",
     "GateFailure",
     "__version__",

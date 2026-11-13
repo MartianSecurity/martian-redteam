@@ -59,6 +59,21 @@ For shared redteam results, use `assert_redteam(assessment)` and
 `martian evals run --require-redteam tests/evals`; see the
 [shared session contract](sdk-and-ci.md#shared-pytest-sessions-and-result-provenance).
 
+## Mistakes that raise instead of passing silently
+
+`martian.evals.evaluate` refuses three situations that would otherwise produce a wrong
+result without any warning:
+
+- **A scorer named like an expectation key** (for example a scorer called `rubric` with
+  `expectations.rubric`) raises `ValueError` before anything runs. MLflow writes both to a
+  `<name>/value` column and the expectation's text would replace the scorer's verdict. The
+  pytest plugin applies the same check to `mlflow.genai.evaluate`.
+- **A prediction function that is not traced** is traced for you. MLflow records per-row
+  results only for traced calls, and the plugin skips MLflow's own probing call so that the
+  first case is not run twice.
+- **An evaluation with no per-row results**, or fewer rows than cases, raises
+  `EvaluationError`.
+
 ## What the gate enforces
 
 ### Local response-guideline judge
