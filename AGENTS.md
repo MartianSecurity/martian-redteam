@@ -2,11 +2,15 @@
 
 Read README.md, then docs/README.md and docs/development.md as needed before changing this repository. docs/architecture.md, docs/agent-protocol.md and docs/gate-and-ci.md hold the contracts.
 
+This SDK is the customer entry point for **Martian Protect** (Evals and Red Team) outside the console. The optional MCP binding, runtime reporter and call gate are integration extras, not a product line; do not extend them unless a current product needs it.
+
+Every change starts with an issue on the Martian Security Board (https://github.com/orgs/MorningHQ/projects/2), filed in `MorningHQ/martian-notes`. Each branch is tied to one issue and its pull request links it.
+
 The distribution is `martian-sdk`, with `martian.evals` and `martian.redteam`
 modules and a combined `martian ci` gate. See docs/sdk-and-ci.md. The relocated
 eval engine is canonical here; compatibility namespaces retain old imports.
 
-This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations; Agents owns attack generation and judging, and the customer's model stays behind a local `model_callback`. Publication preparation is authorized by the SDK consolidation goal; actual publication requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
+This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations; Agents owns attack generation and judging, and the customer's model stays behind a local `model_callback`. The package is published on PyPI; publishing a new version requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
 
 - The catalog holds vulnerability and attack ids only. Rubric prose belongs in the martian-agents evaluator graph, not here. Bump `CATALOG_VERSION` when ids, types or gate flags change.
 - The gate fails closed on transport/schema errors and on gated pass rate. Do not add fallback or retry-to-pass behavior unless explicitly requested.
