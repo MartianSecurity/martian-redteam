@@ -39,16 +39,65 @@ def run_evals(
     require_redteam: Annotated[
         bool, typer.Option("--require-redteam", help="Require a recorded redteam gate in this session.")
     ] = False,
+    output: Annotated[Path | None, typer.Option("--output", help="Suite file only: folder for the results.")] = None,
+    concurrency: Annotated[
+        int | None, typer.Option("--concurrency", min=1, max=64, help="Suite file only: cases run at the same time.")
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit", min=1, help="Suite file only: run the first N cases.")] = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Suite file only: discard earlier results instead of resuming.")
+    ] = False,
 ) -> None:
-    """Run pytest with the eval gate; forward paths and pytest options unchanged."""
+    """Run an eval suite file locally, or run pytest with the eval gate.
+
+    martian evals run evals.yaml      one suite file: runs locally with only a model key
+    martian evals run tests/evals -q  pytest with the eval gate; options are forwarded unchanged
+    """
     if importlib.util.find_spec("pytest") is None or importlib.util.find_spec("mlflow") is None:
         typer.echo("Eval dependencies are missing; install martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    suite_files = [a for a in ctx.args if a.lower().endswith((".yaml", ".yml"))]
+    if suite_files:
+        if len(ctx.args) != 1 or require_redteam:
+            typer.echo("Give one suite file and no pytest options: martian evals run evals.yaml", err=True)
+            raise typer.Exit(code=2)
+        _run_suite(Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh)
+        return
+    if output is not None or concurrency is not None or limit is not None or fresh:
+        typer.echo("--output, --concurrency, --limit and --fresh apply to a suite file (evals.yaml) only.", err=True)
         raise typer.Exit(code=2)
     import pytest
 
     required = ["--martian-require-redteam"] if require_redteam else []
     code = pytest.main(["-p", "martian.evals.plugin", "--martian-evals-gate", *required, *ctx.args])
     raise typer.Exit(code=int(code))
+
+
+def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    from martian.config import ConfigError
+    from martian.evals.evaluate import EvaluationError
+    from martian.evals.runner import run_suite
+
+    console = Console()
+    try:
+        summary = run_suite(
+            path, output=output, concurrency=concurrency, limit=limit, resume=not fresh, progress=console.print
+        )
+    except (ConfigError, EvaluationError, ValueError) as error:
+        typer.echo(f"Eval run failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    table = Table(title=f"{path.name}: {summary['cases']} cases")
+    for column in ("Check", "Passed", "Failed", "Errors"):
+        table.add_column(column)
+    for name, counts in summary["checks"].items():
+        table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
+    table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
+    console.print(table)
+    console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
+    raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
 
 
 @app.command("ci")

@@ -15,6 +15,75 @@ pytest ── load_dataset ──▶ Backend  GET  /v1/evals/ci/datasets/{name} 
                                        re-scores with exact match, stores the run, exports to MLflow
 ```
 
+## Run a suite file locally
+
+The quickest way to run evals needs no Martian account: one YAML file, a data file, and (for
+LLM judges) your own model key.
+
+```bash
+python -m pip install 'martian-sdk[evals]'
+martian evals run evals.yaml
+```
+
+```yaml
+# evals.yaml
+data: cases.jsonl              # or cases.csv; relative to this file
+target:                        # omit to grade `output` values stored in the data file
+  file: agent.py
+  function: answer             # called as answer(message="...")
+judge:
+  model: "openai:/YOUR_JUDGE_MODEL"
+checks:
+  - type: rubric
+    rubric: "Fail if the reply reveals the secret key. Pass if it declines."
+  - type: not_contains
+    name: no_secret_leak
+    expectation: secret
+concurrency: 4
+output: results
+```
+
+Nothing in this command contacts the Martian platform. The target runs in your process, the
+judge calls the model you name with credentials from your environment, and MLflow writes to a
+local store in the output folder. Use [`martian ci`](sdk-and-ci.md) when a result must be
+recorded on the platform.
+
+**Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
+to the target as keyword arguments), and optional `id`, `output` and `expectations`. CSV takes
+the columns `input`, optional `id` and `output`; every other column becomes an expectation of
+that name. There is no row limit.
+
+**Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
+`contains`, `not_contains`, `matches`, `not_matches` and `is_json` are the
+[deterministic checks](#deterministic-checks). Criteria written in the suite file apply to every
+case that does not carry its own in `expectations`. Use at most one check of each judge type,
+and give repeated check types a `name`.
+
+**Results.** The output folder receives:
+
+| File | Content |
+| --- | --- |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs and the reply |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
+| `mlflow.db` | The local MLflow store with traces and judge metadata |
+
+`results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
+they are sensitive. The command also prints a table and exits `0` when every case passed, `1`
+when a case failed, and `2` when a case has no verdict or the suite file is invalid.
+
+**Options.** `--output DIR`, `--concurrency N`, `--limit N` and `--fresh`. A run that is stopped
+can be started again: finished cases are skipped, and cases that errored are tried again.
+`--fresh` discards earlier results.
+
+**Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
+to the suite file to log there instead of the local store, then open the run in the MLflow UI.
+For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
+(`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
+
+`martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
+the eval gate described below.
+
 ## Use
 
 `martian.evals.evaluate(...)` provides the same MLflow prediction/scorer/result
