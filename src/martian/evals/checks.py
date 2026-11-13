@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from mlflow.entities import Feedback
@@ -47,7 +47,7 @@ def _configured(name: str, fixed: Sequence[str], expectation: str | None) -> Non
         raise ValueError("give the values to look for, or expectation='<key>' to read them from each row")
 
 
-def _scorer(name: str, expectation: str | None, decide: Any) -> Scorer:
+def _scorer(name: str, expectation: str | None, decide: Callable[[str, dict[str, Any] | None], Feedback]) -> Scorer:
     """Declare ``expectations`` only when it is read, so rows without expectations still score."""
     if expectation is None:
 

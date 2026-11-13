@@ -193,8 +193,8 @@ def _load_target(reference: TargetRef, base: Path) -> Callable[..., Any]:
         spec.loader.exec_module(module)
     except Exception as error:  # noqa: BLE001 - the customer's module may raise anything on import
         raise ConfigError(f"the target file failed to import: {type(error).__name__}") from None
-    function = getattr(module, reference.function, None)
-    if not callable(function):
+    function: Callable[..., Any] | None = getattr(module, reference.function, None)
+    if function is None or not callable(function):
         raise ConfigError(f"the target file has no function {reference.function!r}")
     return function
 
@@ -391,7 +391,9 @@ def run_suite(
                 if "outputs" in case:
                     row["outputs"] = case["outputs"]
                 data.append(row)
-            frame = evaluate(data=data, scorers=scorers, predict_fn=target).result_df
+            frame: Any = evaluate(
+                data=data, scorers=scorers, predict_fn=target
+            ).result_df  # never None: evaluate raises
             by_id = {case["id"]: case for case in batch}
             for position in range(len(frame)):
                 case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
