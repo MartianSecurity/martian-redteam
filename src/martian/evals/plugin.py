@@ -130,8 +130,11 @@ def _record_scorers() -> None:
         return
 
     def evaluate(*args: Any, **kwargs: Any) -> Any:
-        result = original(*args, **kwargs)
+        from martian.evals.evaluate import check_scorer_names
+
         given = kwargs.get("scorers", args[1] if len(args) > 1 else None)
+        check_scorer_names(kwargs.get("data", args[0] if args else None), given or [])
+        result = original(*args, **kwargs)
         # An unnamed scorer cannot be asserted by name; keep it visible so the gate fails on it.
         names = [_scorer_name(s) or "<unnamed>" for s in (given or [])]
         try:

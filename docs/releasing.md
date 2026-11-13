@@ -1,7 +1,7 @@
 # Releasing the SDK
 
 The canonical distribution is `martian-sdk`; source stays in the
-`MorningHQ/martian-redteam` repository. Read the candidate version from
+`MorningHQ/martian-redteam` repository. Read the version to release from
 `src/martian/_version.py` and verify existing Git tags and PyPI versions before
 publishing. Backward-compatible fixes use a patch bump; new functionality uses
 a minor bump. A release request authorizes only its identified repositories
@@ -93,9 +93,9 @@ the old eval engine.
 
 [The combined example](../examples/combined-ci.yml) installs the delivered,
 hash-checked wheel from the customer's reviewed vendor directory, so testing
-it does not require publishing this candidate or inventing an SDK commit.
+it can be tested before a version is published.
 Copy the wheel and `release-checksums.json` into `ci/vendor/`, add the customer's
-agent dependencies/real callback and eval tests, and configure the Backend origin and one scoped API token. After publication the install step can use an
+agent dependencies/real callback and eval tests, and configure the Backend origin and one scoped API token. For a published version the install step can use an
 exact released `martian-sdk[evals]` version instead. The workflow excludes local
 MLflow stores and uses only safe result artifacts. Hosted workflow execution
 still requires customer repository setup and credentials; local validation is

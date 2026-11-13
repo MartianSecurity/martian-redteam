@@ -13,6 +13,9 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | --- | --- |
 | `src/martian/config.py` | Immutable origin/token and separate CI attribution |
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
+| `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
+| `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
+| `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
@@ -126,7 +129,7 @@ now covers both SDK modules; no eval typing exemption remains.
 - [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions
 - [ ] Coverage / JUnit artifacts still produced; Dependabot ecosystems still `uv` + `github-actions`
 - [ ] `NOTICE` still accurate if catalog IDs change
-- [ ] Do **not** publish to PyPI until per-key identity and quotas exist on martian-agents
+- [ ] Publish to PyPI only through the [release procedure](releasing.md), on an explicit release request
 - [ ] Do **not** point this package at the generic `martian_agents` assistant as a red-team target
 - [ ] Customer examples pin the SDK to a tag or SHA, not floating `@main`
 

@@ -1,23 +1,26 @@
 # Martian SDK documentation
 
-`martian-sdk` contains evals and redteam modules with one scoped customer API
+`martian-sdk` is the customer entry point for Martian Protect outside the
+console. It contains evals and redteam modules with one scoped customer API
 token and approved Backend origin. Customer target callbacks stay local;
 Backend admits/stores work and Agents performs generation/judging. Start with
 [Unified SDK and CI](sdk-and-ci.md) for standalone Python, YAML and CI use.
-The SDK remains unpublished; coordinated hosted rollout must be qualified.
+The package is published on [PyPI](https://pypi.org/project/martian-sdk/).
+Hosted features also need the SDK APIs enabled for the organisation.
 
 ## Read in this order
 
 1. [Architecture](architecture.md) — three systems, data flow, cost model, what this repo is not
 2. [Setup](setup.md) — install, environment, first local run
-3. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
-4. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
-5. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
-6. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
-7. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, WAF
-8. [Security and data](security-and-data.md) — origin isolation and what leaves the customer network
-9. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
-10. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata
+3. [Evals](evals.md) — running a suite file locally, the judges and deterministic checks, and the dataset regression gate
+4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
+5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
+6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
+7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
+8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, WAF
+9. [Security and data](security-and-data.md) — origin isolation and what leaves the customer network
+10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
+11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line
 
 ## SDK release
 

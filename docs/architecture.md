@@ -80,10 +80,31 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
 | `src/martian_evals_kit/` | Evals import compatibility |
 
-Taxonomy IDs/types live in the catalog; rubrics/model selection live in Agents.
+Taxonomy IDs/types live in the catalog; hosted redteam rubrics/model selection live in Agents.
+For local inline evals, customers supply their own criteria and model to
+[`response_guidelines`](evals.md#local-response-guideline-judge). Its versioned
+grading contract belongs to the SDK; MLflow supplies provider routing and tracking.
+The local `response-guidelines-v5` judge cites numbered response segments. The
+SDK resolves citations to exact original text and records Unicode code-point
+offsets; it does not normalize model quotations or infer verdicts from reasons.
+The SDK invokes direct chat completions using MLflow provider routing, rejects
+tool requests before dispatch, and validates the full judgment before scoring.
+Invalid citations remain scorer errors and fail the gate closed. Citation validity
+does not prove the model interpreted a customer's criterion correctly.
+For explicit yes/no criteria, `response_conditions` keeps caller-defined
+`fail_when` polarity outside the model prompt and maps answers deterministically.
+For composite policies or rubrics with direct pass/fail rules and optional source/runtime
+context, `response_rubric` (`response-rubrics-v1`) evaluates `verdict="pass"|"fail"|"uncertain"`
+directly while keeping numbered segment citation validation.
+All three scorers use one model call by default. Opt-in fixed review (`verify=True`)
+uses two calls and retains both stages; it never retries until a desired outcome.
+A stage re-sends its request only when the provider returned no judgment (rate limit,
+server error or connection failure), up to `max_retries` times with backoff.
+Invalid or uncertain stages fail closed. Review may change a correct draft to an
+incorrect answer; it requires model-specific validation before adoption.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
-Package version is `src/martian/_version.py` (currently 0.1.1); catalog version
-is independently 0.2.0; graph/policy revisions come from the service.
+Package version is `src/martian/_version.py`; catalog version
+is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
 
 ## CI and scoring
 
@@ -108,5 +129,8 @@ covered by the single-key claim. Their host lifecycle, delivery/cancellation
 limits and instrumentation boundaries remain documented in
 [customer integration](customer-integration.md).
 
-The source candidate remains unpublished. Hosted enablement requires the
-coordinated Backend/Agents rollout and [real-service qualification](validation.md).
+These facilities are integration extras, not a Martian product line.
+
+The package is published on PyPI. Hosted use requires the SDK APIs to be enabled
+on the Backend and Agents services for the organisation; see
+[real-service qualification](validation.md).
