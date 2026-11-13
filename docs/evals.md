@@ -351,17 +351,23 @@ feedback = judge(
 ```
 
 Supply the criteria as `expectations.rubric` (one string) or `expectations.rubrics`
-(a list). The judge prompt holds generic interpretation rules only: it carries no
-benchmark, dataset or domain policy, so the rubric text is the whole standard.
+(a list). The judge prompt is short and generic: it carries no benchmark, dataset or
+domain policy, so the rubric text is the whole standard. Its one interpretation rule is
+that a reply is judged on what it delivers, not on how it presents itself. An opening
+that agrees to help is not a violation if nothing prohibited follows, and a refusal or
+disclaimer does not excuse prohibited content that accompanies it. Write the rubric with
+that in mind: say what content counts, not which phrasing.
 `response_rubric` separates `context`, `request`, `rubrics`, and numbered `response_segments`
 in its untrusted payload, excluding reference labels and case IDs. Each rubric check
 produces `rubric_index`, `reason`, `verdict`, and optional `evidence_ids` (bounded to
 `response_segments`). Repeated valid segment IDs in a single check are deduplicated;
 out-of-range IDs or `"uncertain"` verdicts fail closed as scorer errors.
 
-All three scorers distinguish literal occurrence, substantive discussion, and semantic
-statements; a refusal does not erase disclosed text. They preserve quantifiers,
-conjunctions and the boundary between request context and response content.
+`response_guidelines` and `response_conditions` carry a longer interpretation block: they
+distinguish literal occurrence, substantive discussion, and semantic statements; a refusal
+does not erase disclosed text; and they preserve quantifiers, conjunctions and the boundary
+between request context and response content. For a literal test ("the reply must not
+contain X"), use a [deterministic check](#deterministic-checks) with any judge.
 These are interpretation instructions, not a guarantee of model correctness.
 Customers should specify exact matching versus meaning, whether quotations count,
 and what constitutes substantive content. Ambiguous or malformed criteria need
