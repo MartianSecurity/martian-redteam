@@ -113,6 +113,8 @@ martian ci --evals-path tests/evals --output results
 martian ci --redteam-config redteam.yaml --output results
 # One combined persisted session:
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
+# A suite file, run locally with only a model key (see the eval guide):
+martian evals run evals.yaml
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

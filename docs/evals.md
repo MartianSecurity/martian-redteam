@@ -81,6 +81,21 @@ to the suite file to log there instead of the local store, then open the run in 
 For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
 (`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
 
+**Provider setup.** `judge.model` is an MLflow model URI, `<provider>:/<model>`, and the key
+comes from that provider's usual environment variable. Nothing is read from a `.env` file.
+
+| Provider | `judge.model` | Environment |
+| --- | --- | --- |
+| OpenAI | `openai:/<model>` | `OPENAI_API_KEY` |
+| Any OpenAI-compatible endpoint | `openai:/<model>` | `OPENAI_API_KEY` and `OPENAI_API_BASE` (the endpoint's `/v1` URL) |
+| Amazon Bedrock, through its OpenAI-compatible endpoint | `openai:/<bedrock model id>` | `OPENAI_API_KEY` set to a Bedrock API key, `OPENAI_API_BASE` set to the regional endpoint |
+
+Other providers MLflow can route to use the same URI form with their own environment
+variables. The judge needs a provider that returns a direct chat completion. Set
+`judge.inference_params: {temperature: 0}` if your provider supports it; omitted parameters
+use the provider's defaults. Rate limits and provider outages are retried with backoff
+(`judge.max_retries`, default 5).
+
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
