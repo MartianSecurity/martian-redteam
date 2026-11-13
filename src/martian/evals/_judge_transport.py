@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import random
+import time
 from typing import Any, Literal
 
+import requests
 from mlflow.entities import Feedback
 from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
 from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
@@ -22,6 +25,21 @@ from mlflow.types.llm import ChatMessage
 from mlflow.utils.workspace_context import get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
 from pydantic import BaseModel, ValidationError
+
+# A provider reply with one of these statuses carries no judgment, so sending the same request
+# again cannot change a verdict that was already given.
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 529})
+_MAX_BACKOFF_SECONDS = 30.0
+PROVIDER_RETRIES_KEY = "martian.judge.provider_retries"
+_sleep = time.sleep
+
+
+def _no_judgment_received(error: Exception) -> bool:
+    """True for rate limits, provider outages and connection failures: nothing was judged."""
+    status = getattr(error, "status_code", None)
+    if status is not None:
+        return status in _RETRY_STATUS
+    return isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError))
 
 
 def _gateway_completion(
@@ -106,6 +124,7 @@ def invoke_response_judge(
     response_format: type[BaseModel],
     inference_params: dict[str, Any] | None,
     stage: Literal["draft", "review"],
+    max_retries: int = 0,
 ) -> Feedback:
     # Reuse routing, credentials and wire transforms from MLflow 3.16.1.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
@@ -115,15 +134,23 @@ def invoke_response_judge(
     except Exception:
         raise ValueError(f"Judge {stage} failed [judge_provider_config]. Check the provider/model URI.") from None
 
-    try:
-        if isinstance(adapter, GatewayAdapter):
-            completion = _gateway_completion(provider, model, prompt, response_format, inference_params)
-        elif isinstance(adapter, LiteLLMAdapter):
-            completion = _litellm_completion(f"{provider}/{model}", prompt, response_format, inference_params)
-        else:
-            raise ValueError("A direct chat completion provider is required")
-    except Exception as error:
-        raise _provider_failure(stage, error) from None
+    retries = 0
+    while True:
+        try:
+            if isinstance(adapter, GatewayAdapter):
+                completion = _gateway_completion(provider, model, prompt, response_format, inference_params)
+            elif isinstance(adapter, LiteLLMAdapter):
+                completion = _litellm_completion(f"{provider}/{model}", prompt, response_format, inference_params)
+            else:
+                raise ValueError("A direct chat completion provider is required")
+            break
+        except Exception as error:
+            # Only a failure that returned no judgment is retried. A reply that was received is
+            # final, valid or not: a second attempt at it would be a retry towards a pass.
+            if retries >= max_retries or not _no_judgment_received(error):
+                raise _provider_failure(stage, error) from None
+            _sleep(min(_MAX_BACKOFF_SECONDS, 2.0**retries) + random.uniform(0.0, 0.5))
+            retries += 1
 
     if not completion.choices:
         raise ValueError(f"Judge {stage} returned no choices [judge_invalid_response]")
@@ -156,7 +183,7 @@ def invoke_response_judge(
     except ValidationError:
         raise ValueError(f"Judge {stage} reply failed schema validation [judge_invalid_schema]") from None
 
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = {PROVIDER_RETRIES_KEY: retries}
     if (usage := completion.usage) is not None:
         prompt_tokens = usage.prompt_tokens
         completion_tokens = usage.completion_tokens
@@ -174,5 +201,5 @@ def invoke_response_judge(
         name=assessment_name,
         value=judgment.model_dump()["result"],
         source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
-        metadata=metadata or None,
+        metadata=metadata,
     )

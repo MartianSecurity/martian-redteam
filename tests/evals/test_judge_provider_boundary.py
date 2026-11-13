@@ -84,7 +84,7 @@ def provider(monkeypatch, tmp_path):
         mlflow.set_tracking_uri(old_uri)
 
 
-def _evaluate(*, condition_mode=False, verify=False):
+def _evaluate(*, condition_mode=False, verify=False, max_retries=0):
     factory = response_conditions if condition_mode else response_guidelines
     expectations = (
         {"conditions": [{"question": "Does the response greet the user?", "fail_when": "no"}]}
@@ -93,7 +93,7 @@ def _evaluate(*, condition_mode=False, verify=False):
     )
     return evaluate(
         data=[{"inputs": {"message": "Say hello."}, "outputs": "Hello!", "expectations": expectations}],
-        scorers=[factory(model="openai:/fixture", name="policy", verify=verify)],
+        scorers=[factory(model="openai:/fixture", name="policy", verify=verify, max_retries=max_retries)],
     )
 
 
@@ -164,3 +164,57 @@ def test_full_fallback_reply_must_match_schema(provider, condition_mode):
     with pytest.raises(GateFailure):
         assert_checks(_evaluate(condition_mode=condition_mode))
     assert ["response_format" in request for request in requests] == [True, False]
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    waits = []
+    monkeypatch.setattr("martian.evals._judge_transport._sleep", waits.append)
+    return waits
+
+
+def test_rate_limit_is_retried_with_backoff_and_then_judged(provider, no_backoff):
+    replies, requests = provider
+    throttled = (429, {"error": {"message": "rate limit"}})
+    replies.extend([throttled, (503, {"error": {"message": "overloaded"}}), _completion({"result": [_GUIDELINE]})])
+
+    result = _evaluate(max_retries=5)
+    assert_checks(result)
+    assert len(requests) == 3
+    assert len(no_backoff) == 2 and no_backoff[0] < no_backoff[1] <= 30.5
+    assert _feedback_metadata(result)["martian.judge.provider_retries"] == "2"
+
+
+def test_a_received_reply_is_never_retried(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([_completion("not a judgment"), _completion({"result": [_GUIDELINE]})])
+
+    result = _evaluate(max_retries=5)
+    with pytest.raises(GateFailure):
+        assert_checks(result)
+    assert len(requests) == 1 and no_backoff == []
+
+
+def test_rate_limit_retries_are_bounded(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([(429, {"error": {"message": "rate limit"}})] * 10)
+
+    result = _evaluate(max_retries=2)
+    with pytest.raises(GateFailure):
+        assert_checks(result)
+    assert len(requests) == 3 and len(no_backoff) == 2
+
+
+def test_request_errors_are_not_retried(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([(401, {"error": {"message": "bad key"}}), _completion({"result": [_GUIDELINE]})])
+
+    result = _evaluate(max_retries=5)
+    with pytest.raises(GateFailure):
+        assert_checks(result)
+    assert len(requests) == 1 and no_backoff == []
+
+
+def _feedback_metadata(result):
+    assessments = result.result_df["assessments"].iloc[0]
+    return next(a for a in assessments if "feedback" in a)["metadata"]

@@ -13,7 +13,7 @@ from mlflow.genai.scorers import Scorer, scorer
 from mlflow.types.llm import ChatMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from martian.evals._judge_transport import invoke_response_judge
+from martian.evals._judge_transport import PROVIDER_RETRIES_KEY, invoke_response_judge
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
 RESPONSE_CONDITIONS_VERSION = "response-conditions-v1"
@@ -412,6 +412,7 @@ def response_guidelines(
     inference_params: dict[str, Any] | None = None,
     include_judge_prompt: bool = False,
     verify: bool = False,
+    max_retries: int = 5,
 ) -> Scorer:
     """Create a response-only MLflow-compatible scorer for expectations.guidelines.
 
@@ -421,7 +422,9 @@ def response_guidelines(
     of nonempty strings. No policy or provider is silently selected.
 
     Provider routing/authentication uses MLflow's pinned model-URI adapter. No
-    semantic retry or verdict repair is performed. Citation IDs resolve to the
+    semantic retry or verdict repair is performed. ``max_retries`` (default 5, 0 to
+    disable) covers only provider replies that carry no judgment: rate limits,
+    server errors and connection failures, with capped exponential backoff. Citation IDs resolve to the
     exact original response text, preserving Unicode and intervening context.
     Schema, evidence and transport
     errors raise, so MLflow records a scorer error and assert_checks fails closed.
@@ -437,6 +440,7 @@ def response_guidelines(
         include_judge_prompt=include_judge_prompt,
         mode="guidelines",
         verify=verify,
+        max_retries=max_retries,
     )
 
 
@@ -448,6 +452,7 @@ def response_conditions(
     inference_params: dict[str, Any] | None = None,
     include_judge_prompt: bool = False,
     verify: bool = False,
+    max_retries: int = 5,
 ) -> Scorer:
     """Judge expectations.conditions with explicit, caller-controlled polarity.
 
@@ -470,6 +475,7 @@ def response_conditions(
         include_judge_prompt=include_judge_prompt,
         mode="conditions",
         verify=verify,
+        max_retries=max_retries,
     )
 
 
@@ -482,6 +488,7 @@ def response_rubric(
     inference_params: dict[str, Any] | None = None,
     include_judge_prompt: bool = False,
     verify: bool = False,
+    max_retries: int = 5,
 ) -> Scorer:
     """Judge expectations.rubric / expectations.rubrics with direct pass/fail verdicts.
 
@@ -498,6 +505,7 @@ def response_rubric(
         include_judge_prompt=include_judge_prompt,
         mode="rubrics",
         verify=verify,
+        max_retries=max_retries,
     )
 
 
@@ -511,9 +519,12 @@ def _response_judge(
     include_judge_prompt: bool,
     mode: Literal["guidelines", "conditions", "rubrics"],
     verify: bool,
+    max_retries: int,
 ) -> Scorer:
     if type(verify) is not bool:
         raise ValueError("verify must be a boolean")
+    if type(max_retries) is not int or not 0 <= max_retries <= 10:
+        raise ValueError("max_retries must be an integer between 0 and 10")
     if not isinstance(model, str) or not model.strip():
         raise ValueError("An explicit judge model URI is required")
     if not name.strip() or not input_key.strip():
@@ -627,6 +638,7 @@ def _response_judge(
             response_format=schema,
             inference_params=params or None,
             stage="draft",
+            max_retries=max_retries,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -654,6 +666,7 @@ def _response_judge(
                 response_format=schema,
                 inference_params=params or None,
                 stage="review",
+                max_retries=max_retries,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
@@ -691,6 +704,10 @@ def _response_judge(
                 "martian.judge.citations": _json(citations),
                 "martian.judge.verification": "fixed-review" if verify else "none",
                 "martian.judge.model_calls": "2" if verify else "1",
+                PROVIDER_RETRIES_KEY: str(
+                    int(metadata.get(PROVIDER_RETRIES_KEY, 0))
+                    + (int(draft["metadata"].get(PROVIDER_RETRIES_KEY, 0)) if verify else 0)
+                ),
             }
         )
         if mode == "conditions":

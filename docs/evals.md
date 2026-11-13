@@ -132,6 +132,15 @@ Provider errors fail the gate with a short error code and the affected stage
 The scorer keeps raw provider error text out of the MLflow error assessment and
 prevents the evaluator from replaying a failed stage.
 
+A provider reply that carries no judgment is retried inside the stage: rate limits
+(HTTP 429), server errors (500, 502, 503, 504, 529) and connection failures, with
+capped exponential backoff. `max_retries` on each judge sets the limit (default 5,
+`0` disables it), and `martian.judge.provider_retries` in the feedback metadata
+records how many were needed. A reply that was received is final, valid or not, and
+a request the provider rejected (400, 401, 403) is not retried. When the retries run
+out, the scorer errors with `judge_provider_throttled` or `judge_provider_error` and
+the gate fails closed.
+
 Feedback metadata includes prompt version/hash, guidelines hash, model, requested
 inference parameters, validated checks, and token usage when reported by the adapter.
 `martian.judge.citation_format` is `response-segments-v1`;

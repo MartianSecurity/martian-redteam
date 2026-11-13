@@ -98,6 +98,8 @@ context, `response_rubric` (`response-rubrics-v1`) evaluates `verdict="pass"|"fa
 directly while keeping numbered segment citation validation.
 All three scorers use one model call by default. Opt-in fixed review (`verify=True`)
 uses two calls and retains both stages; it never retries until a desired outcome.
+A stage re-sends its request only when the provider returned no judgment (rate limit,
+server error or connection failure), up to `max_retries` times with backoff.
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
