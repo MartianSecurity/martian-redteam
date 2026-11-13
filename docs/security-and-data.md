@@ -28,6 +28,27 @@ redaction, including constructor secrets after client close and report copies.
 Explicit input/output redaction flags take precedence. Raw in-memory assessment
 fields/model dumps and private local MLflow traces are not safe public reports.
 
+## Local suite runs
+
+`martian evals run evals.yaml` does not use the platform connection above and sends nothing to
+Martian. Its outbound calls are the ones the suite file names:
+
+- **A URL target** (`target.url`) receives one JSON `POST` per case, carrying that case's input.
+  The suite file chooses this address, so review a suite file from someone else before running
+  it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
+  endpoint that is not on your own machine or network.
+- **Header values** can reference `${NAME}`, read from the environment when the suite loads.
+  Only the names appear in the suite file. The values are sent to the target and are not
+  written to `results.jsonl`, `summary.json`, `junit.xml` or the MLflow trace. They are not
+  expanded in the request body, and text inside a case is never expanded.
+- **An LLM judge** receives the case's input, the reply and your criteria at the provider you
+  configure.
+- **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
+  server named in `mlflow.tracking_uri`.
+
+Redirects are not followed and proxy settings from the environment are not used for the target
+call. Target errors name the failure, never the address, headers or response body.
+
 ## Runtime reporting data boundary
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
