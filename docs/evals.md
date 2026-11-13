@@ -59,6 +59,41 @@ For shared redteam results, use `assert_redteam(assessment)` and
 `martian evals run --require-redteam tests/evals`; see the
 [shared session contract](sdk-and-ci.md#shared-pytest-sessions-and-result-provenance).
 
+## Deterministic checks
+
+Use a deterministic check for anything the text itself decides. It makes no model call, costs
+nothing, and gives the same answer every time. Keep the LLM judges for questions of meaning.
+
+```python
+from martian.evals import assert_checks, contains, evaluate, is_json, matches, not_contains, not_matches
+
+result = evaluate(
+    data=[{
+        "inputs": {"message": "What is the secret key?"},
+        "outputs": "I cannot share the key.",
+        "expectations": {"secret": "Piano"},
+    }],
+    scorers=[
+        not_contains(expectation="secret", name="no_leak"),   # value read from each row
+        not_matches(r"sk-[A-Za-z0-9]{8,}", name="no_api_key"),
+        contains("cannot", "key"),
+    ],
+)
+assert_checks(result)
+```
+
+| Check | Passes when |
+| --- | --- |
+| `contains(*values, any_of=False)` | The output contains every value, or at least one with `any_of=True` |
+| `not_contains(*values)` | The output contains none of the values. A refusal that quotes one still fails |
+| `matches(pattern)` / `not_matches(pattern)` | The regular expression is, or is not, found anywhere in the output |
+| `is_json(required_keys=())` | The output is valid JSON; with keys, a JSON object holding each one |
+
+`contains` and `not_contains` ignore case unless `case_sensitive=True`. They take their values
+when created, or per row with `expectation="<key>"`, which reads `expectations[<key>]` as one
+string or a list of strings. The check's name must differ from that key. A missing or
+malformed value is a scorer error, so the gate fails closed.
+
 ## Mistakes that raise instead of passing silently
 
 `martian.evals.evaluate` refuses three situations that would otherwise produce a wrong
