@@ -39,7 +39,7 @@ def call(monkeypatch, checks, **options):
         requests.append(kwargs)
         return Feedback(name="policy", value=[{**c, "evidence_ids": c.get("evidence_ids", [])} for c in checks])
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", invoke)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", invoke)
     judge = response_guidelines(model="openai:/stub", name="policy", **options)
     result = judge(
         inputs={"message": "How to greet?", "case_id": "do-not-send", "label": "do-not-send"},
@@ -63,7 +63,6 @@ def test_truth_table_and_gate(monkeypatch, checks, expected):
     feedback, requests = call(monkeypatch, checks)
     assert feedback.value is expected
     assert len(requests) == 1
-    assert requests[0]["num_retries"] == 0
     parsed = json.loads(feedback.metadata["martian.judge.checks"])
     assert [c["status"] for c in parsed] == [c["status"] for c in checks]
     if checks[0].get("evidence_ids"):
@@ -190,12 +189,12 @@ def test_citation_errors_fail_closed_without_model_retry(monkeypatch, value):
         calls.append(kwargs)
         return Feedback(name="policy", value=[value])
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", invoke)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", invoke)
     with pytest.raises(ValueError):
         response_guidelines(model="openai:/stub")(
             inputs="A request", outputs="Text with a fake segment ID 99.", expectations={"guidelines": ["A rule"]}
         )
-    assert len(calls) == 1 and calls[0]["num_retries"] == 0
+    assert len(calls) == 1
 
 
 def test_omission_and_compliance_do_not_need_source_quotes():
@@ -238,16 +237,16 @@ def test_missing_criteria_do_not_call_model(monkeypatch, guidelines):
     def unexpected(**kwargs):
         pytest.fail("Invalid input invoked the model")
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", unexpected)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", unexpected)
     with pytest.raises(ValueError):
         response_guidelines(model="openai:/stub")(
             inputs="Request", outputs="Reply", expectations={"guidelines": guidelines}
         )
 
 
-def test_actual_mlflow_adapter_validates_fallback_output(monkeypatch):
-    """Exercise MLflow's real request/schema/Feedback adapter, replacing only HTTP."""
-    from mlflow.genai.judges.adapters import gateway_adapter
+def test_gateway_transport_validates_provider_output(monkeypatch):
+    """Exercise the provider transforms and schema validation with a controlled HTTP reply."""
+    from martian.evals import _judge_transport
 
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_API_BASE", "https://judge.test.example/v1")
@@ -268,7 +267,7 @@ def test_actual_mlflow_adapter_validates_fallback_output(monkeypatch):
             "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
         }
 
-    monkeypatch.setattr(gateway_adapter, "send_chat_request", send)
+    monkeypatch.setattr(_judge_transport, "send_chat_request", send)
     judge = response_guidelines(model="openai:/stub")
     kwargs = {"inputs": "Say hello", "outputs": "Hello!", "expectations": {"guidelines": ["Greet"]}}
     feedback = judge(**kwargs)

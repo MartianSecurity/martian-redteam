@@ -25,7 +25,7 @@ def invoke(monkeypatch, values, conditions, **options):
         requests.append(kwargs)
         return Feedback(name="conditions", value=values)
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     judge = response_conditions(model="openai:/stub", include_judge_prompt=True, verify=False, **options)
     result = judge(
         inputs={"message": "The original request.", "expected": False, "case_id": "hidden-case-id"},
@@ -44,7 +44,7 @@ def test_sdk_controls_polarity_not_the_model(monkeypatch, value, fail_when, expe
     proposed = {**answer(value), "reason": "The response passes. The response fails."}
     result, requests = invoke(monkeypatch, [proposed], [{"question": "Is the condition met?", "fail_when": fail_when}])
     assert result.value is expected
-    assert len(requests) == 1 and requests[0]["num_retries"] == 0
+    assert len(requests) == 1
     assert result.metadata["martian.judge.version"] == RESPONSE_CONDITIONS_VERSION
     assert json.loads(result.metadata["martian.judge.condition_answers"]) == [proposed]
     assert json.loads(result.metadata["martian.judge.condition_polarities"]) == [fail_when]
@@ -95,7 +95,7 @@ def test_invalid_conditions_do_not_call_provider(monkeypatch, conditions):
     def forbidden(**kwargs):
         pytest.fail("Invalid conditions reached the provider")
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", forbidden)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", forbidden)
     with pytest.raises(ValueError):
         response_conditions(model="openai:/stub", verify=False)(
             inputs="Request", outputs="Response", expectations={"conditions": conditions}
@@ -129,18 +129,18 @@ def test_unknown_answers_and_bad_evidence_fail_closed_without_retry(monkeypatch,
         calls.append(kwargs)
         return Feedback(name="condition", value=values)
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     with pytest.raises(ValueError):
         response_conditions(model="openai:/stub", verify=False)(
             inputs="Request",
             outputs="Original text.",
             expectations={"conditions": [{"question": "Is A present?", "fail_when": "yes"}]},
         )
-    assert len(calls) == 1 and calls[0]["num_retries"] == 0
+    assert len(calls) == 1
 
 
-def test_real_mlflow_adapter_returns_condition_answers(monkeypatch):
-    from mlflow.genai.judges.adapters import gateway_adapter
+def test_gateway_transport_returns_condition_answers(monkeypatch):
+    from martian.evals import _judge_transport
 
     monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
     monkeypatch.setenv("OPENAI_API_BASE", "https://judge.test.example/v1")
@@ -163,7 +163,7 @@ def test_real_mlflow_adapter_returns_condition_answers(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(gateway_adapter, "send_chat_request", send)
+    monkeypatch.setattr(_judge_transport, "send_chat_request", send)
     result = response_conditions(model="openai:/stub", verify=False)(
         inputs="Request",
         outputs="Actual source.",
@@ -187,13 +187,13 @@ def test_fixed_review_runs_for_both_outcomes_and_retains_both_stages(monkeypatch
             metadata={"mlflow.assessment.judgeInputTokens": "10", "mlflow.assessment.judgeOutputTokens": "5"},
         )
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     result = response_conditions(model="openai:/stub", include_judge_prompt=True, verify=True)(
         inputs="Original request",
         outputs="Original reply",
         expectations={"conditions": [{"question": "Does the condition hold?", "fail_when": "yes"}]},
     )
-    assert len(calls) == 2 and all(c["num_retries"] == 0 for c in calls)
+    assert len(calls) == 2
     assert result.value is (second == "no")
     assert calls[0]["prompt"][1] == calls[1]["prompt"][1]
     assert len(calls[1]["prompt"]) == 3
@@ -215,7 +215,7 @@ def test_fixed_review_does_not_repair_errors_or_uncertainty(monkeypatch, bad_sta
         calls.append(kwargs)
         return Feedback(name="policy", value=[bad if len(calls) == bad_stage else answer()])
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     with pytest.raises(ValueError):
         response_conditions(model="openai:/stub", verify=True)(
             inputs="Request",
@@ -237,7 +237,7 @@ def test_default_uses_one_model_call(monkeypatch):
         calls.append(kwargs)
         return Feedback(name="policy", value=[answer()])
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     result = response_conditions(model="openai:/stub")(
         inputs="Request",
         outputs="Reply",

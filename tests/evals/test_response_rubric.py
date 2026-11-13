@@ -25,7 +25,7 @@ def invoke(monkeypatch, values, rubrics="Must be grounded in context.", **option
         requests.append(kwargs)
         return Feedback(name="rubric", value=values)
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     judge = response_rubric(model="openai:/stub", include_judge_prompt=True, verify=False, **options)
     result = judge(
         inputs={
@@ -46,7 +46,7 @@ def test_direct_verdict_maps_to_boolean_and_preserves_metadata(monkeypatch, verd
     proposed = rubric_check(verdict)
     result, requests = invoke(monkeypatch, [proposed])
     assert result.value is expected
-    assert len(requests) == 1 and requests[0]["num_retries"] == 0
+    assert len(requests) == 1 and requests[0]["stage"] == "draft"
     assert result.metadata["martian.judge.version"] == RESPONSE_RUBRICS_VERSION
     assert json.loads(result.metadata["martian.judge.rubric_verdicts"]) == [proposed]
     check = json.loads(result.metadata["martian.judge.checks"])[0]
@@ -106,7 +106,7 @@ def test_invalid_rubrics_do_not_call_provider(monkeypatch, rubrics):
     def forbidden(**kwargs):
         pytest.fail("Invalid rubrics reached the provider")
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", forbidden)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", forbidden)
     with pytest.raises(ValueError):
         response_rubric(model="openai:/stub", verify=False)(
             inputs="Request", outputs="Response", expectations={"rubric": rubrics}
@@ -145,7 +145,7 @@ def test_fixed_review_runs_for_rubrics(monkeypatch):
             metadata={"mlflow.assessment.judgeInputTokens": "12", "mlflow.assessment.judgeOutputTokens": "6"},
         )
 
-    monkeypatch.setattr("martian.evals.judges.invoke_judge_model", provider)
+    monkeypatch.setattr("martian.evals.judges.invoke_response_judge", provider)
     result = response_rubric(model="openai:/stub", include_judge_prompt=True, verify=True)(
         inputs={"message": "Original request", "context": "Some context"},
         outputs="Original reply",

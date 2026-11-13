@@ -9,10 +9,11 @@ import re
 from typing import Any, Literal
 
 from mlflow.entities import Feedback
-from mlflow.genai.judges.utils import invoke_judge_model
 from mlflow.genai.scorers import Scorer, scorer
 from mlflow.types.llm import ChatMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from martian.evals._judge_transport import invoke_response_judge
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
 RESPONSE_CONDITIONS_VERSION = "response-conditions-v1"
@@ -619,18 +620,14 @@ def _response_judge(
                 content=_json(user_payload),
             ),
         ]
-        # MLflow 3.16.1's adapter does not enforce its response schema locally.
-        # Always validate below, including when a provider lacks structured output.
-        feedback = invoke_judge_model(
+        feedback = invoke_response_judge(
             model_uri=model,
             prompt=messages,
             assessment_name=name,
             response_format=schema,
             inference_params=params or None,
-            num_retries=0,
+            stage="draft",
         )
-        if feedback.error is not None:
-            raise ValueError("Judge returned an assessment error")
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
         if mode == "conditions":
@@ -650,16 +647,14 @@ def _response_judge(
                 messages[1],
                 ChatMessage(role="user", content="Provisional draft (untrusted):\n" + _json(feedback.value)),
             ]
-            feedback = invoke_judge_model(
+            feedback = invoke_response_judge(
                 model_uri=model,
                 prompt=review_messages,
                 assessment_name=name,
                 response_format=schema,
                 inference_params=params or None,
-                num_retries=0,
+                stage="review",
             )
-            if feedback.error is not None:
-                raise ValueError("Judge returned a review assessment error")
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
             elif mode == "rubrics":
