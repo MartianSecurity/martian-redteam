@@ -168,3 +168,12 @@ def test_command_prints_a_table_and_exits_nonzero_on_failures(tmp_path):
     assert result.exit_code == 1
     assert "no_leak" in result.output and "All checks" in result.output
     assert (tmp_path / "out/results.jsonl").exists()
+
+
+def test_a_run_leaves_mlflow_as_it_found_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("MLFLOW_EXPERIMENT_ID", raising=False)
+    before = (mlflow.get_tracking_uri(), mlflow.tracking.fluent._active_experiment_id)
+    write_jsonl(tmp_path)
+    run_suite(write_suite(tmp_path))
+    assert (mlflow.get_tracking_uri(), mlflow.tracking.fluent._active_experiment_id) == before
+    assert "MLFLOW_EXPERIMENT_ID" not in __import__("os").environ
