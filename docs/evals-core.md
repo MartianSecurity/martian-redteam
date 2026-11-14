@@ -5,24 +5,34 @@ Martian server will both serve. It runs on its own, with no Martian backend, and
 `martian-sdk[evals]`.
 
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
-builds it with `create_app` and supplies three things:
+builds it with `create_app` and supplies these:
 
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
 | `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process | Its MLflow server over REST (planned) |
+| `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 
 ```python
+from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, create_app
 from martian.evals.store import MemoryStore
 
-app = create_app(store=MemoryStore(), principal=lambda: SINGLE_USER)
+app = create_app(
+    store=MemoryStore(),
+    records=SqlRecordStore("sqlite:///evals/martian.db"),
+    principal=lambda: SINGLE_USER,
+)
 ```
 
-Routes read the injected values through `current_principal`, `current_entitlements` and
-`current_store`. `principal` is a FastAPI dependency, so it can declare its own parameters (a
-header, a cookie) and raise `401`.
+`store` and `records` are both required: the store holds projects, datasets, traces and run
+telemetry, and the record store holds the runs and results the read routes list. Routes read the
+injected values through `current_principal`, `current_entitlements`, `current_store` and
+`current_records` (`martian.evals.server.dependencies`). `principal` is a FastAPI dependency, so
+it can declare its own parameters (a header, a cookie) and raise `401`. A request the store or
+the record store refuses with a `StoreError` is answered `404` (`not_found`), `409`
+(`conflict`) or `422` (`invalid`), with the error's detail.
 
 ## Editions and entitlements
 
@@ -128,6 +138,84 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 2
 `tests/evals/test_bootstrap.py` fixes the shape and the capabilities for each edition and role; the
 server's `tests/test_evals_bootstrap.py` fixes the same shape.
 
+## Read routes
+
+The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces and Datasets
+pages call. Each is a port of the server's route onto the store and the record store, and each
+operation (path, parameters, request body, responses, tags and operation id) is the one in
+version 2 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
+
+| Route | Answers with | Reads |
+| --- | --- | --- |
+| `GET /v1/evals/projects` | The default project, then the store's projects by creation time | Store |
+| `GET /v1/evals` | `EvalRunOut` list, newest first; `project_id`, `default_only`, `q`, `page`, `limit` | Records |
+| `GET /v1/evals/{run_id}` | `EvalRunDetailOut`: the run and its case results | Records |
+| `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; a review queue named by `queue_id` from the store |
+| `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
+| `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
+| `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
+| `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
+| `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
+| `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
+| `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
+
+How the shared model becomes these responses (`martian.evals.server.projection`):
+
+- **The default project.** The project with id `default` (`DEFAULT_PROJECT`) is the contract's
+  default project: a request without `project_id` reads it, and a run in it reports
+  `project_id: null`. `GET /v1/evals/projects` always lists it first, as `Default`. Before it
+  exists, the routes that read it answer with nothing rather than `404`.
+- **Published datasets** are the dataset versions of the default project, the newest version of
+  each name, whatever project a run is in. `version` is the version's content digest, `scope` is
+  `global` for a name starting `martian:`, and a case's `status` is its `martian.status` tag
+  (`ACTIVE` when it has none).
+- **Ids.** The contract's paths take UUIDs for runs, projects other than the default, scoring jobs
+  and review queues, and MLflow's form (`tr-` and 32 hex digits) for traces, so the objects these
+  routes serve need ids in those forms; a run with another id cannot be read through them. A case
+  result has no id of its own: its `id` is a UUID derived from its run and case ids, and a score's
+  `id` one derived from its run, case, scorer and scoring job (`result_id`, `score_id`). A run is
+  found by id in the default project, then in each of the store's projects. The run routes match
+  only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
+- **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
+  target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
+  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. `dataset_id` is the run's
+  dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
+  count when it had none. Two runs compare only when both are completed and have the same dataset
+  digest (or store dataset).
+- **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
+  of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
+  expectations, as the server reads its datasets; inputs or expectations with none of those keys
+  are shown as JSON. A dataset case is `usable` when it is active and has both.
+- **Scores and jobs.** A score's `source` is MLflow's (`CODE`, `LLM_JUDGE`, `HUMAN`) and its
+  `telemetry_state` is `persisted` when it has an MLflow assessment, `unavailable` otherwise. A
+  scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
+  jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
+  (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
+- **Members.** The workbench's `members` is the requesting principal only: the core knows no
+  organisation membership. Its `queues` holds the queue named by `queue_id`, because the store
+  interface cannot list a run's queues.
+- **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
+  `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
+  spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
+  spans are not one tree is refused with `409`.
+- **Trace search.** The store filters on project, session, text, state and time and orders by
+  time. The core applies the contract's user, minimum latency and assessment filters to the
+  store's pages, reading at most 1,000 traces per request, and orders by latency over at most
+  1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another, it is
+  `409`.
+
+Not served yet, and what the UI shows meanwhile: the Sessions route (MorningHQ/martian-notes#100,
+once #151 adds sessions to the store); saved trace views (`/views`), which the Traces page reads
+and which the server keeps in its own table, so the page shows a "Not Found" notice above the
+traces; and the reads that come with their writes in MorningHQ/martian-notes#101 (`/scorers`,
+`/judges`, `/suites`, `/dataset-drafts`), which only the scoring dialog and the Drafts tab use.
+
+`tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
+`tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
+of the contract (`tests/evals/contracts/evals-api-v2.json`, unchanged from the server; see
+`tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
+date-times checked.
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
@@ -135,6 +223,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
+- The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -243,13 +332,13 @@ so row-level security applies.
 | Piece | Issue |
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
-| Read routes: runs, results, comparison, traces, datasets | MorningHQ/martian-notes#100 |
+| The Sessions read route, on the store's sessions | MorningHQ/martian-notes#100, after #151 |
 | Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 
-The objects the routes will serve are the [shared eval data model](eval-model.md).
-`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py` and the store and record
-tests run the core without the backend. The `Evals core` job in CI runs them with the model tests,
+The objects the routes serve are the [shared eval data model](eval-model.md).
+`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_read_routes.py`,
+`test_read_contract.py` and the store and record tests run the core without the backend. The `Evals core` job in CI runs them with the model tests,
 on Postgres as well as SQLite.

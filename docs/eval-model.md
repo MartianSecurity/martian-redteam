@@ -16,7 +16,10 @@ rejects unknown fields.
 ## Identifiers
 
 - `id` fields are opaque strings, unique within their project. A local run generates them; the
-  server uses its row UUID as text.
+  server uses its row UUID as text. The evals core's API addresses runs, projects, scoring jobs
+  and review queues by UUID and traces by MLflow's trace id (`tr-` and 32 hex digits), as the
+  server's contract does, so objects it serves take ids in those forms
+  ([read routes](evals-core.md#read-routes)).
 - Case identifiers come from the data (`id` in a JSONL or CSV row, or its position) and are what
   results, scores and reviews refer to.
 - Digests are SHA-256 over canonical JSON (keys sorted, no whitespace, UTF-8), computed by
