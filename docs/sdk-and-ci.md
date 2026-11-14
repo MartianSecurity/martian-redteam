@@ -15,7 +15,13 @@ Replace `<version>` with a release listed on PyPI.
 
 `evals` includes MLflow-skinny **3.16.1**, matching the current Backend/store,
 and pytest. The base installation supports redteam callbacks and local reports.
+The SDK reaches MLflow internals only through `src/martian/evals/_mlflow.py`,
+which lists each one; when moving the MLflow pin, run
+`tests/evals/test_mlflow_private.py` first, since it names any internal the new
+release removed.
 The separate `mcp` extra adds the existing customer MCP integration.
+The `postgres` extra adds the Postgres driver for the in-process evals store on Postgres
+(see [evals core](evals-core.md#the-in-process-binding)).
 
 ## Python interfaces
 
