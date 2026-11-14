@@ -87,6 +87,83 @@ def test_rerun_skips_finished_cases_and_fresh_starts_over(tmp_path):
     assert messages[-2] == "3 cases, 0 already done"
 
 
+CHANGED = "because the suite, the data or the target changed"
+
+
+def test_rerun_grades_again_when_a_check_changes(tmp_path):
+    # The reported defect: tightening a check and rerunning into the same folder kept the old verdicts.
+    write_jsonl(tmp_path)
+    suite = tmp_path / "evals.yaml"
+    suite.write_text('data: cases.jsonl\nchecks:\n  - type: contains\n    name: polite\n    values: ["cannot"]\n')
+    first = run_suite(suite)
+    assert (first["passed"], first["failed"], first["invalidated"]) == (2, 1, 0)
+    suite.write_text(suite.read_text().replace("type: contains", "type: not_contains"))
+    messages = []
+    second = run_suite(suite, progress=messages.append)
+    assert (second["passed"], second["failed"], second["invalidated"]) == (1, 2, 3)
+    assert messages[0] == f"3 cases, 0 already done, 3 earlier results discarded {CHANGED}"
+    assert json.loads((tmp_path / "results/summary.json").read_text())["invalidated"] == 3
+
+
+def test_rerun_grades_again_only_the_cases_whose_data_changed(tmp_path):
+    write_jsonl(tmp_path)
+    suite = write_suite(tmp_path)
+    run_suite(suite)
+    write_jsonl(tmp_path, [dict(CASES[0], expectations={"secret": "share"}), *CASES[1:]])
+    messages = []
+    summary = run_suite(suite, progress=messages.append)
+    assert messages[0] == f"3 cases, 2 already done, 1 earlier result discarded {CHANGED}"
+    assert summary["invalidated"] == 1
+    records = [json.loads(line) for line in (tmp_path / "results/results.jsonl").read_text().splitlines()]
+    assert records[-1]["id"] == "safe" and records[-1]["checks"]["no_leak"]["passed"] is False
+
+
+def test_rerun_grades_again_when_the_target_file_changes(tmp_path):
+    (tmp_path / "cases.jsonl").write_text(
+        json.dumps({"id": "x", "input": "hi", "expectations": {"secret": "piano"}}) + "\n"
+    )
+    agent = tmp_path / "agent.py"
+    agent.write_text("def target(message):\n    return 'I cannot say.'\n", encoding="utf-8")
+    suite = write_suite(tmp_path, extra="target:\n  file: agent.py\n")
+    assert run_suite(suite)["passed"] == 1
+    agent.write_text("def target(message):\n    return 'It is piano.'\n", encoding="utf-8")
+    summary = run_suite(suite)
+    assert (summary["passed"], summary["failed"], summary["invalidated"]) == (0, 1, 1)
+
+
+def test_results_written_without_a_fingerprint_are_graded_again(tmp_path):
+    # Results from an SDK that did not record what produced them cannot be trusted on resume.
+    write_jsonl(tmp_path)
+    suite = write_suite(tmp_path)
+    run_suite(suite)
+    path = tmp_path / "results/results.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    path.write_text("".join(json.dumps({k: v for k, v in r.items() if k != "fingerprint"}) + "\n" for r in records))
+    assert run_suite(suite)["invalidated"] == 3
+
+
+def test_the_fingerprint_follows_the_judge_and_the_sdk_version_only(tmp_path, monkeypatch):
+    from martian.evals import runner
+
+    def fingerprint(model="openai:/a", temperature=0, extra=""):
+        (tmp_path / "evals.yaml").write_text(
+            f"data: cases.jsonl\njudge:\n  model: {model}\n  inference_params: {{temperature: {temperature}}}\n"
+            f"{extra}checks:\n  - type: rubric\n    rubric: Be polite.\n",
+            encoding="utf-8",
+        )
+        return runner._suite_fingerprint(*load_suite(tmp_path / "evals.yaml"))
+
+    base = fingerprint()
+    assert fingerprint() == base
+    assert fingerprint(model="openai:/b") != base
+    assert fingerprint(temperature=1) != base
+    # Settings that change how a run is carried out, not what it grades, keep earlier results.
+    assert fingerprint(extra="concurrency: 9\nbatch: 3\noutput: elsewhere\n") == base
+    assert fingerprint(model="openai:/a\n  max_retries: 2") == base
+    monkeypatch.setattr(runner, "__version__", "9.9.9")
+    assert fingerprint() != base
+
+
 def test_more_than_one_hundred_cases_run_locally(tmp_path):
     cases = [
         {"id": str(i), "input": "hi", "output": "I cannot.", "expectations": {"secret": "piano"}} for i in range(130)
