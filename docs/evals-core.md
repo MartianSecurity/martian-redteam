@@ -146,7 +146,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
   | Projects | `create_project`, `get_project`, `list_projects`, `archive_project` |
   | Datasets | `create_dataset`, `list_datasets`, `get_dataset`, `find_dataset`, `read_cases` |
   | Run telemetry | `start_run`, `get_run`, `finish_run` |
-  | Traces | `record_trace`, `search_traces`, `get_trace`, `set_trace_tag`, `link_traces` |
+  | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces` |
   | Scores | `log_score`, `list_scores` |
   | Registered scorers | `register_scorer`, `list_scorers`, `scorer_versions` |
   | Review | `save_question`, `list_questions`, `create_queue`, `get_queue`, `queue_items`, `set_queue_item` |
@@ -163,11 +163,52 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, scores kept with their trace, versioned scorers, review queues,
-  artifact names, and organisations never seeing each other. A binding's tests subclass
-  `StoreContract`; `MemoryStore` passes it.
+  search filters and paging, sessions and users, scores kept with their trace, versioned scorers,
+  review queues, artifact names, and organisations never seeing each other. A binding's tests
+  subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
   route the edition leaves out. The core's own routes are all free so far.
+
+## Sessions and users
+
+A session is a conversation: the traces that share a session id, each one a turn. A trace's user
+is the application's user who made the request, not the developer who recorded the trace. Both
+come from the traces, so a store needs nothing else to answer the Sessions page.
+
+- `search_sessions(principal, query, *, max_traces=1000)` reads the first `max_traces` traces that
+  `search_traces` would return for the query, in its order, and groups them by
+  `Trace.session_id`. Every trace filter applies before grouping. The query's `limit` does not
+  apply, and a `cursor` is refused as `invalid`: a session search starts from the first trace.
+- It returns `SessionSearch`, the shape the server's `POST /v1/evals/sessions/search` returns
+  today (`sessions()` in `app/evals_explorer.py` in MorningHQ/MartianBackend):
+
+  ```json
+  {
+    "items": [
+      {"id": "conversation-1", "turns": 3, "errors": 1, "started_at": "2026-11-14T12:01:00Z",
+       "last_at": "2026-11-14T12:04:00Z", "preview": "Where is my order?", "tokens": 17}
+    ],
+    "has_more": false, "traces_examined": 4, "ungrouped": 1, "limit": 1000
+  }
+  ```
+
+  Sessions come in the order of their first trace in the query's order, so newest first lists the
+  session with the newest turn first. `preview` is the request of the session's last trace in that
+  order: its first turn when newest first. `tokens` is `null` when no turn reported tokens.
+  `has_more` says more traces matched than were read, so counts may be incomplete; `ungrouped`
+  counts the traces read that have no session id.
+- A session's turns are `search_traces` with `session_id`. `TraceQuery.user_id` filters traces,
+  and so sessions, by user.
+- The in-process binding reads the trace metadata keys MLflow tracing records these in:
+  `mlflow.trace.session` and `mlflow.trace.user` (MLflow's `TraceMetadataKey.TRACE_SESSION` and
+  `TRACE_USER`, which `mlflow.update_current_trace(session_id=..., user=...)` writes).
+  `record_trace` writes `Trace.session_id` and `Trace.user_id` to the same keys, so traces from
+  Martian runs and traces an application records with MLflow tracing group the same way. The
+  server reads the same keys from its MLflow server. OpenTelemetry's attributes for sessions and
+  users are not read yet; mapping them is MorningHQ/martian-notes#150.
+
+The core's `POST /v1/evals/sessions/search` route on this method comes with
+MorningHQ/martian-notes#100.
 
 ## The in-process binding
 
@@ -191,17 +232,21 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   - A run is an MLflow run, holding the run itself as `martian/run.json` and its counts as
     metrics.
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
-    tag, and MLflow's id is derived from it.
+    tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
+    metadata keys, [above](#sessions-and-users).
   - A score is a feedback assessment, and a registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts are files under the run's folder in the artifact root, which must be a local
   folder.
-- Trace search applies MLflow's own filters (run, session, tags, time), then the text filter in
-  this process, so a text search reads every trace the other filters match.
+- Trace search applies MLflow's own filters (run, session, user, tags, time), then the text filter
+  in this process, so a text search reads every trace the other filters match. A session search
+  reads the same traces and groups the first of them in this process.
 
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
-`MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in.
+`MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
+`tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
+database and reads their sessions, turns and users back through the binding.
 
 ## The record store
 
@@ -307,7 +352,7 @@ the UI files, the `Host` check, the port, the browser and the command.
 | Piece | Issue |
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
-| Read routes: runs, results, comparison, traces, datasets | MorningHQ/martian-notes#100 |
+| Read routes: runs, results, comparison, traces, sessions, datasets | MorningHQ/martian-notes#100 |
 | Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |

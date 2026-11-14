@@ -380,6 +380,7 @@ class TraceQuery(_Object):
     project_id: Identifier
     run_id: str | None = None
     session_id: str | None = None
+    user_id: str | None = None
     trace_ids: list[Identifier] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=500)
     states: list[TraceState] = Field(default_factory=list)
@@ -398,6 +399,66 @@ class Page[T](BaseModel):
 
     items: list[T]
     next_cursor: str | None = None
+
+
+SESSION_TRACE_LIMIT = 1000
+"""The most traces one session search groups."""
+
+
+class Session(_Object):
+    """One conversation: the traces that share a session id, each one a turn. Built from traces,
+    never stored. ``preview`` is the request of the session's last trace in the order the
+    search read them, so its first turn when newest first."""
+
+    id: str = Field(min_length=1)
+    turns: int = Field(ge=1)
+    errors: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    last_at: datetime | None = None
+    preview: str = ""
+    tokens: int | None = Field(default=None, ge=0)
+
+
+class SessionSearch(_Object):
+    """The sessions among the first ``limit`` traces a query matches, in the order of each
+    session's first trace in the query's order. ``has_more`` says more traces matched, so counts
+    may be incomplete; ``ungrouped`` counts the traces read that have no session id."""
+
+    items: list[Session]
+    has_more: bool = False
+    traces_examined: int = Field(ge=0)
+    ungrouped: int = Field(ge=0)
+    limit: int = Field(default=SESSION_TRACE_LIMIT, ge=1)
+
+
+def sessions_from_traces(traces: list[Trace], *, has_more: bool, limit: int = SESSION_TRACE_LIMIT) -> SessionSearch:
+    """Group traces, in the order a search returned them, into sessions by ``session_id``."""
+    groups: dict[str, list[Trace]] = {}
+    for trace in traces:
+        if trace.session_id:
+            groups.setdefault(trace.session_id, []).append(trace)
+    items = []
+    for session_id, turns in groups.items():
+        times = [t.request_time for t in turns if t.request_time is not None]
+        tokens = [t.tokens for t in turns if t.tokens is not None]
+        items.append(
+            Session(
+                id=session_id,
+                turns=len(turns),
+                errors=sum(t.state == "error" for t in turns),
+                started_at=min(times, default=None),
+                last_at=max(times, default=None),
+                preview=turns[-1].request,
+                tokens=sum(tokens) if tokens else None,
+            )
+        )
+    return SessionSearch(
+        items=items,
+        has_more=has_more,
+        traces_examined=len(traces),
+        ungrouped=sum(not t.session_id for t in traces),
+        limit=limit,
+    )
 
 
 class QueueItem(_Object):
@@ -467,9 +528,12 @@ def from_results_record(
 
 __all__ = [
     "MODEL_VERSION",
+    "SESSION_TRACE_LIMIT",
     "DatasetDraft",
     "Page",
     "QueueItem",
+    "Session",
+    "SessionSearch",
     "Span",
     "Trace",
     "TraceQuery",
@@ -495,4 +559,5 @@ __all__ = [
     "case_status",
     "digest",
     "from_results_record",
+    "sessions_from_traces",
 ]
