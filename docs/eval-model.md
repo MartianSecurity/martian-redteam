@@ -93,7 +93,7 @@ lists every field, and a test fails when the runner accepts a field that has no 
 Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
 
 - a check option that does not apply to its type, such as `pattern` on `is_json`, and a `judge`
-  with no LLM judge check. The runner ignores both;
+  with no LLM judge check;
 - a field of a JSONL case that the runner does not read, or both `input` and `inputs` (or
   `output` and `outputs`) in one case;
 - anything `martian evals run` refuses, such as an unknown field.
@@ -106,14 +106,16 @@ for a target or judge the suite does not have, and a suite with no `dataset_loca
 `cases_to_jsonl` refuses cases with `tags` or `metadata`. The written text is then loaded again
 and must give the same definition, so a field the writer does not know is refused too.
 
-`martian evals run` still reads the suite file itself; running it from the model is
-MorningHQ/martian-notes#114.
+`martian evals run` loads its suite with `load_suite_file`, so it refuses the same fields before
+any case runs, and records the run through the model: a `Run` of the loaded `Suite`, and a
+`CaseResult` and `Score`s for each `results.jsonl` record
+([command-line runs](evals-core.md#command-line-runs)).
 
 ## Local results
 
 Every field of a `results.jsonl` record has a place. `martian.evals.model.RESULTS_RECORD_FIELDS`
 lists them, and `from_results_record` converts a record and refuses one with a field it does not
-map:
+map. `martian evals run` records every case this way:
 
 | `results.jsonl` field | Model |
 | --- | --- |

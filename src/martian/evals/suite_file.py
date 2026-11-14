@@ -6,9 +6,11 @@
 
 Every field ``martian evals run`` accepts has a place in the model (``SUITE_FILE_FIELDS``), so a
 suite file loaded and written again means the same. Where the two cannot meet, a ``ConfigError``
-names the field instead of dropping it: a check option or judge the runner would ignore, a data
-row field it does not read, or a suite the file cannot hold, such as an agent target, pass
-policies or two judge models. Header values stay as written, ``${NAME}`` unexpanded.
+names the field instead of dropping it: a check option that does not apply to its check, a judge
+no check uses, a data row field the runner does not read, or a suite the file cannot hold, such as
+an agent target, pass policies or two judge models. ``martian evals run`` loads its suite through
+:func:`load_suite_file`, so it refuses the same fields. Header values stay as written, ``${NAME}``
+unexpanded.
 """
 
 from __future__ import annotations
@@ -62,7 +64,7 @@ SUITE_FILE_FIELDS = {
     "mlflow.experiment": "RunSettings.mlflow_experiment",
 }
 
-# The check fields each check type uses besides `type` and `name`. The runner ignores the others.
+# The check fields each check type uses besides `type` and `name`. Loading refuses the others.
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
@@ -157,7 +159,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
     """Everything a suite file says, as the model's suite fields."""
     if file_suite.judge is not None and not any(check.type in runner.JUDGES for check in file_suite.checks):
         raise ConfigError(
-            "judge: no check is an LLM judge (rubric, guidelines or conditions), so the runner ignores it; remove it"
+            "judge: no check is an LLM judge (rubric, guidelines or conditions), so nothing uses it; remove it"
         )
     try:
         return {
@@ -187,11 +189,8 @@ def _target(reference: runner.TargetRef | None) -> Target:
 
 def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | None) -> ScorerVersion:
     given = check.model_fields_set - {"type", "name"}
-    if ignored := sorted(given - CHECK_OPTIONS[check.type]):
-        raise ConfigError(
-            f"checks.{position}: {', '.join(ignored)} does not apply to {check.type} checks, "
-            "so the runner ignores it; remove it"
-        )
+    if unused := sorted(given - CHECK_OPTIONS[check.type]):
+        raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
         assert judge is not None  # the runner refuses a judge check without a judge
         criterion = getattr(check, check.type)

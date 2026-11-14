@@ -93,6 +93,7 @@ def test_a_case_status_follows_the_sdk_verdict():
 @pytest.fixture
 def local_run(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
     monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
     old_uri = mlflow.get_tracking_uri()
     STATE.reset()

@@ -179,7 +179,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
-  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. `dataset_id` is the run's
+  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
+  without an agent name by its dataset, and one whose `source` is `local` as a **Local run**. `dataset_id` is the run's
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
   digest (or store dataset).
@@ -229,6 +230,8 @@ date-times checked.
   above.
 - `martian ui`, the local edition: the core and the Evals UI from one process, with no login. See
   [the local edition](#the-local-edition-martian-ui).
+- `martian evals run` records each suite-file run in the local edition's data folder, so it shows
+  in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
@@ -402,10 +405,10 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
   [above](#bootstrap-response).
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
-  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start. The suite-file runner (`martian evals run`) keeps a `mlflow.db` of its own
-  in its output folder. That is a plain MLflow store of MLflow's evaluation runs, which the core
-  does not read, so `martian ui` does not open it. Writing command-line runs through the core's
-  store, so that they show in the UI, is MorningHQ/martian-notes#114.
+  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start
+  (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
+  folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
+  page reads again, since the UI gets no live event from another process.
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
   and a session. The local edition answers it with the fixed principal, so the UI needs no
   sign-in:
@@ -437,9 +440,6 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   [below](#the-local-edition-in-a-container).
 - If the UI folder holds no `index.html`, because an install has lost the packaged UI or
   `--ui-dir` names another folder, the command stops with exit code `2` and says so.
-- Until the read routes are ported (MorningHQ/martian-notes#100), the UI opens with the
-  bootstrap and shows "Not Found" where a page reads projects, runs, datasets, traces or judges.
-  `create_app` takes no record store yet, so the local edition does not open one.
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
@@ -497,6 +497,43 @@ file the build copies. CI does not build the image. Nothing
 publishes it to a registry yet: MorningHQ/martian-notes#223 builds the package and the image from
 one tagged release.
 
+## Command-line runs
+
+`martian evals run` records each suite-file run in the local edition's data folder
+(`martian.evals.run_record`), so `martian ui` shows it in Runs, the run detail, Compare and
+Traces. The data folder is `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as
+for `martian ui`. The run writes through the store and the record store as `SINGLE_USER`, in the
+default project:
+
+| Object | What a run writes |
+| --- | --- |
+| `Project` | The default project, named `Default`, on the first run |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id` |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply |
+
+- The run is `running` while it grades, and its results and counts are written after each batch,
+  so it shows while it runs. It is `completed` once every case has a result, with a verdict or
+  not. A run that stops on an error is `failed`, with `error` naming the exception's type, and an
+  interrupted one is `cancelled`.
+- A resumed run is a new run. A case whose verdict it reuses from the output folder's
+  `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
+  that graded the case; that result's trace route answers `409`.
+- The data folder is opened before anything in the output folder changes. One that cannot be
+  opened stops the run with exit code `2`.
+- The output folder is written as before: `results.jsonl`, `summary.json` and `junit.xml` hold
+  what they held. `run_suite` returns the summary with the recorded run under `run`, and the
+  command prints the run's code and how to open it. The output folder's `mlflow.db` stays as the
+  store of MLflow's evaluation harness, or the server `mlflow.tracking_uri` names gets those
+  runs. The core does not read it.
+- Traces that an application records with MLflow tracing, and mapping their `mlflow.sourceRun`
+  to a run, are MorningHQ/martian-notes#148.
+
+`tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
+edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
+trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
+cannot be opened.
+
 ## Not built yet
 
 | Piece | Issue |
@@ -506,7 +543,6 @@ one tagged release.
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
-| Command-line suite runs written through the core's store, so `martian ui` shows them | MorningHQ/martian-notes#114 |
 | Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).

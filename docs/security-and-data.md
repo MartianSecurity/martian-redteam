@@ -39,7 +39,8 @@ Martian. Its outbound calls are the ones the suite file names:
   endpoint that is not on your own machine or network.
 - **Header values** can reference `${NAME}`, read from the environment when the suite loads.
   Only the names appear in the suite file. The values are sent to the target and are not
-  written to `results.jsonl`, `summary.json`, `junit.xml` or the MLflow trace. They are not
+  written to `results.jsonl`, `summary.json`, `junit.xml`, the MLflow trace or the local Evals
+  UI's data folder. They are not
   expanded in the request body, and text inside a case is never expanded. Loading a suite file
   into the [shared eval model](eval-model.md#the-sdk-suite-file), as a store keeps it, keeps the
   URL and header values as written, with `${NAME}` unexpanded, so the environment's values are
@@ -48,6 +49,12 @@ Martian. Its outbound calls are the ones the suite file names:
   configure.
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
+
+Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
+`MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
+verdicts and reasons as `results.jsonl` holds them, its trace with the target's spans, and the
+target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
+treat `results.jsonl`.
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.

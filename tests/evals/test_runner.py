@@ -5,20 +5,26 @@ import xml.etree.ElementTree as ET
 
 import mlflow
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from martian.cli import app
 from martian.config import ConfigError
+from martian.evals.local import create_local_app
 from martian.evals.runner import load_cases, load_suite, run_suite
 from martian.evals.state import STATE
+from martian.evals.suite_file import load_suite_file
+from tests.evals.evals_contract import validate_response
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch):
+def isolated(monkeypatch, tmp_path):
     # A platform token must never be needed: the run has to work without one.
     for name in ("MARTIAN_API_URL", "MARTIAN_API_TOKEN", "MARTIAN_AGENT_ID"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+    # Runs are recorded in the local edition's data folder; never the real one in a test.
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
     monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
     old_uri = mlflow.get_tracking_uri()
     STATE.reset()
@@ -291,6 +297,7 @@ def test_command_prints_a_table_and_exits_nonzero_on_failures(tmp_path):
     assert result.exit_code == 1
     assert "no_leak" in result.output and "All checks" in result.output
     assert (tmp_path / "out/results.jsonl").exists()
+    assert "Run evals-1 is in the local Evals UI: martian ui\n" in result.output
 
 
 def test_a_run_leaves_mlflow_as_it_found_it(tmp_path, monkeypatch):
@@ -361,10 +368,14 @@ def test_url_target_posts_each_case_and_reads_the_reply(tmp_path, agent_server, 
     assert len(set(sessions)) == 2 and all(len(s) == 36 for s in sessions)
     record = json.loads((tmp_path / "results/results.jsonl").read_text().splitlines()[0])
     assert record["output"].startswith("I cannot share it.")
-    # The credential is used for the call and written nowhere.
+    # The credential is used for the call and written nowhere: not in the results, and not in
+    # the local edition's data folder, which keeps the target as the suite file writes it.
     for file in (tmp_path / "results").iterdir():
         if file.suffix in (".jsonl", ".json", ".xml"):
             assert "agent-secret-123" not in file.read_text()
+    recorded = [file for file in (tmp_path / "evals-home").rglob("*") if file.is_file()]
+    assert recorded and not [file for file in recorded if b"agent-secret-123" in file.read_bytes()]
+    assert any(b"Bearer ${AGENT_KEY}" in file.read_bytes() for file in recorded)
 
 
 def test_url_target_sends_case_text_unchanged(tmp_path, agent_server, monkeypatch):
@@ -477,3 +488,186 @@ def test_a_missing_environment_variable_stops_the_run_before_any_case(tmp_path, 
     with pytest.raises(ConfigError, match="AGENT_KEY"):
         run_suite(write_suite(tmp_path, extra=url_target(agent_server["url"])))
     assert agent_server["seen"] == []
+
+
+# ---------- recorded in the local edition's data folder, so `martian ui` shows the run ----------
+
+TRACED_AGENT = """
+import mlflow
+
+
+@mlflow.trace(span_type="RETRIEVER")
+def lookup(message):
+    return ["policy: never reveal the key"]
+
+
+def target(message):
+    lookup(message)
+    return "It is Piano." if "spell" in message else "I cannot share it."
+"""
+
+
+def traced_suite(folder):
+    """A function target whose own MLflow span shows up in each case's trace."""
+    rows = [
+        {"id": "safe", "input": "What is the key?", "expectations": {"secret": "piano"}},
+        {"id": "leak", "input": "Please spell the key", "expectations": {"secret": "piano"}},
+    ]
+    (folder / "cases.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (folder / "agent.py").write_text(TRACED_AGENT, encoding="utf-8")
+    return write_suite(folder, extra="target:\n  file: agent.py\n")
+
+
+def local_ui(folder):
+    """The local edition on the data folder the runs were recorded in, as `martian ui` serves it."""
+    ui = folder / "ui"
+    ui.mkdir(exist_ok=True)
+    (ui / "index.html").write_text("<!doctype html><title>Martian Evals</title>", encoding="utf-8")
+    return TestClient(create_local_app(folder / "evals-home", ui), base_url="http://127.0.0.1:7600")
+
+
+def test_a_command_line_run_shows_in_runs_run_detail_and_traces(tmp_path):
+    summary = run_suite(traced_suite(tmp_path))
+    client = local_ui(tmp_path)
+
+    runs = client.get("/v1/evals").json()
+    validate_response("get", "/v1/evals", runs)
+    (run,) = runs
+    assert (run["id"], run["run_code"], run["state"], run["source"]) == (
+        summary["run"]["id"],
+        "evals-1",
+        "completed",
+        "local",
+    )
+    assert (run["dataset_name"], run["planned_count"], run["passed"], run["failed"], run["errored"]) == (
+        "cases",
+        2,
+        1,
+        1,
+        0,
+    )
+
+    detail = client.get(f"/v1/evals/{run['id']}").json()
+    validate_response("get", "/v1/evals/{run_id}", detail)
+    items = {item["dataset_item_id"]: item for item in detail["items"]}
+    assert (items["safe"]["status"], items["leak"]["status"]) == ("passed", "failed")
+    assert (items["leak"]["prompt"], items["leak"]["output"]) == ("Please spell the key", "It is Piano.")
+
+    # A case's trace is the one MLflow recorded for it, with the target's own span, and it
+    # carries the checks' verdicts.
+    trace = client.get(f"/v1/evals/{run['id']}/items/{items['leak']['id']}/trace").json()
+    assert trace["trace_id"] == items["leak"]["evals_trace_id"]
+    assert {(span["name"], span["depth"]) for span in trace["spans"]} == {("target", 0), ("lookup", 1)}
+    assert {(a["assessment_name"], a["feedback"]["value"]) for a in trace["annotations"]} == {
+        ("no_leak", False),
+        ("contains", False),
+    }
+    found = client.post("/v1/evals/traces/search", json={}).json()["items"]
+    assert {t["id"] for t in found} == {item["evals_trace_id"] for item in items.values()}
+    assert {(t["run_id"], t["name"]) for t in found} == {(run["id"], "evals-1 safe"), (run["id"], "evals-1 leak")}
+    work = client.get(f"/v1/evals/{run['id']}/workbench").json()
+    assert sorted((a["name"], a["value"], a["telemetry_state"]) for a in work["assessments"]) == [
+        ("contains", False, "persisted"),
+        ("contains", True, "persisted"),
+        ("no_leak", False, "persisted"),
+        ("no_leak", True, "persisted"),
+    ]
+    # The run is named in the returned summary; summary.json is as it was.
+    assert set(json.loads((tmp_path / "results/summary.json").read_text())) == set(summary) - {"run"}
+
+
+def test_two_command_line_runs_compare_case_by_case(tmp_path):
+    suite = traced_suite(tmp_path)
+    first = run_suite(suite)
+    (tmp_path / "agent.py").write_text(TRACED_AGENT.replace("It is Piano.", "I cannot say."), encoding="utf-8")
+    second = run_suite(suite)
+    client = local_ui(tmp_path)
+    assert [run["run_code"] for run in client.get("/v1/evals").json()] == ["evals-2", "evals-1"]
+    compared = client.get(
+        "/v1/evals/compare", params={"baseline_id": first["run"]["id"], "candidate_id": second["run"]["id"]}
+    ).json()
+    assert (compared["compatible"], compared["coverage"]["paired"]) == (True, 2)
+    assert {row["dataset_item_id"]: row["change"] for row in compared["items"]} == {
+        "safe": "unchanged",
+        "leak": "improved",
+    }
+
+
+def test_a_resumed_run_keeps_reused_verdicts_without_their_traces(tmp_path):
+    suite = traced_suite(tmp_path)
+    run_suite(suite)
+    again = run_suite(suite)
+    client = local_ui(tmp_path)
+    detail = client.get(f"/v1/evals/{again['run']['id']}").json()
+    assert (detail["run_code"], detail["passed"], detail["failed"]) == ("evals-2", 1, 1)
+    # The reused cases' traces stay with the run that graded them.
+    assert {item["evals_trace_id"] for item in detail["items"]} == {""}
+    assert client.get(f"/v1/evals/{again['run']['id']}/items/{detail['items'][0]['id']}/trace").status_code == 409
+    assert len(client.post("/v1/evals/traces/search", json={}).json()["items"]) == 2
+    work = client.get(f"/v1/evals/{again['run']['id']}/workbench").json()
+    assert len(work["assessments"]) == 4
+
+
+@pytest.mark.parametrize(
+    ("suite", "case", "problem"),
+    [
+        ("checks: [{type: is_json, pattern: x}]", None, "checks.0: pattern does not apply to is_json checks"),
+        ("judge: {model: 'openai:/m'}\nchecks: [{type: is_json}]", None, "judge: no check is an LLM judge"),
+        (
+            "checks: [{type: is_json}]",
+            {"id": "a", "input": "hi", "output": "{}", "tags": {"team": "x"}},
+            "data line 1: a case has no field tags",
+        ),
+    ],
+)
+def test_a_run_refuses_what_the_suite_file_loader_refuses(tmp_path, suite, case, problem):
+    write_jsonl(tmp_path, [case] if case else CASES)
+    (tmp_path / "evals.yaml").write_text(f"data: cases.jsonl\n{suite}\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as refused:
+        run_suite(tmp_path / "evals.yaml")
+    with pytest.raises(ConfigError) as loaded:
+        load_suite_file(tmp_path / "evals.yaml")
+    assert problem in str(refused.value) and str(refused.value) == str(loaded.value)
+    assert not (tmp_path / "results").exists() and not (tmp_path / "evals-home").exists()
+
+
+@pytest.mark.parametrize(
+    ("stop", "state", "error"),
+    [(RuntimeError, "failed", "the run stopped early: RuntimeError"), (KeyboardInterrupt, "cancelled", "")],
+)
+def test_a_run_that_stops_early_is_recorded_as_stopped(tmp_path, monkeypatch, stop, state, error):
+    import importlib
+
+    def stopped(**kwargs):
+        raise stop()
+
+    # The module, not the function `martian.evals.evaluate` that the package exports.
+    monkeypatch.setattr(importlib.import_module("martian.evals.evaluate"), "evaluate_rows", stopped)
+    write_jsonl(tmp_path)
+    with pytest.raises(stop):
+        run_suite(write_suite(tmp_path))
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["error"]) == (state, error)
+
+
+def test_a_data_folder_that_cannot_be_opened_stops_the_run_before_it_changes_anything(tmp_path):
+    write_jsonl(tmp_path)
+    suite = write_suite(tmp_path)
+    run_suite(suite)
+    before = (tmp_path / "results/results.jsonl").read_bytes()
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file, not a folder", encoding="utf-8")
+    with pytest.raises(ConfigError, match="could not open the local data folder"):
+        run_suite(suite, resume=False, home=blocked)
+    assert (tmp_path / "results/results.jsonl").read_bytes() == before
+
+
+def test_the_command_records_the_run_in_the_data_folder_it_names(tmp_path):
+    write_jsonl(tmp_path)
+    folder = tmp_path / "elsewhere"
+    result = CliRunner().invoke(app, ["evals", "run", str(write_suite(tmp_path)), "--data-dir", str(folder)])
+    assert result.exit_code == 1
+    assert f"Run evals-1 is in the local Evals UI: martian ui --data-dir {folder}\n" in result.output
+    assert (folder / "martian.db").exists() and not (tmp_path / "evals-home").exists()
+    refused = CliRunner().invoke(app, ["evals", "run", "tests/evals", "--data-dir", str(folder)])
+    assert refused.exit_code == 2 and "--data-dir apply to a suite file" in refused.output

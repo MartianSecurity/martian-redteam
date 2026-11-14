@@ -1,0 +1,1 @@
+import{i as e}from"./checkbox-BIAsFY1m.js";import{cn as t,un as n}from"./index-DxnRvFe2.js";var r=n(t(),1),i=Object.defineProperty,a=(e,t)=>i(e,`name`,{value:t,configurable:!0}),o=r.useId||(()=>void 0),s=0;function c(t){let[n,i]=r.useState(o());return e(()=>{t||i(e=>e??String(s++))},[t]),t||(n?`radix-${n}`:``)}a(c,`useId`);export{c as t};
