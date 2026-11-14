@@ -78,8 +78,11 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
 _CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations"})
 _DEFAULT_FUNCTION = runner.TargetRef.model_fields["function"].default
 _DEFAULT_INPUT_KEY = runner.Suite.model_fields["input_key"].default
-# Suite fields a suite file does not hold: loading it gives them from its name and its data.
-_DERIVED_ON_LOAD = frozenset({"id", "name", "version", "digest", "dataset_name", "dataset_digest"})
+# Suite fields a suite file does not hold: loading it gives them from its name and its data, and
+# who saved a stored version when is the store's, not the file's.
+_DERIVED_ON_LOAD = frozenset(
+    {"id", "name", "version", "digest", "dataset_name", "dataset_digest", "created_at", "created_by"}
+)
 
 
 def _problems(error: ValidationError) -> str:

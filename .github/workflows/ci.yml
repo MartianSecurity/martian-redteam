@@ -154,7 +154,8 @@ jobs:
           uv run --extra postgres pytest -q tests/evals/test_server.py tests/evals/test_store.py
           tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_model.py
           tests/evals/test_mlflow_private.py tests/evals/test_entitlements.py tests/evals/test_bootstrap.py
-          tests/evals/test_read_routes.py tests/evals/test_read_contract.py
+          tests/evals/test_read_routes.py tests/evals/test_read_contract.py tests/evals/test_write_routes.py
+          tests/evals/test_write_contract.py tests/evals/test_worker.py
 
   packaging:
     name: Packaging

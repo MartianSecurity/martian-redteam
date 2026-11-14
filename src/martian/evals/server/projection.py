@@ -27,7 +27,19 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from martian.evals.model import CaseResult, Review, Run, Score, ScoringJob, Trace, TraceState, Value, digest
+from martian.evals.model import (
+    CaseResult,
+    Policy,
+    Review,
+    ReviewQueue,
+    Run,
+    Score,
+    ScoringJob,
+    Trace,
+    TraceState,
+    Value,
+    digest,
+)
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
 
 DEFAULT_PROJECT = "default"
@@ -68,6 +80,26 @@ def result_id(run_id: str, case_id: str) -> uuid.UUID:
     return uuid.uuid5(_IDS, f"case-result\x00{run_id}\x00{case_id}")
 
 
+def derived_id(kind: str, *parts: str) -> uuid.UUID:
+    """A UUID for an object whose id the contract takes as a UUID, derived from what identifies
+    it, such as the ``request_id`` that created it, so a repeated request finds the same object."""
+    return uuid.uuid5(_IDS, "\x00".join((kind, *parts)))
+
+
+def user_uuid(user_id: str) -> uuid.UUID:
+    """A user id where the contract takes a UUID: the id itself when it is one, else one derived
+    from it (the local edition's single user is ``local``)."""
+    try:
+        return uuid.UUID(user_id)
+    except ValueError:
+        return derived_id("user", user_id)
+
+
+def suite_version_id(suite_id: str, version: int) -> uuid.UUID:
+    """The API id of one version of a suite."""
+    return derived_id("suite-version", suite_id, str(version))
+
+
 def score_id(score: Score) -> uuid.UUID:
     """The API id of a stored score."""
     return uuid.uuid5(
@@ -88,7 +120,8 @@ def milliseconds(when: datetime | None) -> int | None:
 # --- case text ------------------------------------------------------------------------------
 
 
-def _text(value: Any) -> str:
+def text_of(value: Any) -> str:
+    """A value as the server shows it: text as it is, anything else as JSON, nothing as empty."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -96,7 +129,8 @@ def _text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _first_text(value: Any, keys: tuple[str, ...]) -> str | None:
+def first_text(value: Any, keys: tuple[str, ...]) -> str | None:
+    """``value`` when it is non-blank text, else the first non-blank text under ``keys``."""
     if isinstance(value, str) and value.strip():
         return value
     if isinstance(value, dict):
@@ -108,12 +142,12 @@ def _first_text(value: Any, keys: tuple[str, ...]) -> str | None:
 
 
 def prompt_text(inputs: dict[str, Any]) -> str:
-    return _first_text(inputs, PROMPT_KEYS) or (_text(inputs) if inputs else "")
+    return first_text(inputs, PROMPT_KEYS) or (text_of(inputs) if inputs else "")
 
 
 def expected_text(expectations: dict[str, Any]) -> str:
     raw: Any = expectations.get("expected_response", expectations)
-    return _first_text(raw, EXPECTED_KEYS) or (_text(raw) if raw else "")
+    return first_text(raw, EXPECTED_KEYS) or (text_of(raw) if raw else "")
 
 
 # --- runs and case results ------------------------------------------------------------------
@@ -127,7 +161,7 @@ def item_out(result: CaseResult) -> EvalItemOut:
         status=result.status,
         prompt=prompt_text(result.inputs),
         expected=expected_text(result.expectations),
-        output=_text(result.output),
+        output=text_of(result.output),
         error=result.error,
         evals_trace_id=result.store.trace_id or "",
         evals_assessment_id=result.store.assessment_id or "",
@@ -158,6 +192,7 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        "cancel_requested_at": run.cancel_requested_at,
         "source": run.source,
         "ci": dict(run.provenance) if run.source == "ci" else None,
     }
@@ -253,16 +288,36 @@ class ReviewRow:
         return asdict(self)
 
 
-def job_config(job: ScoringJob) -> dict[str, Any]:
-    """The server's ``config`` of a scoring job: its scorers by name, and a digest of their pinned
-    versions so two jobs compare only when they scored alike."""
-    scorers = sorted(job.scorers, key=lambda scorer: scorer.name)
+def policy_out(policy: Policy) -> dict[str, Any]:
+    """A policy as the server's criterion policy."""
     return {
-        "scorers": [scorer.name for scorer in job.scorers],
-        "guidelines": "",
-        "policies": [],
-        "definition_digest": digest([scorer.model_dump(mode="json") for scorer in scorers]),
+        "name": policy.scorer,
+        "direction": policy.direction,
+        "threshold": policy.threshold,
+        "minimum_coverage": policy.minimum_coverage,
     }
+
+
+def job_config(job: ScoringJob) -> dict[str, Any]:
+    """The server's ``config`` of a scoring job: its scorers by name, the policy judge's guidelines,
+    the policies that gate it and the suite version it applies, and a digest of the pinned scorer
+    versions and policies so two jobs compare only when they scored alike."""
+    scorers = sorted(job.scorers, key=lambda scorer: scorer.name)
+    policies = sorted(job.policies, key=lambda policy: policy.scorer)
+    pinned: Any = [scorer.model_dump(mode="json") for scorer in scorers]
+    if policies:
+        pinned = {"scorers": pinned, "policies": [policy.model_dump(mode="json") for policy in policies]}
+    config: dict[str, Any] = {
+        "scorers": [scorer.name for scorer in job.scorers],
+        "guidelines": next((str(s.criteria.get("guidelines", "")) for s in job.scorers if s.name == "policy"), ""),
+        "policies": [policy_out(policy) for policy in policies],
+        "definition_digest": digest(pinned),
+    }
+    if job.suite_id is not None and job.suite_version is not None:
+        config["suite_id"] = job.suite_id
+        config["suite_version"] = job.suite_version
+        config["suite_version_id"] = str(suite_version_id(job.suite_id, job.suite_version))
+    return config
 
 
 def public_job(job: ScoringJob) -> dict[str, Any]:
@@ -277,7 +332,23 @@ def public_job(job: ScoringJob) -> dict[str, Any]:
         "total": job.total,
         "succeeded": job.succeeded,
         "errors": job.errors,
-        "cancel_requested_at": None,
+        "cancel_requested_at": job.cancel_requested_at,
+    }
+
+
+def queue_out(queue: ReviewQueue) -> dict[str, Any]:
+    """A review queue as the server's ``public_queue``: case results by their API ids."""
+    return {
+        "id": queue.id,
+        "run_id": queue.run_id,
+        "name": queue.name,
+        "question": queue.questions[0].model_dump(mode="json"),
+        "questions": [question.model_dump(mode="json") for question in queue.questions],
+        "assignee_id": queue.assignee,
+        "item_ids": [str(result_id(queue.run_id, case_id)) for case_id in queue.case_ids],
+        "native_state": "persisted",
+        "native_id": None,
+        "created_at": queue.created_at,
     }
 
 
@@ -302,7 +373,7 @@ def mlflow_assessment(score: Score, trace_id: str) -> dict[str, Any]:
     if score.rationale:
         found["rationale"] = score.rationale
     if score.metadata:
-        found["metadata"] = {key: _text(value) for key, value in score.metadata.items()}
+        found["metadata"] = {key: text_of(value) for key, value in score.metadata.items()}
     return found
 
 
