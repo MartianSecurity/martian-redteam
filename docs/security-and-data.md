@@ -95,9 +95,13 @@ The SDK accepts only typed operation results. It does not filter attack text or 
 - Contents-read permission on the example workflow
 - No `continue-on-error` on the assessment step
 
-## Attribution
+## Licence, attribution and vulnerability reports
 
-Apache-2.0. `NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+Every file in this repository is Apache-2.0 (`LICENSE`); no file carries another licence.
+Paid Martian features are not in this repository. Report a vulnerability as
+[SECURITY.md](../SECURITY.md) describes, never in a public issue.
+
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 
