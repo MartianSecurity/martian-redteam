@@ -140,8 +140,8 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 
 ## Read routes
 
-The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces and Datasets
-pages call. Each is a port of the server's route onto the store and the record store, and each
+The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
+Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
 version 2 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
 
@@ -155,6 +155,7 @@ version 2 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
 | `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
+| `POST /v1/evals/sessions/search` | The sessions among the first 1,000 matching traces ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
@@ -198,17 +199,20 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
   spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
   spans are not one tree is refused with `409`.
-- **Trace search.** The store filters on project, session, text, state and time and orders by
-  time. The core applies the contract's user, minimum latency and assessment filters to the
-  store's pages, reading at most 1,000 traces per request, and orders by latency over at most
-  1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another, it is
-  `409`.
+- **Trace search and sessions.** The store filters on project, session, user, text, state and
+  time and orders by time. The core applies the contract's minimum latency and assessment filters
+  to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
+  most 1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another,
+  it is `409`. A session search is the store's `search_sessions`; with a latency or assessment
+  filter or a latency order, the core reads the first 1,000 traces the store's filters match,
+  applies the rest and groups them the same way. A session search with a cursor is `422`, as on
+  the server.
 
-Not served yet, and what the UI shows meanwhile: the Sessions route (MorningHQ/martian-notes#100,
-once #151 adds sessions to the store); saved trace views (`/views`), which the Traces page reads
-and which the server keeps in its own table, so the page shows a "Not Found" notice above the
-traces; and the reads that come with their writes in MorningHQ/martian-notes#101 (`/scorers`,
-`/judges`, `/suites`, `/dataset-drafts`), which only the scoring dialog and the Drafts tab use.
+Not served, and what the UI shows meanwhile: saved trace views (`/views`), which the Traces page
+reads and which the server keeps in its own table, so the page shows a "Not Found" notice above
+the traces; and the reads that come with their writes in MorningHQ/martian-notes#101
+(`/scorers`, `/judges`, `/suites`, `/dataset-drafts`), which only the scoring dialog and the
+Drafts tab use.
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
@@ -294,8 +298,8 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   server reads the same keys from its MLflow server. OpenTelemetry's attributes for sessions and
   users are not read yet; mapping them is MorningHQ/martian-notes#150.
 
-The core's `POST /v1/evals/sessions/search` route on this method comes with
-MorningHQ/martian-notes#100.
+The core's `POST /v1/evals/sessions/search` answers with this method's `SessionSearch` (see
+[read routes](#read-routes)).
 
 ## The in-process binding
 
@@ -377,7 +381,6 @@ so row-level security applies.
 | Piece | Issue |
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
-| The Sessions read route, on the store's sessions | MorningHQ/martian-notes#100, after #151 |
 | Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |

@@ -22,6 +22,7 @@ READ_OPERATIONS = [
     ("get", "/v1/evals/compare"),
     ("get", "/v1/evals/projects"),
     ("post", "/v1/evals/traces/search"),
+    ("post", "/v1/evals/sessions/search"),
     ("get", "/v1/evals/traces/{trace_id}"),
     ("get", "/v1/evals/traces/{trace_id}/payload"),
     ("get", "/v1/evals/datasets"),
@@ -31,7 +32,7 @@ READ_OPERATIONS = [
 
 # The fields of the server's untyped responses, from the code that builds them in
 # MorningHQ/MartianBackend: public_job, public_assessment, public_review (app/evals_workbench.py),
-# project_out (app/api/evals_explorer.py), project_trace (app/evals_explorer.py), safe_trace and
+# project_out (app/api/evals_explorer.py), project_trace and sessions (app/evals_explorer.py), safe_trace and
 # compare_runs (app/evals_workbench.py), compare_assessments and scorecard (app/evals_quality.py).
 JOB = {"id", "run_id", "config", "state", "error", "created_at", "finished_at", "total", "succeeded", "errors"}
 JOB |= {"cancel_requested_at"}
@@ -157,6 +158,12 @@ def test_untyped_responses_have_the_servers_fields(served):
     assert set(search) == {"items", "next_cursor", "limit"}
     assert all(set(row) == TRACE_ROW for row in search["items"])
     assert set(search["items"][0]["assessments"][0]) == {"id", "name", "value", "rationale", "source", "error"}
+
+    sessions = client.post("/v1/evals/sessions/search", json={}).json()
+    assert set(sessions) == {"items", "has_more", "traces_examined", "ungrouped", "limit"}
+    assert set(sessions["items"][0]) == {"id", "turns", "errors", "started_at", "last_at", "preview", "tokens"}
+    filtered = client.post("/v1/evals/sessions/search", json={"min_latency_ms": 500}).json()
+    assert set(filtered) == set(sessions) and filtered["items"]
 
     trace_id = seeded.traces[(seeded.candidate.id, "faq-1")]
     detail = client.get(f"/v1/evals/traces/{trace_id}").json()

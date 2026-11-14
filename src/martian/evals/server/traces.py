@@ -1,14 +1,18 @@
-"""Trace search and trace detail: a port of the trace routes of the server's
+"""Trace search, sessions and trace detail: a port of the trace routes of the server's
 ``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store.
 
-The store's ``TraceQuery`` filters on project, session, text, state and time and orders by time.
-The contract's search also filters on user, minimum latency and a boolean assessment, and orders
+The store's ``TraceQuery`` filters on project, session, user, text, state and time and orders by
+time. The contract's search also filters on minimum latency and a boolean assessment, and orders
 by latency; the core applies those to what the store returns:
 
-- With a user, latency or assessment filter, a page is filled from the store's pages in turn, at
-  most 1,000 traces read per request; the cursor names the store's page and how many of its
-  matches were already returned.
+- With a latency or assessment filter, a page is filled from the store's pages in turn, at most
+  1,000 traces read per request; the cursor names the store's page and how many of its matches
+  were already returned.
 - Ordering by latency reads every trace the store's filters match, up to 1,000, and refuses more.
+- A session search is the store's ``search_sessions``. With a latency or assessment filter or a
+  latency order, the core reads the first 1,000 traces the store's filters match, filters and
+  orders them, and groups them the same way (``sessions_from_traces``); ``has_more`` then says
+  more traces matched the store's filters than were read.
 
 A cursor belongs to its query and project: another query gets ``409``.
 
@@ -28,7 +32,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Response
 
-from martian.evals.model import Trace, digest
+from martian.evals.model import SessionSearch, Trace, digest, sessions_from_traces
 from martian.evals.model import TraceQuery as StoreQuery
 from martian.evals.server.dependencies import PrincipalDep, StoreDep
 from martian.evals.server.principal import Principal
@@ -70,6 +74,7 @@ def _store_query(body: TraceQuery, project: str) -> StoreQuery:
     return StoreQuery(
         project_id=project,
         session_id=body.session_id or None,
+        user_id=body.user_id or None,
         text=body.q or None,
         states=[TRACE_STATE_BACK[body.state]] if body.state else [],
         since=_from_ms(body.start_time_ms),
@@ -82,8 +87,6 @@ def _store_query(body: TraceQuery, project: str) -> StoreQuery:
 
 def _filter(body: TraceQuery) -> Callable[[Trace], bool] | None:
     tests: list[Callable[[Trace], bool]] = []
-    if body.user_id:
-        tests.append(lambda t: t.user_id == body.user_id)
     if body.min_latency_ms is not None:
         minimum = body.min_latency_ms
         tests.append(lambda t: t.latency_ms is not None and t.latency_ms >= minimum)
@@ -120,21 +123,33 @@ def _position(body: TraceQuery, project: str) -> dict[str, Any]:
     return found
 
 
+async def _bounded(
+    store: EvalStore, principal: Principal, body: TraceQuery, project: str, keep: Callable[[Trace], bool] | None
+) -> tuple[list[Trace], bool]:
+    """The first 1,000 traces the store's filters match, filtered and in the query's order, and
+    whether more matched."""
+    query, cursor = _store_query(body, project), None
+    rows: list[Trace] = []
+    while len(rows) <= READ_LIMIT:
+        page = await store.search_traces(principal, query.model_copy(update={"cursor": cursor}))
+        rows.extend(page.items)
+        if (cursor := page.next_cursor) is None:
+            break
+    more = len(rows) > READ_LIMIT
+    rows = [t for t in rows[:READ_LIMIT] if keep is None or keep(t)]
+    if body.order in ("slowest", "fastest"):
+        known = [t for t in rows if t.latency_ms is not None]
+        known.sort(key=lambda t: t.latency_ms or 0, reverse=body.order == "slowest")
+        rows = known + [t for t in rows if t.latency_ms is None]
+    return rows, more
+
+
 async def _by_latency(
     store: EvalStore, principal: Principal, body: TraceQuery, project: str, keep: Callable[[Trace], bool] | None
 ) -> tuple[list[Trace], str | None]:
-    query, rows, cursor = _store_query(body, project), [], None
-    while True:
-        page = await store.search_traces(principal, query.model_copy(update={"cursor": cursor}))
-        rows.extend(page.items)
-        if len(rows) > READ_LIMIT:
-            raise HTTPException(422, "Ordering by latency covers at most 1,000 traces; narrow the filters")
-        if (cursor := page.next_cursor) is None:
-            break
-    rows = [t for t in rows if keep is None or keep(t)]
-    known = [t for t in rows if t.latency_ms is not None]
-    known.sort(key=lambda t: t.latency_ms or 0, reverse=body.order == "slowest")
-    rows = known + [t for t in rows if t.latency_ms is None]
+    rows, more = await _bounded(store, principal, body, project, keep)
+    if more:
+        raise HTTPException(422, "Ordering by latency covers at most 1,000 traces; narrow the filters")
     offset = _position(body, project).get("offset", 0)
     if not isinstance(offset, int) or offset < 0:
         raise HTTPException(409, EXPIRED)
@@ -185,6 +200,21 @@ async def trace_search(body: TraceQuery, principal: PrincipalDep, store: StoreDe
     else:
         traces, cursor = await _in_order(store, principal, body, project, keep)
     return {"items": [trace_row(t) for t in traces], "next_cursor": cursor, "limit": body.limit}
+
+
+@router.post("/sessions/search", response_model=None)
+async def session_search(body: TraceQuery, principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
+    if body.cursor:
+        raise HTTPException(422, "Start a fresh search for an aggregate or export")
+    project = await project_scope(store, principal, body.project_id)
+    if project is None:
+        found = SessionSearch(items=[], traces_examined=0, ungrouped=0)
+    elif (keep := _filter(body)) is None and body.order in ("newest", "oldest"):
+        found = await store.search_sessions(principal, _store_query(body, project))
+    else:
+        traces, more = await _bounded(store, principal, body, project, keep)
+        found = sessions_from_traces(traces, has_more=more)
+    return found.model_dump(mode="json")
 
 
 async def _trace(

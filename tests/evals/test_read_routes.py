@@ -4,15 +4,17 @@ MemoryStore and on the in-process MLflow binding."""
 
 import asyncio
 import uuid
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
+from martian.evals.model import Trace
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
+from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
-from tests.evals.read_fixture import seed
+from tests.evals.read_fixture import T0, seed
 
 ORG = organisation_principal("user-1", "org-a", frozenset({"member"}), display_name="Ada")
 
@@ -212,6 +214,38 @@ def test_trace_search_filters_and_pages(served):
     assert len(search(client, start_time_ms=start, end_time_ms=start)["items"]) == 1
 
 
+def test_sessions_group_the_traces_a_search_matches(served):
+    client, seeded = served
+    for minute, (state, tokens) in enumerate((("ok", 10), ("error", None))):
+        turn = Trace(
+            id="tr-" + uuid.uuid4().hex,
+            project_id=DEFAULT_PROJECT,
+            name="support chat",
+            state=state,
+            request_time=T0 + timedelta(days=2, minutes=minute),
+            latency_ms=300.0,
+            request=f"turn {minute + 1}",
+            session_id="session-9",
+            user_id="customer-5",
+            tokens=tokens,
+        )
+        asyncio.run(seeded.store.record_trace(SINGLE_USER, turn))
+    sessions = lambda **query: client.post("/v1/evals/sessions/search", json=query).json()  # noqa: E731
+    found = sessions()
+    assert (found["traces_examined"], found["ungrouped"], found["has_more"]) == (9, 6, False)
+    newest, older = found["items"]
+    assert (newest["id"], newest["turns"], newest["errors"], newest["tokens"]) == ("session-9", 2, 1, 10)
+    assert newest["preview"] == "turn 1" and newest["started_at"] < newest["last_at"]
+    assert (older["id"], older["turns"], older["preview"]) == ("session-7", 1, "What are your opening hours?")
+    assert [s["id"] for s in sessions(user_id="customer-3")["items"]] == ["session-7"]
+    assert [s["id"] for s in sessions(order="oldest")["items"]] == ["session-7", "session-9"]
+    # Filters the store does not have are applied by the core before grouping.
+    assert [s["id"] for s in sessions(min_latency_ms=500)["items"]] == ["session-7"]
+    assert [s["id"] for s in sessions(order="slowest")["items"]] == ["session-7", "session-9"]
+    refused = client.post("/v1/evals/sessions/search", json={"cursor": "page-2"})
+    assert refused.status_code == 422 and refused.json()["detail"] == "Start a fresh search for an aggregate or export"
+
+
 @pytest.mark.parametrize(
     "query", [{}, {"user_id": ""}, {"assessment": "exact_match", "assessment_value": "true"}, {"order": "fastest"}]
 )
@@ -243,6 +277,7 @@ def test_trace_search_in_a_project_that_does_not_exist(served, tmp_path):
     records = SqlRecordStore(f"sqlite:///{tmp_path / 'empty.db'}")
     empty = TestClient(create_app(store=MemoryStore(), records=records, principal=lambda: SINGLE_USER))
     assert search(empty) == {"items": [], "next_cursor": None, "limit": 25}
+    assert empty.post("/v1/evals/sessions/search", json={}).json()["items"] == []
     assert empty.get("/v1/evals/datasets").json() == [] and empty.get("/v1/evals").json() == []
     records.close()
 
