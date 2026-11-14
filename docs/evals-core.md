@@ -10,7 +10,7 @@ builds it with `create_app` and supplies three things:
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
 | `store` | An `EvalStore` (`martian.evals.store`) | `mlflow-skinny` in-process (planned) | Its MLflow server over REST (planned) |
-| `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles)` |
+| `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 
 ```python
@@ -65,11 +65,76 @@ The refusal adds no parameters or responses to the route's OpenAPI operation. Th
 gates its own routes the same way until it mounts the core (MorningHQ/martian-notes#102); its copy
 of the map is `app/entitlements.py` in MorningHQ/MartianBackend, and the two change together.
 
+## Capabilities
+
+`martian.evals.server.capabilities` is the one table of what a principal may do. A capability is
+allowed when the principal's role is in its roles and, for a capability that serves a paid feature,
+the edition includes that feature. A principal with several roles is judged by the most privileged;
+a principal with none may do nothing. The names are the Evals UI's, so the UI can read them in
+place of its own role table.
+
+| Capability | Roles | Feature key |
+| --- | --- | --- |
+| `run`, `score`, `review`, `saveSuites`, `saveViews`, `editDrafts` | owner, admin, member | |
+| `createReviewQueues` | owner, admin, member | `review_queues` |
+| `publishDatasets`, `assignReviews`, `manageViews`, `manageApiKeys`, `retryCiExport`, `manageProjects`, `manageJudges` | owner, admin | |
+
+`review` covers answering a review and annotating a trace, both free; answering an item of a
+review queue also needs `review_queues`, which the route checks. Pages such as Monitoring have no
+capability: the UI shows them from the edition's feature keys. The server's copy of the table is in
+`app/entitlements.py` in MorningHQ/MartianBackend.
+
+## Bootstrap response
+
+`GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
+same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 2 of
+`contracts/evals-api.json` in MorningHQ/MartianBackend). The local edition answers:
+
+```json
+{
+  "principal": {
+    "kind": "single_user",
+    "user": {"id": "local", "email": null, "display_name": null},
+    "organisation": null,
+    "role": "owner",
+    "platform_admin": false
+  },
+  "edition": {"key": "community", "name": "Community"},
+  "entitlements": {"features": [], "limits": {}},
+  "capabilities": {
+    "run": true, "score": true, "review": true, "createReviewQueues": false,
+    "saveSuites": true, "saveViews": true, "editDrafts": true, "publishDatasets": true,
+    "assignReviews": true, "manageViews": true, "manageApiKeys": true, "retryCiExport": true,
+    "manageProjects": true, "manageJudges": true
+  },
+  "status": {
+    "status": "ready", "ready": true, "error_code": null, "updated_at": null,
+    "provider": null, "admission_paused": false, "routing_epoch": 0
+  }
+}
+```
+
+- `principal.kind` is `single_user` or `organisation`; `organisation` is `null` for the single
+  local user. `email`, `display_name` and the organisation's `name` are whatever the edition's
+  principal carries (`organisation_principal(..., email=, display_name=, organisation_name=)`),
+  and `null` when it carries none. `platform_admin` is the server operator's flag, always `false`
+  in the local edition.
+- `edition.key` is `community`, `enterprise` or `on_premises`; `edition.name` is its display name.
+- `entitlements.features` lists the feature keys the edition includes, sorted; `limits` is empty
+  until a limit key exists.
+- `capabilities` holds every capability in the table above, `true` or `false`.
+- `status` is the store's readiness, as `GET /v1/evals/status`.
+
+`tests/evals/test_bootstrap.py` fixes the shape and the capabilities for each edition and role; the
+server's `tests/test_evals_bootstrap.py` fixes the same shape.
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
   `EvalsStatusOut` in the server's frozen evals contract (`contracts/evals-api.json` in
   MorningHQ/MartianBackend).
+- `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
+  above.
 - `EvalStore` has one method, `status`. `MemoryStore` implements it in memory and records which
   principals asked, for tests.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -79,7 +144,6 @@ of the map is `app/entitlements.py` in MorningHQ/MartianBackend, and the two cha
 
 | Piece | Issue |
 | --- | --- |
-| A bootstrap response with principal, edition and entitlements | MorningHQ/martian-notes#128 |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | Read routes: runs, results, comparison, traces, datasets | MorningHQ/martian-notes#100 |
 | Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
@@ -88,5 +152,5 @@ of the map is `app/entitlements.py` in MorningHQ/MartianBackend, and the two cha
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 
 The objects the routes will serve are the [shared eval data model](eval-model.md).
-`tests/evals/test_server.py` and `tests/evals/test_entitlements.py` run the core without the
-backend, and the `Evals core` job in CI runs them with the model tests.
+`tests/evals/test_server.py`, `tests/evals/test_entitlements.py` and
+`tests/evals/test_bootstrap.py` run the core without the backend, and the `Evals core` job in CI runs them with the model tests.
