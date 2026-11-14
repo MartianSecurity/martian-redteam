@@ -15,6 +15,15 @@ checks:
 #   file: agent.py               # relative to this file
 #   function: answer             # called as answer(message="...")
 #
+# Or call an agent behind an HTTP endpoint, with no Python file:
+# target:
+#   url: "https://agent.example/api/chat"
+#   headers:
+#     Authorization: "Bearer ${AGENT_API_KEY}"   # read from your environment
+#   body:
+#     message: "{{input}}"
+#   response_path: reply
+#
 # To add an LLM judge, name a model and give it criteria:
 # judge:
 #   model: "openai:/YOUR_JUDGE_MODEL"   # provider credentials come from your environment

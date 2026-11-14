@@ -27,6 +27,9 @@ checks:
     expectation: secret
 ```
 
+`target` can also name an HTTP endpoint (`url`, `headers`, `body`, `response_path`), so an agent
+behind an API needs no Python file.
+
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
 prints a summary table, and can be stopped and resumed. To browse traces and judge reasons,
 point `mlflow ui` at the local store, or set `mlflow.tracking_uri` in the suite file to log to

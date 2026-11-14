@@ -29,7 +29,7 @@ martian evals run evals.yaml
 # evals.yaml
 data: cases.jsonl              # or cases.csv; relative to this file
 target:                        # omit to grade `output` values stored in the data file
-  file: agent.py
+  file: agent.py               # a Python function, or an HTTP endpoint: see "URL target" below
   function: answer             # called as answer(message="...")
 judge:
   model: "openai:/YOUR_JUDGE_MODEL"
@@ -43,15 +43,55 @@ concurrency: 4
 output: results
 ```
 
-Nothing in this command contacts the Martian platform. The target runs in your process, the
-judge calls the model you name with credentials from your environment, and MLflow writes to a
-local store in the output folder. Use [`martian ci`](sdk-and-ci.md) when a result must be
+Nothing in this command contacts the Martian platform. A function target runs in your process,
+a URL target is called from it, the judge calls the model you name with credentials from your
+environment, and MLflow writes to a local store in the output folder. Use [`martian ci`](sdk-and-ci.md) when a result must be
 recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
 to the target as keyword arguments), and optional `id`, `output` and `expectations`. CSV takes
 the columns `input`, optional `id` and `output`; every other column becomes an expectation of
 that name. There is no row limit.
+
+**URL target.** When the agent is behind an HTTP endpoint, name the endpoint instead of a
+Python file:
+
+```yaml
+target:
+  url: "https://agent.example/api/chat"
+  headers:
+    Authorization: "Bearer ${AGENT_API_KEY}"   # read from your environment
+  body:
+    message: "{{input}}"                       # this case's input
+    session: "{{uuid}}"                        # a new random ID for every case
+  response_path: choices.0.message.content     # where the reply is in the JSON response
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case |
+| `body` | Yes | The JSON body, with placeholders in its string values |
+| `headers` | No | Request headers |
+| `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
+| `timeout_seconds` | No | Per-request limit, 1 to 600; default 120 |
+
+- **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
+  `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
+  agents that keep a conversation per session. A value that is only a placeholder keeps its
+  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
+- **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
+  the environment when the suite loads; a missing variable stops the run before any case. The
+  values are not written to the results. They are not expanded in `body`.
+- **Case text is sent as data.** `${...}` or `{{...}}` inside a case's input reaches the agent
+  unchanged.
+- **Failures are errors, not passes.** A status outside 2xx, a timeout, an unreachable address
+  or a response with no value at `response_path` gives that case no verdict and the run exits
+  `2`. There is no retry, redirects are not followed and proxy settings from the environment
+  are not used.
+
+A URL target cannot be combined with `file` or `function`. Use a function target when the
+agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
+secret in the body.
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
 `contains`, `not_contains`, `matches`, `not_matches` and `is_json` are the

@@ -2,10 +2,11 @@
 
     martian evals run evals.yaml
 
-The suite names a data file (JSONL or CSV), the checks to apply, and optionally the function
-under test. Nothing here contacts the Martian platform: the target runs in this process, LLM
-judges call the model you configure, and MLflow uses a local store in the output folder unless
-you point it at your own server. A run can be stopped and started again; finished cases are
+The suite names a data file (JSONL or CSV), the checks to apply, and optionally the target under
+test: a Python function, or an HTTP endpoint. Nothing here contacts the Martian platform: a
+function target runs in this process, a URL target is called from it, LLM judges call the model
+you configure, and MLflow uses a local store in the output folder unless you point it at your
+own server. A run can be stopped and started again; finished cases are
 skipped. Use ``martian ci`` when a result must be recorded on the platform.
 """
 
@@ -15,13 +16,17 @@ import csv
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from xml.sax.saxutils import quoteattr
 
+import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -35,9 +40,71 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# In a URL target's body: {{input}}, {{inputs.NAME}} and {{uuid}} are filled in for each case.
+_PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
+_PLACEHOLDER_NAME = re.compile(r"input|uuid|inputs\.[A-Za-z_][A-Za-z0-9_]*")
+# In a URL target's url and header values: ${NAME} is read from the environment.
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _placeholders(value: Any) -> list[str]:
+    """Every {{name}} in the string values of a body template."""
+    if isinstance(value, str):
+        return _PLACEHOLDER.findall(value)
+    if isinstance(value, dict):
+        return [name for item in value.values() for name in _placeholders(item)]
+    if isinstance(value, list):
+        return [name for item in value for name in _placeholders(item)]
+    return []
+
+
+def _check_url(url: str) -> None:
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError:
+        raise ValueError("target.url is not a valid address") from None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("target.url must be an http or https address")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("target.url must not contain credentials; send them in target.headers")
+
+
 class TargetRef(_Model):
-    file: str
+    """The thing under test: a Python function in a file, or an HTTP endpoint that takes a JSON POST."""
+
+    file: str | None = None
     function: str = "target"
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: dict[str, Any] | None = None
+    response_path: str | None = None
+    timeout_seconds: float = Field(default=120, ge=1, le=600)
+
+    @model_validator(mode="after")
+    def one_kind(self) -> TargetRef:
+        if (self.file is None) == (self.url is None):
+            raise ValueError("a target needs a file or a url, not both")
+        given = self.model_fields_set
+        if self.file is not None:
+            extra = sorted(given & {"headers", "body", "response_path", "timeout_seconds"})
+            if extra:
+                raise ValueError(f"{', '.join(extra)} only applies to a url target")
+            return self
+        if "function" in given:
+            raise ValueError("function only applies to a file target")
+        if not _ENV_REFERENCE.search(self.url or ""):  # otherwise checked once the variables are read
+            _check_url(self.url or "")
+        if not self.body:
+            raise ValueError("a url target needs a body, with {{input}} where the case's input goes")
+        names = _placeholders(self.body)
+        unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
+        if unknown:
+            allowed = "{{input}}, {{inputs.NAME}} or {{uuid}}"
+            raise ValueError(f"unknown body placeholder(s) {', '.join(unknown)}; use {allowed}")
+        if not any(name != "uuid" for name in names):
+            raise ValueError("a url target's body must use {{input}} or {{inputs.NAME}}, or every case sends the same")
+        return self
 
 
 class JudgeConfig(_Model):
@@ -181,8 +248,89 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     return cases
 
 
-def _load_target(reference: TargetRef, base: Path) -> Callable[..., Any]:
-    file = Path(reference.file)
+def _from_environment(text: str) -> str:
+    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
+
+    def value(match: re.Match[str]) -> str:
+        found = os.environ.get(match[1])
+        if not found:
+            raise ConfigError(f"the target needs the environment variable {match[1]}")
+        return found
+
+    return _ENV_REFERENCE.sub(value, text)
+
+
+def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
+    """One case's request body. Case text is inserted as data and never expanded itself."""
+
+    def lookup(name: str) -> Any:
+        if name == "uuid":
+            return str(uuid.uuid4())
+        key = input_key if name == "input" else name.removeprefix("inputs.")
+        if key not in inputs:
+            raise ValueError(f"the case has no input named {key!r}")
+        return inputs[key]
+
+    if isinstance(template, dict):
+        return {key: _fill(item, inputs, input_key) for key, item in template.items()}
+    if isinstance(template, list):
+        return [_fill(item, inputs, input_key) for item in template]
+    if not isinstance(template, str):
+        return template
+    whole = _PLACEHOLDER.fullmatch(template)
+    if whole:  # keeps a number or an object as it is, rather than its text
+        return lookup(whole[1])
+    return _PLACEHOLDER.sub(
+        lambda match: found if isinstance(found := lookup(match[1]), str) else json.dumps(found), template
+    )
+
+
+def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
+    """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
+
+    Errors name what went wrong but never the address, the headers or the response body.
+    """
+    url = _from_environment(reference.url or "")
+    try:
+        _check_url(url)
+    except ValueError as error:
+        raise ConfigError(str(error)) from None
+    headers = {name: _from_environment(value) for name, value in reference.headers.items()}
+    steps = [part for part in (reference.response_path or "").split(".") if part]
+
+    def call(**inputs: Any) -> Any:
+        body = _fill(reference.body, inputs, input_key)
+        try:
+            with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
+                response = client.post(url, headers=headers, json=body)
+        except httpx.HTTPError as error:
+            raise RuntimeError(f"the target could not be reached: {type(error).__name__}") from None
+        if not response.is_success:
+            raise RuntimeError(f"the target returned HTTP {response.status_code}")
+        if not steps:
+            return response.text
+        try:
+            reply = response.json()
+        except ValueError:
+            raise RuntimeError("the target's response is not JSON, so response_path cannot be read") from None
+        for step in steps:
+            if isinstance(reply, dict) and step in reply:
+                reply = reply[step]
+            elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
+                reply = reply[int(step)]
+            else:
+                raise RuntimeError("the target's response has no value at response_path")
+        if reply is None:
+            raise RuntimeError("the target's response has no value at response_path")
+        return reply
+
+    return call
+
+
+def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
+    if reference.url is not None:
+        return _http_target(reference, input_key)
+    file = Path(reference.file or "")
     file = file if file.is_absolute() else (base / file)
     spec = importlib.util.spec_from_file_location("martian_evals_target", file)
     if spec is None or spec.loader is None or not file.is_file():
@@ -350,7 +498,7 @@ def run_suite(
         raise ConfigError("without a target, every case needs an `outputs` (or `output`) value to grade")
     if suite.target is not None and stored:
         raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
-    target = _load_target(suite.target, base) if suite.target is not None else None
+    target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
     scorers = _build_scorers(suite)
     labels = [check.label for check in suite.checks]
 
