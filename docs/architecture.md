@@ -76,6 +76,8 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/redteam/client.py` | Typed public Backend operations and safe recovery |
 | `src/martian/ci.py` | One pytest execution and one persisted session |
 | `src/martian/evals/` | Dataset/MLflow adapters, gates, Backend uploads |
+| `src/martian/evals/model/` | The shared eval data model; see [eval model](eval-model.md) |
+| `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |
 | `src/martian/_privacy.py`, `result.py` | Scoped redaction and safe atomic receipts |
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
 | `src/martian_evals_kit/` | Evals import compatibility |
@@ -121,9 +123,9 @@ next to each one creates it.
 | Path | Holds | Status |
 | --- | --- | --- |
 | `src/martian/evals/` | SDK: suite runner, judges, checks, gate | Exists |
-| `src/martian/evals/model/` | Shared eval data model used by the SDK and the server | Planned, MorningHQ/martian-notes#96 |
-| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected | Planned, MorningHQ/martian-notes#98 |
-| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | Planned, MorningHQ/martian-notes#104 |
+| `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists; routes are ported in MorningHQ/martian-notes#100 and #101 |
+| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | Interface and in-memory store exist; the MLflow bindings are MorningHQ/martian-notes#104 and #106 |
 | `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
 | `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |

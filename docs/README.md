@@ -13,6 +13,8 @@ Hosted features also need the SDK APIs enabled for the organisation.
 1. [Architecture](architecture.md) — three systems, data flow, cost model, what this repo is not
 2. [Setup](setup.md) — install, environment, first local run
 3. [Evals](evals.md) — running a suite file locally, the judges and deterministic checks, and the dataset regression gate
+   - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
+   - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store and entitlements an edition injects
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
