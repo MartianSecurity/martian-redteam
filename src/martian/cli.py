@@ -96,6 +96,8 @@ def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limi
         table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
     table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
     console.print(table)
+    for reason, count in list(summary.get("target_errors", {}).items())[:5]:
+        console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
     raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
 
