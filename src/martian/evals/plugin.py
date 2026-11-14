@@ -88,6 +88,8 @@ def pytest_configure(config: pytest.Config) -> None:
     # would call a side-effecting agent twice. The agent must be traced (the gate fails otherwise).
     import mlflow
 
+    from martian.evals._mlflow import MLFLOW_PYTEST_PLUGIN, active_experiment_id
+
     if mlflow.active_run() is not None:
         raise pytest.UsageError("martian-evals: finish the active MLflow run before starting CI")
     validation_flag = "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"
@@ -101,11 +103,11 @@ def pytest_configure(config: pytest.Config) -> None:
         os.environ.setdefault(name, value)
     _previous_tracking_uri = mlflow.get_tracking_uri()
     # MLflow 3.16.1 has no public setter that restores this without reading an external store.
-    _previous_experiment_id = mlflow.tracking.fluent._active_experiment_id
+    _previous_experiment_id = active_experiment_id()
 
     mlflow.set_tracking_uri("sqlite:///" + os.path.join(store, "mlflow.db"))
     mlflow.set_experiment("martian-evals")
-    config.pluginmanager.import_plugin("mlflow.pytest.plugin")
+    config.pluginmanager.import_plugin(MLFLOW_PYTEST_PLUGIN)
     _record_scorers()
 
 
@@ -163,8 +165,10 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     if _previous_tracking_uri is not None:
         import mlflow
 
+        from martian.evals._mlflow import restore_active_experiment_id
+
         mlflow.set_tracking_uri(_previous_tracking_uri)
-        vars(mlflow.tracking.fluent)["_active_experiment_id"] = _previous_experiment_id
+        restore_active_experiment_id(_previous_experiment_id)
         _previous_tracking_uri = None
         _previous_experiment_id = None
     for name, value in _previous_env.items():
@@ -182,10 +186,10 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 
 def _is_regression_test(item: pytest.Item) -> bool:
     try:
-        from mlflow.pytest.decorator import MLFLOW_TEST_ATTR
+        from martian.evals._mlflow import mlflow_test_attr
     except ImportError:  # the marker module is part of the pinned MLflow
         return False
-    return getattr(getattr(item, "function", None), MLFLOW_TEST_ATTR, False) is True
+    return getattr(getattr(item, "function", None), mlflow_test_attr(), False) is True
 
 
 def _failure(test: str, message: str) -> None:
