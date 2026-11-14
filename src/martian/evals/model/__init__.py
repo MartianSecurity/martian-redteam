@@ -174,6 +174,8 @@ class RunSettings(_Object):
     target_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     judge_max_retries: int | None = Field(default=None, ge=0)
     judge_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Headers added to every judge request, values as written with ${NAME} unexpanded.
+    judge_headers: dict[str, str] | None = None
     output: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None

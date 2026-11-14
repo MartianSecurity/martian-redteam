@@ -40,7 +40,7 @@ rejects unknown fields.
 | `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model`, `parameters`, `criteria` | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
-| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, the local `output` folder and the MLflow location. Unset means the runner's default | none |
+| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder and the MLflow location. Unset means the runner's default | none |
 | `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, and its `settings`. Versioned: a new version for every change | none |
 | `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint` | Trace |
@@ -81,7 +81,7 @@ and its data give them again on the next load.
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds` |
 | Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; the other types are `kind: check` with their options (`values`, `expectation`, `any_of`, `case_sensitive`, `pattern`, `required_keys`) in `parameters` |
 | `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
-| `judge.max_retries`, `judge.rate_limit_wait_seconds` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds` |
+| `judge.max_retries`, `judge.rate_limit_wait_seconds`, `judge.headers` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written) |
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
 | `mlflow.tracking_uri`, `mlflow.experiment` | `RunSettings.mlflow_tracking_uri`, `mlflow_experiment` |
 | `input_key` | `Suite.input_key` |
