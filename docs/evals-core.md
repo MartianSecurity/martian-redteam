@@ -397,7 +397,7 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 
 | Option | Default | What it sets |
 | --- | --- | --- |
-| `--port` | `7600` | The port on 127.0.0.1. A port another process holds stops the command with exit code `2`. |
+| `--port` | `7600` | The port to listen on. A port another process holds stops the command with exit code `2`. |
 | `--data-dir`, or `MARTIAN_EVALS_HOME` | `~/.martian/evals` | The data folder |
 | `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package, which the wheel ships | The built Evals UI: a folder holding `index.html` and `assets/` |
 | `--open` / `--no-open` | `--open` | Whether to open the UI in the default browser (Python's `webbrowser`; `BROWSER` names another) |
@@ -433,15 +433,69 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - Every path outside the API is a file of the built UI. The UI uses hash routes and relative
   asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
   the frontend commit it was built from.
-- The server listens on 127.0.0.1 only, and refuses with `400` a request whose `Host` is not
+- The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
-  to this machine. There is no login: any program on this machine can call it.
+  to this machine. There is no login: any program on this machine can call it. The container
+  image listens on the container's interfaces instead, with the same check; see
+  [below](#the-local-edition-in-a-container).
 - If the UI folder holds no `index.html`, because an install has lost the packaged UI or
   `--ui-dir` names another folder, the command stops with exit code `2` and says so.
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
-when no `--ui-dir` is given.
+when no `--ui-dir` is given, and the container settings below with their warning.
+
+### The local edition in a container
+
+The repository's `Dockerfile` builds the local edition as an image, for one user who runs it on a
+small server rather than a laptop. It runs the same `martian ui`: the wheel built from the
+checkout with the `evals` extra, with its dependencies at the versions `uv.lock` pins, on
+`python:3.12-slim`. Both base images are pinned by digest. The server runs as the user `martian`
+(uid 10001), with the data folder in `/data`, a volume, and without opening a browser.
+
+```bash
+docker build -t martian-evals .
+docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data martian-evals
+```
+
+Then open http://127.0.0.1:7600/ on the server. The `martian-evals` volume holds `mlflow.db`,
+`artifacts/` and `martian.db`, so the data outlives `docker stop` and `docker start`, and a new
+container started on the same volume. To keep the data in a folder of the server instead, mount
+that folder at `/data`; the image's user, uid 10001, must be able to write to it.
+
+**It has no login. Do not expose it publicly.** Anyone who can reach the port can read and change
+everything in it. The command above publishes the port on the server's 127.0.0.1 only. From
+another machine, forward the port over SSH (`ssh -L 7600:127.0.0.1:7600 <server>`) and open
+http://127.0.0.1:7600/ there. Do not publish it on an address other machines can reach
+(`-p 7600:7600` publishes it on every address of the server), and do not put it behind a proxy
+that the internet can reach. Other containers on the same Docker network can reach it too. The
+startup log carries the same warning:
+
+```text
+Martian Evals is listening on 0.0.0.0:7600 (data in /data). Press Ctrl+C to stop.
+WARNING: Martian Evals has no login. Anyone who can reach this port can read and change everything in it. Do not expose it publicly: publish it on 127.0.0.1 only (docker run -p 127.0.0.1:7600:7600 ...) and reach it from another machine through an SSH tunnel.
+```
+
+Inside a container, the server must listen on the container's interfaces for Docker to publish the
+port. Two environment variables, which `martian ui` reads and offers no flag for, set this up. The
+image sets the first. Where both are unset, as for `martian ui` on a laptop, the server stays on
+127.0.0.1 and answers only `127.0.0.1` and `localhost`.
+
+| Setting | In the image | What it sets |
+| --- | --- | --- |
+| `MARTIAN_EVALS_BIND` | `0.0.0.0` | The IPv4 address to listen on. Unset, `127.0.0.1`. On any address but loopback, `martian ui` prints the warning above. A value that is not an IPv4 address stops the command with exit code `2`. |
+| `MARTIAN_EVALS_ALLOWED_HOSTS` | Unset | Host names, separated by commas, that the `Host` check answers besides `127.0.0.1` and `localhost`: for a private network where users reach the server by its own name, as `-e MARTIAN_EVALS_ALLOWED_HOSTS=evals.internal`. A name with a port, a scheme or a wildcard stops the command with exit code `2`: the check compares the name alone, and a wildcard would switch it off. |
+
+The `Host` check stays on in the container. A request through the published port carries the name
+the browser used, `127.0.0.1` or `localhost`, and any other name is refused with `400`, as on a
+laptop. The check keeps a web page from reaching the server through a name that resolves to it;
+it does not keep out a program that reaches the port, which is why the port must stay private.
+
+`tests/test_container_image.py` checks that the `Dockerfile` pins its base images, runs as a user
+other than root and sets the variable `martian ui` reads, and that `.dockerignore` lets in every
+file the build copies. CI does not build the image. Nothing
+publishes it to a registry yet: MorningHQ/martian-notes#223 builds the package and the image from
+one tagged release.
 
 ## Command-line runs
 
@@ -489,6 +543,7 @@ cannot be opened.
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

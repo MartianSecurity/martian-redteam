@@ -136,8 +136,9 @@ those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
-([the local edition](evals-core.md#the-local-edition-martian-ui)). The command ends by naming the
-run and the command that opens it:
+([the local edition](evals-core.md#the-local-edition-martian-ui), which also runs
+[in a container](evals-core.md#the-local-edition-in-a-container) on a small server). The command
+ends by naming the run and the command that opens it:
 
 ```text
 Run evals-3 is in the local Evals UI: martian ui
