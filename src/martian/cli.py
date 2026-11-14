@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -104,7 +106,7 @@ def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limi
 
 @app.command("ui")
 def run_ui(
-    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="Port on 127.0.0.1.")] = 7600,
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="The port to listen on.")] = 7600,
     data_dir: Annotated[
         Path | None,
         typer.Option(
@@ -131,17 +133,30 @@ def run_ui(
     if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
         typer.echo("The local Evals UI needs martian-sdk[evals].", err=True)
         raise typer.Exit(code=2)
-    from martian.evals.local import LocalEditionError, create_local_app, default_home, packaged_ui, serve
+    from martian.evals.local import (
+        ALLOWED_HOSTS_ENV,
+        BIND_ENV,
+        LocalEditionError,
+        create_local_app,
+        default_home,
+        host_names,
+        listen_address,
+        packaged_ui,
+        serve,
+    )
 
     home = (data_dir or default_home()).expanduser().resolve()
     ui = (ui_dir or packaged_ui()).expanduser().resolve()
     try:
-        local = create_local_app(home, ui)
+        # The container image's settings (see BIND_ENV); unset, the server stays on 127.0.0.1.
+        host = listen_address(os.environ.get(BIND_ENV))
+        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)))
         serve(
             local,
+            host=host,
             port=port,
             open_browser=open_browser,
-            announce=lambda url: typer.echo(f"Martian Evals is at {url} (data in {home}). Press Ctrl+C to stop."),
+            announce=lambda url: _announce_ui(url, host=host, port=port, home=home),
         )
     except LocalEditionError as error:
         typer.echo(f"martian ui: {error}", err=True)
@@ -152,6 +167,18 @@ def run_ui(
                 err=True,
             )
         raise typer.Exit(code=2) from None
+
+
+def _announce_ui(url: str, *, host: str, port: int, home: Path) -> None:
+    """What ``martian ui`` prints once it listens. Off loopback, as in the container image, it
+    gives the address it listens on and the warning that there is no login."""
+    from martian.evals.local import EXPOSURE_WARNING
+
+    if ipaddress.IPv4Address(host).is_loopback:
+        typer.echo(f"Martian Evals is at {url} (data in {home}). Press Ctrl+C to stop.")
+        return
+    typer.echo(f"Martian Evals is listening on {host}:{port} (data in {home}). Press Ctrl+C to stop.")
+    typer.echo(EXPOSURE_WARNING, err=True)
 
 
 @app.command("ci")

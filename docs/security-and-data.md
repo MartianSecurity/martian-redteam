@@ -52,6 +52,16 @@ Martian. Its outbound calls are the ones the suite file names:
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
+## The local edition has no login
+
+`martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
+that reaches its port can read and change all of its data. On a laptop it listens on 127.0.0.1
+and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
+and a web page cannot reach it through a name that resolves to the laptop. The container image
+listens on the container's interfaces, keeps the same `Host` check and prints a warning when it
+starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through an SSH tunnel.
+Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).
+
 ## Runtime reporting data boundary
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
