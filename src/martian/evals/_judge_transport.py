@@ -11,26 +11,30 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 import requests
-from mlflow.entities import Feedback
-from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
+from mlflow.entities import AssessmentSource, AssessmentSourceType, Feedback
 from mlflow.environment_variables import MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS
-from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
-from mlflow.genai.judges.adapters.gateway_adapter import GatewayAdapter, _build_request
-from mlflow.genai.judges.adapters.litellm_adapter import LiteLLMAdapter, _invoke_litellm
-from mlflow.genai.judges.adapters.utils import (
+from mlflow.types.llm import ChatMessage
+from pydantic import BaseModel, ValidationError
+
+from martian.evals._mlflow import (
+    MLFLOW_GATEWAY_CALLER_HEADER,
+    WORKSPACE_HEADER_NAME,
+    AssessmentMetadataKey,
     ChatCompletionError,
-    _safe_parse_error,
+    GatewayAdapter,
+    GatewayCaller,
+    LiteLLMAdapter,
+    build_chat_request,
+    error_text,
     get_adapter,
+    get_request_workspace,
+    invoke_litellm,
     is_context_window_error,
     is_response_format_error,
+    lookup_model_cost,
+    parse_model_uri,
+    provider_instance,
 )
-from mlflow.genai.utils.llm_utils import _lookup_model_cost
-from mlflow.metrics.genai.model_utils import _get_provider_instance, _parse_model_uri
-from mlflow.tracing.constant import AssessmentMetadataKey
-from mlflow.types.llm import ChatMessage
-from mlflow.utils.workspace_context import get_request_workspace
-from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
-from pydantic import BaseModel, ValidationError
 
 # A provider reply with one of these statuses carries no judgment, so sending the same request
 # again cannot change a verdict that was already given.
@@ -99,12 +103,12 @@ def _post_chat(endpoint: str, headers: dict[str, str], payload: dict[str, Any]) 
         url=endpoint, headers={"Content-Type": "application/json", **headers}, json=payload, timeout=timeout
     )
     if response.status_code == 400:
-        message = _safe_parse_error(response)
+        message = error_text(response)
         raise ChatCompletionError(
             status_code=400, message=message, is_context_window_error=is_context_window_error(message)
         )
     if response.status_code >= 400:
-        raise ProviderStatusError(response.status_code, _safe_parse_error(response), _retry_after(response.headers))
+        raise ProviderStatusError(response.status_code, error_text(response), _retry_after(response.headers))
     reply: dict[str, Any] = response.json()
     return reply
 
@@ -118,7 +122,7 @@ def _gateway_completion(
 ) -> Any:
     # The pinned helper is annotated with BaseProvider, whose HTTP implementations
     # add the wire adapter and headers used by MLflow's own Gateway judge.
-    provider: Any = _get_provider_instance(provider_name, model)
+    provider: Any = provider_instance(provider_name, model)
     endpoint = provider.get_endpoint_url("llm/v1/chat")
     headers = dict(provider.headers or {})
     if provider_name == "gateway":
@@ -127,7 +131,7 @@ def _gateway_completion(
             headers[WORKSPACE_HEADER_NAME] = workspace
 
     def send(*, structured: bool) -> dict[str, Any]:
-        payload = _build_request(prompt, None, schema, structured, params)
+        payload = build_chat_request(prompt, None, schema, structured, params)
         return _post_chat(
             endpoint=endpoint, headers=headers, payload=provider.adapter_class.chat_to_model(payload, provider.config)
         )
@@ -151,7 +155,7 @@ def _litellm_completion(
     messages = [{"role": message.role, "content": message.content} for message in prompt]
 
     def send(*, structured: bool) -> Any:
-        return _invoke_litellm(
+        return invoke_litellm(
             litellm_model=model,
             messages=messages,
             tools=[],
@@ -194,7 +198,7 @@ def invoke_response_judge(
     # Reuse routing, credentials and wire transforms from MLflow 3.16.1.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
     try:
-        provider, model = _parse_model_uri(model_uri)
+        provider, model = parse_model_uri(model_uri)
         adapter = get_adapter(model_uri, prompt)
     except Exception:
         raise ValueError(f"Judge {stage} failed [judge_provider_config]. Check the provider/model URI.") from None
@@ -274,7 +278,7 @@ def invoke_response_judge(
         if (
             prompt_tokens is not None
             and completion_tokens is not None
-            and (cost := _lookup_model_cost(model_uri, prompt_tokens, completion_tokens)) is not None
+            and (cost := lookup_model_cost(model_uri, prompt_tokens, completion_tokens)) is not None
         ):
             metadata[AssessmentMetadataKey.JUDGE_COST] = cost
     return Feedback(

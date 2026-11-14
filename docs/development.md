@@ -15,10 +15,12 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
+| `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
 | `src/martian/evals/server/` | Evals core: `create_app`, injected principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status` and `/v1/evals/bootstrap` |
-| `src/martian/evals/store/` | Store interface and the in-memory store |
+| `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
+| `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
@@ -92,6 +94,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
 - `pytest-asyncio` mode `auto`.
+- The evals store contract (`tests/evals/store_contract.py`) runs on every store binding. The
+  in-process `mlflow-skinny` binding runs it on SQLite always, and on Postgres when
+  `MARTIAN_TEST_POSTGRES_URL` is set (for example
+  `postgresql+psycopg://user:password@127.0.0.1:5432/evals`, with `uv sync --extra postgres`).
+  Each Postgres test creates and drops its own schema.
+- The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
+  connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
+  user must be able to create roles.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
