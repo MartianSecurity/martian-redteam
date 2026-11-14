@@ -90,6 +90,25 @@ class DatasetVersion(_Object):
     store: StoreRef = StoreRef()
 
 
+class DatasetDraft(_Object):
+    """An editable working copy of a dataset. Publishing it creates a ``DatasetVersion``; every edit
+    raises ``revision``, so two people cannot overwrite each other's changes unnoticed."""
+
+    id: Identifier
+    project_id: Identifier
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    revision: int = Field(default=1, ge=1)
+    state: Literal["editing", "published"] = "editing"
+    source_dataset_id: str | None = None
+    case_count: int = Field(default=0, ge=0)
+    published_digest: Digest | None = None
+    created_by: str | None = None
+    updated_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class Target(_Object):
     """The thing under test. Header values and credentials are never part of the model, only the
     names of the headers an HTTP target sends."""
@@ -448,6 +467,7 @@ def from_results_record(
 
 __all__ = [
     "MODEL_VERSION",
+    "DatasetDraft",
     "Page",
     "QueueItem",
     "Span",

@@ -78,6 +78,7 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/evals/` | Dataset/MLflow adapters, gates, Backend uploads |
 | `src/martian/evals/model/` | The shared eval data model; see [eval model](eval-model.md) |
 | `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |
+| `src/martian/evals/records/` | The evals core's own records on SQLite or Postgres, their migrations and change events |
 | `src/martian/_privacy.py`, `result.py` | Scoped redaction and safe atomic receipts |
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
 | `src/martian_evals_kit/` | Evals import compatibility |
@@ -126,6 +127,7 @@ next to each one creates it.
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
 | `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists; routes are ported in MorningHQ/martian-notes#100 and #101 |
 | `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
+| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts), portable to SQLite and Postgres | Exists |
 | `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
 | `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |
