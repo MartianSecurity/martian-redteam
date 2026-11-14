@@ -106,6 +106,27 @@ The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
 
+## Open-source evals core
+
+This repository is the home of the open-source evals core. The names stay as they are: the
+repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
+and the command `martian`. Everything here is Apache-2.0. Paid Enterprise features live in the
+private Martian backend and console, which use the core; this repository holds no commercially
+licensed code. The repository is private until the open-source launch.
+
+The core grows into this layout. Paths marked as planned do not exist yet; the issue named
+next to each one creates it.
+
+| Path | Holds | Status |
+| --- | --- | --- |
+| `src/martian/evals/` | SDK: suite runner, judges, checks, gate | Exists |
+| `src/martian/evals/model/` | Shared eval data model used by the SDK and the server | Planned, MorningHQ/martian-notes#96 |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected | Planned, MorningHQ/martian-notes#98 |
+| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | Planned, MorningHQ/martian-notes#104 |
+| `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
+| `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
+| `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |
+
 ## CI and scoring
 
 Default baseline probes use one simulator stage, one customer target call and
