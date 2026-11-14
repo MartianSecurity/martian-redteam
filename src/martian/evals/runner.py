@@ -608,6 +608,7 @@ def run_suite(
 
     import mlflow
 
+    from martian.evals._mlflow import active_experiment_id, restore_active_experiment_id
     from martian.evals.evaluate import evaluate_rows
     from martian.evals.gate import _interpret
     from martian.evals.scorers import output_text
@@ -615,7 +616,7 @@ def run_suite(
     # Leave MLflow as it was found: another evaluation in this process must not inherit this
     # run's store, experiment or worker settings.
     previous_uri = mlflow.get_tracking_uri()
-    previous_experiment = mlflow.tracking.fluent._active_experiment_id
+    previous_experiment = active_experiment_id()
     restored = ("MLFLOW_GENAI_EVAL_MAX_WORKERS", "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "MLFLOW_EXPERIMENT_ID")
     previous_env = {name: os.environ.get(name) for name in restored}
     os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(concurrency or suite.concurrency)
@@ -708,7 +709,7 @@ def run_suite(
             say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
     finally:
         mlflow.set_tracking_uri(previous_uri)
-        vars(mlflow.tracking.fluent)["_active_experiment_id"] = previous_experiment
+        restore_active_experiment_id(previous_experiment)
         for name, value in previous_env.items():
             if value is None:
                 os.environ.pop(name, None)

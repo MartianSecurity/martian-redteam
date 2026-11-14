@@ -6,11 +6,14 @@ things the core never imports:
 - ``store``: an :class:`~martian.evals.store.EvalStore`;
 - ``principal``: a FastAPI dependency returning the :class:`Principal` of a request, such as
   :data:`SINGLE_USER` for the local edition, or the server's session lookup;
-- ``entitlements``: a function from a principal to its :class:`Entitlements`.
+- ``entitlements``: a function from a principal to its :class:`Entitlements`, such as
+  ``lambda p: entitlements_for(resolve_edition(plan=...))``. The default is Community.
 
 Routes read them through :func:`current_principal`, :func:`current_entitlements` and
-:func:`current_store`. ``GET /v1/evals/status`` is the first route, in the shape of the frozen
-evals API contract; the rest are ported from the server in MorningHQ/martian-notes#100 and #101.
+:func:`current_store`, and a route that serves a paid feature declares
+``dependencies=[Depends(require_entitlement(key))]``. ``GET /v1/evals/status`` and
+``GET /v1/evals/bootstrap`` are in the shape of the frozen evals API contract; the rest are ported
+from the server in MorningHQ/martian-notes#100 and #101.
 """
 
 from __future__ import annotations
@@ -18,9 +21,24 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 
-from martian.evals.server.entitlements import COMMUNITY, Edition, Entitlements
+from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
+from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
+from martian.evals.server.entitlements import (
+    COMMUNITY,
+    EDITION_NAMES,
+    EDITIONS,
+    ENTERPRISE,
+    FEATURES,
+    LIMITS,
+    ON_PREMISES,
+    Edition,
+    Entitlements,
+    Plan,
+    entitlements_for,
+    resolve_edition,
+)
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.store import EvalStore, StoreStatus
 
@@ -43,6 +61,27 @@ def current_entitlements(request: Request, principal: Annotated[Principal, Depen
     return provider(principal)
 
 
+def ensure_entitled(entitlements: Entitlements, feature: str) -> None:
+    """Refuse with ``403`` when the edition leaves ``feature`` out. The detail names the edition and
+    the feature, for example "The Community edition does not include review queues". Use it inside a
+    route when only part of a request needs the feature."""
+    if not entitlements.allows(feature):
+        edition = EDITION_NAMES[entitlements.edition]
+        raise HTTPException(403, f"The {edition} edition does not include {FEATURES[feature]}")
+
+
+def require_entitlement(feature: str) -> Callable[[Entitlements], None]:
+    """A route dependency for :func:`ensure_entitled`. It runs after the principal provider, so
+    sign-in is checked first, and it adds nothing to the route's OpenAPI operation."""
+    if feature not in FEATURES:
+        raise ValueError(f"unknown feature key {feature!r}")
+
+    def check(entitlements: Annotated[Entitlements, Depends(current_entitlements)]) -> None:
+        ensure_entitled(entitlements, feature)
+
+    return check
+
+
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
 
@@ -52,6 +91,17 @@ async def status(
     store: Annotated[EvalStore, Depends(current_store)],
 ) -> StoreStatus:
     return await store.status(principal)
+
+
+@router.get("/bootstrap", response_model=Bootstrap)
+async def bootstrap(
+    principal: Annotated[Principal, Depends(current_principal)],
+    entitlements: Annotated[Entitlements, Depends(current_entitlements)],
+    store: Annotated[EvalStore, Depends(current_store)],
+) -> Bootstrap:
+    """What the UI reads at start: the principal, the edition and its feature keys, the
+    capabilities the role and edition allow, and the store's readiness."""
+    return build_bootstrap(principal, entitlements, await store.status(principal))
 
 
 def create_app(
@@ -74,15 +124,32 @@ def create_app(
 
 
 __all__ = [
+    "CAPABILITIES",
     "COMMUNITY",
+    "EDITIONS",
+    "EDITION_NAMES",
+    "ENTERPRISE",
+    "FEATURES",
+    "LIMITS",
+    "ON_PREMISES",
     "SINGLE_USER",
+    "Bootstrap",
+    "Capability",
     "Edition",
     "Entitlements",
+    "Plan",
     "Principal",
+    "build_bootstrap",
+    "capabilities_for",
     "create_app",
     "current_entitlements",
     "current_principal",
     "current_store",
+    "ensure_entitled",
+    "entitlements_for",
+    "highest_role",
     "organisation_principal",
+    "require_entitlement",
+    "resolve_edition",
     "router",
 ]

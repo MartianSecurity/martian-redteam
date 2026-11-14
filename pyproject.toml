@@ -39,6 +39,7 @@ evals = [
     "pytest>=8",
     "sqlalchemy>=2.0",
 ]
+postgres = ["martian-sdk[evals]", "psycopg[binary]>=3.2"]
 
 [project.urls]
 Homepage = "https://martiansecurity.ai/"

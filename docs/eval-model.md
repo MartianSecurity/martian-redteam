@@ -32,14 +32,18 @@ rejects unknown fields.
 | `Project` | A named body of evaluation work | Experiment |
 | `Case` | One test case: `inputs`, `expectations`, optional stored `outputs`, `tags`, `metadata` | Evaluation dataset record |
 | `DatasetVersion` | An immutable set of cases: `name`, optional `version`, `digest`, `case_count`, `source` (`file`, `draft`, `global`, `upload`, `traces`) and `location` | Evaluation dataset |
+| `DatasetDraft` | An editable working copy of a dataset: `name`, `revision` (raised by every edit), `state` (`editing` or `published`), `case_count`, and the `published_digest` of the version publishing created | none (Martian table) |
 | `Target` | The thing under test: `function` (file and function), `http` (URL, body template, response path, header names), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). Header values and credentials are never part of it | none |
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model`, `parameters`, `criteria` | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
 | `Suite` | A dataset, a target and scorers with policies, versioned: a new version for every change | none |
 | `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint` | Trace |
-| `Score` | One scorer's verdict on one case result: `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`) | Assessment (feedback) |
+| `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `trace_id` | Assessment (feedback) |
 | `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them | none |
+| `Trace`, `Span` | A recorded call to the thing under test, from an eval run or from live traffic, and the steps inside it. A case result is a trace of a run. Search results leave `spans` empty | Trace and spans |
+| `TraceQuery`, `Page` | Which traces to return (run, session, ids, text, states, tags, time window, order) and one page of any result with `next_cursor` | none |
+| `QueueItem` | One trace in a review queue and whether its review is done | Review queue item |
 | `ReviewQueue`, `ReviewQuestion` | Case results of one run handed to people, with the questions they answer | Labeling session and review schema |
 | `Review` | A person's answer about one case result. A new answer is a new review naming the one it replaces (`previous_id`); reviews are never edited | Assessment (human feedback) |
 
@@ -97,7 +101,7 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 
 ## What uses it
 
-Nothing reads or writes these objects yet; this is the contract the work builds on. The suite
+The [evals core](evals-core.md)'s store interface takes and returns these objects. The suite
 file becomes the written form of these objects (MorningHQ/martian-notes#99), the evals core
 serves them (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).

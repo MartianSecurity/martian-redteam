@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING, Any
 
 import mlflow
 import mlflow.genai
-from mlflow.genai.evaluation.entities import EvaluationResult
 from mlflow.genai.scorers import Scorer
 
+from martian.evals._mlflow import EvaluationResult
 from martian.evals.state import STATE
 
 if TYPE_CHECKING:
-    from mlflow.genai.evaluation.utils import EvaluationDatasetTypes
+    from martian.evals._mlflow import EvaluationDatasetTypes
 
 
 class EvaluationError(RuntimeError):
