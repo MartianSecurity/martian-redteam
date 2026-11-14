@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from martian.evals.model import (
+    SESSION_TRACE_LIMIT,
     Case,
     Counts,
     DatasetVersion,
@@ -30,6 +31,7 @@ from martian.evals.model import (
     RunState,
     Score,
     ScorerVersion,
+    SessionSearch,
     Trace,
     TraceQuery,
 )
@@ -62,6 +64,15 @@ class StoreError(Exception):
         super().__init__(detail)
         self.kind = kind
         self.detail = detail
+
+
+def check_session_search(query: TraceQuery, max_traces: int) -> None:
+    """Refuse a session search no binding can answer: one that continues from a cursor, or reads
+    more traces than a session search may."""
+    if query.cursor is not None:
+        raise StoreError("invalid", "a session search starts from the first trace; leave out the cursor")
+    if not 1 <= max_traces <= SESSION_TRACE_LIMIT:
+        raise StoreError("invalid", f"a session search reads between 1 and {SESSION_TRACE_LIMIT} traces")
 
 
 @runtime_checkable
@@ -128,6 +139,15 @@ class EvalStore(Protocol):
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         """Traces without their spans."""
+        ...
+
+    async def search_sessions(
+        self, principal: Principal, query: TraceQuery, *, max_traces: int = SESSION_TRACE_LIMIT
+    ) -> SessionSearch:
+        """The sessions among the first ``max_traces`` traces ``search_traces`` would return for
+        the query, grouped by ``Trace.session_id`` (``sessions_from_traces``). The query's
+        ``limit`` does not apply; a ``cursor`` is refused as ``invalid``, since a session search
+        starts from the first trace. A session's turns are ``search_traces`` with its id."""
         ...
 
     async def get_trace(self, principal: Principal, project_id: str, trace_id: str) -> Trace | None:
@@ -204,4 +224,12 @@ STORE_METHODS = frozenset(
 
 from martian.evals.store.memory import MemoryStore  # noqa: E402  (MemoryStore implements the interface above)
 
-__all__ = ["STORE_METHODS", "EvalStore", "MemoryStore", "StoreError", "StoreState", "StoreStatus"]
+__all__ = [
+    "STORE_METHODS",
+    "EvalStore",
+    "MemoryStore",
+    "StoreError",
+    "StoreState",
+    "StoreStatus",
+    "check_session_search",
+]

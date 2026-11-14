@@ -19,6 +19,8 @@ from martian.evals.model import (
     Run,
     Score,
     ScorerVersion,
+    Session,
+    SessionSearch,
     Span,
     Trace,
     TraceQuery,
@@ -99,6 +101,7 @@ class StoreContract:
             await refused("not_found", store.get_run(other, "p1", "r1"))
             await refused("not_found", store.get_trace(other, "p1", "t1"))
             await refused("not_found", store.search_traces(other, TraceQuery(project_id="p1")))
+            await refused("not_found", store.search_sessions(other, TraceQuery(project_id="p1")))
             await refused("not_found", store.set_trace_tag(other, "p1", "t1", "k", "v"))
             await refused(
                 "not_found", store.log_score(other, "p1", "t1", Score(scorer="s", source="human", value=True))
@@ -172,6 +175,55 @@ class StoreContract:
         full = await store.get_trace(ORG_A, "p1", "t1")
         assert full is not None and full.spans == [span] and full.session_id == "sess"
         assert await store.get_trace(ORG_A, "p1", "missing") is None
+
+    async def test_sessions_and_users_come_from_the_traces(self, store: EvalStore, project: Project) -> None:
+        # s2 starts first; s1 has the newest turn; t4 has no session.
+        await store.record_trace(ORG_A, trace("t1", minutes=0, session_id="s2", user_id="bob", tokens=5))
+        await store.record_trace(ORG_A, trace("t2", minutes=1, session_id="s1", user_id="alice", tokens=10))
+        await store.record_trace(ORG_A, trace("t3", minutes=2, session_id="s1", user_id="alice", state="error"))
+        await store.record_trace(ORG_A, trace("t4", minutes=3, user_id="carol"))
+        await store.record_trace(ORG_A, trace("t5", minutes=4, session_id="s1", user_id="alice", tokens=7))
+
+        found = await store.search_sessions(ORG_A, TraceQuery(project_id="p1"))
+        assert found == SessionSearch(
+            items=[
+                Session(
+                    id="s1",
+                    turns=3,
+                    errors=1,
+                    started_at=T0 + timedelta(minutes=1),
+                    last_at=T0 + timedelta(minutes=4),
+                    preview="question t2",
+                    tokens=17,
+                ),
+                Session(id="s2", turns=1, started_at=T0, last_at=T0, preview="question t1", tokens=5),
+            ],
+            traces_examined=5,
+            ungrouped=1,
+        )
+        # Sessions follow the query's order, and the preview is the last turn read.
+        oldest = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", oldest_first=True))
+        assert [(s.id, s.preview) for s in oldest.items] == [("s2", "question t1"), ("s1", "question t5")]
+        # A session's turns are the traces with its id.
+        turns = await store.search_traces(ORG_A, TraceQuery(project_id="p1", session_id="s1", oldest_first=True))
+        assert [(t.id, t.user_id) for t in turns.items] == [("t2", "alice"), ("t3", "alice"), ("t5", "alice")]
+        # The user filters traces and sessions alike.
+        bob = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="bob"))
+        assert [t.id for t in bob.items] == ["t1"]
+        bob_sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", user_id="bob"))
+        assert [s.id for s in bob_sessions.items] == ["s2"]
+        carol = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", user_id="carol"))
+        assert (carol.items, carol.traces_examined, carol.ungrouped) == ([], 1, 1)
+        # Every trace filter applies before grouping.
+        errors = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", states=["error"]))
+        assert [(s.id, s.turns, s.errors) for s in errors.items] == [("s1", 1, 1)]
+        # Only the first traces in the query's order are grouped; has_more says more matched.
+        bounded = await store.search_sessions(ORG_A, TraceQuery(project_id="p1"), max_traces=2)
+        assert (bounded.has_more, bounded.traces_examined, bounded.ungrouped, bounded.limit) == (True, 2, 1, 2)
+        assert [(s.id, s.turns) for s in bounded.items] == [("s1", 1)]
+        await refused("invalid", store.search_sessions(ORG_A, TraceQuery(project_id="p1", cursor="2")))
+        await refused("invalid", store.search_sessions(ORG_A, TraceQuery(project_id="p1"), max_traces=1001))
+        await refused("not_found", store.search_sessions(ORG_A, TraceQuery(project_id="missing")))
 
     async def test_traces_take_tags_and_join_runs(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
