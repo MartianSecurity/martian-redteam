@@ -118,7 +118,10 @@ class TargetRef(_Model):
 class JudgeConfig(_Model):
     model: str
     inference_params: dict[str, float | int] = Field(default_factory=dict)
+    # Server errors and connection failures are retried this many times.
     max_retries: int = Field(default=5, ge=0, le=10)
+    # Rate limits are retried for up to this many seconds, as long as the provider asks.
+    rate_limit_wait_seconds: float = Field(default=300, ge=0, le=3600)
 
 
 class CheckSpec(_Model):
@@ -399,6 +402,7 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     input_key=suite.input_key,
                     inference_params=dict(suite.judge.inference_params) or None,
                     max_retries=suite.judge.max_retries,
+                    rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
                 )
             )
         elif check.type == "contains":
@@ -451,9 +455,9 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
     and its parameters, the target, and the SDK version that holds the judge prompts.
 
     Settings that change how a run is carried out but not what it grades (concurrency, batch size,
-    output folder, retries, timeout, MLflow location) are left out, so changing them keeps earlier
-    results. A function target counts by the contents of its file; modules that file imports and
-    the service behind a URL target cannot be seen from here.
+    output folder, retries and the rate-limit wait, timeout, MLflow location) are left out, so
+    changing them keeps earlier results. A function target counts by the contents of its file;
+    modules that file imports and the service behind a URL target cannot be seen from here.
     """
     target: dict[str, Any] | None = None
     if suite.target is not None:
@@ -466,7 +470,9 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
         {
             "sdk": __version__,
             "checks": [check.model_dump(mode="json") for check in suite.checks],
-            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries"}) if suite.judge else None,
+            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds"})
+            if suite.judge
+            else None,
             "input_key": suite.input_key,
             "target": target,
         }
@@ -602,7 +608,7 @@ def run_suite(
 
     import mlflow
 
-    from martian.evals.evaluate import evaluate
+    from martian.evals.evaluate import evaluate_rows
     from martian.evals.gate import _interpret
     from martian.evals.scorers import output_text
 
@@ -631,12 +637,14 @@ def run_suite(
                 if "outputs" in case:
                     row["outputs"] = case["outputs"]
                 data.append(row)
-            frame: Any = evaluate(
+            frame: Any = evaluate_rows(
                 data=data, scorers=scorers, predict_fn=target
-            ).result_df  # never None: evaluate raises
+            ).result_df  # never None: evaluate_rows raises
             by_id = {case["id"]: case for case in batch}
+            recorded: set[str] = set()
             for position in range(len(frame)):
                 case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
+                recorded.add(case["id"])
                 response = frame["response"].iloc[position] if "response" in frame.columns else None
                 state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
                 broke = _missing(response) or "ERROR" in state
@@ -681,6 +689,22 @@ def run_suite(
                         "fingerprint": prints[case["id"]],
                     }
                 )
+            # MLflow leaves out a row whose trace it could not read back. That case has no
+            # verdict, so it is an error now and is graded again on the next run.
+            for case in batch:
+                if case["id"] not in recorded:
+                    missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
+                    results.append(
+                        {
+                            "id": case["id"],
+                            "passed": None,
+                            "checks": {label: dict(missing) for label in labels},
+                            "inputs": case["inputs"],
+                            "output": None,
+                            "error": None,
+                            "fingerprint": prints[case["id"]],
+                        }
+                    )
             say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
     finally:
         mlflow.set_tracking_uri(previous_uri)

@@ -126,7 +126,7 @@ and their criteria, the judge model and its `inference_params`, the target, the 
 inputs, expectations and stored output, and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
-`timeout_seconds` or the MLflow location keeps earlier results. The SDK cannot see changes in
+`judge.rate_limit_wait_seconds`, `timeout_seconds` or the MLflow location keeps earlier results. The SDK cannot see changes in
 modules the target file imports, or in the service behind a URL target: use `--fresh` after
 those.
 
@@ -147,8 +147,10 @@ comes from that provider's usual environment variable. Nothing is read from a `.
 Other providers MLflow can route to use the same URI form with their own environment
 variables. The judge needs a provider that returns a direct chat completion. Set
 `judge.inference_params: {temperature: 0}` if your provider supports it; omitted parameters
-use the provider's defaults. Rate limits and provider outages are retried with backoff
-(`judge.max_retries`, default 5).
+use the provider's defaults. Rate limits are retried for up to `judge.rate_limit_wait_seconds`
+(default 300, at most 3600), waiting as long as the provider's `Retry-After` asks. Server errors
+and connection failures are retried `judge.max_retries` times (default 5). A case whose judge
+call still fails is an error in the results, and the rest of the run carries on.
 
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
@@ -245,7 +247,9 @@ result without any warning:
   results only for traced calls, and the plugin skips MLflow's own probing call so that the
   first case is not run twice.
 - **An evaluation with no per-row results**, or fewer rows than cases, raises
-  `EvaluationError`.
+  `EvaluationError`. MLflow leaves a row out when it cannot read back that row's trace, which
+  can happen when many workers write to a local store at once. `martian evals run` does not
+  stop for this: it records that case as an error and grades it again on the next run.
 
 ## What the gate enforces
 
@@ -320,14 +324,22 @@ Provider errors fail the gate with a short error code and the affected stage
 The scorer keeps raw provider error text out of the MLflow error assessment and
 prevents the evaluator from replaying a failed stage.
 
-A provider reply that carries no judgment is retried inside the stage: rate limits
-(HTTP 429), server errors (500, 502, 503, 504, 529) and connection failures, with
-capped exponential backoff. `max_retries` on each judge sets the limit (default 5,
-`0` disables it), and `martian.judge.provider_retries` in the feedback metadata
-records how many were needed. A reply that was received is final, valid or not, and
-a request the provider rejected (400, 401, 403) is not retried. When the retries run
-out, the scorer errors with `judge_provider_throttled` or `judge_provider_error` and
-the gate fails closed.
+A provider reply that carries no judgment is retried inside the stage:
+
+- **Rate limits** (HTTP 429, and 529 overloaded) are retried for up to
+  `rate_limit_wait_seconds` on each judge (default 300, at most 3600, `0` disables it),
+  counted from the stage's first request. The judge waits as long as the provider asks in
+  `retry-after-ms` or `Retry-After` (seconds or an HTTP date), and uses capped exponential
+  backoff when it does not say. When the provider asks for longer than the time left, the
+  judge stops at once rather than wait in vain.
+- **Server errors** (500, 502, 503, 504) **and connection failures or timeouts** are retried up
+  to `max_retries` times (default 5, `0` disables it), with capped exponential backoff or the
+  provider's `Retry-After`, whichever applies, up to 30 seconds a wait.
+
+`martian.judge.provider_retries` in the feedback metadata records how many retries were
+needed. A reply that was received is final, valid or not, and a request the provider rejected
+(400, 401, 403) is not retried. When the retries run out, the scorer errors with
+`judge_provider_throttled` or `judge_provider_error` and the gate fails closed.
 
 Feedback metadata includes prompt version/hash, guidelines hash, model, requested
 inference parameters, validated checks, and token usage when reported by the adapter.
