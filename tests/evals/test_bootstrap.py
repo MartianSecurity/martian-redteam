@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import (
     CAPABILITIES,
     COMMUNITY,
@@ -18,6 +19,9 @@ from martian.evals.server import (
 )
 from martian.evals.server.bootstrap import EvalCapabilities
 from martian.evals.store import MemoryStore, StoreStatus
+
+# These tests read no records; an in-memory record store satisfies create_app.
+RECORDS = SqlRecordStore("sqlite://")
 
 WRITERS = {"run", "score", "review", "createReviewQueues", "saveSuites", "saveViews", "editDrafts"}
 ADMINS = WRITERS | {
@@ -61,7 +65,7 @@ SHAPE = {
 
 
 def test_the_local_edition_answers_with_its_fixed_principal_in_community():
-    client = TestClient(create_app(store=MemoryStore(), principal=lambda: SINGLE_USER))
+    client = TestClient(create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER))
     response = client.get("/v1/evals/bootstrap")
     assert response.status_code == 200
     assert response.json() == {
@@ -98,7 +102,9 @@ def test_each_edition_and_role_gets_its_capabilities(edition, role):
         organisation_name="Org A",
     )
     store = MemoryStore(StoreStatus(status="provisioning", ready=False, provider="mlflow"))
-    app = create_app(store=store, principal=lambda: member, entitlements=lambda _p: entitlements_for(edition))
+    app = create_app(
+        records=RECORDS, store=store, principal=lambda: member, entitlements=lambda _p: entitlements_for(edition)
+    )
     body = TestClient(app).get("/v1/evals/bootstrap").json()
     assert body["principal"] == {
         "kind": "organisation",
@@ -117,7 +123,12 @@ def test_each_edition_and_role_gets_its_capabilities(edition, role):
 def test_the_edition_names_come_from_the_map():
     names = {
         edition: TestClient(
-            create_app(store=MemoryStore(), principal=lambda: SINGLE_USER, entitlements=lambda _p, e=edition: e)
+            create_app(
+                records=RECORDS,
+                store=MemoryStore(),
+                principal=lambda: SINGLE_USER,
+                entitlements=lambda _p, e=edition: e,
+            )
         )
         .get("/v1/evals/bootstrap")
         .json()["edition"]
@@ -132,14 +143,22 @@ def test_the_edition_names_come_from_the_map():
 
 def test_a_principal_with_no_role_may_do_nothing():
     nobody = Principal(user_id="user-2", organisation_id="org-a")
-    body = TestClient(create_app(store=MemoryStore(), principal=lambda: nobody)).get("/v1/evals/bootstrap").json()
+    body = (
+        TestClient(create_app(records=RECORDS, store=MemoryStore(), principal=lambda: nobody))
+        .get("/v1/evals/bootstrap")
+        .json()
+    )
     assert body["principal"]["role"] is None
     assert not any(body["capabilities"].values())
 
 
 def test_the_highest_role_decides():
     both = Principal(user_id="user-3", organisation_id="org-a", roles=frozenset({"viewer", "admin"}))
-    body = TestClient(create_app(store=MemoryStore(), principal=lambda: both)).get("/v1/evals/bootstrap").json()
+    body = (
+        TestClient(create_app(records=RECORDS, store=MemoryStore(), principal=lambda: both))
+        .get("/v1/evals/bootstrap")
+        .json()
+    )
     assert body["principal"]["role"] == "admin"
     assert body["capabilities"]["manageProjects"] is True
 
@@ -150,7 +169,9 @@ def test_the_table_and_the_response_name_the_same_capabilities():
 
 
 def test_the_shape_is_the_frozen_contracts():
-    schemas = create_app(store=MemoryStore(), principal=lambda: SINGLE_USER).openapi()["components"]["schemas"]
+    schemas = create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER).openapi()["components"][
+        "schemas"
+    ]
     assert {name: set(schemas[name]["properties"]) for name in SHAPE} == SHAPE
     assert all(set(schemas[name].get("required", [])) == SHAPE[name] for name in SHAPE if name != "StoreStatus")
 
