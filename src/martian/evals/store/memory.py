@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from martian.evals.model import (
+    SESSION_TRACE_LIMIT,
     Case,
     Counts,
     DatasetVersion,
@@ -22,12 +23,14 @@ from martian.evals.model import (
     RunState,
     Score,
     ScorerVersion,
+    SessionSearch,
     StoreRef,
     Trace,
     TraceQuery,
     digest,
+    sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus
+from martian.evals.store import StoreError, StoreStatus, check_session_search
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -233,7 +236,8 @@ class MemoryStore:
             await self.log_score(principal, trace.project_id, trace.id, score)
         return await self.get_trace(principal, trace.project_id, trace.id) or saved
 
-    async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
+    def _matching(self, principal: Principal, query: TraceQuery) -> list[Trace]:
+        """Every trace the query matches, in its order, with the scores of each."""
         self._project(principal, query.project_id)
         space = _space(principal)
         found = []
@@ -243,6 +247,8 @@ class MemoryStore:
             if query.run_id is not None and trace.run_id != query.run_id:
                 continue
             if query.session_id is not None and trace.session_id != query.session_id:
+                continue
+            if query.user_id is not None and trace.user_id != query.user_id:
                 continue
             if query.trace_ids and trace.id not in query.trace_ids:
                 continue
@@ -260,12 +266,20 @@ class MemoryStore:
             found.append(trace)
         epoch = datetime.min.replace(tzinfo=UTC)
         found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
-        page = _page(found, query.cursor, query.limit)
-        items = [
+        return [
             t.model_copy(update={"spans": [], "scores": self._scores.get((space, query.project_id, t.id), [])})
-            for t in page.items
+            for t in found
         ]
-        return Page[Trace](items=items, next_cursor=page.next_cursor)
+
+    async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
+        return _page(self._matching(principal, query), query.cursor, query.limit)
+
+    async def search_sessions(
+        self, principal: Principal, query: TraceQuery, *, max_traces: int = SESSION_TRACE_LIMIT
+    ) -> SessionSearch:
+        check_session_search(query, max_traces)
+        found = self._matching(principal, query)
+        return sessions_from_traces(found[:max_traces], has_more=len(found) > max_traces, limit=max_traces)
 
     async def get_trace(self, principal: Principal, project_id: str, trace_id: str) -> Trace | None:
         self._project(principal, project_id)
