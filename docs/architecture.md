@@ -100,13 +100,35 @@ context, `response_rubric` (`response-rubrics-v1`) evaluates `verdict="pass"|"fa
 directly while keeping numbered segment citation validation.
 All three scorers use one model call by default. Opt-in fixed review (`verify=True`)
 uses two calls and retains both stages; it never retries until a desired outcome.
-A stage re-sends its request only when the provider returned no judgment (rate limit,
-server error or connection failure), up to `max_retries` times with backoff.
+A stage re-sends its request only when the provider returned no judgment: a rate limit,
+for up to `rate_limit_wait_seconds` as the provider's `Retry-After` asks, or a server error
+or connection failure, up to `max_retries` times with backoff.
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
+
+## Open-source evals core
+
+This repository is the home of the open-source evals core. The names stay as they are: the
+repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
+and the command `martian`. Everything here is Apache-2.0. Paid Enterprise features live in the
+private Martian backend and console, which use the core; this repository holds no commercially
+licensed code. The repository is private until the open-source launch.
+
+The core grows into this layout. Paths marked as planned do not exist yet; the issue named
+next to each one creates it.
+
+| Path | Holds | Status |
+| --- | --- | --- |
+| `src/martian/evals/` | SDK: suite runner, judges, checks, gate | Exists |
+| `src/martian/evals/model/` | Shared eval data model used by the SDK and the server | Planned, MorningHQ/martian-notes#96 |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected | Planned, MorningHQ/martian-notes#98 |
+| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | Planned, MorningHQ/martian-notes#104 |
+| `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
+| `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
+| `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |
 
 ## CI and scoring
 
