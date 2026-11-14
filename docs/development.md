@@ -14,6 +14,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/config.py` | Immutable origin/token and separate CI attribution |
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
+| `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
