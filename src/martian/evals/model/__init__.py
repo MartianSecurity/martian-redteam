@@ -222,10 +222,12 @@ class CaseResult(_Object):
 
 
 class Score(_Object):
-    """One scorer's verdict on one case result. ``passed`` is None when there is no verdict."""
+    """One scorer's verdict on a case result, or on a trace of live traffic (no run or case).
+    ``passed`` is None when there is no verdict."""
 
-    run_id: Identifier
-    case_id: Identifier
+    run_id: str | None = None
+    case_id: str | None = None
+    trace_id: str | None = None
     scorer: Identifier
     scorer_version: str = ""
     source: ScoreSource
@@ -310,6 +312,84 @@ class Review(_Object):
         return self
 
 
+TraceState = Literal["ok", "error", "in_progress", "unknown"]
+
+
+class Span(_Object):
+    """One step inside a trace: a model call, a tool call, a retrieval."""
+
+    id: Identifier
+    parent_id: str | None = None
+    name: str = ""
+    kind: str = ""
+    status: TraceState = "unknown"
+    start_ms: float | None = None
+    end_ms: float | None = None
+    inputs: Any = None
+    outputs: Any = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class Trace(_Object):
+    """A recorded call to the thing under test, from an eval run or from live traffic. A case result
+    is a trace of a run; a trace need not belong to one. ``spans`` is empty in search results and
+    filled when one trace is read."""
+
+    id: Identifier
+    project_id: Identifier
+    name: str = ""
+    state: TraceState = "unknown"
+    request_time: datetime | None = None
+    latency_ms: float | None = Field(default=None, ge=0)
+    request: str = ""
+    response: str = ""
+    run_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    model: str | None = None
+    tokens: int | None = Field(default=None, ge=0)
+    cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    tags: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    scores: list[Score] = Field(default_factory=list)
+    spans: list[Span] = Field(default_factory=list)
+
+
+class TraceQuery(_Object):
+    """Which traces of a project to return, newest first unless ``oldest_first``."""
+
+    project_id: Identifier
+    run_id: str | None = None
+    session_id: str | None = None
+    trace_ids: list[Identifier] = Field(default_factory=list, max_length=500)
+    text: str | None = Field(default=None, max_length=500)
+    states: list[TraceState] = Field(default_factory=list)
+    tags: dict[str, str] = Field(default_factory=dict)
+    since: datetime | None = None
+    until: datetime | None = None
+    oldest_first: bool = False
+    limit: int = Field(default=50, ge=1, le=500)
+    cursor: str | None = None
+
+
+class Page[T](BaseModel):
+    """One page of results. ``next_cursor`` is None on the last page."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: list[T]
+    next_cursor: str | None = None
+
+
+class QueueItem(_Object):
+    """One trace in a review queue, and whether its review is done."""
+
+    queue_id: Identifier
+    trace_id: Identifier
+    case_id: str | None = None
+    status: Literal["pending", "completed"] = "pending"
+
+
 def case_status(passed: bool | None) -> CaseStatus:
     """A case's status from the SDK's three-valued verdict."""
     return "error" if passed is None else "passed" if passed else "failed"
@@ -368,6 +448,12 @@ def from_results_record(
 
 __all__ = [
     "MODEL_VERSION",
+    "Page",
+    "QueueItem",
+    "Span",
+    "Trace",
+    "TraceQuery",
+    "TraceState",
     "RESULTS_RECORD_FIELDS",
     "Case",
     "CaseResult",
