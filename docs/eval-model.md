@@ -23,8 +23,9 @@ rejects unknown fields.
 - Case identifiers come from the data (`id` in a JSONL or CSV row, or its position) and are what
   results, scores and reviews refer to.
 - Digests are SHA-256 over canonical JSON (keys sorted, no whitespace, UTF-8), computed by
-  `martian.evals.model.digest`. A dataset's digest identifies its content whatever it is called;
-  a suite's digest identifies its definition.
+  `martian.evals.model.digest`. A dataset's digest identifies its content whatever it is called.
+  A suite's digest (`suite_digest`) covers every field but `id`, `version` and `digest`, run
+  settings included, so a store that keeps one version per digest keeps every change.
 - A case result's `fingerprint` is the digest of everything that produced it (see
   [resume](evals.md#run-a-suite-file-locally)), so a resumed run reuses it only while that is unchanged.
 
@@ -36,10 +37,11 @@ rejects unknown fields.
 | `Case` | One test case: `inputs`, `expectations`, optional stored `outputs`, `tags`, `metadata` | Evaluation dataset record |
 | `DatasetVersion` | An immutable set of cases: `name`, optional `version`, `digest`, `case_count`, `source` (`file`, `draft`, `global`, `upload`, `traces`) and `location` | Evaluation dataset |
 | `DatasetDraft` | An editable working copy of a dataset: `name`, `revision` (raised by every edit), `state` (`editing` or `published`), `case_count`, and the `published_digest` of the version publishing created | none (Martian table) |
-| `Target` | The thing under test: `function` (file and function), `http` (URL, body template, response path, header names), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). Header values and credentials are never part of it | none |
+| `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model`, `parameters`, `criteria` | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
-| `Suite` | A dataset, a target and scorers with policies, versioned: a new version for every change | none |
+| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, the local `output` folder and the MLflow location. Unset means the runner's default | none |
+| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, and its `settings`. Versioned: a new version for every change | none |
 | `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint` | Trace |
 | `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `trace_id` | Assessment (feedback) |
@@ -50,17 +52,63 @@ rejects unknown fields.
 | `ReviewQueue`, `ReviewQuestion` | Case results of one run handed to people, with the questions they answer | Labeling session and review schema |
 | `Review` | A person's answer about one case result. A new answer is a new review naming the one it replaces (`previous_id`); reviews are never edited | Assessment (human feedback) |
 
-## The SDK suite file and results
+## The SDK suite file
 
-| SDK | Model |
+A [suite file](evals.md#run-a-suite-file-locally) is the written form of a `Suite`.
+`martian.evals.suite_file` loads one into the model and writes one back:
+
+```python
+from martian.evals.suite_file import cases_to_jsonl, load_suite_file, suite_to_yaml
+
+suite, cases = load_suite_file("evals.yaml")  # the suite, and the cases its data file holds
+text = suite_to_yaml(suite)                   # a suite file that loads back to the same suite
+data = cases_to_jsonl(cases)                  # a JSONL data file for it
+```
+
+`suite_from_yaml(text, name=..., cases=...)` does the same from a file's text. A loaded suite
+is named after its file (`evals.yaml` is the suite `evals`), as a local run names its MLflow
+experiment. Writing leaves out the suite's id, name, version and dataset digest: the file's name
+and its data give them again on the next load.
+
+| Suite file | Model |
 | --- | --- |
-| Suite file `data` | `DatasetVersion` with `source: file`, `location` the path, `digest` over its cases |
+| `data` | `Suite.dataset_location`, as written. `dataset_name` is the file's stem and `dataset_digest` the digest a store gives its cases as a `DatasetVersion` |
 | A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`) |
-| `target.file` and `target.function` | `Target` of kind `function` |
-| `target.url`, `body`, `response_path`, `headers` | `Target` of kind `http`; only the header names are kept |
-| No target, outputs stored in the data | `Target` of kind `stored` |
-| Each entry of `checks` | `ScorerVersion`: a judge type is `kind: llm_judge` with `judge.model` and `judge.inference_params`; a deterministic check is `kind: check` with its options in `parameters` and its rubric, guidelines or conditions in `criteria` |
-| `judge.max_retries`, `judge.rate_limit_wait_seconds`, `concurrency`, `batch`, `output`, `mlflow` | How a run is carried out, not what it grades: not in the model |
+| No `target` | `Target` of kind `stored`: the outputs come with the cases |
+| `target.file`, `target.function` | `Target` of kind `function` |
+| `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
+| `target.timeout_seconds` | `RunSettings.target_timeout_seconds` |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; the other types are `kind: check` with their options (`values`, `expectation`, `any_of`, `case_sensitive`, `pattern`, `required_keys`) in `parameters` |
+| `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
+| `judge.max_retries`, `judge.rate_limit_wait_seconds` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds` |
+| `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
+| `mlflow.tracking_uri`, `mlflow.experiment` | `RunSettings.mlflow_tracking_uri`, `mlflow_experiment` |
+| `input_key` | `Suite.input_key` |
+
+`RunSettings` holds only what the file sets, so an unset setting stays the runner's default and
+the written file says no more than the one loaded. `martian.evals.suite_file.SUITE_FILE_FIELDS`
+lists every field, and a test fails when the runner accepts a field that has no entry.
+
+Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
+
+- a check option that does not apply to its type, such as `pattern` on `is_json`, and a `judge`
+  with no LLM judge check. The runner ignores both;
+- a field of a JSONL case that the runner does not read, or both `input` and `inputs` (or
+  `output` and `outputs`) in one case;
+- anything `martian evals run` refuses, such as an unknown field.
+
+Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
+grades stored outputs, which is a `stored` target), an `agent` target, `policies` (in a file, a
+case passes when every check passes it), `code` or `human` scorers, a pinned scorer `version`,
+`llm_judge` scorers with different models or parameters (a file has one judge), run settings
+for a target or judge the suite does not have, and a suite with no `dataset_location`.
+`cases_to_jsonl` refuses cases with `tags` or `metadata`. The written text is then loaded again
+and must give the same definition, so a field the writer does not know is refused too.
+
+`martian evals run` still reads the suite file itself; running it from the model is
+MorningHQ/martian-notes#114.
+
+## Local results
 
 Every field of a `results.jsonl` record has a place. `martian.evals.model.RESULTS_RECORD_FIELDS`
 lists them, and `from_results_record` converts a record and refuses one with a field it does not
@@ -104,7 +152,7 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 
 ## What uses it
 
-The [evals core](evals-core.md)'s store interface takes and returns these objects. The suite
-file becomes the written form of these objects (MorningHQ/martian-notes#99), the evals core
-serves them (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
+The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
+suite file is their written form ([above](#the-sdk-suite-file)). The evals core serves them
+(MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).
