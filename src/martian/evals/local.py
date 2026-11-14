@@ -6,6 +6,8 @@ unless the caller names another:
 
 - ``mlflow.db``: the core's store, :class:`~martian.evals.store.mlflow_local.MlflowStore` on SQLite;
 - ``artifacts/``: that store's run artifacts.
+- ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
+  runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
@@ -29,6 +31,7 @@ from starlette.staticfiles import StaticFiles
 
 from martian.evals.server import SINGLE_USER, Principal, create_app, current_principal
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
+from martian.evals.records.sql import SqlRecordStore
 from martian.evals.store.mlflow_local import MlflowStore
 
 HOST = "127.0.0.1"
@@ -92,7 +95,8 @@ def create_local_app(home: Path, ui: Path) -> FastAPI:
     os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
     home.mkdir(parents=True, exist_ok=True)
     store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
-    app = create_app(store=store, principal=lambda: SINGLE_USER)
+    records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER)
     app.include_router(session_router)
     app.mount("/", StaticFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(ALLOWED_HOSTS))

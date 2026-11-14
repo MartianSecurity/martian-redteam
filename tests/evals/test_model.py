@@ -10,6 +10,7 @@ from martian.evals.model import (
     RESULTS_RECORD_FIELDS,
     Case,
     Review,
+    RunSettings,
     Score,
     ScorerVersion,
     Suite,
@@ -17,6 +18,7 @@ from martian.evals.model import (
     case_status,
     digest,
     from_results_record,
+    suite_digest,
 )
 from martian.evals.runner import run_suite
 from martian.evals.state import STATE
@@ -41,7 +43,7 @@ def test_objects_are_immutable_and_reject_unknown_fields():
         ({"kind": "http", "url": "https://agent.example/chat"}, "needs body"),
         ({"kind": "agent"}, "needs agent_id"),
         ({"kind": "stored", "url": "https://agent.example/chat"}, "url does not apply"),
-        ({"kind": "function", "file": "a.py", "function": "f", "header_names": ["Authorization"]}, "header_names"),
+        ({"kind": "function", "file": "a.py", "function": "f", "headers": {"Authorization": "x"}}, "headers"),
     ],
 )
 def test_a_target_has_exactly_the_fields_of_its_kind(fields, problem):
@@ -49,11 +51,12 @@ def test_a_target_has_exactly_the_fields_of_its_kind(fields, problem):
         Target(**fields)
 
 
-def test_an_http_target_keeps_header_names_not_values():
-    target = Target(
-        kind="http", url="https://agent.example/chat", body={"message": "{{input}}"}, header_names=["Authorization"]
-    )
-    assert "header_values" not in Target.model_fields and target.header_names == ["Authorization"]
+def test_a_suite_digest_covers_its_definition_but_not_its_identity():
+    rubric = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", model="openai:/judge")
+    suite = Suite(id="s", name="s", scorers=[rubric], digest=DIGEST)
+    assert suite_digest(suite) == suite_digest(suite.model_copy(update={"id": "t", "version": 4, "digest": "1" * 64}))
+    for change in ({"name": "t"}, {"settings": RunSettings(concurrency=2)}, {"dataset_location": "cases.csv"}):
+        assert suite_digest(suite.model_copy(update=change)) != suite_digest(suite)
 
 
 def test_a_suite_has_unique_scorers_and_policies_only_for_them():

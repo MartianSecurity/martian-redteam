@@ -186,13 +186,22 @@ class Suite(_Model):
 def load_suite(path: str | Path) -> tuple[Suite, Path]:
     file = Path(path).resolve()
     try:
-        raw = yaml.safe_load(file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as error:
+        text = file.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ConfigError(f"could not read the suite file: {type(error).__name__}") from None
+    return parse_suite(text), file.parent
+
+
+def parse_suite(text: str) -> Suite:
+    """A suite file's text, validated. Paths in it stay as written, relative to the file."""
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as error:
         raise ConfigError(f"could not read the suite file: {type(error).__name__}") from None
     if not isinstance(raw, dict):
         raise ConfigError("the suite file must be a YAML mapping")
     try:
-        return Suite.model_validate(raw), file.parent
+        return Suite.model_validate(raw)
     except ValidationError as error:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in item['loc']) or 'suite'}: {item['msg']}"

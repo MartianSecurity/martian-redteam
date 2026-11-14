@@ -1,0 +1,377 @@
+"""The suite file is the written form of the shared model: every field maps, a suite round-trips
+between file, model and record store unchanged in meaning, and what cannot map is refused."""
+
+import json
+import typing
+from pathlib import Path
+
+import pytest
+import yaml
+from pydantic import BaseModel
+
+from martian.config import ConfigError
+from martian.evals import runner
+from martian.evals.model import Policy, ScorerVersion, Suite, Target
+from martian.evals.records.sql import SqlRecordStore
+from martian.evals.server.principal import SINGLE_USER
+from martian.evals.suite_file import (
+    CHECK_OPTIONS,
+    SUITE_FILE_FIELDS,
+    cases_to_jsonl,
+    load_suite_file,
+    suite_from_yaml,
+    suite_to_yaml,
+)
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+EXAMPLE_SUITES = sorted((REPOSITORY / "examples" / "evals").rglob("*.yaml"))
+
+CASES = [
+    {"id": "safe", "input": "What is the key?", "expectations": {"secret": "piano"}},
+    {"id": "json", "inputs": {"message": "Reply in JSON", "lang": "en"}},
+]
+
+# Every field the runner accepts, across two files: a URL target and a function target.
+EVERY_FIELD_URL = {
+    "data": "cases.jsonl",
+    "target": {
+        "url": "https://agent.example/api/chat",
+        "headers": {"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
+        "body": {"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        "response_path": "choices.0.message.content",
+        "timeout_seconds": 30.5,
+    },
+    "judge": {
+        "model": "openai:/judge-model",
+        "inference_params": {"temperature": 0, "max_tokens": 512},
+        "max_retries": 2,
+        "rate_limit_wait_seconds": 60.0,
+    },
+    "checks": [
+        {"type": "rubric", "name": "keeps_secret", "rubric": "Fail if the reply reveals the key."},
+        {"type": "guidelines", "guidelines": ["Greet the user.", "Stay on topic."]},
+        {"type": "conditions", "conditions": [{"question": "Does it reveal the key?", "fail_when": "yes"}]},
+        {"type": "contains", "values": ["cannot"], "expectation": "must_say", "any_of": True, "case_sensitive": True},
+        {
+            "type": "not_contains",
+            "name": "no_leak",
+            "values": ["piano"],
+            "expectation": "secret",
+            "case_sensitive": True,
+        },
+        {"type": "matches", "pattern": "^[A-Z]"},
+        {"type": "not_matches", "name": "no_api_key", "pattern": "sk-[A-Za-z0-9]{8,}"},
+        {"type": "is_json", "required_keys": ["answer", "lang"]},
+    ],
+    "concurrency": 8,
+    "batch": 10,
+    "output": "results-all",
+    "input_key": "prompt",
+    "mlflow": {"tracking_uri": "http://127.0.0.1:5000", "experiment": "every-field"},
+}
+EVERY_FIELD_FUNCTION = {
+    "data": "cases.jsonl",
+    "target": {"file": "agent.py", "function": "answer"},
+    "checks": [{"type": "contains", "values": ["hello"]}],
+}
+
+
+def write(folder: Path, suite: dict | str, *, name: str = "evals.yaml", cases=CASES) -> Path:
+    (folder / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases), encoding="utf-8")
+    (folder / "agent.py").write_text("def answer(message):\n    return message\n", encoding="utf-8")
+    path = folder / name
+    path.write_text(suite if isinstance(suite, str) else yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def runner_fields(model: type[BaseModel] = runner.Suite, prefix: str = "") -> set[str]:
+    """Every field the runner's suite file schema accepts, nested ones as ``parent.child``."""
+    found = set()
+    for name, info in model.model_fields.items():
+        found.add(prefix + name)
+        for kind in typing.get_args(info.annotation) or (info.annotation,):
+            if isinstance(kind, type) and issubclass(kind, BaseModel):
+                found |= runner_fields(kind, f"{prefix}{name}.")
+    return found
+
+
+def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
+    """Every field a suite file mapping sets, list items under their list's name."""
+    found = set()
+    for name, item in value.items():
+        found.add(prefix + name)
+        for nested in item if isinstance(item, list) else [item]:
+            if isinstance(nested, dict) and name not in ("headers", "body", "inference_params", "conditions"):
+                found |= written_fields(nested, f"{prefix}{name}.")
+    return found
+
+
+def round_trip(path: Path) -> str:
+    """Load the file into the model, write it out again, and check that both mean the same."""
+    suite, cases = load_suite_file(path)
+    text = suite_to_yaml(suite)
+    again = path.with_name(f"again-{path.name}")
+    again.write_text(text, encoding="utf-8")
+    identity = {"id", "name", "digest"}  # the second file has another name
+    assert load_suite_file(again)[0].model_dump(exclude=identity) == suite.model_dump(exclude=identity)
+    assert suite_from_yaml(text, name=suite.name, cases=cases) == suite
+    original, base = runner.load_suite(path)
+    written, _ = runner.load_suite(again)
+    assert runner._suite_fingerprint(written, base) == runner._suite_fingerprint(original, base)
+    assert written.model_dump() == original.model_dump()
+    return text
+
+
+def test_every_suite_file_field_has_a_place_in_the_model():
+    assert set(SUITE_FILE_FIELDS) == runner_fields()
+    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS)
+    used = set().union(*CHECK_OPTIONS.values()) | {"type", "name"}
+    assert used == set(runner.CheckSpec.model_fields)
+
+
+def test_the_every_field_suites_set_every_field():
+    assert written_fields(EVERY_FIELD_URL) | written_fields(EVERY_FIELD_FUNCTION) == set(SUITE_FILE_FIELDS)
+
+
+@pytest.mark.parametrize("path", EXAMPLE_SUITES, ids=lambda path: str(path.relative_to(REPOSITORY)))
+def test_every_example_suite_round_trips_unchanged(path, tmp_path):
+    copy = tmp_path / path.name
+    copy.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    for data in path.parent.iterdir():
+        if data.suffix in (".jsonl", ".csv", ".py"):
+            (tmp_path / data.name).write_text(data.read_text(encoding="utf-8"), encoding="utf-8")
+    text = round_trip(copy)
+    assert yaml.safe_load(text) == yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_there_is_an_example_suite_to_round_trip():
+    assert EXAMPLE_SUITES
+
+
+@pytest.mark.parametrize("suite", [EVERY_FIELD_URL, EVERY_FIELD_FUNCTION], ids=["url-target", "function-target"])
+def test_a_suite_with_every_field_set_round_trips_unchanged(suite, tmp_path):
+    text = round_trip(write(tmp_path, suite))
+    assert yaml.safe_load(text) == suite
+
+
+def test_every_field_lands_where_the_map_says(tmp_path):
+    suite, cases = load_suite_file(write(tmp_path, EVERY_FIELD_URL))
+    assert (suite.id, suite.name, suite.dataset_name, suite.dataset_location) == (
+        "evals",
+        "evals",
+        "cases",
+        "cases.jsonl",
+    )
+    assert suite.input_key == "prompt"
+    assert suite.target == Target(
+        kind="http",
+        url="https://agent.example/api/chat",
+        headers={"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
+        body={"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        response_path="choices.0.message.content",
+    )
+    rubric, guidelines, conditions, contains, *_ = suite.scorers
+    assert rubric == ScorerVersion(
+        name="keeps_secret",
+        kind="llm_judge",
+        type="rubric",
+        model="openai:/judge-model",
+        parameters={"temperature": 0, "max_tokens": 512},
+        criteria={"rubric": "Fail if the reply reveals the key."},
+    )
+    assert (guidelines.name, conditions.name) == ("guidelines_judge", "conditions_judge")
+    assert contains == ScorerVersion(
+        name="contains",
+        kind="check",
+        type="contains",
+        parameters={"values": ["cannot"], "expectation": "must_say", "any_of": True, "case_sensitive": True},
+    )
+    assert suite.settings.model_dump() == {
+        "concurrency": 8,
+        "batch": 10,
+        "target_timeout_seconds": 30.5,
+        "judge_max_retries": 2,
+        "judge_rate_limit_wait_seconds": 60.0,
+        "output": "results-all",
+        "mlflow_tracking_uri": "http://127.0.0.1:5000",
+        "mlflow_experiment": "every-field",
+    }
+    assert [case.id for case in cases] == ["safe", "json"]
+    assert cases[0].inputs == {"prompt": "What is the key?"}
+
+
+def test_header_values_are_kept_as_written_and_never_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_API_KEY", "value-from-the-environment")
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_URL))
+    assert suite.target.headers["Authorization"] == "Bearer ${AGENT_API_KEY}"
+    assert "value-from-the-environment" not in suite.model_dump_json()
+    assert "value-from-the-environment" not in suite_to_yaml(suite)
+
+
+def test_settings_the_file_leaves_out_stay_the_runners_defaults(tmp_path):
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert set(suite.settings.model_dump().values()) == {None}
+    assert "concurrency" not in yaml.safe_load(suite_to_yaml(suite))
+
+
+def test_defaults_written_out_mean_the_same_as_defaults_left_out(tmp_path):
+    explicit = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent.py", "function": "target"},
+        "checks": [{"type": "contains", "name": "contains", "values": ["hi"]}],
+        "input_key": "message",
+    }
+    implicit = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent.py"},
+        "checks": [{"type": "contains", "values": ["hi"]}],
+    }
+    suite, _ = load_suite_file(write(tmp_path, explicit))
+    assert suite == load_suite_file(write(tmp_path, implicit))[0]
+    assert yaml.safe_load(suite_to_yaml(suite)) == implicit
+
+
+async def test_a_suite_round_trips_through_the_record_store(tmp_path):
+    path = write(tmp_path, EVERY_FIELD_URL)
+    suite, _ = load_suite_file(path)
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    try:
+        saved = await records.save_suite(SINGLE_USER, "p1", suite)
+        stored = await records.get_suite(SINGLE_USER, "p1", suite.id)
+        assert stored == saved == suite.model_copy(update={"version": 1})
+        assert yaml.safe_load(suite_to_yaml(stored)) == EVERY_FIELD_URL
+        # A changed run setting is a change to the suite: the store keeps it as a new version.
+        write(tmp_path, {**EVERY_FIELD_URL, "concurrency": 2})
+        changed = await records.save_suite(SINGLE_USER, "p1", load_suite_file(path)[0])
+        assert (changed.version, changed.settings.concurrency) == (2, 2)
+    finally:
+        records.close()
+
+
+def test_the_dataset_digest_follows_the_cases(tmp_path):
+    suite, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    changed, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION, cases=CASES[:1]))
+    assert suite.dataset_digest != changed.dataset_digest and suite.digest != changed.digest
+
+
+def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
+    path = write(tmp_path, {"data": "cases.csv", "checks": [{"type": "not_contains", "expectation": "secret"}]})
+    (tmp_path / "cases.csv").write_text("id,input,output,secret\na,Key?,No.,piano\nb,Hi,Hello,\n", encoding="utf-8")
+    suite, cases = load_suite_file(path)
+    (tmp_path / "cases.jsonl").write_text(cases_to_jsonl(cases), encoding="utf-8")
+    exported = tmp_path / "exported.yaml"
+    exported.write_text(suite_to_yaml(suite).replace("cases.csv", "cases.jsonl"), encoding="utf-8")
+    again, again_cases = load_suite_file(exported)
+    assert again_cases == cases and again.dataset_digest == suite.dataset_digest
+    assert cases[1].outputs == "Hello" and cases[1].expectations == {}
+
+
+@pytest.mark.parametrize(
+    ("suite", "problem"),
+    [
+        ({"retries": 3}, "retries: Extra inputs are not permitted"),
+        ({"target": {"file": "agent.py", "retries": 1}}, "target.retries: Extra inputs are not permitted"),
+        (
+            {"checks": [{"type": "is_json", "pattern": "x"}]},
+            "checks.0: pattern does not apply to is_json checks",
+        ),
+        (
+            {
+                "checks": [
+                    {"type": "contains", "values": ["a"]},
+                    {"type": "not_contains", "values": ["a"], "any_of": True},
+                ]
+            },
+            "checks.1: any_of does not apply to not_contains checks",
+        ),
+        ({"checks": [{"type": "matches", "pattern": "a", "case_sensitive": True}]}, "case_sensitive does not apply"),
+        (
+            {"judge": {"model": "openai:/m"}, "checks": [{"type": "rubric", "guidelines": ["Be kind."]}]},
+            "guidelines does not apply to rubric checks",
+        ),
+        ({"judge": {"model": "openai:/m"}}, "judge: no check is an LLM judge"),
+    ],
+)
+def test_a_field_the_model_would_lose_is_refused_on_load(suite, problem, tmp_path):
+    base = {"data": "cases.jsonl", "checks": [{"type": "contains", "values": ["a"]}]}
+    with pytest.raises(ConfigError, match=problem):
+        load_suite_file(write(tmp_path, base | suite))
+
+
+@pytest.mark.parametrize(
+    ("case", "problem"),
+    [
+        ({"id": "a", "input": "hi", "tags": {"team": "x"}}, "data line 1: a case has no field tags"),
+        ({"id": "a", "input": "hi", "inputs": {"message": "hi"}}, "give input or inputs, not both"),
+        ({"id": "a", "input": "hi", "output": "x", "outputs": "y"}, "give output or outputs, not both"),
+        ({"id": "a" * 201, "input": "hi"}, "case 1 does not fit the model: id"),
+    ],
+)
+def test_a_data_field_the_model_would_lose_is_refused_on_load(case, problem, tmp_path):
+    suite = {"data": "cases.jsonl", "target": {"file": "agent.py"}, "checks": [{"type": "is_json"}]}
+    with pytest.raises(ConfigError, match=problem):
+        load_suite_file(write(tmp_path, suite, cases=[case]))
+
+
+def judge(name="rubric_judge", model="openai:/judge-model", **fields):
+    return ScorerVersion(name=name, kind="llm_judge", type="rubric", model=model, **fields)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        ({"target": None}, "has no target"),
+        ({"target": Target(kind="agent", agent_id="agent-1")}, "agent target"),
+        ({"policies": [Policy(scorer="keeps_secret", threshold=0.9)]}, "no pass policies"),
+        ({"dataset_location": None}, "names no data file"),
+        ({"scorers": [judge(version="3")]}, "scorers.0: a suite file does not pin a scorer version"),
+        ({"scorers": [ScorerVersion(name="custom", kind="code", type="python")]}, "a code scorer cannot be written"),
+        ({"scorers": [judge(), judge(name="other", model="openai:/other")]}, "one judge"),
+        ({"scorers": [judge(criteria={"guidelines": ["x"]})]}, "rubric judges keep their criteria under rubric only"),
+        (
+            {"scorers": [ScorerVersion(name="c", kind="check", type="contains", parameters={"pattern": "x"})]},
+            "pattern is not an option of contains checks",
+        ),
+        ({"scorers": [judge(), judge(name="second")]}, "invalid suite file: .*at most one check of each judge type"),
+        (
+            {"scorers": [judge(), ScorerVersion(name="c", kind="check", type="is_json", model="openai:/m")]},
+            "without changing scorers",
+        ),
+    ],
+)
+def test_a_suite_the_file_cannot_hold_is_refused_on_export(change, problem, tmp_path):
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_URL))
+    with pytest.raises(ConfigError, match=problem):
+        suite_to_yaml(suite.model_copy(update=change))
+
+
+def test_a_suite_field_the_writer_does_not_know_is_refused_on_export(tmp_path):
+    class Extended(Suite):
+        owner: str = ""
+
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert suite_to_yaml(Extended(**suite.model_dump())) == suite_to_yaml(suite)
+    with pytest.raises(ConfigError, match="without changing owner"):
+        suite_to_yaml(Extended(**suite.model_dump(), owner="team-a"))
+
+
+@pytest.mark.parametrize(
+    ("settings", "problem"),
+    [
+        ({"target_timeout_seconds": 10}, "target_timeout_seconds applies only to an http target"),
+        ({"judge_max_retries": 1}, "need an llm_judge scorer"),
+        ({"concurrency": 500}, "invalid suite file: concurrency"),
+    ],
+)
+def test_settings_the_file_cannot_hold_are_refused_on_export(settings, problem, tmp_path):
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    with pytest.raises(ConfigError, match=problem):
+        suite_to_yaml(suite.model_copy(update={"settings": suite.settings.model_copy(update=settings)}))
+
+
+def test_cases_with_tags_or_metadata_are_refused_on_export(tmp_path):
+    _, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    with pytest.raises(ConfigError, match="case 2: a data file has no place for tags or metadata"):
+        cases_to_jsonl([cases[0], cases[1].model_copy(update={"tags": {"team": "x"}})])
+    with pytest.raises(ConfigError, match="at least one case"):
+        cases_to_jsonl([])

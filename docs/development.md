@@ -16,7 +16,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
-| `src/martian/evals/server/` | Evals core: `create_app`, injected principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status` and `/v1/evals/bootstrap` |
+| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store and principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status`, `/v1/evals/bootstrap` and the read routes (`runs.py`, `traces.py`, `datasets.py`, shaped by `projection.py` and `quality.py`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite, the session call and the built UI on 127.0.0.1 |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
