@@ -29,9 +29,9 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app, current_principal
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
-from martian.evals.records.sql import SqlRecordStore
 from martian.evals.store.mlflow_local import MlflowStore
 
 HOST = "127.0.0.1"
