@@ -61,7 +61,7 @@ packages = ["src/martian", "src/martian_redteam", "src/martian_evals_kit"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src", "/tests", "/examples", "/docs", "/scripts", "/pyproject.toml",
-    "/README.md", "/LICENSE", "/NOTICE", "/uv.lock",
+    "/README.md", "/LICENSE", "/NOTICE", "/uv.lock", "/Dockerfile", "/.dockerignore",
 ]
 
 # The Evals UI the wheel ships in src/martian/ui/: a build of the Evals app in MorningHQ/MartianFrontend

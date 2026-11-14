@@ -32,6 +32,9 @@ SESSION = {
 def no_telemetry(monkeypatch):
     monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
     monkeypatch.delenv("MLFLOW_WORKSPACE", raising=False)
+    # The container image's settings: unset unless a test sets them.
+    monkeypatch.delenv(local.BIND_ENV, raising=False)
+    monkeypatch.delenv(local.ALLOWED_HOSTS_ENV, raising=False)
 
 
 @pytest.fixture
@@ -195,7 +198,65 @@ def test_the_command_defaults_to_the_data_folder_in_home_and_opens_the_browser(m
     result = CliRunner().invoke(cli, ["ui", "--ui-dir", str(ui)])
     assert result.exit_code == 0, result.output
     assert served["port"] == 7600 and served["open_browser"] is True
+    assert served["host"] == "127.0.0.1"
     assert (tmp_path / ".martian" / "evals" / "mlflow.db").is_file()
+
+
+def test_the_image_settings_listen_on_the_named_address_keep_the_host_check_and_warn(monkeypatch, tmp_path, ui):
+    # What the Dockerfile sets, and a name a user adds for a server reached by name.
+    served = {}
+
+    def record(app, **options):
+        served.update(options, app=app)
+        options["announce"](f"http://{options['host']}:{options['port']}/")
+
+    monkeypatch.setattr(local, "serve", record)
+    monkeypatch.setenv(local.BIND_ENV, "0.0.0.0")
+    monkeypatch.setenv(local.ALLOWED_HOSTS_ENV, " evals.internal, Box.lan ,")
+    result = CliRunner().invoke(cli, ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert served["host"] == "0.0.0.0"
+    assert "Martian Evals is listening on 0.0.0.0:7600" in result.output
+    assert local.EXPOSURE_WARNING in result.output
+    assert "WARNING: Martian Evals has no login." in local.EXPOSURE_WARNING
+    client = TestClient(served["app"], base_url=LOCAL)
+    for host in ("127.0.0.1:7600", "localhost:8080", "evals.internal:7600", "box.lan"):
+        assert client.post("/v1/auth/refresh", headers={"host": host}).status_code == 200, host
+    for host in ("attacker.example:7600", "evals.internal.attacker.example", "0.0.0.0:7600"):
+        assert client.post("/v1/auth/refresh", headers={"host": host}).status_code == 400, host
+
+
+def test_the_default_command_does_not_warn(monkeypatch, tmp_path, ui):
+    monkeypatch.setattr(local, "serve", lambda app, **options: options["announce"]("http://127.0.0.1:7600/"))
+    result = CliRunner().invoke(cli, ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "Martian Evals is at http://127.0.0.1:7600/" in result.output
+    assert "WARNING" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("MARTIAN_EVALS_BIND", "evals.internal", "MARTIAN_EVALS_BIND must be an IPv4 address"),
+        ("MARTIAN_EVALS_BIND", "::", "MARTIAN_EVALS_BIND must be an IPv4 address"),
+        ("MARTIAN_EVALS_ALLOWED_HOSTS", "*", "without a port, scheme or wildcard: '*'"),
+        ("MARTIAN_EVALS_ALLOWED_HOSTS", "evals.internal,*.lan", "without a port, scheme or wildcard: '*.lan'"),
+        ("MARTIAN_EVALS_ALLOWED_HOSTS", "evals.internal:7600", "without a port, scheme or wildcard"),
+        ("MARTIAN_EVALS_ALLOWED_HOSTS", "http://evals.internal", "without a port, scheme or wildcard"),
+    ],
+)
+def test_an_image_setting_that_would_not_hold_is_refused(monkeypatch, tmp_path, ui, name, value, message):
+    monkeypatch.setattr(local, "serve", lambda app, **options: pytest.fail("served"))
+    monkeypatch.setenv(name, value)
+    result = CliRunner().invoke(cli, ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"])
+    assert result.exit_code == 2
+    assert message in result.output
+
+
+def test_the_server_listens_on_the_address_it_is_given():
+    port = free_port()
+    with listen(port, "0.0.0.0") as listener:
+        assert listener.getsockname() == ("0.0.0.0", port)
 
 
 def test_the_command_serves_the_ui_the_package_ships(monkeypatch, tmp_path):

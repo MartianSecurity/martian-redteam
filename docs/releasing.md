@@ -42,8 +42,13 @@ retain the checksums of the actual validated artifacts.
 The base dependencies support redteam. `evals` adds MLflow 3.16.1/pandas/pytest
 and its local SQL store prerequisites. `mcp` retains the optional MCP runtime.
 CI checks Python 3.12 and 3.13. The sdist contains source (with the built Evals UI), tests, examples,
-documentation, build configuration, lockfile and license/notice; no task-owned
-credentials, raw live logs, local MLflow stores or browser auth state are bundled.
+documentation, build configuration (with the `Dockerfile` and `.dockerignore`), lockfile and
+license/notice; no task-owned credentials, raw live logs, local MLflow stores or browser auth
+state are bundled.
+
+The `Dockerfile` builds the local edition's image from the checkout and `uv.lock`
+([evals core](evals-core.md#the-local-edition-in-a-container)). No workflow builds or publishes
+it yet; MorningHQ/martian-notes#223 publishes it with the package from one tagged release.
 
 ## The Evals UI in the wheel
 

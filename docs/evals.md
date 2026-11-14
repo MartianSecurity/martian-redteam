@@ -136,7 +136,8 @@ For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow
 (`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
 
 **The local Evals UI.** `martian ui` opens the Evals UI on your machine, with no login and no
-other service; see [the local edition](evals-core.md#the-local-edition-martian-ui). A suite-file
+other service; see [the local edition](evals-core.md#the-local-edition-martian-ui), which also
+runs [in a container](evals-core.md#the-local-edition-in-a-container) on a small server. A suite-file
 run does not appear in it yet (MorningHQ/martian-notes#114), so browse a run's traces with
 `mlflow ui` as above.
 
