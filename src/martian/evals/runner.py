@@ -6,13 +6,14 @@ The suite names a data file (JSONL or CSV), the checks to apply, and optionally 
 test: a Python function, or an HTTP endpoint. Nothing here contacts the Martian platform: a
 function target runs in this process, a URL target is called from it, LLM judges call the model
 you configure, and MLflow uses a local store in the output folder unless you point it at your
-own server. A run can be stopped and started again; finished cases are
-skipped. Use ``martian ci`` when a result must be recorded on the platform.
+own server. A run can be stopped and started again; a finished case is skipped while nothing that
+produced its verdict has changed. Use ``martian ci`` when a result must be recorded on the platform.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,6 +32,7 @@ import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from martian._version import __version__
 from martian.config import ConfigError
 
 JUDGES = ("rubric", "guidelines", "conditions")
@@ -116,7 +118,10 @@ class TargetRef(_Model):
 class JudgeConfig(_Model):
     model: str
     inference_params: dict[str, float | int] = Field(default_factory=dict)
+    # Server errors and connection failures are retried this many times.
     max_retries: int = Field(default=5, ge=0, le=10)
+    # Rate limits are retried for up to this many seconds, as long as the provider asks.
+    rate_limit_wait_seconds: float = Field(default=300, ge=0, le=3600)
 
 
 class CheckSpec(_Model):
@@ -397,6 +402,7 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     input_key=suite.input_key,
                     inference_params=dict(suite.judge.inference_params) or None,
                     max_retries=suite.judge.max_retries,
+                    rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
                 )
             )
         elif check.type == "contains":
@@ -439,6 +445,51 @@ def _missing(value: Any) -> bool:
     return value is None or value != value  # NaN
 
 
+def _digest(value: Any) -> str:
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _suite_fingerprint(suite: Suite, base: Path) -> str:
+    """Everything in the suite a verdict depends on: the checks and their criteria, the judge model
+    and its parameters, the target, and the SDK version that holds the judge prompts.
+
+    Settings that change how a run is carried out but not what it grades (concurrency, batch size,
+    output folder, retries and the rate-limit wait, timeout, MLflow location) are left out, so
+    changing them keeps earlier results. A function target counts by the contents of its file;
+    modules that file imports and the service behind a URL target cannot be seen from here.
+    """
+    target: dict[str, Any] | None = None
+    if suite.target is not None:
+        target = suite.target.model_dump(mode="json", exclude={"timeout_seconds"})
+        if suite.target.file is not None:
+            file = Path(suite.target.file)
+            file = file if file.is_absolute() else base / file
+            target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
+    return _digest(
+        {
+            "sdk": __version__,
+            "checks": [check.model_dump(mode="json") for check in suite.checks],
+            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds"})
+            if suite.judge
+            else None,
+            "input_key": suite.input_key,
+            "target": target,
+        }
+    )
+
+
+def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any]) -> str:
+    return _digest(
+        {
+            "suite": suite_fingerprint,
+            "inputs": case["inputs"],
+            "expectations": case["expectations"],
+            "outputs": case.get("outputs"),
+        }
+    )
+
+
 class Results:
     """``results.jsonl`` in the output folder: one record per case, the latest record wins."""
 
@@ -463,7 +514,7 @@ class Results:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
-def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float) -> dict[str, Any]:
+def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float, invalidated: int) -> dict[str, Any]:
     per_check = {
         label: {
             "passed": sum(r["checks"].get(label, {}).get("passed") is True for r in records),
@@ -483,6 +534,7 @@ def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float) -
         "errors": sum(r["passed"] is None for r in records),
         "checks": per_check,
         "target_errors": target_errors,
+        "invalidated": invalidated,
         "seconds_this_run": round(seconds, 1),
     }
 
@@ -540,14 +592,23 @@ def run_suite(
 
     folder = Path(output) if output is not None else base / suite.output
     results = Results(folder, resume=resume)
-    done = {i for i, r in results.records().items() if r["passed"] is not None}
+    suite_print = _suite_fingerprint(suite, base)
+    prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
+    # An earlier verdict is reused only when it was produced by exactly this suite and case.
+    finished = {i: r for i, r in results.records().items() if r["passed"] is not None and i in prints}
+    done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
+    invalidated = len(finished) - len(done)
     todo = [case for case in cases if case["id"] not in done]
     say = progress or (lambda message: None)
-    say(f"{len(cases)} cases, {len(cases) - len(todo)} already done")
+    message = f"{len(cases)} cases, {len(cases) - len(todo)} already done"
+    if invalidated:
+        plural = "result" if invalidated == 1 else "results"
+        message += f", {invalidated} earlier {plural} discarded because the suite, the data or the target changed"
+    say(message)
 
     import mlflow
 
-    from martian.evals.evaluate import evaluate
+    from martian.evals.evaluate import evaluate_rows
     from martian.evals.gate import _interpret
     from martian.evals.scorers import output_text
 
@@ -576,12 +637,14 @@ def run_suite(
                 if "outputs" in case:
                     row["outputs"] = case["outputs"]
                 data.append(row)
-            frame: Any = evaluate(
+            frame: Any = evaluate_rows(
                 data=data, scorers=scorers, predict_fn=target
-            ).result_df  # never None: evaluate raises
+            ).result_df  # never None: evaluate_rows raises
             by_id = {case["id"]: case for case in batch}
+            recorded: set[str] = set()
             for position in range(len(frame)):
                 case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
+                recorded.add(case["id"])
                 response = frame["response"].iloc[position] if "response" in frame.columns else None
                 state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
                 broke = _missing(response) or "ERROR" in state
@@ -623,8 +686,25 @@ def run_suite(
                         "inputs": case["inputs"],
                         "output": None if broke else output_text(response),
                         "error": reason,
+                        "fingerprint": prints[case["id"]],
                     }
                 )
+            # MLflow leaves out a row whose trace it could not read back. That case has no
+            # verdict, so it is an error now and is graded again on the next run.
+            for case in batch:
+                if case["id"] not in recorded:
+                    missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
+                    results.append(
+                        {
+                            "id": case["id"],
+                            "passed": None,
+                            "checks": {label: dict(missing) for label in labels},
+                            "inputs": case["inputs"],
+                            "output": None,
+                            "error": None,
+                            "fingerprint": prints[case["id"]],
+                        }
+                    )
             say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
     finally:
         mlflow.set_tracking_uri(previous_uri)
@@ -637,7 +717,7 @@ def run_suite(
 
     final = results.records()
     ordered = [final[case["id"]] for case in cases if case["id"] in final]
-    summary = _summary(ordered, labels, time.monotonic() - started)
+    summary = _summary(ordered, labels, time.monotonic() - started, invalidated)
     summary["output"] = str(folder)
     (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)

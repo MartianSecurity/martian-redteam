@@ -267,7 +267,7 @@ def test_gateway_transport_validates_provider_output(monkeypatch):
             "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
         }
 
-    monkeypatch.setattr(_judge_transport, "send_chat_request", send)
+    monkeypatch.setattr(_judge_transport, "_post_chat", send)
     judge = response_guidelines(model="openai:/stub")
     kwargs = {"inputs": "Say hello", "outputs": "Hello!", "expectations": {"guidelines": ["Greet"]}}
     feedback = judge(**kwargs)
