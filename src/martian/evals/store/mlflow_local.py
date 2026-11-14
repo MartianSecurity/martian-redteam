@@ -14,7 +14,9 @@ How the shared model sits in MLflow:
   its artifacts, and its counts are also logged as metrics.
 - A trace keeps MLflow's trace id when the id has MLflow's form; otherwise MLflow's id is
   derived from it and the original is kept in the ``martian.trace_id`` tag. Spans are MLflow
-  spans, with the same rule for span ids.
+  spans, with the same rule for span ids. A trace's session and user are the trace metadata keys
+  MLflow tracing records them in, ``mlflow.trace.session`` and ``mlflow.trace.user``, so traces an
+  application records with MLflow tracing group into sessions without Martian's help.
 - A score is a feedback assessment on its trace.
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
 - A review question is a label schema; a review queue is an MLflow review queue named by the
@@ -22,7 +24,8 @@ How the shared model sits in MLflow:
 - Run artifacts are files under the run's artifact folder. The artifact root must be local.
 
 Text search over traces is applied in this process after MLflow's own filters, so a search reads
-every trace those filters match.
+every trace those filters match. A session search reads the same traces and groups the first of
+them in this process.
 """
 
 from __future__ import annotations
@@ -65,6 +68,7 @@ from martian.evals._mlflow import (
 )
 from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
 from martian.evals.model import (
+    SESSION_TRACE_LIMIT,
     Case,
     Counts,
     DatasetVersion,
@@ -78,19 +82,26 @@ from martian.evals.model import (
     Score,
     ScorerVersion,
     ScoreSource,
+    SessionSearch,
     Span,
     StoreRef,
     Trace,
     TraceQuery,
     digest,
+    sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
-from martian.evals.store import StoreError, StoreStatus
+from martian.evals.store import StoreError, StoreStatus, check_session_search
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
 T = TypeVar("T")
+
+SESSION_KEY = "mlflow.trace.session"
+"""The trace metadata key MLflow tracing records a session id in (``TraceMetadataKey.TRACE_SESSION``)."""
+USER_KEY = "mlflow.trace.user"
+"""The trace metadata key MLflow tracing records the application's user in (``TraceMetadataKey.TRACE_USER``)."""
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
@@ -462,8 +473,8 @@ class MlflowStore:
             mlflow_id = _mlflow_trace_id(trace.id)
             metadata = dict(trace.metadata)
             for key, value in (
-                ("mlflow.trace.session", trace.session_id),
-                ("mlflow.trace.user", trace.user_id),
+                (SESSION_KEY, trace.session_id),
+                (USER_KEY, trace.user_id),
                 ("mlflow.trace.model", trace.model),
                 (
                     "mlflow.trace.tokenUsage",
@@ -507,39 +518,56 @@ class MlflowStore:
         assert saved is not None
         return saved
 
+    def _matching(self, query: TraceQuery) -> list[Trace]:
+        """Every trace the query matches, in its order."""
+        experiment = self._experiment(query.project_id)
+        filters = []
+        if query.run_id is not None and _SAFE_FILTER_VALUE.match(query.run_id):
+            filters.append(f"tags.`martian.run_id` = '{query.run_id}'")
+        for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id)):
+            if value is not None and _SAFE_FILTER_VALUE.match(value):
+                filters.append(f"metadata.`{key}` = '{value}'")
+        for key, value in query.tags.items():
+            if _SAFE_FILTER_VALUE.match(key) and _SAFE_FILTER_VALUE.match(value):
+                filters.append(f"tags.`{key}` = '{value}'")
+        if query.since is not None:
+            filters.append(f"trace.timestamp_ms >= {_ms(query.since)}")
+        if query.until is not None:
+            filters.append(f"trace.timestamp_ms < {_ms(query.until)}")
+        infos, token = [], None
+        while True:
+            page, token = self._store.search_traces(
+                locations=[experiment.experiment_id],
+                filter_string=" AND ".join(filters) or None,
+                max_results=500,
+                page_token=token,
+            )
+            infos += page
+            if not token:
+                break
+        found = [t for t in (_trace(info, query.project_id) for info in infos) if _matches(t, query)]
+        epoch = datetime.min.replace(tzinfo=UTC)
+        found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
+        return found
+
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         def work() -> Page[Trace]:
-            experiment = self._experiment(query.project_id)
-            filters = []
-            if query.run_id is not None and _SAFE_FILTER_VALUE.match(query.run_id):
-                filters.append(f"tags.`martian.run_id` = '{query.run_id}'")
-            if query.session_id is not None and _SAFE_FILTER_VALUE.match(query.session_id):
-                filters.append(f"metadata.`mlflow.trace.session` = '{query.session_id}'")
-            for key, value in query.tags.items():
-                if _SAFE_FILTER_VALUE.match(key) and _SAFE_FILTER_VALUE.match(value):
-                    filters.append(f"tags.`{key}` = '{value}'")
-            if query.since is not None:
-                filters.append(f"trace.timestamp_ms >= {_ms(query.since)}")
-            if query.until is not None:
-                filters.append(f"trace.timestamp_ms < {_ms(query.until)}")
-            infos, token = [], None
-            while True:
-                page, token = self._store.search_traces(
-                    locations=[experiment.experiment_id],
-                    filter_string=" AND ".join(filters) or None,
-                    max_results=500,
-                    page_token=token,
-                )
-                infos += page
-                if not token:
-                    break
-            found = [t for t in (_trace(info, query.project_id) for info in infos) if _matches(t, query)]
-            epoch = datetime.min.replace(tzinfo=UTC)
-            found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
+            found = self._matching(query)
             start = int(query.cursor) if query.cursor and query.cursor.isdigit() else 0
             chunk = found[start : start + query.limit]
             more = start + query.limit < len(found)
             return Page[Trace](items=chunk, next_cursor=str(start + query.limit) if more else None)
+
+        return await self._call(principal, work)
+
+    async def search_sessions(
+        self, principal: Principal, query: TraceQuery, *, max_traces: int = SESSION_TRACE_LIMIT
+    ) -> SessionSearch:
+        check_session_search(query, max_traces)
+
+        def work() -> SessionSearch:
+            found = self._matching(query)
+            return sessions_from_traces(found[:max_traces], has_more=len(found) > max_traces, limit=max_traces)
 
         return await self._call(principal, work)
 
@@ -1003,8 +1031,8 @@ def _trace(info: TraceInfo, project_id: str, *, spans: list[Span] | None = None)
     run_id = tags.pop("martian.run_id", None)
     name = tags.pop("mlflow.traceName", "")
     known = {
-        "mlflow.trace.session",
-        "mlflow.trace.user",
+        SESSION_KEY,
+        USER_KEY,
         "mlflow.trace.model",
         "mlflow.trace.tokenUsage",
         "mlflow.trace.cost",
@@ -1022,8 +1050,8 @@ def _trace(info: TraceInfo, project_id: str, *, spans: list[Span] | None = None)
         request=metadata.get("martian.request", info.request_preview or ""),
         response=metadata.get("martian.response", info.response_preview or ""),
         run_id=run_id,
-        session_id=metadata.get("mlflow.trace.session"),
-        user_id=metadata.get("mlflow.trace.user"),
+        session_id=metadata.get(SESSION_KEY),
+        user_id=metadata.get(USER_KEY),
         model=metadata.get("mlflow.trace.model"),
         tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
         cost=cost.get("total_cost") if isinstance(cost, dict) else None,
@@ -1038,6 +1066,8 @@ def _matches(trace: Trace, query: TraceQuery) -> bool:
     if query.run_id is not None and trace.run_id != query.run_id:
         return False
     if query.session_id is not None and trace.session_id != query.session_id:
+        return False
+    if query.user_id is not None and trace.user_id != query.user_id:
         return False
     if query.trace_ids and trace.id not in query.trace_ids:
         return False
