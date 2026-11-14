@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -56,6 +57,11 @@ def _placeholders(value: Any) -> list[str]:
     if isinstance(value, list):
         return [name for item in value for name in _placeholders(item)]
     return []
+
+
+class TargetCallError(RuntimeError):
+    """A URL target call failed. The message is the SDK's own wording: it names what went wrong
+    and never holds the address, a header, a credential or anything the server sent back."""
 
 
 def _check_url(url: str) -> None:
@@ -268,7 +274,7 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
             return str(uuid.uuid4())
         key = input_key if name == "input" else name.removeprefix("inputs.")
         if key not in inputs:
-            raise ValueError(f"the case has no input named {key!r}")
+            raise TargetCallError(f"the case has no input named {key!r}")
         return inputs[key]
 
     if isinstance(template, dict):
@@ -288,7 +294,9 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
 def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
 
-    Errors name what went wrong but never the address, the headers or the response body.
+    Errors name what went wrong but never the address, the headers or the response body. The
+    returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
+    a case's call failed.
     """
     url = _from_environment(reference.url or "")
     try:
@@ -298,32 +306,54 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     headers = {name: _from_environment(value) for name, value in reference.headers.items()}
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
-    def call(**inputs: Any) -> Any:
+    def send(inputs: dict[str, Any]) -> Any:
         body = _fill(reference.body, inputs, input_key)
         try:
             with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body)
         except httpx.HTTPError as error:
-            raise RuntimeError(f"the target could not be reached: {type(error).__name__}") from None
+            raise TargetCallError(f"the target could not be reached: {type(error).__name__}") from None
         if not response.is_success:
-            raise RuntimeError(f"the target returned HTTP {response.status_code}")
+            raise TargetCallError(f"the target returned HTTP {response.status_code}")
         if not steps:
             return response.text
         try:
             reply = response.json()
         except ValueError:
-            raise RuntimeError("the target's response is not JSON, so response_path cannot be read") from None
+            raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
         for step in steps:
             if isinstance(reply, dict) and step in reply:
                 reply = reply[step]
             elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
                 reply = reply[int(step)]
             else:
-                raise RuntimeError("the target's response has no value at response_path")
+                raise TargetCallError("the target's response has no value at response_path")
         if reply is None:
-            raise RuntimeError("the target's response has no value at response_path")
+            raise TargetCallError("the target's response has no value at response_path")
         return reply
 
+    # Why each failed call failed, by the inputs it was given: the evaluator reports only that
+    # a call failed. Two cases with identical inputs send identical requests, so sharing is safe.
+    reasons: dict[str, list[str]] = {}
+    lock = threading.Lock()
+
+    def key(inputs: dict[str, Any]) -> str:
+        return json.dumps(inputs, sort_keys=True, default=str)
+
+    def call(**inputs: Any) -> Any:
+        try:
+            return send(inputs)
+        except TargetCallError as error:
+            with lock:
+                reasons.setdefault(key(inputs), []).append(str(error))
+            raise
+
+    def failure_reason(inputs: dict[str, Any]) -> str | None:
+        with lock:
+            found = reasons.get(key(inputs))
+            return found.pop(0) if found else None
+
+    call.failure_reason = failure_reason  # type: ignore[attr-defined]
     return call
 
 
@@ -442,12 +472,17 @@ def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float) -
         }
         for label in labels
     }
+    target_errors: dict[str, int] = {}
+    for record in records:
+        if record.get("error"):
+            target_errors[str(record["error"])] = target_errors.get(str(record["error"]), 0) + 1
     return {
         "cases": len(records),
         "passed": sum(r["passed"] is True for r in records),
         "failed": sum(r["passed"] is False for r in records),
         "errors": sum(r["passed"] is None for r in records),
         "checks": per_check,
+        "target_errors": target_errors,
         "seconds_this_run": round(seconds, 1),
     }
 
@@ -467,7 +502,7 @@ def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str) -
             for label, check in record["checks"].items()
             if check.get("passed") is not True
         ]
-        message = "; ".join(details) or str(record.get("error") or "no verdict")
+        message = str(record["error"]) if record.get("error") else "; ".join(details) or "no verdict"
         if record["passed"] is False:
             lines.append(f"    <failure message={quoteattr(message[:2000])}/>")
         elif record["passed"] is None:
@@ -499,6 +534,7 @@ def run_suite(
     if suite.target is not None and stored:
         raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
+    failure_reason: Callable[[dict[str, Any]], str | None] | None = getattr(target, "failure_reason", None)
     scorers = _build_scorers(suite)
     labels = [check.label for check in suite.checks]
 
@@ -549,6 +585,10 @@ def run_suite(
                 response = frame["response"].iloc[position] if "response" in frame.columns else None
                 state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
                 broke = _missing(response) or "ERROR" in state
+                # A function target's exception may hold anything, so only a URL target gives a reason.
+                reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
+                    "the target call failed" if broke else None
+                )
                 verdicts: dict[str, dict[str, Any]] = {}
                 for label in labels:
                     value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
@@ -582,7 +622,7 @@ def run_suite(
                         "checks": verdicts,
                         "inputs": case["inputs"],
                         "output": None if broke else output_text(response),
-                        "error": "the target call failed" if broke else None,
+                        "error": reason,
                     }
                 )
             say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")

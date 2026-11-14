@@ -117,6 +117,12 @@ def test_a_failing_target_is_an_error_not_a_pass(tmp_path):
     (tmp_path / "agent.py").write_text("def target(message):\n    raise RuntimeError('boom')\n", encoding="utf-8")
     summary = run_suite(write_suite(tmp_path, extra="target:\n  file: agent.py\n"))
     assert (summary["passed"], summary["failed"], summary["errors"]) == (0, 0, 1)
+    # The exception comes from the customer's code and may hold anything, so it is not repeated.
+    assert json.loads((tmp_path / "results/results.jsonl").read_text())["error"] == "the target call failed"
+    assert summary["target_errors"] == {"the target call failed": 1}
+    for file in (tmp_path / "results").iterdir():
+        if file.suffix in (".jsonl", ".json", ".xml"):
+            assert "boom" not in file.read_text()
 
 
 def test_cases_load_from_jsonl_and_csv_with_the_same_shape(tmp_path):
@@ -274,9 +280,17 @@ def test_url_target_without_a_response_path_uses_the_response_text(tmp_path, age
     assert (summary["passed"], summary["errors"]) == (1, 0)
 
 
-@pytest.mark.parametrize("fault", ["status", "missing_path", "not_json", "unreachable"])
-def test_a_failing_url_target_is_an_error_not_a_pass(tmp_path, agent_server, monkeypatch, fault):
-    monkeypatch.setenv("AGENT_KEY", "k")
+@pytest.mark.parametrize(
+    "fault, reason",
+    [
+        ("status", "the target returned HTTP 500"),
+        ("missing_path", "the target's response has no value at response_path"),
+        ("not_json", "the target's response has no value at response_path"),
+        ("unreachable", "the target could not be reached: ConnectError"),
+    ],
+)
+def test_a_failing_url_target_is_an_error_not_a_pass(tmp_path, agent_server, monkeypatch, fault, reason):
+    monkeypatch.setenv("AGENT_KEY", "agent-secret-123")
     url = agent_server["url"]
     if fault == "status":
         agent_server["behaviour"]["status"] = 500
@@ -289,6 +303,35 @@ def test_a_failing_url_target_is_an_error_not_a_pass(tmp_path, agent_server, mon
     write_inputs(tmp_path, ["hi"])
     summary = run_suite(write_suite(tmp_path, extra=url_target(url, extra="  timeout_seconds: 2\n")))
     assert (summary["passed"], summary["failed"], summary["errors"]) == (0, 0, 1)
+    # The case says why the call failed, in the SDK's own words.
+    record = json.loads((tmp_path / "results/results.jsonl").read_text())
+    assert record["error"] == reason
+    assert summary["target_errors"] == {reason: 1}
+    assert reason in (tmp_path / "results/junit.xml").read_text().replace("&apos;", "'")
+    # It never repeats the address, the credential or what the server sent back.
+    for file in (tmp_path / "results").iterdir():
+        if file.suffix in (".jsonl", ".json", ".xml"):
+            text = file.read_text()
+            assert "agent-secret-123" not in text and "127.0.0.1" not in text and "I cannot." not in text
+
+
+def test_the_command_prints_why_url_target_calls_failed(tmp_path, agent_server, monkeypatch):
+    monkeypatch.setenv("AGENT_KEY", "k")
+    agent_server["behaviour"]["status"] = 401
+    write_inputs(tmp_path, ["hi", "hello"])
+    suite = write_suite(tmp_path, extra=url_target(agent_server["url"]))
+    result = CliRunner().invoke(app, ["evals", "run", str(suite)])
+    assert result.exit_code == 2
+    assert "2 case(s): the target returned HTTP 401" in result.output
+
+
+def test_a_case_missing_a_named_input_says_so(tmp_path, agent_server, monkeypatch):
+    monkeypatch.setenv("AGENT_KEY", "k")
+    write_inputs(tmp_path, ["hi"])
+    target = url_target(agent_server["url"]).replace("{{input}}", "{{inputs.question}}")
+    summary = run_suite(write_suite(tmp_path, extra=target))
+    assert summary["target_errors"] == {"the case has no input named 'question'": 1}
+    assert agent_server["seen"] == []
 
 
 @pytest.mark.parametrize(

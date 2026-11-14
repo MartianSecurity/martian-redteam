@@ -88,6 +88,11 @@ target:
   or a response with no value at `response_path` gives that case no verdict and the run exits
   `2`. There is no retry, redirects are not followed and proxy settings from the environment
   are not used.
+- **A failed call says why.** The case's `error` in `results.jsonl` holds the reason, such as
+  `the target returned HTTP 401` or `the target could not be reached: ConnectError`, and the
+  command prints how many cases failed for each reason. The reason is the SDK's own wording:
+  it never includes the address, a header or the response body. A function target reports
+  only `the target call failed`, because its exception comes from your code.
 
 A URL target cannot be combined with `file` or `function`. Use a function target when the
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
@@ -104,7 +109,7 @@ and give repeated check types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs and the reply |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, and how many cases failed for each target error |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
 | `mlflow.db` | The local MLflow store with traces and judge metadata |
 
