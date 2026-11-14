@@ -23,7 +23,9 @@ uv run --all-extras python scripts/check_release.py --install
 
 CI runs tests on Python 3.12 and 3.13. Package checks install the wheel and source
 distribution into separate clean environments, verify dependencies, import the
-public and compatibility namespaces outside the checkout and exercise the CLIs.
+public and compatibility namespaces outside the checkout, exercise the CLIs and
+serve the packaged Evals UI with `martian ui`, after checking it is the pinned
+build ([the Evals UI in the wheel](releasing.md#the-evals-ui-in-the-wheel)).
 The generated `release-checksums.json` identifies artifacts; it is an output,
 not a source file. See [release preparation](releasing.md) for tag and publisher
 requirements. A tag build cannot publish without an explicit publishing dispatch.

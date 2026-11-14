@@ -147,8 +147,8 @@ def run_ui(
         typer.echo(f"martian ui: {error}", err=True)
         if ui_dir is None and not (ui / "index.html").is_file():
             typer.echo(
-                "This install has no built Evals UI. Pass --ui-dir with one, such as the dist-evals folder "
-                "that `npm run build:evals` writes in the frontend.",
+                "This install of martian-sdk has lost the Evals UI it ships: reinstall it, or pass --ui-dir "
+                "with a built UI, such as the dist-evals folder that `npm run build:evals` writes in the frontend.",
                 err=True,
             )
         raise typer.Exit(code=2) from None

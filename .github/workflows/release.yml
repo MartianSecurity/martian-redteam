@@ -52,6 +52,12 @@ jobs:
           test "$(git rev-parse HEAD)" = "${tag_commit}"
           git merge-base --is-ancestor "${tag_commit}" refs/remotes/origin/main
           printf 'Source tag: %s\nSource commit: %s\n' "${RELEASE_TAG}" "${tag_commit}" >> "${GITHUB_STEP_SUMMARY}"
+          # The Evals UI the tag ships; check_release.py below refuses distributions with any other.
+          python3 - >> "${GITHUB_STEP_SUMMARY}" <<'PY'
+          import tomllib
+          ui = tomllib.load(open("pyproject.toml", "rb"))["tool"]["martian"]["ui"]
+          print(f"Evals UI: {ui['version']} from MorningHQ/MartianFrontend commit {ui['commit']}")
+          PY
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.0"

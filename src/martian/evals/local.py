@@ -9,9 +9,9 @@ unless the caller names another:
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
-the built Evals UI. The server listens on 127.0.0.1 only and refuses a request whose ``Host``
-header names another host, so a web page cannot reach it through a name that resolves to this
-machine.
+the built Evals UI, by default the one the wheel ships in ``martian/ui``. The server listens on
+127.0.0.1 only and refuses a request whose ``Host`` header names another host, so a web page
+cannot reach it through a name that resolves to this machine.
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ def default_home() -> Path:
 
 
 def packaged_ui() -> Path:
-    """Where the package keeps the built Evals UI: the ``ui`` folder of the ``martian`` package.
-    The wheel ships it from MorningHQ/martian-notes#113; until then a built UI is named explicitly."""
+    """Where the package keeps the built Evals UI: the ``ui`` folder of the ``martian`` package, a
+    build of the frontend's Evals app that the wheel ships, named in its ``ui-version.json``."""
     return Path(__file__).resolve().parents[1] / "ui"
 
 
