@@ -36,6 +36,10 @@ point `mlflow ui` at the local store, or set `mlflow.tracking_uri` in the suite 
 your own MLflow server. [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md)
 has the full guide: data formats, every check, provider setup and results.
 
+On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
+push and keeps one comment with the result, also without a Martian account. See
+[gate and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
+
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.

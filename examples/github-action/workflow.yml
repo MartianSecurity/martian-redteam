@@ -1,0 +1,65 @@
+# Example customer workflow: run an eval suite file on every pull request and
+# keep one comment per suite with its result. Copy into .github/workflows/ in
+# your repository and replace the suite paths with yours. See
+# docs/gate-and-ci.md.
+#
+# As written it runs the two sample suites next to this file: `passing` exits 0
+# and `failing` exits 1, so one job is green and one red, each with its own
+# comment. comments/passed.md and comments/failed.md show the two comments.
+#
+# Both suites grade stored replies with deterministic checks, so the job needs
+# no Martian account, no model key and no secret, only the workflow token. A
+# suite with an LLM judge or a URL target reads its provider key or agent
+# credential from the step's env, as `martian evals run` does on your machine.
+#
+# Use `pull_request`, never `pull_request_target`: the suite runs the pull
+# request's code. Pull requests from forks and from Dependabot get a read-only
+# token, and the result then goes to the job summary only.
+#
+# Pin MorningHQ/martian-redteam to a release tag or a full commit SHA that has
+# .github/actions/evals; replace the placeholder SHA below. @main moves under you.
+
+name: Evals
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write # the comment; nothing else is written
+
+jobs:
+  evals:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [passing, failing]
+    # One run per pull request and suite at a time, so two quick pushes cannot
+    # both create the comment.
+    concurrency:
+      group: evals-${{ github.event.pull_request.number }}-${{ matrix.suite }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run evals and comment
+        uses: MorningHQ/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
+        with:
+          suite: examples/github-action/${{ matrix.suite }}/evals.yaml
+          output: results/${{ matrix.suite }}
+
+      # results.jsonl and mlflow.db hold prompts and replies in clear text, so
+      # this keeps only the counts and the JUnit report.
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evals-${{ matrix.suite }}
+          path: |
+            results/${{ matrix.suite }}/summary.json
+            results/${{ matrix.suite }}/junit.xml
+          if-no-files-found: ignore

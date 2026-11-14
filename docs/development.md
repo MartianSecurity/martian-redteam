@@ -57,7 +57,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
-| `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |
+| `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
 
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
@@ -71,14 +71,14 @@ The product is a CI/CD SDK. GitHub Actions is the harness; this package is the s
 | Layer | Where | Secrets | Required on PRs |
 | --- | --- | --- | --- |
 | 1. Library | `pytest` + typed operations/legacy recorded fixtures | none | yes |
-| 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate` | none | yes |
+| 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate`; composite `.github/actions/evals` on `examples/github-action` (comments with the workflow token, `pull-requests: write`) | none | yes |
 | 3. Live dogfood | `martian redteam run` / root `action.yml` / `red-team.yml` against staging graphs | `MARTIAN_API_TOKEN` | **no** (dispatch + environment, after coordinated single-key service qualification) |
 
 Layer 2 uses a nested validate composite so the customer gate Action (`action.yml`) stays **run-only**. That avoids a `command: validate` switch that could later be forgotten on `pull_request` once a staging key exists.
 
 Third-party actions are SHA-pinned. Concurrency cancels in-progress runs on the same ref.
 
-Customer red-team workflows (reusable workflow, composite action, `validate` / `run -c -a`) are documented in [gate and CI](gate-and-ci.md). They are not this repo’s unit-test pipeline.
+Customer red-team workflows (reusable workflow, composite action, `validate` / `run -c -a`) and the evals pull-request action are documented in [gate and CI](gate-and-ci.md). They are not this repo’s unit-test pipeline.
 
 ## Dependabot
 
@@ -102,6 +102,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
+- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
