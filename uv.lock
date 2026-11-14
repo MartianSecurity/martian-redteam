@@ -1092,6 +1092,7 @@ evals = [
     { name = "pandas" },
     { name = "pytest" },
     { name = "sqlalchemy" },
+    { name = "uvicorn" },
 ]
 mcp = [
     { name = "httpx2" },
@@ -1107,6 +1108,7 @@ postgres = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "sqlalchemy" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -1149,6 +1151,8 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'postgres'", specifier = ">=2.0" },
     { name = "tenacity", specifier = ">=9.1.0" },
     { name = "typer", specifier = ">=0.16.0" },
+    { name = "uvicorn", marker = "extra == 'evals'", specifier = ">=0.30" },
+    { name = "uvicorn", marker = "extra == 'postgres'", specifier = ">=0.30" },
 ]
 provides-extras = ["evals", "mcp", "postgres"]
 

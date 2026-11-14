@@ -78,21 +78,26 @@ class Bootstrap(_Out):
     status: StoreStatus
 
 
-def build_bootstrap(principal: Principal, entitlements: Entitlements, status: StoreStatus) -> Bootstrap:
-    role = highest_role(principal.roles)
+def principal_out(principal: Principal) -> BootstrapPrincipal:
+    """The principal as the UI reads it: in the bootstrap, and in the local edition's session call."""
     organisation = (
         None
         if principal.organisation_id is None
         else BootstrapOrganisation(id=principal.organisation_id, name=principal.organisation_name)
     )
+    return BootstrapPrincipal(
+        kind=principal.kind,
+        user=BootstrapUser(id=principal.user_id, email=principal.email, display_name=principal.display_name),
+        organisation=organisation,
+        role=highest_role(principal.roles),
+        platform_admin=principal.platform_admin,
+    )
+
+
+def build_bootstrap(principal: Principal, entitlements: Entitlements, status: StoreStatus) -> Bootstrap:
+    role = highest_role(principal.roles)
     return Bootstrap(
-        principal=BootstrapPrincipal(
-            kind=principal.kind,
-            user=BootstrapUser(id=principal.user_id, email=principal.email, display_name=principal.display_name),
-            organisation=organisation,
-            role=role,
-            platform_admin=principal.platform_admin,
-        ),
+        principal=principal_out(principal),
         edition=BootstrapEdition(key=entitlements.edition, name=EDITION_NAMES[entitlements.edition]),
         entitlements=BootstrapEntitlements(features=sorted(entitlements.features), limits=dict(entitlements.limits)),
         capabilities=EvalCapabilities(**capabilities_for(role, entitlements)),
