@@ -94,6 +94,43 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in.
 
+## The record store
+
+MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
+needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
+on, scoring jobs, the human review chain, versioned suites and editable dataset drafts.
+`RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
+SQLite or Postgres, with one Alembic history for both:
+
+```python
+from martian.evals.records.sql import SqlRecordStore
+
+records = SqlRecordStore("sqlite:///evals/martian.db")
+records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="martian")
+```
+
+- The store migrates the database to the newest revision when it starts. Pass `migrate=False`
+  where a separate job runs `martian.evals.records.sql.upgrade`. The version table is
+  `martian_alembic_version`, so it can share a database with MLflow's tables.
+- Each row keeps the whole model object as JSON, plus the columns queries filter and order on,
+  so the tables use only portable types.
+- Every statement filters on the organisation. On Postgres, row-level security filters again,
+  against the organisation the store sets for each transaction, and applies to the tables' owner.
+  A role that bypasses row-level security, such as a superuser, is held only by the store's own
+  filter.
+- Updates that move a run or scoring job on name the state they expect, and draft edits name the
+  revision they expect. A review chain never forks: a review is replaced at most once.
+- Every change publishes an event (`martian.evals.records.events`) naming what changed.
+  `InProcessEvents` delivers events within one process, which is enough for the local edition.
+  The server delivers them between processes. A listener that falls too far behind gets
+  `EventsLost` and reads everything again.
+- Projects are not records: they are MLflow experiments. CI gate sessions stay with the server's
+  CI gate.
+
+`tests/evals/record_contract.py` is the behaviour; it runs on SQLite always and on Postgres when
+`MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
+so row-level security applies.
+
 ## Not built yet
 
 | Piece | Issue |

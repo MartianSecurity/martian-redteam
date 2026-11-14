@@ -35,7 +35,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit
 
 from mlflow.entities import (
     AssessmentError,
@@ -63,6 +63,7 @@ from martian.evals._mlflow import (
     WorkspaceStore,
     load_dataset_records,
 )
+from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
 from martian.evals.model import (
     Case,
     Counts,
@@ -134,25 +135,6 @@ def _from_ms(value: int | None) -> datetime | None:
     return datetime.fromtimestamp(value / 1000, UTC) if value is not None else None
 
 
-def _postgres_url(database_url: str, schema: str) -> str:
-    """The URL with libpq's search path set to the schema, so MLflow's tables live there."""
-    parts = urlsplit(database_url)
-    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "options"]
-    query.append(("options", f"-csearch_path={schema}"))
-    return urlunsplit(parts._replace(query=urlencode(query)))
-
-
-def _create_schema(database_url: str, schema: str) -> None:
-    from sqlalchemy import create_engine, text
-
-    engine = create_engine(database_url)
-    try:
-        with engine.begin() as connection:
-            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-    finally:
-        engine.dispose()
-
-
 class MlflowStore:
     """An ``EvalStore`` on mlflow-skinny's SQL store in this process.
 
@@ -162,14 +144,13 @@ class MlflowStore:
     """
 
     def __init__(self, database_url: str, artifact_root: str | Path, *, schema: str = "mlflow") -> None:
-        if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", schema):
-            raise ValueError("schema must be a lowercase identifier")
+        check_schema(schema)
         self._artifact_root = Path(artifact_root).resolve()
         self._artifact_root.mkdir(parents=True, exist_ok=True)
         url = database_url
-        if urlsplit(database_url).scheme.split("+")[0] == "postgresql":
-            _create_schema(database_url, schema)
-            url = _postgres_url(database_url, schema)
+        if is_postgres(database_url):
+            create_schema(database_url, schema)
+            url = postgres_url(database_url, schema)
         # MLflow's stores are untyped.
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]

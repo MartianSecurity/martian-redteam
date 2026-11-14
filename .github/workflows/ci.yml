@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
-      # The in-process MLflow store runs the store contract on Postgres as well as SQLite.
+      # The in-process MLflow store and the record store run their contracts on Postgres too.
       postgres:
         image: postgres:17-alpine
         env:
@@ -152,7 +152,8 @@ jobs:
           MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
         run: >
           uv run --extra postgres pytest -q tests/evals/test_server.py tests/evals/test_store.py
-          tests/evals/test_store_mlflow.py tests/evals/test_model.py tests/evals/test_mlflow_private.py
+          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_model.py
+          tests/evals/test_mlflow_private.py
 
   packaging:
     name: Packaging

@@ -32,6 +32,7 @@ rejects unknown fields.
 | `Project` | A named body of evaluation work | Experiment |
 | `Case` | One test case: `inputs`, `expectations`, optional stored `outputs`, `tags`, `metadata` | Evaluation dataset record |
 | `DatasetVersion` | An immutable set of cases: `name`, optional `version`, `digest`, `case_count`, `source` (`file`, `draft`, `global`, `upload`, `traces`) and `location` | Evaluation dataset |
+| `DatasetDraft` | An editable working copy of a dataset: `name`, `revision` (raised by every edit), `state` (`editing` or `published`), `case_count`, and the `published_digest` of the version publishing created | none (Martian table) |
 | `Target` | The thing under test: `function` (file and function), `http` (URL, body template, response path, header names), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). Header values and credentials are never part of it | none |
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model`, `parameters`, `criteria` | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
