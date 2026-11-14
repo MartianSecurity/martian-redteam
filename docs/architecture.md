@@ -77,6 +77,7 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/ci.py` | One pytest execution and one persisted session |
 | `src/martian/evals/` | Dataset/MLflow adapters, gates, Backend uploads |
 | `src/martian/evals/model/` | The shared eval data model; see [eval model](eval-model.md) |
+| `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |
 | `src/martian/_privacy.py`, `result.py` | Scoped redaction and safe atomic receipts |
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
 | `src/martian_evals_kit/` | Evals import compatibility |
