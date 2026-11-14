@@ -18,7 +18,25 @@ PRIVATE_MODULE = SRC / "martian" / "evals" / "_mlflow.py"
 PUBLIC_IMPORTS: dict[str, set[str] | None] = {
     "mlflow": None,
     "mlflow.genai": None,
-    "mlflow.entities": {"Feedback", "AssessmentSource", "AssessmentSourceType"},
+    "mlflow.entities": {
+        "AssessmentError",
+        "AssessmentSource",
+        "AssessmentSourceType",
+        "ExperimentTag",
+        "Feedback",
+        "Metric",
+        "RunStatus",
+        "RunTag",
+        "Span",
+        "Trace",
+        "TraceInfo",
+        "TraceLocation",
+        "TraceState",
+        "ViewType",
+        "Workspace",
+    },
+    "mlflow.exceptions": {"MlflowException"},
+    "mlflow.genai.label_schemas": {"InputCategorical", "InputNumeric", "InputPassFail", "InputText", "LabelSchemaType"},
     "mlflow.genai.scorers": {"scorer", "Scorer"},
     "mlflow.types.llm": {"ChatMessage"},
     "mlflow.environment_variables": {"MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS"},
@@ -35,7 +53,10 @@ def test_each_mlflow_internal_the_sdk_uses_still_exists(module, name):
     if (module, name) in TYPE_ONLY:
         assert re.search(rf"\b{name}\s*=", inspect.getsource(imported)), f"MLflow no longer defines {module}.{name}"
     elif name:
-        assert hasattr(imported, name), f"MLflow no longer has {module}.{name}"
+        found: object = imported
+        for part in name.split("."):
+            assert hasattr(found, part), f"MLflow no longer has {module}.{name}"
+            found = getattr(found, part)
 
 
 def _uses_outside_the_public_api(path: Path) -> list[str]:
@@ -107,4 +128,8 @@ def test_the_private_module_lists_every_internal_it_imports():
             for alias in node.names:
                 if node.module == "mlflow.tracking" and alias.name == "fluent":
                     continue  # read for its _active_experiment_id, which is listed
-                assert (node.module, alias.name) in listed, f"{node.module}.{alias.name} is not listed"
+                found = any(
+                    module == node.module and (name == alias.name or name.startswith(alias.name + "."))
+                    for module, name in listed
+                )
+                assert found, f"{node.module}.{alias.name} is not listed"

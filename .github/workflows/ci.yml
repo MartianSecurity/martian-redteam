@@ -115,6 +115,21 @@ jobs:
     name: Evals core
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    services:
+      # The in-process MLflow store runs the store contract on Postgres as well as SQLite.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: martian
+          POSTGRES_PASSWORD: martian_ci
+          POSTGRES_DB: evals
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U martian -d evals"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -130,10 +145,14 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked --extra evals
+        run: uv sync --locked --extra postgres
 
       - name: Test the evals core without the backend
-        run: uv run --extra evals pytest -q tests/evals/test_server.py tests/evals/test_store.py tests/evals/test_model.py
+        env:
+          MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
+        run: >
+          uv run --extra postgres pytest -q tests/evals/test_server.py tests/evals/test_store.py
+          tests/evals/test_store_mlflow.py tests/evals/test_model.py tests/evals/test_mlflow_private.py
 
   packaging:
     name: Packaging
