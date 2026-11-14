@@ -98,6 +98,30 @@ The SDK accepts only typed operation results. It does not filter attack text or 
 - Contents-read permission on the example workflow
 - No `continue-on-error` on the assessment step
 
+## MLflow trace-id path traversal
+
+The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes below.
+
+- **The advisory.** CVE-2026-53995 ([GHSA-wqmh-qccw-pqwf](https://github.com/advisories/GHSA-wqmh-qccw-pqwf),
+  high) covers MLflow's file-based tracking store only. A trace id such as `../../x` sent to
+  `POST /api/3.0/mlflow/traces` made `FileStore.start_trace` write trace files outside the
+  experiment's folder. The advisory names 3.17.2 as the first fixed release, but its fix
+  ([mlflow#26842](https://github.com/mlflow/mlflow/pull/26842),
+  [mlflow#26979](https://github.com/mlflow/mlflow/pull/26979)) is not in 3.17.2; it ships in 3.18.0.
+- **Not exposed: the SDK uses SQL stores.** The in-process store, the pytest kit and the suite
+  runner use SQLite or Postgres, never the file store. A suite file's `mlflow.tracking_uri` can
+  name a file store, but then MLflow tracing in the customer's own process chooses the trace ids.
+- **The SQL-store twin.** Up to 3.17.2 the SQL store also accepted any trace id and wrote it into
+  the trace's artifact location, so `../../x` pointed the trace at a folder outside its
+  experiment. 3.18.0 refuses such an id
+  ([mlflow#27311](https://github.com/mlflow/mlflow/pull/27311)); the advisory does not mention it.
+  `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
+  (`tr-` and 32 hex digits) and derives one from any other id.
+  `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
+- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+  not the file store. Only Backend holds credentials for it, and Backend sends only derived
+  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
+
 ## Licence, attribution and vulnerability reports
 
 Every file in this repository is Apache-2.0 (`LICENSE`); no file carries another licence.

@@ -102,7 +102,7 @@ def pytest_configure(config: pytest.Config) -> None:
         _previous_env[name] = os.environ.get(name)
         os.environ.setdefault(name, value)
     _previous_tracking_uri = mlflow.get_tracking_uri()
-    # MLflow 3.16.1 has no public setter that restores this without reading an external store.
+    # MLflow has no public setter that restores this without reading an external store.
     _previous_experiment_id = active_experiment_id()
 
     mlflow.set_tracking_uri("sqlite:///" + os.path.join(store, "mlflow.db"))
