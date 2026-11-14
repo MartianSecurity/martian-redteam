@@ -20,7 +20,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from martian.evals.model import CaseResult, Project, Run, ScoringJob, Trace
+from martian.evals.model import CaseResult, Project, ReviewQueue, Run, ScoringJob, Trace
 from martian.evals.records import RecordStore
 from martian.evals.server.capabilities import highest_role
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep
@@ -33,7 +33,9 @@ from martian.evals.server.projection import (
     item_out,
     job_config,
     mlflow_assessment,
+    project_key,
     public_job,
+    queue_out,
     result_id,
     run_detail,
     run_out,
@@ -62,11 +64,37 @@ async def project_keys(store: EvalStore, principal: Principal) -> list[str]:
     return [DEFAULT_PROJECT, *(p.id for p in await store.list_projects(principal) if p.id != DEFAULT_PROJECT)]
 
 
-async def find_run(store: EvalStore, records: RecordStore, principal: Principal, run_id: uuid.UUID) -> Run:
+async def lookup_run(store: EvalStore, records: RecordStore, principal: Principal, run_id: str) -> Run | None:
     for key in await project_keys(store, principal):
-        if run := await records.get_run(principal, key, str(run_id)):
+        if run := await records.get_run(principal, key, run_id):
             return run
+    return None
+
+
+async def find_run(store: EvalStore, records: RecordStore, principal: Principal, run_id: uuid.UUID) -> Run:
+    if run := await lookup_run(store, records, principal, str(run_id)):
+        return run
     raise HTTPException(404, "Not found")
+
+
+async def writable_project(store: EvalStore, principal: Principal, project_id: uuid.UUID | None) -> str:
+    """The store's project a write goes to. The default project is created on its first write;
+    another project must exist, and an archived project takes no more work."""
+    return await writable_key(store, principal, project_key(project_id))
+
+
+async def writable_key(store: EvalStore, principal: Principal, key: str) -> str:
+    """:func:`writable_project` for a project named by its store id."""
+    project = await store.get_project(principal, key)
+    if project is None:
+        if key != DEFAULT_PROJECT:
+            raise HTTPException(404, "Not found")
+        project = await store.create_project(
+            principal, Project(id=DEFAULT_PROJECT, name="Default", description="Organization evaluation project")
+        )
+    if project.archived_at is not None:
+        raise HTTPException(409, "This evaluation project is archived or unavailable")
+    return key
 
 
 async def project_runs(records: RecordStore, principal: Principal, project_id: str) -> list[Run]:
@@ -97,6 +125,17 @@ async def run_trace(store: EvalStore, principal: Principal, project_id: str, tra
         raise
 
 
+async def run_queues(store: EvalStore, records: RecordStore, principal: Principal, run: Run) -> list[ReviewQueue]:
+    """The run's review queues, newest first. The store cannot list queues; creating one adds a
+    pending review per case and question, so the run's reviews name every queue it has."""
+    reviews = await records.list_reviews(principal, run.project_id, run.id, current_only=False)
+    queues = []
+    for queue_id in dict.fromkeys(r.queue_id for r in reviews if r.queue_id):
+        if (queue := await store.get_queue(principal, run.project_id, queue_id)) is not None:
+            queues.append(queue)
+    return _newest(queues, lambda q: (q.created_at or EPOCH, q.id))
+
+
 def _newest[T](rows: Sequence[T], key: Callable[[T], Any]) -> list[T]:
     return sorted(rows, key=key, reverse=True)
 
@@ -110,7 +149,7 @@ def _page[T](rows: Sequence[T], number: int, limit: int) -> tuple[list[T], dict[
     }
 
 
-def _project(project: Project) -> dict[str, Any]:
+def project_row(project: Project) -> dict[str, Any]:
     return {
         "id": project.id,
         "name": project.name,
@@ -131,7 +170,7 @@ async def projects(principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
     return {
         "items": [
             {"id": None, "name": "Default", "description": "Organization evaluation project", "state": "ready"},
-            *(_project(p) for p in found),
+            *(project_row(p) for p in found),
         ],
         "datasets_scope": "organization",
     }
@@ -278,7 +317,7 @@ async def workbench(
             latest.setdefault((review.item_id, review.criterion), review)
     latest_reviews = [latest[key] for key in sorted(latest, key=lambda key: (str(key[0]), key[1]))][:801]
 
-    queues = []
+    queues = (await run_queues(store, records, principal, run))[:100]
     if queue_id is not None:
         queue = await store.get_queue(principal, run.project_id, str(queue_id))
         case_ids = {item.id: item.dataset_item_id for item in items}
@@ -288,20 +327,8 @@ async def workbench(
             or (item_id is not None and case_ids.get(item_id) not in queue.case_ids)
         ):
             raise HTTPException(404, "Not found")
-        queues.append(
-            {
-                "id": queue.id,
-                "run_id": queue.run_id,
-                "name": queue.name,
-                "question": queue.questions[0].model_dump(mode="json"),
-                "questions": [question.model_dump(mode="json") for question in queue.questions],
-                "assignee_id": queue.assignee,
-                "item_ids": [str(result_id(run.id, case_id)) for case_id in queue.case_ids],
-                "native_state": "persisted",
-                "native_id": None,
-                "created_at": queue.created_at,
-            }
-        )
+        if all(q.id != queue.id for q in queues):
+            queues.insert(0, queue)
     return {
         "jobs": [public_job(j) for j in job_rows],
         "assessments": [s.public() for s in score_rows],
@@ -316,7 +343,7 @@ async def workbench(
                 "role": highest_role(principal.roles),
             }
         ],
-        "queues": queues,
+        "queues": [queue_out(q) for q in queues],
         "selected_job": public_job(selected) if selected else None,
         "pagination": {"jobs": jobs_pagination, "assessments": scores_pagination, "reviews": reviews_pagination},
         "truncated": False,
@@ -384,4 +411,16 @@ async def trace(
     }
 
 
-__all__ = ["explorer", "find_run", "project_keys", "router"]
+__all__ = [
+    "explorer",
+    "find_run",
+    "lookup_run",
+    "project_keys",
+    "project_row",
+    "project_runs",
+    "router",
+    "run_queues",
+    "run_results",
+    "writable_key",
+    "writable_project",
+]

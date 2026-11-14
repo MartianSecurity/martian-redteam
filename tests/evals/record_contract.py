@@ -21,7 +21,7 @@ from martian.evals.model import (
     Suite,
     digest,
 )
-from martian.evals.records import EventsLost, RecordStore
+from martian.evals.records import EventsLost, RecordStore, SavedView
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -154,6 +154,7 @@ class RecordContract:
 
         first = await records.save_suite(ORG_A, "p1", suite("Be kind."))
         assert first.version == 1
+        assert first.created_by == "user-a" and first.created_at is not None
         assert await records.save_suite(ORG_A, "p1", suite("Be kind.")) == first
         second = await records.save_suite(ORG_A, "p1", suite("Be kind and brief."))
         assert second.version == 2
@@ -194,6 +195,39 @@ class RecordContract:
         await refused("not_found", records.put_draft_cases(ORG_A, "p1", "d9", cases, expected_revision=1))
         assert [d.id for d in await records.list_drafts(ORG_A, "p1")] == ["d1"]
         assert await records.get_draft(ORG_A, "p1", "d1") == published
+
+    async def test_a_draft_is_renamed_in_turn_and_removed_with_its_cases(self, records: RecordStore) -> None:
+        await records.create_draft(ORG_A, "p1", DatasetDraft(id="d1", project_id="p1", name="Refunds"))
+        await records.put_draft_cases(ORG_A, "p1", "d1", [Case(id="c1", inputs={"m": "1"})], expected_revision=1)
+        renamed = await records.edit_draft(ORG_A, "p1", "d1", expected_revision=2, name="Returns")
+        assert (renamed.name, renamed.description, renamed.revision) == ("Returns", "", 3)
+        described = await records.edit_draft(ORG_A, "p1", "d1", expected_revision=3, description="Every refund")
+        assert (described.name, described.description, described.revision) == ("Returns", "Every refund", 4)
+        await refused("conflict", records.edit_draft(ORG_A, "p1", "d1", expected_revision=3, name="Stale"))
+        await refused("not_found", records.edit_draft(ORG_B, "p1", "d1", expected_revision=4, name="Theirs"))
+        await records.delete_draft(ORG_A, "p1", "d1")
+        assert await records.get_draft(ORG_A, "p1", "d1") is None
+        await refused("not_found", records.draft_cases(ORG_A, "p1", "d1"))
+        await refused("not_found", records.delete_draft(ORG_A, "p1", "d1"))
+
+    async def test_a_saved_view_changes_in_turn(self, records: RecordStore) -> None:
+        view = SavedView(id="v1", project_id="p1", owner="user-a", name="Slow", definition={"query": {"limit": 5}})
+        saved = await records.save_view(ORG_A, "p1", view)
+        assert saved.revision == 1 and saved.created_at is not None
+        assert await records.save_view(ORG_A, "p1", view.model_copy(update={"name": "Other"})) == saved
+        changed = await records.save_view(ORG_A, "p1", view.model_copy(update={"name": "Slowest"}), expected_revision=1)
+        assert (changed.name, changed.revision, changed.created_at) == ("Slowest", 2, saved.created_at)
+        await refused("conflict", records.save_view(ORG_A, "p1", view, expected_revision=1))
+        await refused(
+            "not_found", records.save_view(ORG_A, "p1", view.model_copy(update={"id": "v9"}), expected_revision=1)
+        )
+        await records.save_view(ORG_A, "p1", view.model_copy(update={"id": "v0", "name": "Errors"}))
+        assert [v.name for v in await records.list_views(ORG_A, "p1")] == ["Errors", "Slowest"]
+        assert await records.list_views(ORG_B, "p1") == [] and await records.get_view(ORG_B, "p1", "v1") is None
+        await refused("conflict", records.delete_view(ORG_A, "p1", "v1", expected_revision=1))
+        await records.delete_view(ORG_A, "p1", "v1", expected_revision=2)
+        assert await records.get_view(ORG_A, "p1", "v1") is None
+        await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
 
     async def test_organisations_and_the_local_user_never_see_each_other(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))

@@ -13,26 +13,32 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` with the agents it can call and, optionally, a judge | Its own worker ([the worker](#the-worker)) |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, create_app
 from martian.evals.store import MemoryStore
+from martian.evals.worker import InProcessWorker
 
+store, records = MemoryStore(), SqlRecordStore("sqlite:///evals/martian.db")
 app = create_app(
-    store=MemoryStore(),
-    records=SqlRecordStore("sqlite:///evals/martian.db"),
+    store=store,
+    records=records,
     principal=lambda: SINGLE_USER,
+    worker=InProcessWorker(store, records, targets={agent_id: call_agent}),
 )
 ```
 
 `store` and `records` are both required: the store holds projects, datasets, traces and run
-telemetry, and the record store holds the runs and results the read routes list. Routes read the
-injected values through `current_principal`, `current_entitlements`, `current_store` and
-`current_records` (`martian.evals.server.dependencies`). `principal` is a FastAPI dependency, so
-it can declare its own parameters (a header, a cookie) and raise `401`. A request the store or
-the record store refuses with a `StoreError` is answered `404` (`not_found`), `409`
-(`conflict`) or `422` (`invalid`), with the error's detail.
+telemetry, and the record store holds runs, results, reviews and the other
+[records](#the-record-store). `worker` is optional: without one, a route that starts a run or a
+scoring job answers `503` ("This installation runs no evaluation worker"). Routes read the
+injected values through `current_principal`, `current_entitlements`, `current_store`,
+`current_records` and `current_worker` (`martian.evals.server.dependencies`). `principal` is a
+FastAPI dependency, so it can declare its own parameters (a header, a cookie) and raise `401`. A
+request the store or the record store refuses with a `StoreError` is answered `404`
+(`not_found`), `409` (`conflict`) or `422` (`invalid`), with the error's detail.
 
 ## Editions and entitlements
 
@@ -71,9 +77,12 @@ sign-in has been checked:
 {"detail": "The Community edition does not include review queues"}
 ```
 
-The refusal adds no parameters or responses to the route's OpenAPI operation. The Martian server
-gates its own routes the same way until it mounts the core (MorningHQ/martian-notes#102); its copy
-of the map is `app/entitlements.py` in MorningHQ/MartianBackend, and the two change together.
+The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
+own routes this way: the review queue routes, the question library and answering a queue's item
+need `review_queues`, and `GET /v1/evals/monitoring` needs `monitoring`
+([write routes](#write-routes)). The Martian server gates its own routes the same way until it
+mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
+MorningHQ/MartianBackend, and the two change together.
 
 ## Capabilities
 
@@ -93,6 +102,14 @@ place of its own role table.
 review queue also needs `review_queues`, which the route checks. Pages such as Monitoring have no
 capability: the UI shows them from the edition's feature keys. The server's copy of the table is in
 `app/entitlements.py` in MorningHQ/MartianBackend.
+
+Every write route declares the capability it needs with
+`dependencies=[Depends(require_capability(name))]`. A principal whose most privileged role is not
+in the capability's roles is refused with `403` and the server's wording, "Requires member role" or
+"Requires admin role"; a capability that serves a paid feature is refused first for an edition
+without it. Where only part of a request needs more, the route asks `allows(principal, name)`:
+assigning review work to someone else needs `assignReviews`, and changing another person's view
+`manageViews`.
 
 ## Bootstrap response
 
@@ -150,7 +167,7 @@ version 2 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/projects` | The default project, then the store's projects by creation time | Store |
 | `GET /v1/evals` | `EvalRunOut` list, newest first; `project_id`, `default_only`, `q`, `page`, `limit` | Records |
 | `GET /v1/evals/{run_id}` | `EvalRunDetailOut`: the run and its case results | Records |
-| `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; a review queue named by `queue_id` from the store |
+| `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
 | `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
@@ -192,9 +209,11 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
   jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
   (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
-- **Members.** The workbench's `members` is the requesting principal only: the core knows no
-  organisation membership. Its `queues` holds the queue named by `queue_id`, because the store
-  interface cannot list a run's queues.
+- **Members and queues.** The workbench's `members` is the requesting principal only: the core
+  knows no organisation membership. Its `queues` are the run's review queues, newest first, at most
+  100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
+  finds a run's queues through its reviews: creating a queue adds a pending review per case and
+  question.
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
   spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
@@ -208,17 +227,141 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   applies the rest and groups them the same way. A session search with a cursor is `422`, as on
   the server.
 
-Not served, and what the UI shows meanwhile: saved trace views (`/views`), which the Traces page
-reads and which the server keeps in its own table, so the page shows a "Not Found" notice above
-the traces; and the reads that come with their writes in MorningHQ/martian-notes#101
-(`/scorers`, `/judges`, `/suites`, `/dataset-drafts`), which only the scoring dialog and the
-Drafts tab use.
+The reads that come with their writes (saved views, scorers, judges, suites, review queues and
+questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v2.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
+
+## Write routes
+
+The core serves the routes that launch, score and review runs and that edit datasets, suites,
+judges, review queues, projects and saved views. Each is a port of the server's route onto the
+store, the record store and the worker, and each operation is the one in version 2 of the frozen
+contract:
+
+| Routes | What they do | Module |
+| --- | --- | --- |
+| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a registered agent over a published dataset and hand it to the worker; stop it | `launch` |
+| `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
+| `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
+| `GET`, `POST /judges` | Registered judges, a new version for each registration | `suites` |
+| `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
+| `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
+| `POST /traces/{trace_id}/annotations` | A person's feedback or expectation on a trace | `reviews` |
+| `POST /projects`, `POST /projects/{project_id}/archive` | Create a project; archive an idle one | `projects` |
+| `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
+| `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
+
+All paths are under `/v1/evals`. How the core carries them out:
+
+- **Requests are idempotent by their `request_id`.** The id of what a request creates (a run, a
+  scoring job, a review, a queue, a suite, a project, a view) is a UUID derived from its
+  `request_id` (`projection.derived_id`), so the same request again returns the same object, and
+  the same `request_id` with other content is `409`, as on the server. A judge version keeps its
+  `request_id` as `operation_id` in its criteria, and a trace annotation in its score's metadata.
+- **No target or model call in a request.** A launch checks the request, asks the worker whether
+  it can call the target (`Worker.check_target`), records a `queued` run with the published
+  dataset version it will read and the target's pin in `provenance.target`, and submits it. A
+  scoring request records a `queued` scoring job and submits it. Both answer `202` at once.
+- **Runs.** A launch names a registered agent (`agent_id`) and a published dataset; an agent the
+  worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One run at
+  a time per organisation (`409` "An eval run is already in progress"). Run codes count up from
+  `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with no
+  usable prompt or expected text, calls the target once per case with no retry, grades each output
+  by exact match and records a trace per called case.
+- **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
+  `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
+  worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
+  target request"), a job keeps the scores it made. Cancelling a finished run is `409`.
+- **Scoring.** The scorers are the built-in ones by name (`exact_match`, `contains_expected`,
+  `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
+  registered judges pinned by name and version, or a saved suite version's scorers and policies
+  (`suite_version_id`). Judge scorers need a worker with a judge (`Worker.judges`); without one
+  they are refused (`422`) and `GET /scorers` shows them unavailable. One active scoring job per
+  run: the server's bound of one per organisation, which limits model use, belongs to the worker
+  that runs the jobs. A job's scores sit beside the run's own, and each scored value is also kept
+  on its case's trace.
+- **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
+  queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
+  complete review also stores the answer as a human score, on the case's trace too. Only a role
+  with `assignReviews` gives another person's work to someone; the core knows no membership, so
+  an assignee is any user id. Where the contract takes a user as a UUID and the user id is not one
+  (the local user is `local`), the core sends a UUID derived from it (`projection.user_uuid`).
+- **Review queues and questions.** A queue lives in the store with one item per case's trace, so
+  only results with a trace can be queued. Creating it adds a pending review per case and question;
+  each answer marks the case's item completed once every question of the queue is answered, and
+  `POST /review-queues/{id}/sync` sets every item again. The store keeps one definition per
+  question name, so the library has version 1 of each question: a second version is `409`, and a
+  queue question with the name of a different library question is the store's `409`.
+- **Store writes happen in the request.** A review's score, an annotation, a queue and a published
+  dataset are written to the store before the response. The store is the core's own, not a
+  telemetry export, so the server's background tasks that copied them to MLflow have no
+  counterpart, and `POST /{run_id}/assessments/{id}/sync` only writes a score the store does not
+  hold yet.
+- **Dataset drafts** live in the record store's default project. A record (`id`, `input`,
+  `expected_output`, `status`, `metadata`) is a case: an object `input` is its `inputs`, a text one
+  `inputs.message`, anything else `inputs.input`, with the tag `martian.input_form` saying which;
+  `expected_output` is `expectations.expected_response` and `status` the `martian.status` tag, as
+  for published datasets. Every edit names the revision it was made against. Validation reports
+  the counts and the `sha256` publishing checks, which is the dataset version's content digest.
+- **Publishing** writes the draft's cases as a dataset version of the default project, named as
+  the draft, and marks the draft published, in one request (`202`, state `published`). A dataset
+  operation is the record of a published draft; none is ever left running, so resuming or aborting
+  one is `409` ("Dataset operation is already finished").
+- **Projects** are store projects whose id is derived from the `request_id`; at most 25 besides
+  the default one. An archived project takes no more runs, scores, reviews or annotations.
+- **Views** belong to a project and to the person who saved them; a private view is seen only by
+  its owner. At most 100 per person.
+
+Not served: the CI gate's routes (`/ci/...`, `/ci-sessions/...`), which stay with the server's CI
+gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overview`,
+`POST /quality-issues/search` and `/triage`, `POST /traces/export`).
+
+`tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
+`MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
+deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
+schemas against the contract, validates typed responses, and checks that the core serves every
+operation of the contract but the ones above. `tests/evals/test_worker.py` covers the worker.
+
+## The worker
+
+`martian.evals.worker` is what the write routes hand long-running work to, in place of the
+server's background tasks. A route records the work first, as a queued `Run` or `ScoringJob`, and
+then calls `Worker.submit(Work(...))`:
+
+| Member | What it does |
+| --- | --- |
+| `Work` | `kind` (`run` or `scoring`), the `principal`, `project_id`, `run_id`, and `job_id` for scoring |
+| `Worker.judges` | Whether the worker can run model judges |
+| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
+| `Worker.submit(work)` | Accept the work and return before any of it runs |
+
+`execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
+record before each case, so a cancel request reaches a worker in another process too, and move
+each record on only from the state it expects, so two workers never both take the same work. Work
+whose record is no longer queued when its turn comes is skipped, and work that fails part way is
+marked `failed` with its reason, never left running.
+
+`InProcessWorker(store, records, targets={agent_id: call}, judge=None, target_timeout_seconds=120)`
+runs each piece of work as a task of the API's event loop. A target is an async function from a
+`Case` to its output (`TargetCall`); a judge is an async function from a `JudgeRequest` (the
+prompt, expected text, output and the judge scorers to apply) to a `JudgeResult` (the model and a
+verdict per scorer). `drain()` waits for the work submitted so far. Work is lost with the process:
+a run interrupted by a restart stays `running` until the durable queue.
+
+What builds on it:
+
+| Issue | Change |
+| --- | --- |
+| MorningHQ/martian-notes#139 | A durable job queue and worker process: `submit` enqueues |
+| MorningHQ/martian-notes#140 | One process per evaluation run, executing each `Work` |
+| MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
+| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge |
+| MorningHQ/martian-notes#116 | Run and run again from the local UI |
 
 ## What exists
 
@@ -228,6 +371,9 @@ date-times checked.
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
+- The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
+  queues and questions, annotations, projects, saved views and dataset authoring, and
+  [the worker](#the-worker) interface with its in-process implementation.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -258,7 +404,7 @@ date-times checked.
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
-  route the edition leaves out. The core's own routes are all free so far.
+  route the edition leaves out, and `require_capability` a write route the role does not allow.
 
 ## Sessions and users
 
@@ -343,7 +489,8 @@ database and reads their sessions, turns and users back through the binding.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites and editable dataset drafts.
+on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
+page's saved views.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -363,8 +510,14 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   against the organisation the store sets for each transaction, and applies to the tables' owner.
   A role that bypasses row-level security, such as a superuser, is held only by the store's own
   filter.
-- Updates that move a run or scoring job on name the state they expect, and draft edits name the
-  revision they expect. A review chain never forks: a review is replaced at most once.
+- Updates that move a run or scoring job on name the state they expect, and draft and view edits
+  name the revision they expect. A review chain never forks: a review is replaced at most once.
+- A suite version records who saved it and when (`Suite.created_by`, `created_at`). A draft can be
+  renamed or described (`edit_draft`) and removed with its cases (`delete_draft`).
+- A saved view (`SavedView` in `martian.evals.records`) is UI state, not evaluation content, so it
+  is not part of the shared model: `save_view` creates one or, naming the revision it read,
+  replaces it; `get_view`, `list_views` and `delete_view` read and remove them. Migration `0002`
+  adds its table.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed.
   `InProcessEvents` delivers events within one process, which is enough for the local edition.
   The server delivers them between processes. A listener that falls too far behind gets
@@ -381,12 +534,13 @@ so row-level security applies.
 | Piece | Issue |
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
-| Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
-| Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
+| A durable worker, and one process per evaluation run | MorningHQ/martian-notes#139, #140 |
+| HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_read_routes.py`,
-`test_read_contract.py` and the store and record tests run the core without the backend. The `Evals core` job in CI runs them with the model tests,
-on Postgres as well as SQLite.
+`test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`, `test_worker.py` and the
+store and record tests run the core without the backend. The `Evals core` job in CI runs them with
+the model tests, on Postgres as well as SQLite.
