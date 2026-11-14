@@ -1087,6 +1087,7 @@ dependencies = [
 [package.optional-dependencies]
 evals = [
     { name = "alembic" },
+    { name = "fastapi" },
     { name = "mlflow-skinny" },
     { name = "pandas" },
     { name = "pytest" },
@@ -1116,6 +1117,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", marker = "extra == 'evals'", specifier = ">=1.13" },
+    { name = "fastapi", marker = "extra == 'evals'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.12,<3" },
     { name = "jsonschema", marker = "extra == 'mcp'", specifier = ">=4.23,<5" },

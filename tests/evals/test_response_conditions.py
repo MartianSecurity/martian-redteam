@@ -163,7 +163,7 @@ def test_gateway_transport_returns_condition_answers(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(_judge_transport, "send_chat_request", send)
+    monkeypatch.setattr(_judge_transport, "_post_chat", send)
     result = response_conditions(model="openai:/stub", verify=False)(
         inputs="Request",
         outputs="Actual source.",

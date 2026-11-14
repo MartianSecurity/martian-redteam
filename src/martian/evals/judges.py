@@ -13,7 +13,12 @@ from mlflow.genai.scorers import Scorer, scorer
 from mlflow.types.llm import ChatMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from martian.evals._judge_transport import PROVIDER_RETRIES_KEY, invoke_response_judge
+from martian.evals._judge_transport import (
+    DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    MAX_RATE_LIMIT_WAIT_SECONDS,
+    PROVIDER_RETRIES_KEY,
+    invoke_response_judge,
+)
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
 RESPONSE_CONDITIONS_VERSION = "response-conditions-v1"
@@ -400,6 +405,7 @@ def response_guidelines(
     include_judge_prompt: bool = False,
     verify: bool = False,
     max_retries: int = 5,
+    rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
 ) -> Scorer:
     """Create a response-only MLflow-compatible scorer for expectations.guidelines.
 
@@ -409,9 +415,12 @@ def response_guidelines(
     of nonempty strings. No policy or provider is silently selected.
 
     Provider routing/authentication uses MLflow's pinned model-URI adapter. No
-    semantic retry or verdict repair is performed. ``max_retries`` (default 5, 0 to
-    disable) covers only provider replies that carry no judgment: rate limits,
-    server errors and connection failures, with capped exponential backoff. Citation IDs resolve to the
+    semantic retry or verdict repair is performed. Only provider replies that carry no
+    judgment are retried. Rate limits (HTTP 429 and 529) are retried for up to
+    ``rate_limit_wait_seconds`` (default 300, 0 to disable), waiting as long as the
+    provider's ``Retry-After`` asks, or with capped exponential backoff when it does not.
+    Server errors and connection failures are retried up to ``max_retries`` times (default
+    5, 0 to disable). Citation IDs resolve to the
     exact original response text, preserving Unicode and intervening context.
     Schema, evidence and transport
     errors raise, so MLflow records a scorer error and assert_checks fails closed.
@@ -428,6 +437,7 @@ def response_guidelines(
         mode="guidelines",
         verify=verify,
         max_retries=max_retries,
+        rate_limit_wait_seconds=rate_limit_wait_seconds,
     )
 
 
@@ -440,6 +450,7 @@ def response_conditions(
     include_judge_prompt: bool = False,
     verify: bool = False,
     max_retries: int = 5,
+    rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
 ) -> Scorer:
     """Judge expectations.conditions with explicit, caller-controlled polarity.
 
@@ -463,6 +474,7 @@ def response_conditions(
         mode="conditions",
         verify=verify,
         max_retries=max_retries,
+        rate_limit_wait_seconds=rate_limit_wait_seconds,
     )
 
 
@@ -476,6 +488,7 @@ def response_rubric(
     include_judge_prompt: bool = False,
     verify: bool = False,
     max_retries: int = 5,
+    rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
 ) -> Scorer:
     """Judge expectations.rubric / expectations.rubrics with direct pass/fail verdicts.
 
@@ -493,6 +506,7 @@ def response_rubric(
         mode="rubrics",
         verify=verify,
         max_retries=max_retries,
+        rate_limit_wait_seconds=rate_limit_wait_seconds,
     )
 
 
@@ -507,11 +521,18 @@ def _response_judge(
     mode: Literal["guidelines", "conditions", "rubrics"],
     verify: bool,
     max_retries: int,
+    rate_limit_wait_seconds: float,
 ) -> Scorer:
     if type(verify) is not bool:
         raise ValueError("verify must be a boolean")
     if type(max_retries) is not int or not 0 <= max_retries <= 10:
         raise ValueError("max_retries must be an integer between 0 and 10")
+    if (
+        type(rate_limit_wait_seconds) not in (int, float)
+        or not math.isfinite(rate_limit_wait_seconds)
+        or not 0 <= rate_limit_wait_seconds <= MAX_RATE_LIMIT_WAIT_SECONDS
+    ):
+        raise ValueError("rate_limit_wait_seconds must be a number of seconds between 0 and 3600")
     if not isinstance(model, str) or not model.strip():
         raise ValueError("An explicit judge model URI is required")
     if not name.strip() or not input_key.strip():
@@ -626,6 +647,7 @@ def _response_judge(
             inference_params=params or None,
             stage="draft",
             max_retries=max_retries,
+            rate_limit_wait_seconds=rate_limit_wait_seconds,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -654,6 +676,7 @@ def _response_judge(
                 inference_params=params or None,
                 stage="review",
                 max_retries=max_retries,
+                rate_limit_wait_seconds=rate_limit_wait_seconds,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
