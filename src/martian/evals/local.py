@@ -9,6 +9,9 @@ unless the caller names another:
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
   runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
 
+``martian evals run`` records each suite-file run in the same folder
+(:mod:`martian.evals.run_record`), so the UI shows it.
+
 The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
 the built Evals UI, by default the one the wheel ships in ``martian/ui``. The server listens on
@@ -55,6 +58,22 @@ def default_home() -> Path:
     return Path.home() / ".martian" / "evals"
 
 
+def data_folder(home: str | Path | None = None) -> Path:
+    """The data folder: ``home`` when one is named, else ``MARTIAN_EVALS_HOME``, else
+    :func:`default_home`."""
+    return Path(home or os.environ.get("MARTIAN_EVALS_HOME") or default_home()).expanduser().resolve()
+
+
+def open_stores(home: Path) -> tuple[MlflowStore, SqlRecordStore]:
+    """The store and the record store in the data folder ``home``, created on first use. ``martian
+    ui`` serves them, and ``martian evals run`` records its runs in them."""
+    # The local edition sends nothing off this machine.
+    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
+    home.mkdir(parents=True, exist_ok=True)
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    return store, SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+
+
 def packaged_ui() -> Path:
     """Where the package keeps the built Evals UI: the ``ui`` folder of the ``martian`` package, a
     build of the frontend's Evals app that the wheel ships, named in its ``ui-version.json``."""
@@ -91,11 +110,7 @@ def create_local_app(home: Path, ui: Path) -> FastAPI:
     user, the session call, and the built UI in ``ui``, a folder holding ``index.html``."""
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
-    # The local edition sends nothing off this machine.
-    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
-    home.mkdir(parents=True, exist_ok=True)
-    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
-    records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    store, records = open_stores(home)
     app = create_app(store=store, records=records, principal=lambda: SINGLE_USER)
     app.include_router(session_router)
     app.mount("/", StaticFiles(directory=ui, html=True), name="ui")

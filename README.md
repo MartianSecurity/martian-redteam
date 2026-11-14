@@ -31,10 +31,11 @@ checks:
 behind an API needs no Python file.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, and can be stopped and resumed. To browse traces and judge reasons,
-point `mlflow ui` at the local store, or set `mlflow.tracking_uri` in the suite file to log to
-your own MLflow server. [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md)
-has the full guide: data formats, every check, provider setup and results.
+prints a summary table, and can be stopped and resumed. It is also recorded for `martian ui`
+(below), which shows each case's verdict, reasons and trace and compares runs; set
+`mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
+[Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full
+guide: data formats, every check, provider setup and results.
 
 ## What is in the package
 

@@ -47,6 +47,16 @@ def run_evals(
     fresh: Annotated[
         bool, typer.Option("--fresh", help="Suite file only: discard earlier results instead of resuming.")
     ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="Suite file only: the local Evals UI's data folder to record the run in, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -61,10 +71,15 @@ def run_evals(
         if len(ctx.args) != 1 or require_redteam:
             typer.echo("Give one suite file and no pytest options: martian evals run evals.yaml", err=True)
             raise typer.Exit(code=2)
-        _run_suite(Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh)
+        _run_suite(
+            Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh, home=data_dir
+        )
         return
-    if output is not None or concurrency is not None or limit is not None or fresh:
-        typer.echo("--output, --concurrency, --limit and --fresh apply to a suite file (evals.yaml) only.", err=True)
+    if output is not None or concurrency is not None or limit is not None or fresh or data_dir is not None:
+        typer.echo(
+            "--output, --concurrency, --limit, --fresh and --data-dir apply to a suite file (evals.yaml) only.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     import pytest
 
@@ -73,18 +88,27 @@ def run_evals(
     raise typer.Exit(code=int(code))
 
 
-def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool) -> None:
+def _run_suite(
+    path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool, home: Path | None
+) -> None:
     from rich.console import Console
     from rich.table import Table
 
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
+    from martian.evals.local import data_folder
     from martian.evals.runner import run_suite
 
     console = Console()
     try:
         summary = run_suite(
-            path, output=output, concurrency=concurrency, limit=limit, resume=not fresh, progress=console.print
+            path,
+            output=output,
+            concurrency=concurrency,
+            limit=limit,
+            resume=not fresh,
+            progress=console.print,
+            home=home,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -99,6 +123,14 @@ def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limi
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
+    recorded = summary["run"]
+    ui = (
+        "martian ui" if data_folder() == Path(recorded["data_dir"]) else f"martian ui --data-dir {recorded['data_dir']}"
+    )
+    # One line, never wrapped, so the command can be copied.
+    console.print(
+        f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
+    )
     raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
 
 
@@ -131,9 +163,9 @@ def run_ui(
     if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
         typer.echo("The local Evals UI needs martian-sdk[evals].", err=True)
         raise typer.Exit(code=2)
-    from martian.evals.local import LocalEditionError, create_local_app, default_home, packaged_ui, serve
+    from martian.evals.local import LocalEditionError, create_local_app, data_folder, packaged_ui, serve
 
-    home = (data_dir or default_home()).expanduser().resolve()
+    home = data_folder(data_dir)
     ui = (ui_dir or packaged_ui()).expanduser().resolve()
     try:
         local = create_local_app(home, ui)
