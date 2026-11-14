@@ -123,9 +123,9 @@ next to each one creates it.
 
 | Path | Holds | Status |
 | --- | --- | --- |
-| `src/martian/evals/` | SDK: suite runner, judges, checks, gate | Exists |
+| `src/martian/evals/` | SDK: suite runner, suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
-| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists; routes are ported in MorningHQ/martian-notes#100 and #101 |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists with the read routes; the write routes are MorningHQ/martian-notes#101 |
 | `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
 | `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts), portable to SQLite and Postgres | Exists |
 | `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |

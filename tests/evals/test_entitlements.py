@@ -6,6 +6,7 @@ import pytest
 from fastapi import Depends, Header, HTTPException
 from fastapi.testclient import TestClient
 
+from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import (
     COMMUNITY,
     EDITIONS,
@@ -24,6 +25,9 @@ from martian.evals.server import (
     resolve_edition,
 )
 from martian.evals.store import MemoryStore
+
+# These tests read no records; an in-memory record store satisfies create_app.
+RECORDS = SqlRecordStore("sqlite://")
 
 
 def test_the_key_list_and_the_edition_sets():
@@ -72,6 +76,7 @@ def _app_with_paid_route(entitlements):
         return organisation_principal("user-1", x_org, frozenset({"member"}))
 
     app = create_app(
+        records=RECORDS,
         store=MemoryStore(),
         principal=from_header,
         entitlements=entitlements or (lambda p: entitlements_for(resolve_edition(plan=plans[p.organisation_id]))),
@@ -95,7 +100,7 @@ def test_a_paid_route_is_refused_in_community_with_a_clear_error():
 
 
 def test_the_local_edition_is_community_by_default_and_refuses_paid_routes():
-    app = create_app(store=MemoryStore(), principal=lambda: SINGLE_USER)
+    app = create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER)
 
     @app.get("/v1/evals/monitoring", dependencies=[Depends(require_entitlement("monitoring"))])
     def monitoring() -> dict[str, list[str]]:

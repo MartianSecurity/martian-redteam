@@ -40,7 +40,10 @@ Martian. Its outbound calls are the ones the suite file names:
 - **Header values** can reference `${NAME}`, read from the environment when the suite loads.
   Only the names appear in the suite file. The values are sent to the target and are not
   written to `results.jsonl`, `summary.json`, `junit.xml` or the MLflow trace. They are not
-  expanded in the request body, and text inside a case is never expanded.
+  expanded in the request body, and text inside a case is never expanded. Loading a suite file
+  into the [shared eval model](eval-model.md#the-sdk-suite-file), as a store keeps it, keeps the
+  URL and header values as written, with `${NAME}` unexpanded, so the environment's values are
+  never stored. A literal value is stored as it is: keep credentials in the environment.
 - **An LLM judge** receives the case's input, the reply and your criteria at the provider you
   configure.
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
