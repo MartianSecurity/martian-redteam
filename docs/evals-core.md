@@ -50,12 +50,49 @@ header, a cookie) and raise `401`.
   `StoreError` with `kind` `not_found`, `conflict` or `invalid`. Another organisation's object
   is `not_found`, the same as a missing one.
 - `MemoryStore` is the reference implementation, in memory.
+- `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
+  store in the same process, with no MLflow server: SQLite for the local edition, Postgres for
+  on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
   search filters and paging, scores kept with their trace, versioned scorers, review queues,
   artifact names, and organisations never seeing each other. A binding's tests subclass
   `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition name and a set of feature keys. Nothing is gated on it yet.
+
+## The in-process binding
+
+```python
+from martian.evals.store.mlflow_local import MlflowStore
+
+store = MlflowStore("sqlite:///evals/mlflow.db", "evals/artifacts")
+# On Postgres, with martian-sdk[postgres] installed; MLflow's tables go in the schema:
+store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/martian/artifacts", schema="mlflow")
+```
+
+- Each organisation gets its own MLflow workspace (`org-` and a hash of its id), and the single
+  local user gets `local`. Every call sets the workspace for its own thread through MLflow's
+  per-request context. The binding never sets `MLFLOW_ENABLE_WORKSPACES` or `MLFLOW_WORKSPACE`,
+  so other MLflow use in the same process, such as a local suite run, is unaffected.
+- On Postgres, MLflow's tables live in their own schema (`mlflow` by default), so they can
+  share a database with other tables.
+- How the objects sit in MLflow:
+  - A project is an experiment named by its id.
+  - A dataset version is an evaluation dataset, whose records keep each case's id and position.
+  - A run is an MLflow run, holding the run itself as `martian/run.json` and its counts as
+    metrics.
+  - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
+    tag, and MLflow's id is derived from it.
+  - A score is a feedback assessment, and a registered scorer an MLflow scorer.
+  - A review question is a label schema, and a review queue an MLflow review queue whose
+    definition is an experiment tag.
+- Run artifacts are files under the run's folder in the artifact root, which must be a local
+  folder.
+- Trace search applies MLflow's own filters (run, session, tags, time), then the text filter in
+  this process, so a text search reads every trace the other filters match.
+
+The store contract runs on this binding with SQLite in every test run, and on Postgres when
+`MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in.
 
 ## Not built yet
 
@@ -64,7 +101,7 @@ header, a cookie) and raise `401`.
 | The edition-to-feature map and a bootstrap response | MorningHQ/martian-notes#127, #128 |
 | Read routes: runs, results, comparison, traces, datasets | MorningHQ/martian-notes#100 |
 | Write routes: launch, scoring, datasets, judges, suites, reviews | MorningHQ/martian-notes#101 |
-| The store's MLflow bindings: in-process on `mlflow-skinny`, and the server's REST binding | MorningHQ/martian-notes#106, #105 |
+| The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 

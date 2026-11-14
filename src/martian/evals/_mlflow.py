@@ -9,7 +9,7 @@ missing. ``PRIVATE_DEPENDENCIES`` lists each internal name.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
 from mlflow.genai.evaluation.entities import EvaluationResult
@@ -27,9 +27,11 @@ from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
 from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
-from mlflow.tracing.constant import AssessmentMetadataKey
+from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
+from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
+from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
 from mlflow.tracking import fluent as _fluent
-from mlflow.utils.workspace_context import get_request_workspace
+from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
 
 if TYPE_CHECKING:
@@ -55,8 +57,15 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.pytest.decorator", "MLFLOW_TEST_ATTR"),
     ("mlflow.pytest.plugin", ""),  # loaded by name as a pytest plugin
     ("mlflow.tracing.constant", "AssessmentMetadataKey"),
+    ("mlflow.tracing.constant", "TraceTagKey.SPANS_LOCATION"),
+    ("mlflow.tracing.constant", "SpansLocation.TRACKING_STORE"),
     ("mlflow.tracking.fluent", "_active_experiment_id"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
+    ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
+    ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
+    ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
+    ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
+    ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
 )
 
@@ -82,6 +91,25 @@ def restore_active_experiment_id(value: str | None) -> None:
     vars(_fluent)["_active_experiment_id"] = value
 
 
+class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
+    """MLflow's SQL tracking store with workspaces on for this store only.
+
+    MLflow turns workspaces on with the process-wide ``MLFLOW_ENABLE_WORKSPACES`` variable, which
+    would also change every other MLflow use in the process, such as a local suite run. Every
+    query of this store still requires a workspace in the request context.
+    """
+
+    @staticmethod
+    def _workspaces_enabled() -> bool:
+        return True
+
+
+def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, page_token: str | None) -> Any:
+    """One page of a dataset's records and the next page token. MLflow has no public reader that
+    takes a store."""
+    return store._load_dataset_records(dataset_id, page_token=page_token)
+
+
 def mlflow_test_attr() -> str:
     """The attribute ``@mlflow.test`` sets on a test function. Imported late: it loads pytest."""
     from mlflow.pytest.decorator import MLFLOW_TEST_ATTR
@@ -102,6 +130,11 @@ __all__ = [
     "GatewayAdapter",
     "GatewayCaller",
     "LiteLLMAdapter",
+    "ServerWorkspaceContext",
+    "SpansLocation",
+    "TraceTagKey",
+    "WorkspaceSqlAlchemyStore",
+    "WorkspaceStore",
     "active_experiment_id",
     "build_chat_request",
     "error_text",
@@ -110,6 +143,7 @@ __all__ = [
     "invoke_litellm",
     "is_context_window_error",
     "is_response_format_error",
+    "load_dataset_records",
     "lookup_model_cost",
     "mlflow_test_attr",
     "parse_model_uri",
