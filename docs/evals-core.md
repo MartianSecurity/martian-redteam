@@ -9,7 +9,7 @@ builds it with `create_app` and supplies three things:
 
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
-| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process | Its MLflow server over REST (planned) |
+| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST (planned) |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 
@@ -135,6 +135,8 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
+- `martian ui`, the local edition: the core and the Evals UI from one process, with no login. See
+  [the local edition](#the-local-edition-martian-ui).
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -238,6 +240,68 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 `MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
 so row-level security applies.
 
+## The local edition (`martian ui`)
+
+`martian ui` serves the core and the Evals UI from one process on this machine, with no login and
+no other service, and opens the UI in the default browser. It needs `martian-sdk[evals]`, which
+includes the `uvicorn` server, and works offline. `martian.evals.local` builds it.
+
+```bash
+martian ui                                   # http://127.0.0.1:7600/
+martian ui --port 7601 --data-dir ./evals-data --no-open
+martian ui --ui-dir ../frontend/dist-evals   # a UI built by `npm run build:evals` in the frontend
+```
+
+| Option | Default | What it sets |
+| --- | --- | --- |
+| `--port` | `7600` | The port on 127.0.0.1. A port another process holds stops the command with exit code `2`. |
+| `--data-dir`, or `MARTIAN_EVALS_HOME` | `~/.martian/evals` | The data folder |
+| `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package | The built Evals UI: a folder holding `index.html` and `assets/` |
+| `--open` / `--no-open` | `--open` | Whether to open the UI in the default browser (Python's `webbrowser`; `BROWSER` names another) |
+
+- The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
+  [above](#bootstrap-response).
+- The store is `MlflowStore` on SQLite: `mlflow.db` and `artifacts/` in the data folder, created
+  on the first start. The suite-file runner (`martian evals run`) keeps a `mlflow.db` of its own
+  in its output folder. That is a plain MLflow store of MLflow's evaluation runs, which the core
+  does not read, so `martian ui` does not open it. Writing command-line runs through the core's
+  store, so that they show in the UI, is MorningHQ/martian-notes#114.
+- The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
+  and a session. The local edition answers it with the fixed principal, so the UI needs no
+  sign-in:
+
+  ```json
+  {
+    "access_token": "local",
+    "session": {
+      "kind": "single_user",
+      "user": {"id": "local", "email": null, "display_name": null},
+      "organisation": null,
+      "role": "owner",
+      "platform_admin": false,
+      "session_id": "local"
+    }
+  }
+  ```
+
+  `session` is the bootstrap's `principal` with a `session_id`. Nothing checks the token. The
+  route belongs to the local edition, not to the core: the Martian server answers the same call
+  from its own sign-in.
+- Every path outside the API is a file of the built UI. The UI uses hash routes and relative
+  asset paths, and calls `/v1` on its own origin.
+- The server listens on 127.0.0.1 only, and refuses with `400` a request whose `Host` is not
+  `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
+  to this machine. There is no login: any program on this machine can call it.
+- The wheel does not include the built UI yet; MorningHQ/martian-notes#113 puts it in
+  `src/martian/ui/`, which is the default `--ui-dir`. Until then, pass `--ui-dir`. Without a
+  built UI the command stops with exit code `2` and says so.
+- Until the read routes are ported (MorningHQ/martian-notes#100), the UI opens with the
+  bootstrap and shows "Not Found" where a page reads projects, runs, datasets, traces or judges.
+  `create_app` takes no record store yet, so the local edition does not open one.
+
+`tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
+the UI files, the `Host` check, the port, the browser and the command.
+
 ## Not built yet
 
 | Piece | Issue |
@@ -248,8 +312,10 @@ so row-level security applies.
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| The built Evals UI inside the wheel, for `martian ui` | MorningHQ/martian-notes#113 |
+| Command-line suite runs written through the core's store, so `martian ui` shows them | MorningHQ/martian-notes#114 |
 
 The objects the routes will serve are the [shared eval data model](eval-model.md).
-`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py` and the store and record
-tests run the core without the backend. The `Evals core` job in CI runs them with the model tests,
-on Postgres as well as SQLite.
+`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py` and the
+store and record tests run the core without the backend. The `Evals core` job in CI runs them with
+the model tests, on Postgres as well as SQLite.

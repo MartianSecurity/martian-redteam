@@ -39,6 +39,9 @@ has the full guide: data formats, every check, provider setup and results.
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian ui`: the Evals UI on your machine, with no login and no other service. The wheel does
+  not include the built UI yet, so pass `--ui-dir`; see
+  [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   deterministic checks (`contains`, `not_contains`, `matches`, `not_matches`, `is_json`),
   pinned datasets, Backend-scored regression gates and recorded CI sessions.

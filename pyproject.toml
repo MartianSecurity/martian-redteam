@@ -38,6 +38,7 @@ evals = [
     "pandas>=2.2",
     "pytest>=8",
     "sqlalchemy>=2.0",
+    "uvicorn>=0.30",
 ]
 postgres = ["martian-sdk[evals]", "psycopg[binary]>=3.2"]
 

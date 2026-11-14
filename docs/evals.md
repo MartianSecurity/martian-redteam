@@ -135,6 +135,11 @@ to the suite file to log there instead of the local store, then open the run in 
 For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
 (`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
 
+**The local Evals UI.** `martian ui` opens the Evals UI on your machine, with no login and no
+other service; see [the local edition](evals-core.md#the-local-edition-martian-ui). A suite-file
+run does not appear in it yet (MorningHQ/martian-notes#114), so browse a run's traces with
+`mlflow ui` as above.
+
 **Provider setup.** `judge.model` is an MLflow model URI, `<provider>:/<model>`, and the key
 comes from that provider's usual environment variable. Nothing is read from a `.env` file.
 

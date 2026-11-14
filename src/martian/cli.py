@@ -102,6 +102,58 @@ def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limi
     raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
 
 
+@app.command("ui")
+def run_ui(
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="Port on 127.0.0.1.")] = 7600,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            envvar="MARTIAN_EVALS_HOME",
+            file_okay=False,
+            show_default=False,
+            help="Folder for the local store and its artifacts. Default: ~/.martian/evals.",
+        ),
+    ] = None,
+    ui_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--ui-dir",
+            envvar="MARTIAN_EVALS_UI_DIR",
+            file_okay=False,
+            show_default=False,
+            help="Folder of a built Evals UI (index.html and assets/). Default: the one in this package.",
+        ),
+    ] = None,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the UI in the default browser.")] = True,
+) -> None:
+    """Open the Evals UI on this machine: one user, no login, everything stored locally on SQLite."""
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
+        typer.echo("The local Evals UI needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import LocalEditionError, create_local_app, default_home, packaged_ui, serve
+
+    home = (data_dir or default_home()).expanduser().resolve()
+    ui = (ui_dir or packaged_ui()).expanduser().resolve()
+    try:
+        local = create_local_app(home, ui)
+        serve(
+            local,
+            port=port,
+            open_browser=open_browser,
+            announce=lambda url: typer.echo(f"Martian Evals is at {url} (data in {home}). Press Ctrl+C to stop."),
+        )
+    except LocalEditionError as error:
+        typer.echo(f"martian ui: {error}", err=True)
+        if ui_dir is None and not (ui / "index.html").is_file():
+            typer.echo(
+                "This install has no built Evals UI. Pass --ui-dir with one, such as the dist-evals folder "
+                "that `npm run build:evals` writes in the frontend.",
+                err=True,
+            )
+        raise typer.Exit(code=2) from None
+
+
 @app.command("ci")
 def run_ci(
     evals_path: Annotated[

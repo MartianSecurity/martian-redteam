@@ -121,6 +121,8 @@ martian ci --redteam-config redteam.yaml --output results
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
 # A suite file, run locally with only a model key (see the eval guide):
 martian evals run evals.yaml
+# The Evals UI on this machine, one user and no login (see the evals core guide):
+martian ui
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

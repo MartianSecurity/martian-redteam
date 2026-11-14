@@ -18,6 +18,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
 | `src/martian/evals/server/` | Evals core: `create_app`, injected principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status` and `/v1/evals/bootstrap` |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
+| `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite, the session call and the built UI on 127.0.0.1 |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
