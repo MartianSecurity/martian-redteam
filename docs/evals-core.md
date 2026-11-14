@@ -244,19 +244,21 @@ so row-level security applies.
 
 `martian ui` serves the core and the Evals UI from one process on this machine, with no login and
 no other service, and opens the UI in the default browser. It needs `martian-sdk[evals]`, which
-includes the `uvicorn` server, and works offline. `martian.evals.local` builds it.
+includes the `uvicorn` server, and works offline. `martian.evals.local` builds it. The wheel ships
+the built UI; [the release guide](releasing.md#the-evals-ui-in-the-wheel) says which build and how
+it is checked.
 
 ```bash
 martian ui                                   # http://127.0.0.1:7600/
 martian ui --port 7601 --data-dir ./evals-data --no-open
-martian ui --ui-dir ../frontend/dist-evals   # a UI built by `npm run build:evals` in the frontend
+martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run build:evals` in the frontend
 ```
 
 | Option | Default | What it sets |
 | --- | --- | --- |
 | `--port` | `7600` | The port on 127.0.0.1. A port another process holds stops the command with exit code `2`. |
 | `--data-dir`, or `MARTIAN_EVALS_HOME` | `~/.martian/evals` | The data folder |
-| `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package | The built Evals UI: a folder holding `index.html` and `assets/` |
+| `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package, which the wheel ships | The built Evals UI: a folder holding `index.html` and `assets/` |
 | `--open` / `--no-open` | `--open` | Whether to open the UI in the default browser (Python's `webbrowser`; `BROWSER` names another) |
 
 - The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
@@ -288,19 +290,20 @@ martian ui --ui-dir ../frontend/dist-evals   # a UI built by `npm run build:eval
   route belongs to the local edition, not to the core: the Martian server answers the same call
   from its own sign-in.
 - Every path outside the API is a file of the built UI. The UI uses hash routes and relative
-  asset paths, and calls `/v1` on its own origin.
+  asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
+  the frontend commit it was built from.
 - The server listens on 127.0.0.1 only, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it.
-- The wheel does not include the built UI yet; MorningHQ/martian-notes#113 puts it in
-  `src/martian/ui/`, which is the default `--ui-dir`. Until then, pass `--ui-dir`. Without a
-  built UI the command stops with exit code `2` and says so.
+- If the UI folder holds no `index.html`, because an install has lost the packaged UI or
+  `--ui-dir` names another folder, the command stops with exit code `2` and says so.
 - Until the read routes are ported (MorningHQ/martian-notes#100), the UI opens with the
   bootstrap and shows "Not Found" where a page reads projects, runs, datasets, traces or judges.
   `create_app` takes no record store yet, so the local edition does not open one.
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
-the UI files, the `Host` check, the port, the browser and the command.
+the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
+when no `--ui-dir` is given.
 
 ## Not built yet
 
@@ -312,7 +315,6 @@ the UI files, the `Host` check, the port, the browser and the command.
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | Worker entry points: one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
-| The built Evals UI inside the wheel, for `martian ui` | MorningHQ/martian-notes#113 |
 | Command-line suite runs written through the core's store, so `martian ui` shows them | MorningHQ/martian-notes#114 |
 
 The objects the routes will serve are the [shared eval data model](eval-model.md).

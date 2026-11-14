@@ -64,6 +64,14 @@ include = [
     "/README.md", "/LICENSE", "/NOTICE", "/uv.lock",
 ]
 
+# The Evals UI the wheel ships in src/martian/ui/: a build of the Evals app in MorningHQ/MartianFrontend
+# (`npm run build:evals`) at `commit`. scripts/vendor_ui.py replaces the folder and writes this table;
+# scripts/check_release.py refuses distributions whose UI is not this build. See docs/releasing.md.
+[tool.martian.ui]
+version = "0.1.0"
+commit = "0255f4eaa7d6ea2fe67685950c2372ab0570a16f"
+digest = "sha256:367b4cafcac39f259a27e6d4dda36c1a78a8f9699194ea27787ac04e5c5c55ce"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

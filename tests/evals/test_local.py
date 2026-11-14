@@ -1,7 +1,9 @@
 """`martian ui`: the evals core on SQLite and the Evals UI from one local process, with no login."""
 
+import re
 import socket
 import threading
+import tomllib
 from pathlib import Path
 
 import httpx
@@ -196,10 +198,25 @@ def test_the_command_defaults_to_the_data_folder_in_home_and_opens_the_browser(m
     assert (tmp_path / ".martian" / "evals" / "mlflow.db").is_file()
 
 
+def test_the_command_serves_the_ui_the_package_ships(monkeypatch, tmp_path):
+    served = {}
+    monkeypatch.setattr(local, "serve", lambda app, **options: served.update(options, app=app))
+    monkeypatch.delenv("MARTIAN_EVALS_UI_DIR", raising=False)
+    result = CliRunner().invoke(cli, ["ui", "--data-dir", str(tmp_path / "home"), "--no-open"])
+    assert result.exit_code == 0, result.output
+    client = TestClient(served["app"], base_url=LOCAL)
+    assert "<title>Martian Evals</title>" in client.get("/").text
+    stamp = client.get("/ui-version.json").json()
+    pin = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())["tool"]["martian"]["ui"]
+    assert (stamp["version"], stamp["commit"], stamp["dirty"]) == (pin["version"], pin["commit"], False)
+    for asset in re.findall(r'(?:src|href)="\./(assets/[^"]+)"', client.get("/").text):
+        assert client.get(f"/{asset}").status_code == 200, asset
+
+
 def test_the_command_says_how_to_name_a_ui_when_the_package_has_none(monkeypatch, tmp_path):
     monkeypatch.setattr(local, "packaged_ui", lambda: tmp_path / "no-ui")
     monkeypatch.delenv("MARTIAN_EVALS_UI_DIR", raising=False)
     result = CliRunner().invoke(cli, ["ui", "--data-dir", str(tmp_path / "home"), "--no-open"])
     assert result.exit_code == 2
     assert "there is no built Evals UI in" in result.output
-    assert "Pass --ui-dir" in result.output
+    assert "has lost the Evals UI it ships: reinstall it, or pass --ui-dir" in result.output

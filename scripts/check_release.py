@@ -1,19 +1,98 @@
-"""Qualify wheel/sdist and the single-key public imports; optionally clean-install both."""
+"""Qualify wheel/sdist, the packaged Evals UI and the single-key public imports; optionally clean-install both."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
+import socket
 import subprocess
 import tarfile
 import tempfile
+import time
+import tomllib
+import urllib.request
 import zipfile
+from collections.abc import Mapping
 from email.parser import BytesParser
 from pathlib import Path
 
+UI = "martian/ui/"
+"""Where the wheel keeps the built Evals UI; the sdist keeps it in ``src/martian/ui/``."""
 
-def validate(directory: Path) -> list[Path]:
+STAMP = "ui-version.json"
+"""The build's identity, written by the frontend's ``npm run build:evals``."""
+
+
+def ui_digest(files: Mapping[str, bytes]) -> str:
+    """The digest of a built UI: SHA-256 over one ``<sha256>  <path>`` line per file, sorted by path."""
+    listing = "".join(f"{hashlib.sha256(files[path]).hexdigest()}  {path}\n" for path in sorted(files))
+    return "sha256:" + hashlib.sha256(listing.encode()).hexdigest()
+
+
+def ui_pin(pyproject: bytes) -> dict[str, str]:
+    """The ``[tool.martian.ui]`` table: the version, frontend commit and digest of the UI to ship."""
+    try:
+        table = tomllib.loads(pyproject.decode())["tool"]["martian"]["ui"]
+        return {key: str(table[key]) for key in ("version", "commit", "digest")}
+    except KeyError as error:
+        raise ValueError(f"pyproject.toml does not pin the Evals UI: [tool.martian.ui] lacks {error}") from None
+
+
+def check_ui(files: Mapping[str, bytes], pin: Mapping[str, str], where: str) -> None:
+    """Require ``files``, a built UI by path, to be the clean build that ``pin`` names, byte for byte."""
+    if "index.html" not in files or STAMP not in files:
+        raise ValueError(f"{where} holds no built Evals UI: index.html or {STAMP} is missing")
+    stamp = json.loads(files[STAMP])
+    if stamp.get("dirty") is not False:
+        raise ValueError(f"the Evals UI in {where} was built from a frontend tree with uncommitted changes")
+    if (stamp.get("version"), stamp.get("commit")) != (pin["version"], pin["commit"]):
+        raise ValueError(
+            f"the Evals UI in {where} is {stamp.get('version')} at {stamp.get('commit')}, "
+            f"but pyproject.toml pins {pin['version']} at {pin['commit']}"
+        )
+    if ui_digest(files) != pin["digest"]:
+        raise ValueError(f"the Evals UI files in {where} differ from the build pyproject.toml pins")
+
+
+def once(names: list[str], what: str) -> None:
+    """Require no file twice in a distribution, and one built Evals UI."""
+    if len(names) != len(set(names)):
+        raise ValueError(f"{what} holds a file more than once")
+    if (count := sum(Path(name).name == STAMP for name in names)) != 1:
+        raise ValueError(f"{what} holds {count} built Evals UIs; it must hold one")
+
+
+def wheel_ui(archive: zipfile.ZipFile) -> dict[str, bytes]:
+    """The built UI in a wheel, by path below ``martian/ui/``. It must be there once and only there."""
+    names = archive.namelist()
+    once(names, "the wheel")
+    return {name.removeprefix(UI): archive.read(name) for name in names if name.startswith(UI) and name != UI}
+
+
+def sdist_ui(archive: tarfile.TarFile) -> tuple[dict[str, bytes], bytes]:
+    """The built UI in an sdist, by path below ``src/martian/ui/``, and the sdist's ``pyproject.toml``."""
+    members = [member for member in archive.getmembers() if member.isfile()]
+    once([member.name for member in members], "the source distribution")
+    top = Path(members[0].name).parts[0]
+
+    def read(member: tarfile.TarInfo) -> bytes:
+        handle = archive.extractfile(member)
+        if handle is None:
+            raise ValueError(f"{member.name} cannot be read from the source distribution")
+        return handle.read()
+
+    prefix = f"{top}/src/{UI}"
+    files = {m.name.removeprefix(prefix): read(m) for m in members if m.name.startswith(prefix)}
+    pyproject = next((m for m in members if m.name == f"{top}/pyproject.toml"), None)
+    if pyproject is None:
+        raise ValueError("the source distribution has no pyproject.toml")
+    return files, read(pyproject)
+
+
+def validate(directory: Path) -> tuple[list[Path], dict[str, str]]:
+    """Check both distributions; return them and the Evals UI pin they share."""
     wheels, sources = list(directory.glob("*.whl")), list(directory.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sources) != 1:
         raise ValueError("expected exactly one wheel and one source distribution")
@@ -36,6 +115,7 @@ def validate(directory: Path) -> list[Path]:
         entries = archive.read(next(n for n in names if n.endswith(".dist-info/entry_points.txt"))).decode()
         if "martian = martian.cli:app" not in entries or "martian-redteam =" not in entries:
             raise ValueError("CLI entry points are missing")
+        packaged_ui = wheel_ui(archive)
     with tarfile.open(sources[0]) as archive:
         members = archive.getmembers()
         for member in members:
@@ -49,6 +129,10 @@ def validate(directory: Path) -> list[Path]:
         if handle is None:
             raise ValueError("source metadata is missing")
         metadata.append(BytesParser().parsebytes(handle.read()))
+        source_ui, pyproject = sdist_ui(archive)
+    pin = ui_pin(pyproject)
+    check_ui(packaged_ui, pin, "the wheel")
+    check_ui(source_ui, pin, "the source distribution")
     for info in metadata:
         if info["Name"] != "martian-sdk" or not info["Version"]:
             raise ValueError("incorrect distribution identity")
@@ -62,10 +146,50 @@ def validate(directory: Path) -> list[Path]:
             raise ValueError("distribution depends on a local or unpublished source")
     if metadata[0]["Version"] != metadata[1]["Version"]:
         raise ValueError("wheel and source versions differ")
-    return [wheels[0], sources[0]]
+    return [wheels[0], sources[0]], pin
 
 
-def install(artifacts: list[Path]) -> None:
+def serve_ui(environment: Path, work: Path, pin: Mapping[str, str]) -> None:
+    """Start the installed ``martian ui`` with no ``--ui-dir`` and read the packaged UI and the API from it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    base = f"http://127.0.0.1:{port}"
+    home = work / "evals-home"
+    command = [str(environment / "bin/martian"), "ui", "--no-open", "--port", str(port), "--data-dir", str(home)]
+    # The packaged UI, not one a variable names.
+    variables = {key: value for key, value in os.environ.items() if key != "MARTIAN_EVALS_UI_DIR"}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with (work / "martian-ui.log").open("w+") as log:
+        server = subprocess.Popen(command, cwd=work, env=variables, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    page = opener.open(base + "/", timeout=5).read().decode()
+                    break
+                except OSError:
+                    if server.poll() is not None or time.monotonic() > deadline:
+                        log.seek(0)
+                        raise ValueError(f"martian ui did not serve the packaged UI: {log.read()}") from None
+                    time.sleep(0.25)
+            if "<title>Martian Evals</title>" not in page:
+                raise ValueError("martian ui did not answer / with the Evals UI")
+            stamp = json.loads(opener.open(f"{base}/{STAMP}", timeout=5).read())
+            if (stamp["version"], stamp["commit"]) != (pin["version"], pin["commit"]):
+                raise ValueError("martian ui serves another Evals UI than the one pyproject.toml pins")
+            session = json.loads(
+                opener.open(urllib.request.Request(base + "/v1/auth/refresh", method="POST"), timeout=5).read()
+            )
+            bootstrap = json.loads(opener.open(base + "/v1/evals/bootstrap", timeout=5).read())
+            if session["session"]["kind"] != "single_user" or bootstrap["principal"]["kind"] != "single_user":
+                raise ValueError("martian ui did not answer the session call and the bootstrap for the local user")
+        finally:
+            server.terminate()
+            server.wait(10)
+
+
+def install(artifacts: list[Path], pin: Mapping[str, str]) -> None:
     for artifact in artifacts:
         with tempfile.TemporaryDirectory(prefix="martian-sdk-install-") as work:
             environment = Path(work) / "venv"
@@ -87,6 +211,7 @@ def install(artifacts: list[Path]) -> None:
             subprocess.run([str(python), "-I", "-c", source], cwd=work, check=True)
             for command in (("martian", "--version"), ("martian", "ci", "--help"), ("martian-redteam", "--version")):
                 subprocess.run([str(environment / "bin" / command[0]), *command[1:]], cwd=work, check=True)
+            serve_ui(environment, Path(work), pin)
 
 
 def main() -> None:
@@ -95,12 +220,12 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=Path("release-checksums.json"))
     parser.add_argument("--install", action="store_true")
     args = parser.parse_args()
-    artifacts = validate(args.dist_dir)
+    artifacts, pin = validate(args.dist_dir)
     if args.install:
-        install(artifacts)
+        install(artifacts, pin)
     manifest = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in artifacts}
     args.manifest.write_text(json.dumps(manifest, indent=2) + "\n")
-    print(json.dumps({"artifacts": manifest, "clean_installs": args.install}))
+    print(json.dumps({"artifacts": manifest, "evals_ui": pin, "clean_installs": args.install}))
 
 
 if __name__ == "__main__":

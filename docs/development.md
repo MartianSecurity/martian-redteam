@@ -19,6 +19,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/server/` | Evals core: `create_app`, injected principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status` and `/v1/evals/bootstrap` |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite, the session call and the built UI on 127.0.0.1 |
+| `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
@@ -57,7 +58,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
 | `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
-| `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
+| `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), throwaway venv install, `validate examples/config.yaml` | 3.12 |
 | `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
 
