@@ -135,6 +135,12 @@ to the suite file to log there instead of the local store, then open the run in 
 For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
 (`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
 
+**The suite as model objects.** A suite file is the written form of the
+[shared eval model](eval-model.md#the-sdk-suite-file)'s `Suite`. `martian.evals.suite_file`
+loads a suite file and its data into the model's objects and writes them back as a suite file
+and a JSONL data file. A field that either direction would lose is refused with an error naming
+it, including check options and a `judge` that `martian evals run` accepts but ignores.
+
 **Provider setup.** `judge.model` is an MLflow model URI, `<provider>:/<model>`, and the key
 comes from that provider's usual environment variable. Nothing is read from a `.env` file.
 
