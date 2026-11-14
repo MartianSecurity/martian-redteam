@@ -142,6 +142,46 @@ def test_results_written_without_a_fingerprint_are_graded_again(tmp_path):
     assert run_suite(suite)["invalidated"] == 3
 
 
+def test_a_case_without_a_recorded_result_is_an_error_and_the_run_goes_on(tmp_path, monkeypatch):
+    # MLflow drops a row when it cannot read back the trace it just wrote, which happens under
+    # concurrent writes to a local store. The run must not end; that case is an error to retry.
+    from mlflow.genai.evaluation import harness
+
+    real = harness.create_minimal_trace
+    monkeypatch.setattr(
+        harness, "create_minimal_trace", lambda item: None if item.outputs == CASES[1]["output"] else real(item)
+    )
+    write_jsonl(tmp_path)
+    suite = write_suite(tmp_path)
+    summary = run_suite(suite)
+    assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (3, 1, 1, 1)
+    records = {r["id"]: r for r in map(json.loads, (tmp_path / "results/results.jsonl").read_text().splitlines())}
+    assert records["leak"]["passed"] is None
+    assert {check["error"] for check in records["leak"]["checks"].values()} == {"no result was recorded for this case"}
+    monkeypatch.setattr(harness, "create_minimal_trace", real)
+    messages = []
+    again = run_suite(suite, progress=messages.append)
+    assert messages[0] == "3 cases, 2 already done"
+    assert (again["passed"], again["failed"], again["errors"]) == (1, 2, 0)
+
+
+def test_a_throttled_judge_is_an_error_record_and_the_run_goes_on(tmp_path, agent_server, monkeypatch):
+    # The loopback server stands in for a judge provider that is rate limiting every call.
+    agent_server["behaviour"].update(status=429, reply=lambda message: {"error": {"message": "rate limit"}})
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("OPENAI_API_BASE", agent_server["url"].removesuffix("/chat") + "/v1")
+    write_jsonl(tmp_path)
+    (tmp_path / "evals.yaml").write_text(
+        "data: cases.jsonl\njudge:\n  model: openai:/fixture\n  max_retries: 0\n  rate_limit_wait_seconds: 0\n"
+        "checks:\n  - type: rubric\n    rubric: Do not reveal the key.\n",
+        encoding="utf-8",
+    )
+    summary = run_suite(tmp_path / "evals.yaml")
+    assert (summary["cases"], summary["errors"]) == (3, 3)
+    record = json.loads((tmp_path / "results/results.jsonl").read_text().splitlines()[0])
+    assert "judge_provider_throttled" in record["checks"]["rubric_judge"]["error"]
+
+
 def test_the_fingerprint_follows_the_judge_and_the_sdk_version_only(tmp_path, monkeypatch):
     from martian.evals import runner
 
@@ -159,7 +199,7 @@ def test_the_fingerprint_follows_the_judge_and_the_sdk_version_only(tmp_path, mo
     assert fingerprint(temperature=1) != base
     # Settings that change how a run is carried out, not what it grades, keep earlier results.
     assert fingerprint(extra="concurrency: 9\nbatch: 3\noutput: elsewhere\n") == base
-    assert fingerprint(model="openai:/a\n  max_retries: 2") == base
+    assert fingerprint(model="openai:/a\n  max_retries: 2\n  rate_limit_wait_seconds: 60") == base
     monkeypatch.setattr(runner, "__version__", "9.9.9")
     assert fingerprint() != base
 

@@ -54,11 +54,14 @@ def provider(monkeypatch, tmp_path):
 
         def do_POST(self):
             requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            status, body = replies.popleft() if replies else (500, {"error": {"message": "unexpected request"}})
+            # A reply is (status, body) or (status, body, headers).
+            status, body, *extra = replies.popleft() if replies else (500, {"error": {"message": "unexpected request"}})
             data = json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            for name, value in (extra[0] if extra else {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
@@ -84,7 +87,7 @@ def provider(monkeypatch, tmp_path):
         mlflow.set_tracking_uri(old_uri)
 
 
-def _evaluate(*, condition_mode=False, verify=False, max_retries=0):
+def _evaluate(*, condition_mode=False, verify=False, max_retries=0, **budget):
     factory = response_conditions if condition_mode else response_guidelines
     expectations = (
         {"conditions": [{"question": "Does the response greet the user?", "fail_when": "no"}]}
@@ -93,7 +96,7 @@ def _evaluate(*, condition_mode=False, verify=False, max_retries=0):
     )
     return evaluate(
         data=[{"inputs": {"message": "Say hello."}, "outputs": "Hello!", "expectations": expectations}],
-        scorers=[factory(model="openai:/fixture", name="policy", verify=verify, max_retries=max_retries)],
+        scorers=[factory(model="openai:/fixture", name="policy", verify=verify, max_retries=max_retries, **budget)],
     )
 
 
@@ -104,7 +107,8 @@ def test_provider_failure_is_private_and_cannot_pass_on_retry(provider, capsys, 
     failure = (429, {"error": {"message": "rate limit " + _CANARY}}) if review else _completion("rate limit " + _CANARY)
     replies.extend(([valid] if review else []) + [failure, valid, valid])
 
-    result = _evaluate(verify=review)
+    # No rate-limit budget, so the throttled review stays a failure.
+    result = _evaluate(verify=review, rate_limit_wait_seconds=0)
     with pytest.raises(GateFailure):
         assert_checks(result)
     assert len(requests) == (2 if review else 1)
@@ -168,9 +172,103 @@ def test_full_fallback_reply_must_match_schema(provider, condition_mode):
 
 @pytest.fixture
 def no_backoff(monkeypatch):
+    """Record each wait instead of sleeping, and let the judge's clock advance by it."""
     waits = []
-    monkeypatch.setattr("martian.evals._judge_transport._sleep", waits.append)
+    now = [0.0]
+
+    def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("martian.evals._judge_transport._sleep", sleep)
+    monkeypatch.setattr("martian.evals._judge_transport._clock", lambda: now[0], raising=False)
     return waits
+
+
+_THROTTLED = {"error": {"message": "rate limit"}}
+
+
+def test_throttling_longer_than_the_old_retry_window_is_outlasted(provider, no_backoff):
+    # The reported defect: five retries over about half a minute, then a judge error.
+    replies, requests = provider
+    replies.extend([(429, _THROTTLED, {"Retry-After": "2"})] * 20 + [_completion({"result": [_GUIDELINE]})])
+
+    result = _evaluate(max_retries=5)
+    assert_checks(result)
+    assert len(requests) == 21
+    assert no_backoff == [2.0] * 20  # the provider's Retry-After, 40 seconds in all
+    assert _feedback_metadata(result)["martian.judge.provider_retries"] == "20"
+
+
+def test_retry_after_in_milliseconds_is_honoured(provider, no_backoff):
+    replies, _ = provider
+    replies.extend([(429, _THROTTLED, {"retry-after-ms": "250"}), _completion({"result": [_GUIDELINE]})])
+
+    assert_checks(_evaluate())
+    assert no_backoff == [0.25]
+
+
+def test_rate_limits_stop_when_the_time_budget_is_spent(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([(429, _THROTTLED, {"Retry-After": "100"})] * 10)
+
+    result = _evaluate(rate_limit_wait_seconds=250)
+    with pytest.raises(GateFailure):
+        assert_checks(result)
+    # Waited 100 + 100; the third reply asks for 100 more with only 50 left, so the judge stops.
+    assert len(requests) == 3 and no_backoff == [100.0, 100.0]
+    assert "judge_provider_throttled" in json.dumps(result.result_df["assessments"].iloc[0], default=str)
+
+
+def test_a_retry_after_beyond_the_budget_is_not_waited_for(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([(429, _THROTTLED, {"Retry-After": "1000"}), _completion({"result": [_GUIDELINE]})])
+
+    with pytest.raises(GateFailure):
+        assert_checks(_evaluate())
+    assert len(requests) == 1 and no_backoff == []
+
+
+def test_rate_limits_without_retry_after_back_off_within_the_budget(provider, no_backoff):
+    replies, requests = provider
+    replies.extend([(429, _THROTTLED)] * 8 + [_completion({"result": [_GUIDELINE]})])
+
+    assert_checks(_evaluate(max_retries=0))  # the retry count does not limit rate-limit retries
+    assert len(requests) == 9
+    assert no_backoff == sorted(no_backoff) and no_backoff[-1] <= 30.5
+
+
+def test_connection_failures_are_retried(provider, no_backoff, monkeypatch):
+    import socket
+
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+    monkeypatch.setenv("OPENAI_API_BASE", f"http://127.0.0.1:{port}/v1")
+
+    with pytest.raises(GateFailure):
+        assert_checks(_evaluate(max_retries=2))
+    assert len(no_backoff) == 2
+
+
+def test_the_rate_limit_budget_is_validated():
+    for bad in (-1, 3601, "60", True, float("nan")):
+        with pytest.raises(ValueError, match="rate_limit_wait_seconds"):
+            response_guidelines(model="openai:/fixture", rate_limit_wait_seconds=bad)
+
+
+def test_retry_after_dates_are_read_as_seconds():
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    from martian.evals._judge_transport import _retry_after
+
+    later = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    assert 25 <= _retry_after({"Retry-After": later}) <= 30
+    assert _retry_after({"Retry-After": "7"}) == 7.0
+    assert _retry_after({"retry-after-ms": "1500"}) == 1.5
+    assert _retry_after({"Retry-After": "soon"}) is None
+    assert _retry_after({}) is None
 
 
 def test_rate_limit_is_retried_with_backoff_and_then_judged(provider, no_backoff):
@@ -195,9 +293,9 @@ def test_a_received_reply_is_never_retried(provider, no_backoff):
     assert len(requests) == 1 and no_backoff == []
 
 
-def test_rate_limit_retries_are_bounded(provider, no_backoff):
+def test_server_error_retries_are_bounded(provider, no_backoff):
     replies, requests = provider
-    replies.extend([(429, {"error": {"message": "rate limit"}})] * 10)
+    replies.extend([(503, {"error": {"message": "overloaded"}})] * 10)
 
     result = _evaluate(max_retries=2)
     with pytest.raises(GateFailure):
