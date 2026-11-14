@@ -108,8 +108,8 @@ and give repeated check types a `name`.
 
 | File | Content |
 | --- | --- |
-| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs and the reply |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, and how many cases failed for each target error |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error, and how many earlier results were discarded (`invalidated`) |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
 | `mlflow.db` | The local MLflow store with traces and judge metadata |
 
@@ -120,6 +120,15 @@ when a case failed, and `2` when a case has no verdict or the suite file is inva
 **Options.** `--output DIR`, `--concurrency N`, `--limit N` and `--fresh`. A run that is stopped
 can be started again: finished cases are skipped, and cases that errored are tried again.
 `--fresh` discards earlier results.
+
+A finished case is reused only while nothing that produced its verdict has changed: the checks
+and their criteria, the judge model and its `inference_params`, the target, the case's own
+inputs, expectations and stored output, and the SDK version. A function target counts by the
+contents of its file. When any of these changes, the case is graded again, and the run prints how
+many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
+`timeout_seconds` or the MLflow location keeps earlier results. The SDK cannot see changes in
+modules the target file imports, or in the service behind a URL target: use `--fresh` after
+those.
 
 **Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
 to the suite file to log there instead of the local store, then open the run in the MLflow UI.
