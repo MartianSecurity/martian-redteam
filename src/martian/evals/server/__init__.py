@@ -11,9 +11,9 @@ things the core never imports:
 
 Routes read them through :func:`current_principal`, :func:`current_entitlements` and
 :func:`current_store`, and a route that serves a paid feature declares
-``dependencies=[Depends(require_entitlement(key))]``. ``GET /v1/evals/status`` is the first
-route, in the shape of the frozen evals API contract; the rest are ported from the server in
-MorningHQ/martian-notes#100 and #101.
+``dependencies=[Depends(require_entitlement(key))]``. ``GET /v1/evals/status`` and
+``GET /v1/evals/bootstrap`` are in the shape of the frozen evals API contract; the rest are ported
+from the server in MorningHQ/martian-notes#100 and #101.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 
+from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
+from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.entitlements import (
     COMMUNITY,
     EDITION_NAMES,
@@ -91,6 +93,17 @@ async def status(
     return await store.status(principal)
 
 
+@router.get("/bootstrap", response_model=Bootstrap)
+async def bootstrap(
+    principal: Annotated[Principal, Depends(current_principal)],
+    entitlements: Annotated[Entitlements, Depends(current_entitlements)],
+    store: Annotated[EvalStore, Depends(current_store)],
+) -> Bootstrap:
+    """What the UI reads at start: the principal, the edition and its feature keys, the
+    capabilities the role and edition allow, and the store's readiness."""
+    return build_bootstrap(principal, entitlements, await store.status(principal))
+
+
 def create_app(
     *,
     store: EvalStore,
@@ -111,6 +124,7 @@ def create_app(
 
 
 __all__ = [
+    "CAPABILITIES",
     "COMMUNITY",
     "EDITIONS",
     "EDITION_NAMES",
@@ -119,16 +133,21 @@ __all__ = [
     "LIMITS",
     "ON_PREMISES",
     "SINGLE_USER",
+    "Bootstrap",
+    "Capability",
     "Edition",
     "Entitlements",
     "Plan",
     "Principal",
+    "build_bootstrap",
+    "capabilities_for",
     "create_app",
     "current_entitlements",
     "current_principal",
     "current_store",
     "ensure_entitled",
     "entitlements_for",
+    "highest_role",
     "organisation_principal",
     "require_entitlement",
     "resolve_edition",
