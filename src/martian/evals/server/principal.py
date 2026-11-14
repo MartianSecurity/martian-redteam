@@ -17,12 +17,19 @@ class Principal:
     user_id: str
     organisation_id: str | None = None
     roles: frozenset[Role] = field(default_factory=frozenset)
+    email: str | None = None
+    display_name: str | None = None
+    organisation_name: str | None = None
+    platform_admin: bool = False
+    """The server's operator, who may install global datasets. The local edition has none."""
 
     def __post_init__(self) -> None:
         if not self.user_id:
             raise ValueError("a principal needs a user id")
         if self.organisation_id == "":
             raise ValueError("organisation_id is None for the single local user, never empty")
+        if self.organisation_id is None and self.organisation_name is not None:
+            raise ValueError("the single local user has no organisation to name")
 
     @property
     def kind(self) -> Literal["single_user", "organisation"]:
@@ -33,8 +40,25 @@ SINGLE_USER = Principal(user_id="local", organisation_id=None, roles=frozenset({
 """The one user of the local edition: no organisation, no sign-in, every role."""
 
 
-def organisation_principal(user_id: str, organisation_id: str, roles: frozenset[Role]) -> Principal:
+def organisation_principal(
+    user_id: str,
+    organisation_id: str,
+    roles: frozenset[Role],
+    *,
+    email: str | None = None,
+    display_name: str | None = None,
+    organisation_name: str | None = None,
+    platform_admin: bool = False,
+) -> Principal:
     """A member of an organisation, as the server resolves it from its session."""
     if not organisation_id:
         raise ValueError("an organisation principal needs an organisation id")
-    return Principal(user_id=user_id, organisation_id=organisation_id, roles=roles)
+    return Principal(
+        user_id=user_id,
+        organisation_id=organisation_id,
+        roles=roles,
+        email=email,
+        display_name=display_name,
+        organisation_name=organisation_name,
+        platform_admin=platform_admin,
+    )
