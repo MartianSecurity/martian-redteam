@@ -5,12 +5,14 @@ output folder, writes the report to the job summary, and on a pull request edits
 that carries this suite's hidden marker, creating it only when there is none. Standard library
 only, so it runs on the action's Python without further installs.
 
-The comment holds counts, check names and case ids, never inputs, replies or judge reasons.
+The comment holds counts, pass rates with their intervals, check names and case ids, never
+inputs, replies or judge reasons.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -81,6 +83,16 @@ def code(text: str, limit: int = 60, *, cell: bool = True) -> str:
     return f"{fence}{pad}{text}{pad}{fence}"
 
 
+def rate(counts: Mapping[str, Any]) -> str:
+    """A pass rate and its interval from summary.json, written as ``martian.evals.stats.rate_text``
+    writes them: the rate to the nearest percent, the bounds rounded outward."""
+    if counts["pass_rate"] is None:
+        return "—"
+    low, high = counts["confidence_95"]
+    shown = math.floor(counts["pass_rate"] * 100 + 0.5)
+    return f"{shown}% ({math.floor(low * 100 + 1e-9)}–{math.ceil(high * 100 - 1e-9)}%)"
+
+
 def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, run_url: str | None = None) -> str:
     """The comment body: the marker line, a headline, per-check counts and the cases that did not pass.
 
@@ -102,15 +114,22 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases, {summary['passed']} passed, "
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
-            "| Check | Passed | Failed | Errors |",
-            "| --- | ---: | ---: | ---: |",
+            "| Check | Passed | Failed | Errors | Pass rate (95% CI) |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ]
         checks = list(summary["checks"].items())
         for name, counts in checks[:MAX_ROWS]:
-            lines.append(f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} |")
-        lines.append(f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} |")
+            lines.append(
+                f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} | {rate(counts)} |"
+            )
+        lines.append(
+            f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} | {rate(summary)} |"
+        )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
+        if summary["groups"]:
+            plural = "group" if summary["groups"] == 1 else "groups"
+            lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
         lines.append("")
         failed = [case for case in outcome.cases if case["passed"] is False]
         errored = [case for case in outcome.cases if case["passed"] is None]

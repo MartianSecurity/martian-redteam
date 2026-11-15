@@ -75,7 +75,7 @@ and its data give them again on the next load.
 | Suite file | Model |
 | --- | --- |
 | `data` | `Suite.dataset_location`, as written. `dataset_name` is the file's stem and `dataset_digest` the digest a store gives its cases as a `DatasetVersion` |
-| A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`) |
+| A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`); a JSONL row's `group` is the tag `martian.group` in `Case.tags` |
 | No `target` | `Target` of kind `stored`: the outputs come with the cases |
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
@@ -104,7 +104,8 @@ grades stored outputs, which is a `stored` target), an `agent` target, `policies
 case passes when every check passes it), `code` or `human` scorers, a pinned scorer `version`,
 `llm_judge` scorers with different models or parameters (a file has one judge), run settings
 for a target or judge the suite does not have, and a suite with no `dataset_location`.
-`cases_to_jsonl` refuses cases with `tags` or `metadata`. The written text is then loaded again
+`cases_to_jsonl` writes the `martian.group` tag as the row's `group` and refuses cases with any
+other `tags` or with `metadata`. The written text is then loaded again
 and must give the same definition, so a field the writer does not know is refused too.
 
 `martian evals run` loads its suite with `load_suite_file`, so it refuses the same fields before
@@ -129,8 +130,11 @@ map. `martian evals run` records every case this way:
 | `fingerprint` | `CaseResult.fingerprint` |
 
 `summary.json` is derived: `cases`, `passed`, `failed` and `errors` are `Run.counts`; the per-check
-counts and `target_errors` are counted from scores and case results; `invalidated`,
-`seconds_this_run` and `output` describe that one local invocation and are not stored.
+counts and `target_errors` are counted from scores and case results; `pass_rate`,
+`confidence_95` and `groups` are computed from those verdicts and the cases' `martian.group` tags
+([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)); `invalidated`,
+`seconds_this_run` and `output` describe that one local invocation and are not stored. A
+`results.jsonl` record has no `group`: the group belongs to the case, not to its result.
 
 ## The server's evals tables
 

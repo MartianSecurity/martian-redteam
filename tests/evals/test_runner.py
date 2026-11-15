@@ -13,6 +13,7 @@ from martian.config import ConfigError
 from martian.evals.local import create_local_app
 from martian.evals.runner import load_cases, load_suite, run_suite
 from martian.evals.state import STATE
+from martian.evals.stats import proportion_interval, wilson
 from martian.evals.suite_file import load_suite_file
 from tests.evals.evals_contract import validate_response
 
@@ -70,7 +71,11 @@ def test_run_writes_results_summary_and_junit_without_any_platform_setting(tmp_p
     write_jsonl(tmp_path)
     summary = run_suite(write_suite(tmp_path))
     assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (3, 1, 2, 0)
-    assert summary["checks"]["no_leak"] == {"passed": 2, "failed": 1, "errors": 0}
+    no_leak = summary["checks"]["no_leak"]
+    assert {key: no_leak[key] for key in ("passed", "failed", "errors")} == {"passed": 2, "failed": 1, "errors": 0}
+    assert no_leak["pass_rate"] == 2 / 3 and no_leak["confidence_95"] == list(wilson(2, 3))
+    assert summary["pass_rate"] == 1 / 3 and summary["confidence_95"] == list(wilson(1, 3))
+    assert summary["groups"] is None
     records = [json.loads(line) for line in (tmp_path / "results/results.jsonl").read_text().splitlines()]
     by_id = {r["id"]: r for r in records}
     assert by_id["leak"]["passed"] is False and by_id["leak"]["checks"]["no_leak"]["passed"] is False
@@ -78,7 +83,43 @@ def test_run_writes_results_summary_and_junit_without_any_platform_setting(tmp_p
     assert json.loads((tmp_path / "results/summary.json").read_text())["failed"] == 2
     suite = ET.parse(tmp_path / "results/junit.xml").getroot()
     assert (suite.get("tests"), suite.get("failures"), suite.get("errors")) == ("3", "2", "0")
+    properties = {p.get("name"): float(p.get("value")) for p in suite.iter("property")}
+    low, high = wilson(1, 3)
+    assert properties["pass_rate"] == pytest.approx(1 / 3, rel=1e-5)
+    assert (properties["pass_rate_95_low"], properties["pass_rate_95_high"]) == pytest.approx((low, high), rel=1e-5)
+    assert properties["check.no_leak.pass_rate_95_low"] == pytest.approx(wilson(2, 3)[0], rel=1e-5)
+    assert "case_groups" not in properties
     assert (tmp_path / "results/mlflow.db").exists()
+
+
+def test_the_summary_intervals_allow_for_the_groups_the_data_names(tmp_path):
+    # Two groups of related cases that each agree inside: eight cases weigh as 8/7 of a case.
+    cases = [
+        {"id": f"{group}-{n}", "input": "hi", "output": output, "expectations": {"secret": "piano"}, "group": group}
+        for group, output in (("declines", "I cannot."), ("leaks", "It is piano."))
+        for n in range(4)
+    ]
+    write_jsonl(tmp_path, cases)
+    summary = run_suite(write_suite(tmp_path))
+    assert (summary["passed"], summary["failed"], summary["groups"]) == (4, 4, 2)
+    assert summary["pass_rate"] == 0.5
+    assert summary["confidence_95"] == pytest.approx(
+        proportion_interval([True] * 4 + [False] * 4, ["a"] * 4 + ["b"] * 4)
+    )
+    assert summary["confidence_95"][0] < wilson(4, 8)[0]
+    # The group is the data's, not the result's: results.jsonl records are as before.
+    records = [json.loads(line) for line in (tmp_path / "results/results.jsonl").read_text().splitlines()]
+    assert all("group" not in record for record in records)
+    suite = ET.parse(tmp_path / "results/junit.xml").getroot()
+    assert {p.get("name"): p.get("value") for p in suite.iter("property")}["case_groups"] == "2"
+    result = CliRunner().invoke(app, ["evals", "run", str(tmp_path / "evals.yaml")])
+    assert "50% (6–94%)" in result.output and "Intervals allow for 2 case groups" in result.output
+
+
+def test_a_case_group_must_be_text(tmp_path):
+    write_jsonl(tmp_path, [{**CASES[0], "group": 3}])
+    with pytest.raises(ConfigError, match="case safe: `group` must be a non-empty string"):
+        run_suite(write_suite(tmp_path))
 
 
 def test_rerun_skips_finished_cases_and_fresh_starts_over(tmp_path):
@@ -296,6 +337,7 @@ def test_command_prints_a_table_and_exits_nonzero_on_failures(tmp_path):
     result = CliRunner().invoke(app, ["evals", "run", str(write_suite(tmp_path)), "--output", str(tmp_path / "out")])
     assert result.exit_code == 1
     assert "no_leak" in result.output and "All checks" in result.output
+    assert "Pass rate (95% CI)" in result.output and "33% (6–80%)" in result.output and "67% (20–94%)" in result.output
     assert (tmp_path / "out/results.jsonl").exists()
     assert "Run evals-1 is in the local Evals UI: martian ui\n" in result.output
 

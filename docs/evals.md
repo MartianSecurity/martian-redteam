@@ -50,9 +50,12 @@ run is recorded in the data folder of the
 [`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
-to the target as keyword arguments), and optional `id`, `output` and `expectations`. CSV takes
-the columns `input`, optional `id` and `output`; every other column becomes an expectation of
-that name. There is no row limit.
+to the target as keyword arguments), and optional `id`, `output`, `expectations` and `group`.
+`group` is a string that names a set of related cases, such as paraphrases of one attack or turns
+of one conversation, so the summary's intervals allow for them
+([pass rates and intervals](#pass-rates-and-confidence-intervals)). CSV takes the columns `input`,
+optional `id` and `output`; every other column becomes an expectation of that name, so a CSV case
+has no group. There is no row limit.
 
 **URL target.** When the agent is behind an HTTP endpoint, name the endpoint instead of a
 Python file:
@@ -110,13 +113,14 @@ and give repeated check types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error, and how many earlier results were discarded (`invalidated`) |
-| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error; and how many earlier results were discarded (`invalidated`) |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), and `case_groups` when the data names groups |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
-they are sensitive. The command also prints a table and exits `0` when every case passed, `1`
-when a case failed, and `2` when a case has no verdict or the suite file is invalid.
+they are sensitive. The command also prints a table of the counts and each pass rate with its
+interval, such as `67% (20–94%)`, and exits `0` when every case passed, `1` when a case failed,
+and `2` when a case has no verdict or the suite file is invalid.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
 run that is stopped can be started again: finished cases are skipped, and cases that errored are
@@ -193,6 +197,53 @@ call still fails is an error in the results, and the rest of the run carries on.
 
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
+
+## Pass rates and confidence intervals
+
+A pass rate from a few dozen cases is uncertain: 8 of 10 and 80 of 100 are both 80%. The pass
+rates of a suite-file run, of the evals core's scorecards and of the Evals UI's pages come with
+their 95% confidence interval, and a scorecard's mean scores with theirs. `martian.evals.stats`
+computes them with the standard library only. The pytest gate (`assert_gate`) and red-team pass
+rates do not report intervals.
+
+| Measure | Method | Notes |
+| --- | --- | --- |
+| Pass rate | Wilson score interval | Stays inside 0–100% and keeps close to 95% coverage down to a handful of cases. 0 of n has a lower bound of exactly 0% and an upper bound above it; n of n the reverse; 1 case is never a single point |
+| Mean score | Student t interval: mean ± t(0.975, n − 1) × s / √n | Needs two values; with one there is no interval. Values that are all equal give a zero-width interval |
+| Grouped cases | Both widened by the cluster-robust (CR1) design effect | See below |
+
+A pass rate counts only cases with a verdict: errors and missing scores are reported beside it,
+not counted as failures. Shown as text, a rate is rounded to the nearest percent and its bounds
+outward, so `67% (20–94%)` always contains the computed interval.
+
+**Grouped cases.** Cases that share a `group` in the data file are related, so they tell less than
+the same number of independent cases. With n cases in k ≥ 2 groups and e the difference of each
+case's value (1 for a pass, 0 for a fail, or the score) from the mean, the design effect is
+
+```text
+deff = k(n − 1) / ((k − 1) n) × Σ over groups (Σ e in the group)² / Σ e²
+```
+
+and never below 1, so grouping never narrows an interval. A pass rate takes the Wilson interval at
+the effective sample size n / deff; a mean takes the t interval with its variance multiplied by
+deff, on k − 1 degrees of freedom. When every case is in a group of its own, deff is exactly 1
+and the intervals are the ungrouped ones. A case without a `group` is a group of its own. With
+fewer than two groups, or when every case has the same outcome, there is nothing to estimate the
+grouping from and the cases count as independent. Two groups of four cases that each agree
+inside give deff = 7: the eight cases weigh as 8/7 of a case, and 4 of 8 reads `50% (6–94%)`
+rather than the ungrouped `50% (21–79%)`.
+
+**Where they appear.**
+
+| Where | Interval |
+| --- | --- |
+| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | Wilson for each check's pass rate and the run's, grouped when the data names groups |
+| The evals core's scorecards (run detail, Compare, Monitoring) | `confidence_95`, Wilson, for a boolean scorer's pass rate; `mean_confidence_95`, Student t, for a numeric scorer's mean ([read routes](evals-core.md#read-routes)) |
+| The Evals UI's Runs, run detail, Compare and Overview | Wilson from the counts each response carries, ungrouped |
+
+Case results do not carry a case's group, so the core and the Evals UI treat every case as
+independent; only the command line's summary allows for groups. The Evals UI's Overview counts
+traces, which can share a session, as independent too.
 
 ## Use
 

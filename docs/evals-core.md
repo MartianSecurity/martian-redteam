@@ -210,6 +210,11 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
   jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
   (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
+  Each criterion carries `confidence_95`, the Wilson interval of a boolean scorer's pass rate, as
+  the server's does, and `mean_confidence_95`, the Student t interval of a numeric scorer's mean
+  (`null` for fewer than two values), which the server's scorecard does not have yet
+  ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)). Both treat the
+  run's cases as independent.
 - **Members and queues.** The workbench's `members` is the requesting principal only: the core
   knows no organisation membership. Its `queues` are the run's review queues, newest first, at most
   100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
