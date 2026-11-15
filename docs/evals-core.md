@@ -533,7 +533,11 @@ requested scores, each of its judge's type, a model name, and revision `martian-
 (`v2` with registered judges). Agents judges on the model its operator configured and reports it
 as `bedrock/<model>` with no version, so a request pinned to a model or an endpoint is refused
 before any call ("The Agents judge runs on its operator's model; this judge is pinned to ...").
-An installation on the Agents judge leaves the default judge model unset.
+An installation on the Agents judge leaves the default judge model unset. It uses the route's
+static authorization; the per-case target lease the Martian server sends
+(`X-Martian-Target-Lease` with an `action_id`) is not part of it, and a server that needs it
+supplies its own `Judge` when it mounts the core (MorningHQ/martian-notes#102). It is separate
+from the worker's `AgentExecutor`, which calls registered agents as targets.
 
 **What a score says when there is no verdict.** A judge that fails with a message it can show
 (`JudgeError`) puts that message on each score of the request: the SDK judge's failure messages
