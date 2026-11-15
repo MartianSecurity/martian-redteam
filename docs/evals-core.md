@@ -98,8 +98,9 @@ sign-in has been checked:
 ```
 
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
-own routes this way: the review queue routes, the question library and answering a queue's item
-need `review_queues`, and `GET /v1/evals/monitoring` needs `monitoring`
+own routes this way: the review queue routes, the question library, answering a queue's item and
+the reviewers' agreement (`GET /v1/evals/reviewer-agreement`) need `review_queues`, and
+`GET /v1/evals/monitoring` needs `monitoring`
 ([write routes](#write-routes)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
 MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
@@ -207,7 +208,8 @@ The core adds read routes of its own, which the server's contract does not have:
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
-| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and complete reviews. Store: the registered judges, and the newest 1,000 traces |
+| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `reviewer_agreement` is the [reviewers' agreement](evals.md#agreement-between-reviewers) on each question named like a judge of `items`, as `GET /reviewer-agreement` gives it across queues. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and reviews. Store: the registered judges, the runs' review queues and the newest 1,000 traces |
+| `GET /v1/evals/reviewer-agreement` | People's agreement with each other on the items two or more of them answered ([agreement between reviewers](evals.md#agreement-between-reviewers)): `project_id`, `minimum` (30), `queues`, one per review queue of the project, newest first, each with `queue_id`, `name`, `run_id` and `questions`, and `questions`, one per question name across every queue that asks it. A question's report has `question`, `kind`, `answered`, `shared` (the items two or more reviewers answered, the ones compared), `reviewers`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `method` (`cohen` or `lin` for two reviewers, `fleiss` or `icc` for more), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `mean_absolute_difference` and its `_confidence_95`, and `concordance`. Below `minimum` the counts and `agreed` are given and `method` and every rate, interval and coefficient are `null`. `project_id` and `queue_id` narrow it to a project and one queue; a project or queue that does not exist is `404`. It needs `review_queues` | Records: every link of each run's review chains. Store: the runs' review queues |
 | `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `panel` (the members a judge graded by a [panel](evals.md#a-panel-of-judges) runs on, each `model` and `endpoint`, in place of a model; empty for any other judge), `status` (`checked` or `unchecked`), `reason` (`null`, `none` when it has no calibration, or `model_changed` when it runs on another model, or panel, than its calibration was measured on) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
 | `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `panel`, `labelled`, `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved), `actor_id` and `created_at`. `project_id` names its project | Records |
 
@@ -266,6 +268,12 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   anything. Traces are read newest first, at most 1,000 (`traces_examined`); `traces_truncated`
   says older ones were left out. Runs, their scores and their reviews are read in full. The
   report is the core's own because the judges' responses are typed in the frozen contract.
+- **Reviewers' agreement.** A second reviewer's answer follows the first in the case's chain for
+  the question and becomes the current review, the one the contract's review routes and the judge
+  report read. The reviewer report reads every link of the chains, each reviewer's newest, so both
+  answers count. It is the core's own for the same reason as the judge report, and the judge
+  report carries it beside its items rather than in them, so a judge version's
+  [calibration](evals.md#calibration), its item of the report, is unchanged.
 - **Judge calibrations.** A judge version is `checked` while its newest calibration was measured
   on the model it runs on now, as a scoring job admitted now would pin it; the routes are the
   core's own for the same reason as the agreement report. `POST /judge-calibrations` saves one
@@ -335,7 +343,9 @@ The reads that come with their writes (saved views, scorers, judges, suites, rev
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`;
-`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics, and
+`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics,
+`tests/evals/test_reviewer_agreement.py` the reviewers' agreement route on both, two people
+answering a queue through the review route, and its statistics, and
 `tests/evals/test_calibration.py` the calibration routes.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
@@ -1091,8 +1101,9 @@ reported and calibrated as one judge.
   [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own routes for the attempts of repeated cases, with the run's reliability and its
-  flaky cases, for each judge version's agreement with people's labels, and for each judge
-  version's calibration, which a core's own write route saves. Another registers a judge graded
+  flaky cases, for each judge version's agreement with people's labels, for people's agreement
+  with each other per review queue, and for each judge version's calibration, which a core's own
+  write route saves. Another registers a judge graded
   by a [panel of judges](evals.md#a-panel-of-judges), which the worker grades on each member.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
@@ -2382,9 +2393,9 @@ an export holds, resuming, and what the receiving store assigns are in
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_agreement.py`, `test_calibration.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
-`test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,
-`test_worker_limits.py`, `test_worker_concurrency.py`, `test_no_outbound.py` and the store and
-record tests run the core without the backend. The `Evals core` job in CI runs them with the
-model tests, on Postgres as well as SQLite.
+`test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`, `test_write_routes.py`,
+`test_write_contract.py`, `test_user_ids.py`, `test_worker.py`, `test_worker_process.py`,
+`test_worker_targets.py`, `test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`,
+`test_worker_queue.py`, `test_worker_limits.py`, `test_worker_concurrency.py`,
+`test_no_outbound.py` and the store and record tests run the core without the backend. The
+`Evals core` job in CI runs them with the model tests, on Postgres as well as SQLite.

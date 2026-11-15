@@ -29,7 +29,8 @@ frozen evals API contract: status and bootstrap here, the read routes in ``runs`
 ``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
 ``POST /v1/traces``, which records an application's spans as traces through the store. Some routes
 are the core's own, which the contract does not have: a run's attempts in ``runs``, the judges'
-agreement with people in ``agreement``, and each judge version's calibration in ``calibration``.
+agreement with people and people's agreement with each other in ``agreement``, and each judge
+version's calibration in ``calibration``.
 """
 
 from __future__ import annotations

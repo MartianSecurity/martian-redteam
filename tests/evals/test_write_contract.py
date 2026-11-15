@@ -66,9 +66,11 @@ WRITE_OPERATIONS = [
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: a run's attempts
-# (MorningHQ/martian-notes#180), the judges' agreement with people (MorningHQ/martian-notes#185) and
-# each judge version's calibration (MorningHQ/martian-notes#186).
+# (MorningHQ/martian-notes#180), the judges' agreement with people (MorningHQ/martian-notes#185),
+# people's agreement with each other (MorningHQ/martian-notes#189) and each judge version's
+# calibration (MorningHQ/martian-notes#186).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/judge-agreement")}
+OWN_NAMES |= {("get", "/v1/evals/reviewer-agreement")}
 OWN_NAMES |= {
     ("get", "/v1/evals/judge-calibrations"),
     ("post", "/v1/evals/judge-calibrations"),
