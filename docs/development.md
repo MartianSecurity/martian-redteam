@@ -22,7 +22,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/trace_conventions.py` | The versioned table that maps OpenTelemetry GenAI, OpenInference and MLflow span attributes onto the trace fields ([evals core](evals-core.md#trace-conventions)) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
-| `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run in a process of its own that holds a lock on the run |
+| `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run queued in the data folder and run in a process of its own |
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `src/martian/evals/inspect_import.py` | Inspect AI `.eval` and `.json` logs read against Inspect's log schema and recorded in the data folder as runs, the same way |
 | `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results |

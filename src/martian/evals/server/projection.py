@@ -70,6 +70,7 @@ RUN_STATUS = {
     "partial": "FINISHED",
     "failed": "FAILED",
     "cancelled": "KILLED",
+    "stopped": "KILLED",
 }
 USAGE_NOTE = "Native instrumented usage is shown when supplied; missing token/cost values remain unavailable."
 

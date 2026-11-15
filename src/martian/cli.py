@@ -78,6 +78,26 @@ def run_evals(
             "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
         ),
     ] = None,
+    max_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--max-seconds",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run after this many seconds; run it again to resume. "
+            "Replaces limits.max_seconds.",
+        ),
+    ] = None,
+    max_judge_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-judge-tokens",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run once its LLM judges have used this many tokens; run it again "
+            "to resume. Replaces limits.max_judge_tokens.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -100,12 +120,15 @@ def run_evals(
             repeats=repeats,
             fresh=fresh,
             home=data_dir,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
         return
-    if any(value is not None for value in (output, concurrency, limit, repeats, data_dir)) or fresh:
+    suite_only = (output, concurrency, limit, repeats, data_dir, max_seconds, max_judge_tokens)
+    if fresh or any(option is not None for option in suite_only):
         typer.echo(
-            "--output, --concurrency, --limit, --repeats, --fresh and --data-dir apply to a suite file "
-            "(evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh, --max-seconds, --max-judge-tokens and "
+            "--data-dir apply to a suite file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -125,6 +148,8 @@ def _run_suite(
     repeats: int | None,
     fresh: bool,
     home: Path | None,
+    max_seconds: float | None = None,
+    max_judge_tokens: int | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -146,6 +171,8 @@ def _run_suite(
             progress=console.print,
             home=home,
             repeats=repeats,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -159,10 +186,10 @@ def _run_suite(
             "security check (security), or the suite's rule (suite). Reliability counts the cases that "
             "passed every attempt"
         )
-    table = Table(
-        title=f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else ""),
-        caption="; ".join(notes) or None,
-    )
+    title = f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else "")
+    if summary["not_run"]:
+        title += f", {summary['not_run']} not run"
+    table = Table(title=title, caption="; ".join(notes) or None)
     columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
     for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
@@ -204,6 +231,17 @@ def _run_suite(
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
             console.print(f"{count} {unit}, {label}: {reason}", markup=False, highlight=False)
+    if summary["not_run"]:
+        # A run stopped at a limit, or cancelled, counts only the cases it finished above.
+        why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+        partly = " A case the run stopped in the middle of runs all of its attempts again." if plan else ""
+        console.print(
+            f"{why}: {summary['not_run']} case(s) not run. Run the same command again to resume after the cases "
+            f"it finished.{partly}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
     recorded = summary["run"]
     ui = (
@@ -213,7 +251,8 @@ def _run_suite(
     console.print(
         f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
     )
-    raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
+    # A case with no verdict, or one the run stopped before, is never a pass.
+    raise typer.Exit(code=2 if summary["errors"] or summary["not_run"] else 1 if summary["failed"] else 0)
 
 
 @import_app.command("inspect")
@@ -538,6 +577,16 @@ def run_ui(
         ),
     ] = None,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the UI in the default browser.")] = True,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            envvar="MARTIAN_EVALS_CONCURRENCY",
+            min=1,
+            help="How many runs, and how many scoring jobs, may be in progress at once; each runs in a process of "
+            "its own.",
+        ),
+    ] = 1,
 ) -> None:
     """Open the Evals UI on this machine: one user, no login, everything stored locally on SQLite."""
     if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
@@ -560,7 +609,7 @@ def run_ui(
     try:
         # The container image's settings (see BIND_ENV); unset, the server stays on 127.0.0.1.
         host = listen_address(os.environ.get(BIND_ENV))
-        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)))
+        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)), concurrency=concurrency)
         serve(
             local,
             host=host,
