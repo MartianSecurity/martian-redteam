@@ -62,6 +62,22 @@ EVERY_FIELD_URL = {
         {"type": "matches", "pattern": "^[A-Z]"},
         {"type": "not_matches", "name": "no_api_key", "pattern": "sk-[A-Za-z0-9]{8,}"},
         {"type": "is_json", "required_keys": ["answer", "lang"]},
+        {"type": "contains_any", "values": ["sorry", "cannot"], "case_sensitive": True},
+        {"type": "contains_all", "name": "both_words", "expectation": "must_say"},
+        {"type": "equals", "values": ["No."], "expectation": "answer", "case_sensitive": True},
+        {"type": "starts_with", "values": ["Sorry"]},
+        {"type": "ends_with", "expectation": "sign_off"},
+        {"type": "similarity", "expectation": "reference", "min_similarity": 0.8, "case_sensitive": True},
+        {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "required": ["answer"],
+                "properties": {"answer": {"type": "string", "maxLength": 200}, "lang": {"enum": ["en", "fr"]}},
+            },
+        },
+        {"type": "length", "min_length": 1, "max_length": 800},
+        {"type": "latency", "max_ms": 2500.0},
     ],
     "concurrency": 8,
     "batch": 10,
@@ -72,7 +88,7 @@ EVERY_FIELD_URL = {
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
     "target": {"file": "agent.py", "function": "answer"},
-    "checks": [{"type": "contains", "values": ["hello"]}],
+    "checks": [{"type": "contains", "values": ["hello"]}, {"type": "cost", "max_usd": 0.02, "max_tokens": 4000}],
 }
 
 
@@ -88,7 +104,7 @@ def runner_fields(model: type[BaseModel] = runner.Suite, prefix: str = "") -> se
     """Every field the runner's suite file schema accepts, nested ones as ``parent.child``."""
     found = set()
     for name, info in model.model_fields.items():
-        found.add(prefix + name)
+        found.add(prefix + (info.alias or name))
         for kind in typing.get_args(info.annotation) or (info.annotation,):
             if isinstance(kind, type) and issubclass(kind, BaseModel):
                 found |= runner_fields(kind, f"{prefix}{name}.")
@@ -101,7 +117,7 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            if isinstance(nested, dict) and name not in ("headers", "body", "inference_params", "conditions"):
+            if isinstance(nested, dict) and name not in ("headers", "body", "inference_params", "conditions", "schema"):
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
 
@@ -126,7 +142,13 @@ def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
     assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS)
     used = set().union(*CHECK_OPTIONS.values()) | {"type", "name"}
-    assert used == set(runner.CheckSpec.model_fields)
+    assert used == {info.alias or name for name, info in runner.CheckSpec.model_fields.items()}
+
+
+def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
+    check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
+    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
+    assert set(runner.TEXT_CHECKS + runner.CALL_CHECKS) <= set(runner.CHECKS)
 
 
 def test_the_every_field_suites_set_every_field():
@@ -186,6 +208,13 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         type="contains",
         parameters={"values": ["cannot"], "expectation": "must_say", "any_of": True, "case_sensitive": True},
     )
+    by_name = {scorer.name: scorer for scorer in suite.scorers}
+    assert by_name["both_words"] == ScorerVersion(
+        name="both_words", kind="check", type="contains_all", parameters={"expectation": "must_say"}
+    )
+    # The file's `schema` keeps its name in the model, though the runner's field is json_schema.
+    assert by_name["json_schema"].parameters["schema"]["required"] == ["answer"]
+    assert by_name["latency"].parameters == {"max_ms": 2500.0}
     assert suite.settings.model_dump() == {
         "concurrency": 8,
         "batch": 10,
@@ -296,6 +325,13 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
             "guidelines does not apply to rubric checks",
         ),
         ({"judge": {"model": "openai:/m"}}, "judge: no check is an LLM judge"),
+        ({"checks": [{"type": "is_json", "schema": {"type": "object"}}]}, "schema does not apply to is_json checks"),
+        ({"checks": [{"type": "equals", "values": ["a"], "any_of": True}]}, "any_of does not apply to equals checks"),
+        (
+            {"target": {"file": "agent.py"}, "checks": [{"type": "latency", "max_ms": 10, "max_tokens": 5}]},
+            "max_tokens does not apply to latency checks",
+        ),
+        ({"checks": [{"type": "json_schema", "json_schema": {}}]}, "json_schema: Extra inputs are not permitted"),
     ],
 )
 def test_a_field_the_model_would_lose_is_refused_on_load(suite, problem, tmp_path):
@@ -337,6 +373,10 @@ def judge(name="rubric_judge", model="openai:/judge-model", **fields):
         (
             {"scorers": [ScorerVersion(name="c", kind="check", type="contains", parameters={"pattern": "x"})]},
             "pattern is not an option of contains checks",
+        ),
+        (
+            {"scorers": [ScorerVersion(name="s", kind="check", type="json_schema", parameters={"json_schema": {}})]},
+            "json_schema is not an option of json_schema checks",
         ),
         ({"scorers": [judge(), judge(name="second")]}, "invalid suite file: .*at most one check of each judge type"),
         (

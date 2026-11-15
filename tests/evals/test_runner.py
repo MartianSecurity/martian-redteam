@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from martian.cli import app
 from martian.config import ConfigError
+from martian.evals import runner
 from martian.evals.local import create_local_app
 from martian.evals.runner import load_cases, load_suite, run_suite
 from martian.evals.state import STATE
@@ -276,6 +277,21 @@ def test_cases_load_from_jsonl_and_csv_with_the_same_shape(tmp_path):
         ("data: c.jsonl\nchecks: [{type: matches}]", "pattern"),
         ("data: c.jsonl\nchecks: [{type: is_json}, {type: is_json}]", "unique"),
         ("data: c.jsonl\nchecks: [{type: is_json}]\nupload: true", "upload"),
+        ("data: c.jsonl\nchecks: [{type: equals}]", "values or an expectation key"),
+        ("data: c.jsonl\nchecks: [{type: similarity, values: [a]}]", "needs min_similarity"),
+        ("data: c.jsonl\nchecks: [{type: similarity, values: [a], min_similarity: 2}]", "min_similarity"),
+        ("data: c.jsonl\nchecks: [{type: json_schema}]", "needs a schema"),
+        ("data: c.jsonl\nchecks: [{type: json_schema, schema: {type: text}}]", "schema.type must be one of"),
+        ("data: c.jsonl\nchecks: [{type: length}]", "min_length, max_length or both"),
+        ("data: c.jsonl\nchecks: [{type: length, min_length: 9, max_length: 3}]", "more than max_length"),
+        ("data: c.jsonl\ntarget: {file: a.py}\nchecks: [{type: latency}]", "needs max_ms"),
+        ("data: c.jsonl\ntarget: {file: a.py}\nchecks: [{type: cost}]", "max_usd, max_tokens or both"),
+        ("data: c.jsonl\nchecks: [{type: latency, max_ms: 100}]", "latency measures the target's call"),
+        (
+            "data: c.jsonl\ntarget: {url: 'http://127.0.0.1:1/x', body: {m: '{{input}}'}}\n"
+            "checks: [{type: cost, name: budget, max_tokens: 5}]",
+            "budget reads the token usage and cost .* URL target's call records neither",
+        ),
     ],
 )
 def test_invalid_suite_files_are_rejected_with_the_field_named(tmp_path, text, problem):
@@ -671,3 +687,68 @@ def test_the_command_records_the_run_in_the_data_folder_it_names(tmp_path):
     assert (folder / "martian.db").exists() and not (tmp_path / "evals-home").exists()
     refused = CliRunner().invoke(app, ["evals", "run", "tests/evals", "--data-dir", str(folder)])
     assert refused.exit_code == 2 and "--data-dir apply to a suite file" in refused.output
+
+
+DETERMINISTIC_AGENT = """
+import mlflow
+from mlflow.entities import SpanType
+from mlflow.tracing.constant import SpanAttributeKey
+
+
+USAGE = {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}
+COST = {"input_cost": 0.0002, "output_cost": 0.0004, "total_cost": 0.0006}
+
+
+def target(message):
+    with mlflow.start_span(name="model", span_type=SpanType.CHAT_MODEL) as span:
+        span.set_attribute(SpanAttributeKey.CHAT_USAGE, USAGE)
+        span.set_attribute(SpanAttributeKey.LLM_COST, COST)
+    return '{"answer": "Paris", "lang": "en"}'
+"""
+
+EVERY_CHECK = """
+data: cases.jsonl
+target:
+  file: agent.py
+checks:
+  - {type: contains, values: [Paris]}
+  - {type: not_contains, values: [London]}
+  - {type: contains_any, values: [Rome, Paris]}
+  - {type: contains_all, expectation: words}
+  - {type: equals, expectation: reply}
+  - {type: starts_with, values: ['{"answer"']}
+  - {type: ends_with, values: ['"en"}']}
+  - {type: similarity, values: ['{"answer": "Paris", "lang": "fr"}'], min_similarity: 0.9}
+  - {type: matches, pattern: 'Par[a-z]+'}
+  - {type: not_matches, pattern: 'sk-[A-Za-z0-9]{8,}'}
+  - {type: is_json, required_keys: [answer]}
+  - {type: json_schema, schema: {type: object, required: [answer], properties: {answer: {type: string}}}}
+  - {type: length, min_length: 10, max_length: 100}
+  - {type: latency, max_ms: 60000}
+  - {type: cost, max_usd: 0.01, max_tokens: 100}
+"""
+
+
+def test_a_suite_file_runs_every_deterministic_check_with_no_model_call(tmp_path, monkeypatch):
+    def no_model_call(*args, **kwargs):
+        raise AssertionError("a deterministic check called a model")
+
+    # Every way the SDK reaches a model.
+    for path in ("judges.invoke_response_judge", "_judge_transport._post_chat", "_judge_transport._litellm_completion"):
+        monkeypatch.setattr(f"martian.evals.{path}", no_model_call)
+    row = {"id": "capital", "input": "Capital of France? Reply in JSON."}
+    row["expectations"] = {"words": ["answer", "Paris"], "reply": '{"answer": "Paris", "lang": "en"}'}
+    (tmp_path / "cases.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (tmp_path / "agent.py").write_text(DETERMINISTIC_AGENT, encoding="utf-8")
+    (tmp_path / "evals.yaml").write_text(EVERY_CHECK, encoding="utf-8")
+    summary = run_suite(tmp_path / "evals.yaml")
+    assert set(summary["checks"]) == set(runner.CHECKS)
+    record = json.loads((tmp_path / "results/results.jsonl").read_text().splitlines()[-1])
+    assert {label: check["passed"] for label, check in record["checks"].items()} == dict.fromkeys(runner.CHECKS, True)
+    assert record["checks"]["cost"]["rationale"] == "30 tokens, $0.0006"
+    assert summary["passed"] == 1
+
+    # A tighter limit fails the case rather than erroring it.
+    (tmp_path / "evals.yaml").write_text(EVERY_CHECK.replace("max_tokens: 100", "max_tokens: 29"), encoding="utf-8")
+    tightened = run_suite(tmp_path / "evals.yaml")
+    assert (tightened["failed"], tightened["checks"]["cost"]) == (1, {"passed": 0, "failed": 1, "errors": 0})
