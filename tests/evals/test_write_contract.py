@@ -25,6 +25,8 @@ WRITE_OPERATIONS = [
     ("post", "/v1/evals/suites"),
     ("get", "/v1/evals/judges"),
     ("post", "/v1/evals/judges"),
+    ("get", "/v1/evals/judge-model"),
+    ("put", "/v1/evals/judge-model"),
     ("post", "/v1/evals/{run_id}/items/{item_id}/reviews"),
     ("get", "/v1/evals/reviews"),
     ("get", "/v1/evals/review-queues"),

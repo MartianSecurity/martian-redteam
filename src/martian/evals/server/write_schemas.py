@@ -1,6 +1,6 @@
 """The typed request and response bodies of the write routes, as the frozen evals contract has them.
 
-Each class is the schema of the same name in version 2 of ``contracts/evals-api.json`` in
+Each class is the schema of the same name in version 3 of ``contracts/evals-api.json`` in
 MorningHQ/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
 ``app/schemas.py``, the scoring, review and suite requests from ``app/evals_workbench_schema.py``,
 the project, judge, question, annotation and view requests from ``app/evals_explorer_schema.py``,
@@ -27,6 +27,7 @@ from pydantic import (
     model_validator,
 )
 
+from martian.evals.judge_settings import ENDPOINT_PATTERN, MODEL_URI_PATTERN, judge_model_problem
 from martian.evals.server.schemas import TraceQuery
 from martian.evals.worker.scorers import CODE_SCORERS, JUDGE_SCORERS
 
@@ -233,6 +234,10 @@ class ProjectRequest(StrictRequest):
         return self
 
 
+JudgeModelUri = Annotated[str, Field(max_length=240, pattern=MODEL_URI_PATTERN)]
+JudgeEndpoint = Annotated[str, Field(max_length=500, pattern=ENDPOINT_PATTERN)]
+
+
 class JudgeVersionRequest(StrictRequest):
     request_id: uuid.UUID
     project_id: uuid.UUID | None = None
@@ -244,11 +249,15 @@ class JudgeVersionRequest(StrictRequest):
     options: list[str] = Field(default_factory=list, max_length=20)
     minimum: float = Field(default=0, allow_inf_nan=False)
     maximum: float = Field(default=1, allow_inf_nan=False)
+    model: JudgeModelUri | None = None
+    endpoint: JudgeEndpoint | None = None
 
     @model_validator(mode="after")
     def definition(self) -> JudgeVersionRequest:
         if self.name in RESERVED_NAMES:
             raise ValueError("This name is reserved for an existing criterion")
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
         if "{{ outputs }}" not in self.instructions:
             raise ValueError("Include {{ outputs }} in the judge instructions")
         # Bounds apply only to numeric judges; normalise them so a definition has one form.
@@ -263,6 +272,23 @@ class JudgeVersionRequest(StrictRequest):
             maximum=self.maximum,
         )
         return self
+
+
+class JudgeModelRequest(StrictRequest):
+    model: JudgeModelUri | None = None
+    endpoint: JudgeEndpoint | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> JudgeModelRequest:
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
+        return self
+
+
+class JudgeModelOut(BaseModel):
+    model: str | None
+    endpoint: str | None
+    selectable: bool
 
 
 class QuestionVersionRequest(StrictRequest):
