@@ -20,6 +20,11 @@ conversation, or a conversation that no check grades. A row with ``simulated_use
 conversation (``Case.simulated_user``), played by the suite's ``simulator`` (``Suite.simulator``,
 :mod:`martian.evals.simulation`); loading refuses one in a suite without a target or a simulator,
 and a check named ``goal_reached``, the label of its goal verdict.
+
+A conversation judge (``runner.CONVERSATION_JUDGES``, :mod:`martian.evals.conversation_judges`)
+reads a whole conversation, so loading refuses one in a suite whose data has a case of one input,
+a ``task_completion`` judge with a scripted conversation that gives no ``expectations.goal``, and a
+``policy_adherence`` judge with a conversation that has no guidelines, its own or the check's.
 """
 
 from __future__ import annotations
@@ -155,6 +160,10 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "groundedness": frozenset(),
     "context_relevance": frozenset(),
     "context_sufficiency": frozenset(),
+    # The conversation judges read the conversation; policy adherence takes guidelines for every case.
+    "task_completion": frozenset(),
+    "policy_adherence": frozenset({"guidelines"}),
+    "knowledge_retention": frozenset(),
     "contains": _TEXT_OPTIONS | {"any_of"},
     "not_contains": _TEXT_OPTIONS,
     "contains_any": _TEXT_OPTIONS,
@@ -311,8 +320,51 @@ def _check_conversations(file_suite: runner.Suite, cases: list[Case]) -> None:
             )
 
 
+def _check_conversation_judges(file_suite: runner.Suite, cases: list[Case]) -> None:
+    """Refuse a conversation judge the data cannot give what it reads: a case of one input, which
+    has no conversation; a scripted conversation with no goal for ``task_completion`` (a simulated
+    one's goal is its user's unless it gives one); and a conversation with no guidelines for
+    ``policy_adherence``, when the check gives none for every case."""
+    judges = [check for check in file_suite.checks if check.type in runner.CONVERSATION_JUDGES]
+    if not judges:
+        return
+    for case in cases:
+        if not case.turns and case.simulated_user is None:
+            raise ConfigError(
+                f"case {case.id} has one input, and {judges[0].label} (a {judges[0].type} judge) reads a whole "
+                "conversation; give the case turns or a simulated_user, or remove the check"
+            )
+    for check in judges:
+        for case in cases:
+            if check.type == "task_completion":
+                goal = case.expectations.get("goal")
+                if goal is None and case.simulated_user is None:
+                    raise ConfigError(
+                        f"case {case.id}: {check.label} (a task_completion judge) needs the user's goal; "
+                        "give the case expectations.goal"
+                    )
+                if goal is not None and (not isinstance(goal, str) or not goal.strip()):
+                    raise ConfigError(f"case {case.id}: expectations.goal must be a nonempty string")
+            if check.type == "policy_adherence":
+                given = case.expectations.get("guidelines")
+                if given is None and check.guidelines is None:
+                    raise ConfigError(
+                        f"case {case.id}: {check.label} (a policy_adherence judge) needs guidelines; give the "
+                        "check guidelines, or the case expectations.guidelines"
+                    )
+                if given is not None and (
+                    not isinstance(given, list)
+                    or not given
+                    or not all(isinstance(guideline, str) and guideline.strip() for guideline in given)
+                ):
+                    raise ConfigError(
+                        f"case {case.id}: expectations.guidelines must be a nonempty list of nonempty strings"
+                    )
+
+
 def _suite(file_suite: runner.Suite, *, name: str, suite_id: str | None, cases: list[Case]) -> Suite:
     _check_conversations(file_suite, cases)
+    _check_conversation_judges(file_suite, cases)
     fields = _definition(file_suite)
     fields.update(
         id=suite_id or name,
@@ -381,14 +433,15 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
         raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
         assert judge is not None  # the runner refuses a judge check without a judge
-        criterion = getattr(check, check.type) if check.type in runner.CRITERIA_JUDGES else None
+        key = runner.CRITERIA_KEYS.get(check.type)
+        criterion = getattr(check, key) if key is not None else None
         return ScorerVersion(
             name=check.label,
             kind="llm_judge",
             type=check.type,
             model=judge.model,
             parameters=dict(judge.inference_params),
-            criteria={} if criterion is None else {check.type: criterion},
+            criteria={} if key is None or criterion is None else {key: criterion},
             scope=check.scope,
         )
     return ScorerVersion(
@@ -606,10 +659,11 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
     if scorer.kind == "llm_judge":
         if scorer.type not in runner.JUDGES:
             raise ConfigError(f"{where}: a suite file's LLM judges are {', '.join(runner.JUDGES)}")
-        if scorer.type in runner.GROUNDING_JUDGES and scorer.criteria:
+        key = runner.CRITERIA_KEYS.get(scorer.type)
+        if key is None and scorer.criteria:
             raise ConfigError(f"{where}: {scorer.type} judges have no criteria")
-        if set(scorer.criteria) - {scorer.type}:
-            raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {scorer.type} only")
+        if key is not None and set(scorer.criteria) - {key}:
+            raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {key} only")
         options = dict(scorer.criteria)
     elif scorer.kind in ("check", "code"):
         types = runner.CHECKS if scorer.kind == "check" else runner.CODE_CHECKS
