@@ -1,10 +1,12 @@
-"""The durable queue and its worker (MorningHQ/martian-notes#139).
+"""The durable queue and its worker (MorningHQ/martian-notes#139), and resuming work it takes again
+(MorningHQ/martian-notes#141).
 
 The queue holds run launches and scoring jobs in the record store's database, on SQLite and on
 Postgres: each piece once, held by one worker at a time, and taken again once the lease of a
 worker that stopped runs out. The queue-backed worker is a ``Worker`` the routes use unchanged,
 scoring jobs publish their progress as runs do, and stopping the serving process mid-run and
-starting it again loses and fails no queued or running run.
+starting it again loses and fails no queued or running run. Work taken again resumes after the
+cases already finished: their target or judge is not called again.
 """
 
 from __future__ import annotations
@@ -36,6 +38,9 @@ from martian.evals.store import EvalStore, MemoryStore
 from martian.evals.worker import (
     InProcessWorker,
     InterruptedRuns,
+    Judge,
+    JudgeRequest,
+    JudgeResult,
     Lifecycle,
     QueueWorker,
     Runner,
@@ -49,7 +54,7 @@ from martian.evals.worker.queue import STOPPED_TOO_OFTEN, entry_id
 from martian.evals.worker.scorers import builtin_scorer
 from tests.evals import queue_fixture, test_records
 from tests.evals.record_contract import ORG_A, ORG_B
-from tests.evals.write_fixture import AGENT, Inert, agent, publish, request_id, serve
+from tests.evals.write_fixture import AGENT, CASES, Inert, agent, judge, publish, request_id, serve
 
 POSTGRES_URL, needs_postgres = test_records.POSTGRES_URL, test_records.needs_postgres
 schema, owner_url = test_records.schema, test_records.owner_url  # the record tests' fixtures
@@ -199,10 +204,13 @@ def queue_worker(
     queue: SqlWorkQueue,
     target: TargetCall = agent,
     *,
+    judge: Judge | None = None,
     lease_seconds: float = 1,
     max_attempts: int = 3,
 ) -> QueueWorker:
-    runner: Runner = InProcessWorker(store, records, targets={AGENT: target}, target_timeout_seconds=SECONDS)
+    runner: Runner = InProcessWorker(
+        store, records, targets={AGENT: target}, judge=judge, target_timeout_seconds=SECONDS
+    )
     return QueueWorker(
         queue,
         runner,
@@ -243,8 +251,9 @@ async def stored(records: SqlRecordStore, run: Run) -> Run:
 
 
 def calls(folder: Path, case_id: str) -> list[str]:
-    """The processes that called the waiting agent with ``case_id``, by id."""
-    return sorted(path.name.rsplit("-", 1)[1] for path in folder.glob(f"called-{case_id}-*"))
+    """The process of each call of the waiting agent with ``case_id``, by id: one entry per call."""
+    prefix = f"called-{case_id}-"
+    return sorted(path.name.removeprefix(prefix).split("-")[0] for path in folder.glob(f"{prefix}*"))
 
 
 def test_the_routes_hand_work_to_the_queue_and_its_worker_runs_it(records: SqlRecordStore, queue: SqlWorkQueue) -> None:
@@ -303,16 +312,25 @@ def test_a_submit_that_fails_leaves_no_run_or_scoring_job_queued(records: SqlRec
         assert [(job.state, job.error) for job in jobs] == [("failed", NOT_ACCEPTED)] * 2
 
 
-async def test_work_whose_worker_died_is_taken_again_and_run_from_the_start(
+async def test_work_whose_worker_died_is_taken_again_and_resumes_after_its_finished_cases(
     records: SqlRecordStore, queue: SqlWorkQueue
 ) -> None:
     store = MemoryStore()
     run, work = await queued_run(store, records)
-    worker = queue_worker(store, records, queue)
+    called: list[str] = []
+
+    async def counting(case: Case) -> str:
+        called.append(case.id)
+        return await agent(case)
+
+    worker = queue_worker(store, records, queue, counting)
     await worker.submit(work)
     # A worker takes the run, starts it, records one case and dies.
     assert await queue.claim(0.3) is not None
-    await records.update_run(SINGLE_USER, run.model_copy(update={"state": "running"}), expected_state="queued")
+    started = datetime(2026, 11, 15, 9, tzinfo=UTC)
+    await records.update_run(
+        SINGLE_USER, run.model_copy(update={"state": "running", "started_at": started}), expected_state="queued"
+    )
     old = CaseResult(run_id=run.id, case_id="faq-1", position=0, status="error", error="the first worker's")
     await records.put_results(SINGLE_USER, DEFAULT_PROJECT, [old])
     await worker.start()
@@ -320,14 +338,79 @@ async def test_work_whose_worker_died_is_taken_again_and_run_from_the_start(
         await worker.drain()
     finally:
         await worker.stop()
+    # faq-1 keeps the result the first worker recorded and is not called again; faq-3 has no
+    # expected text, so no worker calls it.
+    assert called == ["faq-2"]
     finished = await stored(records, run)
-    assert (finished.state, finished.error) == ("completed", "")
-    assert (finished.counts.passed, finished.counts.failed, finished.counts.skipped) == (1, 1, 1)
+    assert (finished.state, finished.error, finished.started_at) == ("completed", "", started)
+    counts = finished.counts
+    assert (counts.cases, counts.passed, counts.failed, counts.errors, counts.skipped) == (3, 0, 1, 1, 1)
     results = await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)
-    assert [(r.case_id, r.status) for r in results.items] == [
-        ("faq-1", "passed"),
-        ("faq-2", "failed"),
-        ("faq-3", "skipped"),
+    assert [(r.case_id, r.status, r.error) for r in results.items] == [
+        ("faq-1", "error", "the first worker's"),
+        ("faq-2", "failed", ""),
+        ("faq-3", "skipped", "item is missing a usable prompt or expected output"),
+    ]
+
+
+def judge_of(called: list[str], hold: str | None = None, gate: asyncio.Event | None = None) -> Judge:
+    """A judge that notes the prompt of each request in ``called``; with ``hold``, a request of
+    that prompt waits for ``gate`` before it answers."""
+
+    async def judging(request: JudgeRequest) -> JudgeResult:
+        called.append(request.prompt)
+        if request.prompt == hold and gate is not None:
+            await gate.wait()
+        return await judge(request)
+
+    return judging
+
+
+async def test_a_scoring_job_taken_again_resumes_after_the_cases_it_scored(
+    records: SqlRecordStore, queue: SqlWorkQueue
+) -> None:
+    store = MemoryStore()
+    run, work = await queued_run(store, records)
+    first_calls: list[str] = []
+    gate = asyncio.Event()
+    held = "Can I change my username?"  # faq-2, the job's second case
+    first = queue_worker(store, records, queue, judge=judge_of(first_calls, held, gate), lease_seconds=60)
+    await first.start()
+    await first.submit(work)
+    await first.drain()
+    job = ScoringJob(
+        id="j1",
+        run_id=run.id,
+        scorers=[builtin_scorer("exact_match"), builtin_scorer("correctness")],
+        state="queued",
+    )
+    await records.create_scoring_job(SINGLE_USER, DEFAULT_PROJECT, job)
+    await first.submit(
+        Work(kind="scoring", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run.id, job_id="j1")
+    )
+
+    async def judging_the_second() -> bool:
+        return held in first_calls
+
+    await eventually(judging_the_second)
+    # The worker stops while the judge grades faq-2, as a worker whose process dies does: the next
+    # worker takes the job again.
+    await first.stop()
+    second_calls: list[str] = []
+    second = queue_worker(store, records, queue, judge=judge_of(second_calls), lease_seconds=60)
+    await second.start()
+    try:
+        await second.drain()
+    finally:
+        await second.stop()
+    # faq-1 was scored and is not judged again; faq-2 was in flight and is; faq-3 has no output.
+    assert first_calls == ["How do I reset my password?", held]
+    assert second_calls == [held]
+    (done,) = await records.list_scoring_jobs(SINGLE_USER, DEFAULT_PROJECT, run.id)
+    assert (done.state, done.total, done.succeeded, done.errors) == ("partial", 6, 4, 2)
+    scores = [s for s in await records.list_scores(SINGLE_USER, DEFAULT_PROJECT, run.id) if s.scoring_job_id == "j1"]
+    assert sorted((s.case_id, s.scorer) for s in scores) == [
+        (case_id, scorer) for case_id in ("faq-1", "faq-2", "faq-3") for scorer in ("correctness", "exact_match")
     ]
 
 
@@ -560,9 +643,10 @@ def gone(pid: int) -> bool:
         ("in-process", "sqlite"),
         ("processes", "sqlite"),
         pytest.param("in-process", "postgres", marks=needs_postgres),
+        pytest.param("processes", "postgres", marks=needs_postgres),
     ],
 )
-def test_stopping_the_serving_process_mid_run_and_starting_it_again_loses_and_fails_no_run(
+def test_stopping_the_serving_process_mid_run_and_starting_it_again_finishes_the_run_without_repeating_cases(
     tmp_path: Path,
     runner: str,
     database: str,
@@ -574,23 +658,36 @@ def test_stopping_the_serving_process_mid_run_and_starting_it_again_loses_and_fa
     # An API process that only queues work: the run is queued when it stops.
     first = Server(tmp_path, runner, url, schema, "queue")
     try:
-        run_id = first.call("POST", "/v1/evals", {"agent_id": AGENT, "dataset_name": "support-faq"})["id"]
+        launched = first.call("POST", "/v1/evals", {"agent_id": AGENT, "dataset_name": "support-faq"})
+        run_id = launched["id"]
         assert first.run(run_id)["state"] == "queued"
     finally:
         first.kill()
 
-    # A process that serves the queue takes it, and stops while its first case is in flight.
+    # A process that serves the queue takes it, finishes faq-1, and stops while faq-2 is in flight.
+    (tmp_path / "release-faq-1").touch()
     second = Server(tmp_path, runner, url, schema, "serve")
     try:
-        wait_until(lambda: bool(calls(tmp_path, "faq-1")))
-        assert second.run(run_id)["state"] == "running"
+        wait_until(lambda: bool(calls(tmp_path, "faq-2")))
+        midway = second.run(run_id)
+        assert (midway["state"], midway["passed"], midway["failed"]) == ("running", 1, 0)
     finally:
         second.kill()
-    (caller,) = calls(tmp_path, "faq-1")
+    (caller,) = calls(tmp_path, "faq-2")
     wait_until(lambda: gone(int(caller)))  # a run's own process ends with the worker that started it
-    assert calls(tmp_path, "faq-2") == []
+    assert calls(tmp_path, "faq-1") == [caller]
 
-    # Started again, it takes the run once its lease runs out and finishes it.
+    # A newer version of the dataset, under which faq-2 would pass, is published meanwhile.
+    newer = [
+        case.model_copy(update={"expectations": {"expected_response": "I am not sure."}})
+        if case.id == "faq-2"
+        else case
+        for case in CASES
+    ]
+    asyncio.run(queue_fixture.store_in(tmp_path).create_dataset(SINGLE_USER, DEFAULT_PROJECT, "support-faq", newer))
+
+    # Started again, it takes the run once its lease runs out and finishes it, on the dataset
+    # version the run was admitted with.
     (tmp_path / "release").touch()
     third = Server(tmp_path, runner, url, schema, "serve")
     try:
@@ -598,7 +695,11 @@ def test_stopping_the_serving_process_mid_run_and_starting_it_again_loses_and_fa
         run = third.run(run_id)
     finally:
         third.stop()
-    assert (run["state"], run["error"]) == ("completed", "")
+    assert (run["state"], run["error"], run["dataset_id"]) == ("completed", "", launched["dataset_id"])
     assert (run["passed"], run["failed"], run["skipped"], run["errored"]) == (1, 1, 1, 0)
-    taken_again = calls(tmp_path, "faq-1")
-    assert len(taken_again) == 2 and caller in taken_again
+    # The target calls of each case: faq-1 had finished and is not called again, faq-2 was in flight
+    # and is, once, and faq-3 has no expected text, so it is never called.
+    assert calls(tmp_path, "faq-1") == [caller]
+    again = calls(tmp_path, "faq-2")
+    assert len(again) == 2 and caller in again
+    assert calls(tmp_path, "faq-3") == []

@@ -32,8 +32,9 @@ Runs and scoring jobs are queued durably in the data folder's ``martian.db``
 (:class:`~martian.evals.records.queue.SqlWorkQueue`), and ``martian ui`` serves the queue beside the
 app (:class:`~martian.evals.worker.QueueWorker`). Each run is held by whatever works on it: a
 claim on the run's entry in the queue, whose lease that process renews. A run whose ``martian ui``
-stopped is taken again once its lease runs out, by the next ``martian ui`` on the folder, and runs
-from the start; its own process ended with the ``martian ui`` that started it. ``martian evals
+stopped is taken again once its lease runs out, by the next ``martian ui`` on the folder, and
+resumes after the cases it had finished, on the dataset and suite versions it was admitted with;
+its own process ended with the ``martian ui`` that started it. ``martian evals
 run`` holds the run it records in the same queue (:class:`RunHold`), and a run whose recording
 process stopped is finished as interrupted once its lease runs out, or at once when someone
 cancels it (:meth:`LocalWorker.cancel_interrupted`). A queued or running run with no entry in the

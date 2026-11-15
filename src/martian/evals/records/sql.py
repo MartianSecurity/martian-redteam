@@ -243,8 +243,10 @@ class SqlRecordStore:
 
     # --- case results and scores ------------------------------------------------------------
 
-    async def put_results(self, principal: Principal, project_id: str, results: list[CaseResult]) -> None:
-        def work(connection: Connection, space: str) -> set[str]:
+    async def put_results(
+        self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
+    ) -> None:
+        def work(connection: Connection, space: str) -> tuple[set[str], set[str]]:
             touched = set()
             for result in results:
                 self._require_run(connection, space, project_id, result.run_id)
@@ -263,10 +265,13 @@ class SqlRecordStore:
                     ["space", "project_id", "run_id", "case_id"],
                 )
                 touched.add(result.run_id)
-            return touched
+            return touched, self._put_scores(connection, space, project_id, scores or [])
 
-        for run_id in await self._run(principal, work):
+        results_of, scores_of = await self._run(principal, work)
+        for run_id in results_of:
             self._emit(principal, "case_results", project_id, run_id)
+        for run_id in scores_of:
+            self._emit(principal, "scores", project_id, run_id)
 
     async def list_results(
         self, principal: Principal, project_id: str, run_id: str, *, offset: int = 0, limit: int = 100
@@ -296,31 +301,34 @@ class SqlRecordStore:
 
         return await self._run(principal, work)
 
+    def _put_scores(self, connection: Connection, space: str, project_id: str, scores: list[Score]) -> set[str]:
+        touched = set()
+        for score in scores:
+            if score.run_id is None or score.case_id is None:
+                raise StoreError("invalid", "a stored score names its run and case")
+            self._require_run(connection, space, project_id, score.run_id)
+            saved = score.model_copy(update={"created_at": score.created_at or _now()})
+            self._upsert(
+                connection,
+                score_rows,
+                {
+                    "space": space,
+                    "project_id": project_id,
+                    "run_id": score.run_id,
+                    "case_id": score.case_id,
+                    "scorer": score.scorer,
+                    "scoring_job_id": score.scoring_job_id or "",
+                    "created_at": saved.created_at,
+                    "record": _json(saved),
+                },
+                ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id"],
+            )
+            touched.add(score.run_id)
+        return touched
+
     async def put_scores(self, principal: Principal, project_id: str, scores: list[Score]) -> None:
         def work(connection: Connection, space: str) -> set[str]:
-            touched = set()
-            for score in scores:
-                if score.run_id is None or score.case_id is None:
-                    raise StoreError("invalid", "a stored score names its run and case")
-                self._require_run(connection, space, project_id, score.run_id)
-                saved = score.model_copy(update={"created_at": score.created_at or _now()})
-                self._upsert(
-                    connection,
-                    score_rows,
-                    {
-                        "space": space,
-                        "project_id": project_id,
-                        "run_id": score.run_id,
-                        "case_id": score.case_id,
-                        "scorer": score.scorer,
-                        "scoring_job_id": score.scoring_job_id or "",
-                        "created_at": saved.created_at,
-                        "record": _json(saved),
-                    },
-                    ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id"],
-                )
-                touched.add(score.run_id)
-            return touched
+            return self._put_scores(connection, space, project_id, scores)
 
         for run_id in await self._run(principal, work):
             self._emit(principal, "scores", project_id, run_id)

@@ -90,6 +90,27 @@ class RecordContract:
         )
         await refused("not_found", records.list_results(ORG_A, "p1", "r9"))
 
+    async def test_a_case_result_and_its_scores_are_stored_together_or_not_at_all(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        result = CaseResult(run_id="r1", case_id="c1", status="passed", output="ok")
+        own = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+        listener = records.events.subscribe(ORG_A)
+        try:
+            await records.put_results(ORG_A, "p1", [result], scores=[own])
+            got = [await listener.next(timeout=5), await listener.next(timeout=5)]
+            assert [(e.kind, e.id) for e in got] == [("case_results", "r1"), ("scores", "r1")]
+        finally:
+            listener.close()
+        assert [r.case_id for r in (await records.list_results(ORG_A, "p1", "r1")).items] == ["c1"]
+        assert [s.scorer for s in await records.list_scores(ORG_A, "p1", "r1", case_id="c1")] == ["exact_match"]
+        # A score the store refuses leaves the case without its result too.
+        later = CaseResult(run_id="r1", case_id="c2", position=1, status="passed")
+        await refused(
+            "invalid",
+            records.put_results(ORG_A, "p1", [later], scores=[Score(scorer="s", source="code", trace_id="t")]),
+        )
+        assert [r.case_id for r in (await records.list_results(ORG_A, "p1", "r1")).items] == ["c1"]
+
     async def test_a_scoring_job_adds_scores_beside_the_runs_own(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
         own = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)

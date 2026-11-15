@@ -34,6 +34,7 @@ from martian.evals.worker.scorers import builtin_scorer
 from tests.evals.local_fixture import DATASET, SUITE_SCORERS, FakeTarget, publish, save_suite
 from tests.evals.test_worker_judges import KEY as JUDGE_KEY
 from tests.evals.test_worker_judges import REPORTED, Loopback, model_answer
+from tests.evals.write_fixture import CASES
 
 LOCAL = "http://127.0.0.1:7600"
 RUNS = "/v1/local/runs"
@@ -409,11 +410,13 @@ def _stored(home: Path, run_id: str) -> Run:
 
 
 def test_a_run_whose_martian_ui_was_stopped_is_taken_again_when_it_starts_again(home, ui, target, tmp_path):
-    """`martian ui` is killed, as a crash or a power cut would, while the run waits on its target,
-    and its run's process ends with it. Started again, `martian ui` takes the run again once its
-    lease runs out, runs it from the start in a new process, and scores it with its suite."""
+    """`martian ui` is killed, as a crash or a power cut would, while the run waits on its target
+    for its second case, and its run's process ends with it. Started again, `martian ui` takes the
+    run again once its lease runs out and resumes it in a new process, on the dataset and suite
+    versions it was admitted with: the finished case is not called again, the one in flight is.
+    Then it scores the run with its suite."""
     publish(home)
-    target.gate = threading.Event()
+    target.gate, target.held = threading.Event(), {"Can I change my username?"}
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -434,8 +437,17 @@ def test_a_run_whose_martian_ui_was_stopped_is_taken_again_when_it_starts_again(
                 defined = call(http, "POST", "/v1/local/targets", 201, json=target.definition())
                 suite = save_suite(http, str(uuid.uuid4()))
                 queued = launch(http, defined["id"], suite)
-                _until(lambda: target.requests, "the run's process to call the target")
-            assert _stored(home, queued["id"]).state == "running"
+                _until(lambda: len(target.requests) == 2, "the run's process to call the target for its second case")
+                # Newer versions of the dataset, under which the second case would pass, and of the
+                # suite are saved while the run is in flight.
+                newer = [
+                    Case(id=case.id, inputs=case.inputs, expectations={"expected_response": "I am not sure."})
+                    for case in CASES
+                ]
+                publish(home, newer)
+                save_suite(http, str(uuid.uuid4()), ["valid_json"], suite_id=suite["suite_id"], expected_version=1)
+            running = _stored(home, queued["id"])
+            assert (running.state, running.counts.passed) == ("running", 1)
             assert held(home, queued["id"])
         finally:
             os.killpg(server.pid, signal.SIGKILL)
@@ -449,12 +461,17 @@ def test_a_run_whose_martian_ui_was_stopped_is_taken_again_when_it_starts_again(
         drain(client)
         run, work = results(client, queued["id"])
         assert (run["state"], run["error"], run["passed"], run["failed"]) == ("completed", "", 1, 1)
+        assert settings(run) == settings(queued)
         [job] = work["jobs"]
         assert (job["state"], job["succeeded"], job["errors"]) == ("partial", 4, 2)
-    # The first process asked once and ended with the killed server; the new one asked each case.
+        # The suite version the run was admitted with scored it, not the newer one.
+        assert (job["config"]["suite_version_id"], job["config"]["scorers"]) == (suite["id"], SUITE_SCORERS)
+        assert "valid_json" not in {row["name"] for row in work["assessments"]}
+    # The first process asked for both cases and ended with the killed server, the second case in
+    # flight; the new one asked again only for the case that had no result.
     assert [request["body"]["message"] for request in target.requests] == [
         "How do I reset my password?",
-        "How do I reset my password?",
+        "Can I change my username?",
         "Can I change my username?",
     ]
 

@@ -19,7 +19,8 @@ takes it with :meth:`QueueWorker.serve`, one piece at a time, and runs it with i
   its claim taken by another, after its lease ran out, stops the work at once.
 - **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
   claimable again once the lease runs out, and the next worker takes it again: a run or scoring
-  job still ``running`` is queued again and runs from the start (:func:`take_over`). A worker that
+  job still ``running`` is queued again and resumes after the cases already finished, whose
+  target or judge is not called again (:func:`take_over`). A worker that
   is stopped (``stop``, or a cancelled ``serve``) stops its work and gives it back at once, without
   counting the attempt. A ``ProcessWorker``'s run process ends with the worker that started it.
   After ``max_attempts`` claims, the work is ``failed`` with :data:`STOPPED_TOO_OFTEN`, not taken
