@@ -330,24 +330,34 @@ class Policy(_Object):
 
 class RunLimits(_Object):
     """When a run stops before its last case: once it has run for ``max_seconds`` of wall time, or
-    once its judges have used ``max_judge_tokens`` tokens, input and output together, as the judge's
-    provider reported them. ``None`` is no limit. Each start or resume of a run has its limits
-    afresh. A run that reaches one is ``stopped``, keeps its finished cases and can be resumed."""
+    once its model calls on the judges' provider path have used ``max_judge_tokens`` tokens, input
+    and output together, as the provider reported them: its LLM judges' and, in ``martian evals
+    run``, its simulated users' (:mod:`martian.evals.simulation`). ``None`` is no limit. Each start
+    or resume of a run has its limits afresh. A run that reaches one is ``stopped``, keeps its
+    finished cases and can be resumed."""
 
     max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_judge_tokens: int | None = Field(default=None, ge=1)
 
-    def stop(self, limit: LimitName, used: float | None) -> dict[str, Any]:
+    def stop(
+        self, limit: LimitName, used: float | None, *, simulated: int = 0, unreported: str = "the judge"
+    ) -> dict[str, Any]:
         """What a run that stopped at ``limit`` records of it (``Run.provenance["stopped"]``): the
-        limit, its value, what had been used (None for judge tokens a judge did not report), and
-        a message that names the setting to raise."""
+        limit, its value, what had been used (None for tokens a model call did not report), and a
+        message that names the setting to raise. ``simulated`` is how many of the tokens used were
+        the simulated users', which the message then counts apart from the judges'; ``unreported``
+        names the model call that reported no usage."""
         value = getattr(self, limit)
         if limit == "max_seconds":
             message = f"Stopped at its time limit (max_seconds {value:g}) after {used or 0:.0f} seconds"
         elif used is None:
-            message = "Stopped: the judge reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+            message = (
+                f"Stopped: {unreported} reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+            )
         else:
             message = f"Stopped at its judge token limit (max_judge_tokens {value}) after {used:.0f} tokens"
+            if simulated:
+                message += f" ({used - simulated:.0f} by its judges, {simulated} by its simulated users)"
         return {"limit": limit, "value": value, "used": used, "message": message}
 
 
