@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from martian.evals.model import Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
+from martian.evals.stats import wilson
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
 from tests.evals.read_fixture import T0, seed
@@ -126,6 +127,8 @@ def test_the_workbench_shows_the_newest_scoring_job_and_its_scores(served):
         1,
         1.0,
     )
+    # The Wilson interval of 2 of 2; a boolean scorer has no mean to give an interval for.
+    assert card["confidence_95"] == list(wilson(2, 2)) and card["mean_confidence_95"] is None
     assert [r["id"] for r in work["latest_reviews"]] == ["review-1"]
     assert work["calibration"][0]["paired"] == 1 and work["calibration"][0]["agreement"] == 1.0
     assert work["members"] == [{"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "name": "local", "role": "owner"}]
@@ -150,10 +153,27 @@ def test_comparing_two_runs_pairs_their_cases(served):
     assert result["compatible"] and result["coverage"]["paired"] == 3
     assert [i["change"] for i in result["items"]] == ["unchanged", "improved", "not_comparable"]
     assert result["changes"] == {"improved": 1, "regressed": 0, "unchanged": 1, "not_comparable": 1}
+    # Two comparable pairs and one change: far too few to tell from noise.
+    found = result["significance"]
+    assert (found["label"], found["test"], found["compared"], found["improved"], found["p_value"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+        1.0,
+    )
+    assert found["minimum_detectable_effect"] is None
     with_jobs = {**pair, "baseline_job_id": seeded.baseline_job.id, "candidate_job_id": seeded.candidate_job.id}
     scored = client.get("/v1/evals/compare", params=with_jobs).json()
     assert scored["criteria"] == {"correctness": {"unchanged": 1, "improved": 1, "not_comparable": 1}}
     assert scored["items"][1]["criteria"]["correctness"]["delta"] == 1.0
+    judged = scored["criteria_significance"]["correctness"]
+    assert (judged["label"], judged["test"], judged["compared"], judged["improved"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+    )
     one_job = {**pair, "baseline_job_id": seeded.baseline_job.id}
     assert client.get("/v1/evals/compare", params=one_job).status_code == 422
 
@@ -166,6 +186,7 @@ def test_runs_of_different_datasets_are_not_comparable(served):
         "/v1/evals/compare", params={"baseline_id": other.id, "candidate_id": seeded.candidate.id}
     ).json()
     assert not result["compatible"] and "different dataset identities" in result["reason"]
+    assert result["significance"] is None
     running = client.get(
         "/v1/evals/compare", params={"baseline_id": seeded.running.id, "candidate_id": seeded.candidate.id}
     )

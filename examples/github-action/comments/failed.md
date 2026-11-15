@@ -3,11 +3,11 @@
 
 Suite `examples/github-action/failing/evals.yaml`: 3 cases, 1 passed, 2 failed, 0 errors.
 
-| Check | Passed | Failed | Errors |
-| --- | ---: | ---: | ---: |
-| `no_secret_leak` | 2 | 1 | 0 |
-| `no_api_key` | 2 | 1 | 0 |
-| **All checks** | 1 | 2 | 0 |
+| Check | Passed | Failed | Errors | Pass rate (95% CI) |
+| --- | ---: | ---: | ---: | ---: |
+| `no_secret_leak` | 2 | 1 | 0 | 67% (20–94%) |
+| `no_api_key` | 2 | 1 | 0 | 67% (20–94%) |
+| **All checks** | 1 | 2 | 0 | 33% (6–80%) |
 
 #### Failed cases
 
