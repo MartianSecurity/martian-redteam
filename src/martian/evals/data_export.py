@@ -19,6 +19,11 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   refers to before the object. The receiving store assigns its own identifiers for what it
   stores (``StoreRef``, dataset version ids, assessment ids), and the import points every
   reference at them.
+- :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
+  kind of object of the two interfaces that an export carries, and the files it is in;
+  :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
+  when a table or a kind is in neither, so a new one is exported (a new file: a new format
+  version) or left out on purpose.
 """
 
 from __future__ import annotations
@@ -96,6 +101,61 @@ FILES = (
     "traces.jsonl",
 )
 """Every file of an export, in the order an import reads them."""
+
+EXPORTED_TABLES = {
+    "martian_runs": "runs.jsonl",
+    "martian_case_results": "case_results.jsonl",
+    "martian_scores": "scores.jsonl",
+    "martian_scoring_jobs": "scoring_jobs.jsonl",
+    "martian_reviews": "reviews.jsonl",
+    "martian_suites": "suites.jsonl",
+    "martian_dataset_drafts": "drafts.jsonl",
+    "martian_dataset_draft_cases": "draft_cases.jsonl",
+    "martian_saved_views": "views.jsonl",
+}
+"""Each table of the record store (``martian.evals.records.tables``) that an export carries, and
+the file its rows are in."""
+
+LEFT_OUT_TABLES = {
+    "martian_work_queue": (
+        "the worker's queue of runs and scoring jobs no worker has finished: transient. A run "
+        "exported queued or running is finished as interrupted when the local edition opens the "
+        "data folder it was imported into"
+    ),
+}
+"""Each table of the record store that an export leaves out, and why."""
+
+EXPORTED_KINDS = {
+    "Project": ("projects.jsonl",),
+    "ScorerVersion": ("scorers.jsonl",),
+    "ReviewQuestion": ("questions.jsonl",),
+    "DatasetVersion": ("datasets.jsonl",),
+    "Case": ("cases.jsonl", "draft_cases.jsonl"),
+    "Suite": ("suites.jsonl",),
+    "DatasetDraft": ("drafts.jsonl",),
+    "SavedView": ("views.jsonl",),
+    "Run": ("runs.jsonl",),
+    "CaseResult": ("case_results.jsonl",),
+    "Score": ("scores.jsonl", "traces.jsonl"),
+    "ScoringJob": ("scoring_jobs.jsonl",),
+    "Review": ("reviews.jsonl",),
+    "ReviewQueue": ("queues.jsonl",),
+    "QueueItem": ("queues.jsonl",),
+    "Trace": ("traces.jsonl",),
+}
+"""Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
+return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
+not objects: ``artifacts.jsonl`` and ``artifacts/``."""
+
+LEFT_OUT_KINDS = {
+    "StoreStatus": "the store's readiness, not data",
+    "Page": "one page of a listing; the export writes the objects listed",
+    "TraceQuery": "a trace search, not data",
+    "SessionSearch": "sessions grouped from a search's traces; the export writes the traces",
+    "Counts": "a run's counts, written with its run",
+}
+"""Each model class the two interfaces take or return that is not a kind of object an export
+carries, and why."""
 
 TRACE_PAGE = 500
 """Traces read per export step: a page of the store's trace search."""
@@ -853,8 +913,12 @@ def import_local(folder: Path, home: Path) -> ImportSummary:
 
 
 __all__ = [
+    "EXPORTED_KINDS",
+    "EXPORTED_TABLES",
     "FILES",
     "FORMAT",
+    "LEFT_OUT_KINDS",
+    "LEFT_OUT_TABLES",
     "VERSION",
     "ExportError",
     "ExportSummary",
