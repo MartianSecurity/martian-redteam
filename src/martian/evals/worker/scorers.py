@@ -39,9 +39,12 @@ def is_builtin(scorer: ScorerVersion) -> bool:
 def scorer_source(scorer: ScorerVersion) -> str:
     """The ``source_id`` of a code score, and of a judge score that has no verdict. A custom
     Python scorer's is ``python:<name>`` and an installed check's ``installed:<name>``: the worker's
-    setup installs the function under that name."""
+    setup installs the function under that name. A deterministic check a request named has
+    ``martian.checks.<type>``."""
     if is_builtin(scorer):
         return f"martian.{scorer.name}:{BUILTIN_VERSION}"
+    if scorer.kind == "check":
+        return f"martian.checks.{scorer.type}"
     if scorer.kind == "code" and scorer.type in INSTALLED_TYPES:
         return f"installed:{scorer.name}"
     if scorer.kind == "code":

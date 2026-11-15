@@ -485,8 +485,8 @@ contract:
 | Routes | What they do | Module |
 | --- | --- | --- |
 | `POST /v1/evals`, `POST /{run_id}/cancel`, `POST /{run_id}/resume` | Admit a run of a target the worker knows over a published dataset, optionally under its own limits, and hand it to the worker; stop it; go on with a run that stopped at a limit | `launch` |
-| `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
-| `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
+| `GET /scorers`, `GET /checks`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; the deterministic checks and their options; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
+| `GET`, `POST /suites` | Saved suites of built-in scorers, deterministic checks with their options, and policies, a new version for each change | `suites` |
 | `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on; `GET` lists a judge graded by a panel with `panel` in its `definition` | `suites` |
 | `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
@@ -574,9 +574,11 @@ All paths are under `/v1/evals`. How the core carries them out:
   is already in progress" at a limit of 1, else "5 scoring jobs are already in progress, as many as
   this organisation may have at once". The count reads the jobs of each completed run, since the
   record store has no query across runs. A job's scores sit beside the run's own, and each scored
-  value is also kept on its case's trace. A request cannot name a
-  [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
-  names, so any other is `422`, and `GET /scorers` does not offer one (MartianSecurity/martian-notes#334).
+  value is also kept on its case's trace. A request may also name
+  [deterministic checks with their options](#deterministic-checks-in-the-worker) (`checks`,
+  version 4 of the contract); it cannot name a [custom Python scorer](#custom-scorers-in-the-worker):
+  the contract's `scorers` are the built-in names, so any other is `422`, and `GET /scorers` does
+  not offer one.
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. That score
@@ -1458,8 +1460,8 @@ worker = ProcessWorker(worker_services, records, options={...})
   imports the scorers, only in each piece of work's own process. The API process imports the
   setup's module to check its import path, so the setup imports scorer modules inside the
   function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
-  request or suite can name only those, so a job of custom scorers is recorded by the edition's
-  own code until the contract carries them (MartianSecurity/martian-notes#334). A judge request carries
+  request or suite can name only those and the [deterministic checks](#deterministic-checks-in-the-worker),
+  so a job of custom scorers is recorded by the edition's own code. A judge request carries
   only judge scorers. The local edition installs none. What the worker isolates, and what it does
   not, is in [security and data](security-and-data.md#custom-python-scorers).
 - **Scoring jobs only, never a monitor.** A [monitor](#monitors) refuses a scorer of kind `code`
@@ -1469,6 +1471,58 @@ worker = ProcessWorker(worker_services, records, options={...})
 `tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
 values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
 through the core's routes, failing if the process that serves the API imports the scorer file.
+
+### Deterministic checks in the worker
+
+A scoring request or a saved suite may name the [deterministic checks](evals.md#deterministic-checks)
+of a suite file with their options (MartianSecurity/martian-notes#334, version 4 of the contract). `GET /checks` lists them,
+each with its options (`martian.evals.check_options.CATALOGUE`): an option's `name` as the suite
+file writes it, its `kind` for a form (`strings`, `text`, `boolean`, `number`, `integer`, `choice`,
+`choices` or `json`), `label`, `description`, `required` and, for a choice, `choices`.
+
+```json
+{"request_id": "…", "scorers": [], "checks": [
+  {"type": "contains", "name": "names_refund", "options": {"values": ["refund"], "case_sensitive": true}},
+  {"type": "json_schema", "options": {"schema": {"type": "object", "required": ["answer"]}}}]}
+```
+
+- **A check is `{type, name?, options}`.** `type` is one of the suite file's 28 check types (not a
+  judge, `python` or `installed`), `name` its label (its type by default, as in a suite file; lowercase letters, digits and
+  underscores, and no built-in scorer's, judge's or other check's), and `options` the options the
+  suite file gives that type, under the file's names. A request is checked as a suite file is:
+  an option the type does not take, one it cannot read (a pattern that does not compile, a schema
+  with a keyword the check does not support) or lacks (`values` or `expectation` for a text check)
+  is `422` with the file's own reason, before any job is recorded. A request has at most 40 checks, each with options
+  of at most 20,000 characters, and needs at least one criterion of any kind (`scorers`,
+  `judges` or `checks`; the built-in scorers and judges together are at most 7, as before). A
+  check needs no cost acknowledgement and a worker without a judge accepts it: no model is called.
+- **It scores as the suite file does.** A check becomes a scorer of kind `check` (`ScorerVersion`,
+  the `parameters` its options), the same one loading the entry of a suite file makes
+  (`martian.evals.check_options.check_scorer`). The worker builds it as `martian evals run` does
+  (`runner._build_check`) and runs it on each saved output with the case's expectations
+  (`martian.evals.worker.checks`), so the verdict, the reason and the error are the suite file's: a
+  scoring job and a run over the same outputs score alike (`tests/evals/test_scorer_options.py`
+  checks every check, with options that make each read something, against a run of the same file). A
+  check that raises is that score's error, never a pass, and counts as an error in the job. The job
+  keeps the request's `checks` in its `config.checks` and its `definition_digest` names their options,
+  so two jobs with other options do not compare as scored alike.
+- **What a saved output cannot give** is the target's call, as for a suite file whose cases bring
+  their outputs. The tool-call checks read the calls in the saved reply (`source: reply`, the default
+  here); `source: trace` is a score's error, since the worker records one span for a call. `latency`
+  reads the latency the worker recorded for the case, and is the error "the trace records no
+  duration" for a run imported rather than run by the worker. `cost` is the error "the trace records no token usage", since the worker
+  records neither tokens nor cost.
+- **A saved suite keeps its checks.** `POST /suites` takes `checks` beside `scorers` (which may now be
+  empty when there are checks), and the version's `definition` has them as `checks`, ordered by name,
+  with `scorers` still naming every scorer of the suite, checks included, so that a version 3
+  client reads what it did and cannot revise a suite's checks away: it names a check in `scorers`,
+  which it cannot send, and is refused. A version of built-in scorers alone has no `checks` key. Scoring with the suite
+  (`suite_version_id`) names the suite's built-in scorers in `scorers` and its checks in `checks`
+  exactly as saved, or is `422` ("Scoring request differs from its pinned suite version"). A policy names a built-in
+  scorer, so a check has none.
+- **Not here.** The checks need a completed run's saved outputs, so a monitor, which scores live
+  traces, does not take them; and conversation cases, which the worker does not run, have no
+  output to check.
 
 ### Case hooks and installed checks in the worker
 

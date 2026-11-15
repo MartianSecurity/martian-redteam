@@ -7,7 +7,8 @@ scorers and, through its judge, the model judges. The request calls no model.
 
 - The job's id is derived from ``request_id``; the same request again returns the same job.
 - The scorers are the console's built-in scorers by name, registered judges pinned by name and
-  version, or a saved suite version's scorers and policies.
+  version, deterministic checks with their options (``checks``, MartianSecurity/martian-notes#334), or a saved suite
+  version's scorers, checks and policies. A check calls no model.
 - Judge scorers need a worker with a judge (``Worker.judges``), as the server needs a configured
   judge.
 - Each judge scorer is pinned to its model when the job is admitted: the judge's own, or the
@@ -58,11 +59,12 @@ from martian.evals.server.projection import (
 )
 from martian.evals.server.quality import definition_digest, scorecard
 from martian.evals.server.runs import find_run, project_runs, run_results, writable_key
-from martian.evals.server.write_schemas import ScoreRequest
+from martian.evals.server.write_schemas import ScoreRequest, SuiteRequest
 from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
 from martian.evals.worker import Work, execute
+from martian.evals.worker.checks import is_check
 from martian.evals.worker.scorers import BUILTIN_SCORERS, CODE_SCORERS, JUDGE_SCORERS, builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -93,6 +95,14 @@ async def find_suite_version(records: RecordStore, principal: Principal, version
             if suite_version_id(latest.id, version) == version_id:
                 return await records.get_suite(principal, DEFAULT_PROJECT, latest.id, version=version)
     return None
+
+
+def requested_checks(body: ScoreRequest | SuiteRequest) -> list[ScorerVersion]:
+    """The deterministic checks a request names, as the scorers a job runs: each is what loading the same
+    entry of a suite file makes (:func:`martian.evals.check_options.check_scorer`)."""
+    from martian.evals.check_options import check_scorer
+
+    return [check_scorer(check.type, check.name, check.options) for check in body.checks]
 
 
 async def _pinned_judges(
@@ -151,12 +161,26 @@ async def _planned(
         if suite is None:
             raise HTTPException(404, "Not found")
         guidelines = next((str(s.criteria.get("guidelines", "")) for s in suite.scorers if s.name == "policy"), "")
-        if sorted(body.scorers) != sorted(s.name for s in suite.scorers) or body.guidelines != guidelines:
+        kept = [s for s in suite.scorers if is_check(s)]
+        if (
+            sorted(body.scorers) != sorted(s.name for s in suite.scorers if not is_check(s))
+            or body.guidelines != guidelines
+            or sorted(requested_checks(body), key=lambda s: s.name) != sorted(kept, key=lambda s: s.name)
+        ):
             raise HTTPException(422, "Scoring request differs from its pinned suite version")
         return list(suite.scorers), list(suite.policies), suite.id, suite.version
     scorers = [builtin_scorer(name, guidelines=body.guidelines) for name in sorted(body.scorers)]
     scorers += await _pinned_judges(store, principal, run.project_id, body)
+    scorers += requested_checks(body)
     return sorted(scorers, key=lambda s: s.name), [], None, None
+
+
+@router.get("/checks", response_model=None)
+async def check_catalogue(principal: PrincipalDep) -> dict[str, Any]:
+    """The deterministic checks a scoring request or a saved suite may name, each with its options."""
+    from martian.evals.check_options import CATALOGUE
+
+    return {"items": CATALOGUE}
 
 
 @router.get("/scorers", response_model=None)
@@ -354,4 +378,4 @@ async def monitoring(
     }
 
 
-__all__ = ["find_suite_version", "router", "scoring_plan", "with_models"]
+__all__ = ["find_suite_version", "requested_checks", "router", "scoring_plan", "with_models"]

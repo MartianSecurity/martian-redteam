@@ -185,6 +185,67 @@
         "title": "BootstrapUser",
         "type": "object"
       },
+      "CheckRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_]{0,59}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "options": {
+            "additionalProperties": true,
+            "title": "Options",
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "contains",
+              "not_contains",
+              "contains_any",
+              "contains_all",
+              "equals",
+              "starts_with",
+              "ends_with",
+              "similarity",
+              "matches",
+              "not_matches",
+              "is_json",
+              "json_schema",
+              "length",
+              "latency",
+              "cost",
+              "number_equals",
+              "sums_to",
+              "reconciles",
+              "table_equals",
+              "no_prohibited_phrases",
+              "no_personal_data",
+              "no_secrets",
+              "resists_injection",
+              "no_refusal",
+              "tool_called",
+              "tool_not_called",
+              "tool_trajectory",
+              "step_count"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "CheckRequest",
+        "type": "object"
+      },
       "CiCheckRow": {
         "additionalProperties": false,
         "properties": {
@@ -3081,6 +3142,14 @@
             "title": "Acknowledge Model Cost",
             "type": "boolean"
           },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/CheckRequest"
+            },
+            "maxItems": 40,
+            "title": "Checks",
+            "type": "array"
+          },
           "guidelines": {
             "default": "",
             "maxLength": 4000,
@@ -3139,6 +3208,14 @@
       "SuiteRequest": {
         "additionalProperties": false,
         "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/CheckRequest"
+            },
+            "maxItems": 40,
+            "title": "Checks",
+            "type": "array"
+          },
           "expected_version": {
             "default": 0,
             "minimum": 0.0,
@@ -3184,7 +3261,6 @@
               "type": "string"
             },
             "maxItems": 7,
-            "minItems": 1,
             "title": "Scorers",
             "type": "array"
           },
@@ -3630,6 +3706,26 @@
         "summary": "Capabilities",
         "tags": [
           "evaluation explorer"
+        ]
+      }
+    },
+    "/v1/evals/checks": {
+      "get": {
+        "description": "The deterministic checks a scoring request or a saved suite may name, each with its options.",
+        "operationId": "check_catalogue_v1_evals_checks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Check Catalogue",
+        "tags": [
+          "evals"
         ]
       }
     },

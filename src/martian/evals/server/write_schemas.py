@@ -45,6 +45,37 @@ ScorerName = Literal[
     "policy",
 ]
 RESERVED_NAMES = frozenset({*CODE_SCORERS, *JUDGE_SCORERS, "human_review", "martian_triage"})
+CheckType = Literal[
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+    "matches",
+    "not_matches",
+    "is_json",
+    "json_schema",
+    "length",
+    "latency",
+    "cost",
+    "number_equals",
+    "sums_to",
+    "reconciles",
+    "table_equals",
+    "no_prohibited_phrases",
+    "no_personal_data",
+    "no_secrets",
+    "resists_injection",
+    "no_refusal",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
+    "step_count",
+]
+MAX_CHECKS = 40
 
 
 class EvalRunRequest(BaseModel):
@@ -74,6 +105,26 @@ class JudgeReference(BaseModel):
     version: int = Field(ge=1)
 
 
+class CheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: CheckType
+    name: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,59}$")
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def readable(self) -> CheckRequest:
+        # The suite file's own validation of the check, so a request cannot name what a file would refuse.
+        from martian.evals.check_options import check_scorer
+
+        check_scorer(self.type, self.name, self.options)
+        return self
+
+    @property
+    def label(self) -> str:
+        return self.name or self.type
+
+
 class ScoreRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -83,6 +134,7 @@ class ScoreRequest(BaseModel):
     suite_version_id: uuid.UUID | None = None
     guidelines: str = Field(default="", max_length=4000)
     acknowledge_model_cost: bool = False
+    checks: list[CheckRequest] = Field(default_factory=list, max_length=MAX_CHECKS)
 
     @model_validator(mode="after")
     def validate_suite(self) -> ScoreRequest:
@@ -90,11 +142,17 @@ class ScoreRequest(BaseModel):
             raise ValueError("Select each scorer only once")
         names = [j.name for j in self.judges]
         if (
-            not 1 <= len(self.scorers) + len(names) <= 7
+            not len(self.scorers) + len(names) + len(self.checks) >= 1
+            or len(self.scorers) + len(names) > 7
             or len(set(names)) != len(names)
             or set(names) & {*CODE_SCORERS, *JUDGE_SCORERS}
         ):
             raise ValueError("Choose one to seven unique criteria")
+        labels = [check.label for check in self.checks]
+        if len(set(labels)) != len(labels) or set(labels) & {*self.scorers, *names}:
+            raise ValueError("Name each check once, and give it a name no other criterion has")
+        if reserved := sorted(set(labels) & RESERVED_NAMES):
+            raise ValueError(f"{', '.join(reserved)} is a reserved name; name the check something else")
         if "policy" in self.scorers and not self.guidelines.strip():
             raise ValueError("Policy scoring requires guidelines")
         if "policy" not in self.scorers and self.guidelines:
@@ -149,14 +207,19 @@ class SuiteRequest(BaseModel):
     suite_id: uuid.UUID | None = None
     expected_version: int = Field(default=0, ge=0)
     name: str = Field(min_length=1, max_length=120)
-    scorers: list[ScorerName] = Field(min_length=1, max_length=7)
+    scorers: list[ScorerName] = Field(max_length=7)
     guidelines: str = Field(default="", max_length=4000)
     policies: list[CriterionPolicy] = Field(default_factory=list, max_length=7)
+    checks: list[CheckRequest] = Field(default_factory=list, max_length=MAX_CHECKS)
 
     @model_validator(mode="after")
     def definition(self) -> SuiteRequest:
         ScoreRequest(
-            request_id=self.request_id, scorers=self.scorers, guidelines=self.guidelines, acknowledge_model_cost=True
+            request_id=self.request_id,
+            scorers=self.scorers,
+            guidelines=self.guidelines,
+            checks=self.checks,
+            acknowledge_model_cost=True,
         )
         names = [p.name for p in self.policies]
         if len(set(names)) != len(names) or not set(names).issubset(self.scorers):
