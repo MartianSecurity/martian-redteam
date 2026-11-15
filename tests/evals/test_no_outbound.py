@@ -44,10 +44,15 @@ PROCESS_SECONDS = 300
 KEPT = ("PATH", "LANG", "LC_ALL", "TMPDIR")
 """The only variables a guarded process inherits from the test's environment."""
 
-TEXT_HOSTS = frozenset({"react.dev", "base-ui.com", "www.w3.org", "local.invalid"})
+TEXT_HOSTS = frozenset(
+    {"react.dev", "base-ui.com", "www.w3.org", "local.invalid", "agent.example", "models.example", "localhost"}
+)
 """Hosts the built UI's scripts name without loading anything from them: the links in React's and
-Base UI's error messages, XML namespace names, and the placeholder base the UI resolves relative
-addresses against. A new host in a rebuilt UI fails the bundle test until someone checks it."""
+Base UI's error messages, XML namespace names, the placeholder base the UI resolves relative
+addresses against, and the example addresses shown as placeholder text in the local target and
+judge model forms (``https://agent.example/api/chat``, ``https://models.example/v1``,
+``http://localhost:4000/v1``). A new host in a rebuilt UI fails the bundle test until someone
+checks it."""
 
 
 def guarded(tmp_path: Path) -> tuple[Path, dict[str, str]]:
