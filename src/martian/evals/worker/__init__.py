@@ -209,10 +209,10 @@ class Lifecycle(Protocol):
 
 @runtime_checkable
 class InterruptedRuns(Protocol):
-    """What a worker adds when it can tell that nothing is working on a run any more, as the local
-    edition's ``LocalWorker`` can: each of its runs is held by the processes running it. The cancel
-    route asks it about a running run. Without it, a running run whose worker stopped waits for a
-    next case that never comes, until the durable queue (MorningHQ/martian-notes#139)."""
+    """What a worker adds when it can tell that nothing is working on a run any more, as a
+    :class:`QueueWorker` can: each run is held by a claim in the queue, whose lease the process
+    working on it renews. The cancel route asks it about a running run. Without it, a running run
+    whose worker stopped waits for a next case that never comes."""
 
     async def cancel_interrupted(self, principal: Principal, run: Run) -> Run | None:
         """Cancel ``run``, which is ``running``, at once when nothing is working on it any more,

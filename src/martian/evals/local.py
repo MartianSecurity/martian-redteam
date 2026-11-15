@@ -7,25 +7,26 @@ unless the caller names another:
 - ``mlflow.db``: the core's store, :class:`~martian.evals.store.mlflow_local.MlflowStore` on SQLite;
 - ``artifacts/``: that store's run artifacts.
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
-  runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
+  runs, case results, scores, scoring jobs, reviews, suites and dataset drafts; and the worker's
+  queue of runs and scoring jobs (:class:`~martian.evals.records.queue.SqlWorkQueue`), in which
+  each run is held by what works on it.
 - ``targets.json`` and ``target-keys.json``: the targets the user defines in the UI, in place of
   the hosted console's Agents registry, and their keys, in a file only the user can read
   (:mod:`martian.evals.local_targets`).
 - ``settings.json``: the local settings, :class:`~martian.evals.judge_settings.FileJudgeSettings`:
   the default judge model, which an organisation sets on the server. Written when it is first set.
-- ``locks/``: an empty file per process working on a run, which that process holds an OS lock on
-  (:class:`~martian.evals.local_runs.RunLock`), so that another process can tell it is alive.
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
 open the folder, so that an application can then record traces into the project's experiment with
 MLflow tracing (``docs/evals-core.md`` gives the settings).
 
-Runs started in the UI run in processes of their own, with the edition's worker
-(:class:`~martian.evals.local_runs.LocalWorker`), against the targets the user defines, and their
-suites' model judges run on the SDK judge, on the default judge model in ``settings.json`` or the
-judge's own. When it starts, the server finishes as interrupted each queued or running run that no
-process is working on any more (:func:`~martian.evals.local_runs.finish_interrupted`).
+Runs started in the UI are queued durably and run in processes of their own, with the edition's
+worker (:class:`~martian.evals.local_runs.LocalWorker`), which the server serves beside the app,
+against the targets the user defines, and their suites' model judges run on the SDK judge, on the
+default judge model in ``settings.json`` or the judge's own. A run whose server stopped is taken
+again when the next one starts. When it starts, the server finishes as interrupted each queued or
+running run that is not in the queue at all (:func:`~martian.evals.local_runs.finish_interrupted`).
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
@@ -189,10 +190,11 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
 
 def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
-    user, with a worker that runs each run in a process of its own, the session call, the local
-    targets in ``home`` and the local runs, and the built UI in ``ui``, a folder holding
-    ``index.html``. It answers a request only when its ``Host`` header names one of ``hosts``.
-    Runs of ``home`` that no process is working on any more are finished as interrupted first."""
+    user, with a worker that serves the folder's queue beside the app and runs each run in a
+    process of its own, the session call, the local targets in ``home`` and the local runs, and
+    the built UI in ``ui``, a folder holding ``index.html``. It answers a request only when its
+    ``Host`` header names one of ``hosts``. Queued or running runs of ``home`` that are not in its
+    queue at all are finished as interrupted first."""
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)

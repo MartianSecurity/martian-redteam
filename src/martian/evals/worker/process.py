@@ -24,7 +24,7 @@ Each process builds what it runs the work with by calling the worker's *setup*: 
 function, named by its import path so that the new process can import it, which takes the
 worker's ``options`` (JSON) as keyword arguments and returns :class:`WorkerServices`. The work
 reaches the process as JSON on its standard input (:func:`dump_work`), never on its command line,
-with the worker's HTTP targets as written. Their credentials come from the setup's
+with the HTTP target its run names, as written. Its credentials come from the setup's
 ``credentials``, in that process. A process that exits with an error leaves no work queued or
 running: the worker marks it ``failed``.
 
@@ -70,6 +70,7 @@ UNSELECTED = ("MLFLOW_EXPERIMENT_ID", "MLFLOW_EXPERIMENT_NAME")
 """Selections a run's process never inherits from the process that starts it."""
 
 ENDED_EARLY = "The worker process ended before this work finished"
+NOT_STARTED = "The worker could not start a process for this work"
 PARENT_GONE = 3
 """The exit status of a run's process that stopped because the process that started it ended."""
 WRONG_WORKSPACE = (
@@ -148,9 +149,10 @@ class ProcessWorker:
     the ids of the functions its targets call, which :meth:`check_target` accepts, and ``judges``
     says whether it gives a judge. ``targets`` are the HTTP targets the worker calls itself, by
     id; they are read at each check and each run, so they may be a live view, and each run's
-    process receives them with its work. ``executor`` admits the registered agents, which each
+    process receives the one its run names with its work. ``executor`` admits the registered agents, which each
     run's process calls through its setup's executor. ``records`` is this process's record store,
-    used only to mark work failed when its process exits with an error.
+    used to find the target a run names and to mark work failed when its process exits with an
+    error.
     """
 
     def __init__(
@@ -194,8 +196,14 @@ class ProcessWorker:
         """Run the work in a process of its own and return once that process has ended
         (:class:`~martian.evals.worker.Runner`). The process ends with this one, and when ``run``
         is cancelled it is ended at once and the work is left as it is, for the queue to give to
-        the next worker. A process that exits with an error fails the work, as with ``submit``."""
-        process, request = await self._start(work, tied=True)
+        the next worker. A process that exits with an error fails the work, as with ``submit``, and
+        so does one that cannot start, such as for a target the worker now refuses."""
+        try:
+            process, request = await self._start(work, tied=True)
+        except Exception:  # noqa: BLE001 - work that cannot start must not wait in the queue
+            log.exception("The process for %s work on run %s could not start", work.kind, work.run_id)
+            await fail_unfinished(self._records, work, NOT_STARTED)
+            return
         assert process.stdin is not None
         try:
             process.stdin.write(request + b"\n")
@@ -215,16 +223,27 @@ class ProcessWorker:
         while self._tasks:
             await asyncio.gather(*list(self._tasks))
 
+    async def _named_target(self, work: Work) -> dict[str, Any]:
+        """The HTTP target the work's run names, as written, when it is one of this worker's: the
+        only target the run's process receives, so a target the run does not name is never read or
+        checked. ``check_target`` checked this one before the run was recorded."""
+        if work.kind != "run":
+            return {}
+        run = await self._records.get_run(work.principal, work.project_id, work.run_id)
+        named = run.target.agent_id if run is not None and run.target is not None else None
+        if named is None or named not in self._targets:
+            return {}
+        return {named: http_target(self._targets[named]).model_dump(mode="json")}
+
     async def _start(self, work: Work, *, tied: bool) -> tuple[asyncio.subprocess.Process, bytes]:
         """Start the work's process and return it with the request to send it. A ``tied`` process
         has a session of its own and ends when its standard input closes."""
-        targets = {key: http_target(value).model_dump(mode="json") for key, value in self._targets.items()}
         request = json.dumps(
             {
                 "setup": self._setup,
                 "options": self._options,
                 "work": dump_work(work),
-                "targets": targets if work.kind == "run" else {},
+                "targets": await self._named_target(work),
                 "tied": tied,
             }
         )

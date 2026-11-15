@@ -285,7 +285,11 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **No target or model call in a request.** A launch checks the request, asks the worker whether
   it can call the target (`Worker.check_target`), records a `queued` run with the published
   dataset version it will read and the target's pin in `provenance.target`, and submits it. A
-  scoring request records a `queued` scoring job and submits it. Both answer `202` at once.
+  scoring request records a `queued` scoring job and submits it. Both answer `202` at once. The
+  launch checks only the target it names. When the worker refuses the submit or fails, the
+  recorded run or job is `failed` with "The worker did not accept this work, so nothing ran"
+  before the error is raised (`submit_or_fail`), so it never stays `queued` and blocks the next
+  launch or scoring request.
 - **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
   target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
   id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One
@@ -450,7 +454,8 @@ no registered agent, so an install with no martian-agents service runs functions
 
 `ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
 gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
-the HTTP targets as written with its work, and calls them with its setup's `credentials`; it calls
+the HTTP target its run names, as written, with its work, and no other, so a target the run does
+not name is never read or checked; it calls it with its setup's `credentials`, and it calls
 registered agents with its setup's `executor`. `targets` is read at each check and each run, so it
 may be a live view of targets the user defines.
 
@@ -459,7 +464,8 @@ server on loopback: once per case with the worker's credential, a non-2xx respon
 missing credential and an unreachable endpoint, each with no retry. It runs one in its own process
 with `ProcessWorker` and no martian-agents at all, and runs a registered agent through a fake
 martian-agents executor, in process and in a process of its own, without the HTTP path. The key
-and the leases appear in no record.
+and the leases appear in no record. A run whose worker also has a target it would refuse, under
+another id, completes, with `ProcessWorker` and under the queue: only the run's own target is read.
 
 ### One process per run
 
@@ -494,7 +500,7 @@ process:
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
    timeout, the HTTP targets' `credentials` and the registered agents' `executor`. `options` must
    be JSON;
-4. runs the work, and the HTTP targets it arrived with, with an `InProcessWorker` for the work's
+4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
    organisation, and exits.
 
 Whatever the setup or the work selects in MLflow inside that process, such as a tracking URI, an
@@ -510,7 +516,9 @@ worker that started it, the one holding the work's claim. It starts in a session
 a pipe from the worker as its standard input, which it keeps open; it exits with status 3 as soon
 as the pipe closes, however the worker ended. So it never outlives the claim, and a signal meant
 for the worker, such as a terminal's Ctrl+C, reaches only the worker, which ends the process and
-gives the work back. A cancelled `run` ends the process and leaves the work's record as it is.
+gives the work back. A cancelled `run` ends the process and leaves the work's record as it is. A
+process that cannot start fails the work with "The worker could not start a process for this
+work", so it does not wait in the queue.
 
 `tests/evals/test_worker_process.py` launches two organisations' runs at once on one SQLite store,
 each calling an agent traced with MLflow tracing, and checks where every trace landed: with a
@@ -551,7 +559,8 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
 
 - **Where the worker runs.** With `in_process=True` the worker serves the queue beside the app,
   in the API process: `create_app` starts it when the app starts serving and stops it when the
-  app stops. That is how the core runs on one machine. Otherwise the API process only queues
+  app stops. That is how the local edition runs (`LocalWorker`, [runs whose process
+  stopped](#runs-whose-process-stopped)). Otherwise the API process only queues
   work, and a worker process of its own builds the same `QueueWorker`, usually with a
   `ProcessWorker` runner, and runs `await worker.serve()`.
 - **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
@@ -573,6 +582,15 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   and gives it back at once, without counting the attempt. After `max_attempts` claims the work is
   `failed` with "The worker stopped before this work finished, too many times; it is not taken
   again". Work that ends `failed` stays failed: nothing retries a target or a judge.
+- **Runs recorded outside the queue.** A process that records a run itself, as `martian evals run`
+  does in the local edition, holds the run in the queue with a `recording` claim that it renews
+  (`SqlWorkQueue.hold`). No worker runs one: once its lease runs out, the process recording it is
+  gone, and the worker that claims it finishes the run, `failed`, or `cancelled` when a stop was
+  asked, with the `error` "Interrupted: the process working on this run stopped before it
+  finished".
+- **Cancelling.** `QueueWorker` answers the cancel route's question (`InterruptedRuns`): a running
+  run that no live claim holds, such as one whose worker died and that no worker has taken again
+  yet, is cancelled at once with that `error`, since no worker would reach its next case.
 - **One piece at a time.** Each `QueueWorker` runs one piece of work at a time, of any
   organisation; workers that share the queue share its work. `drain()` waits until the queue holds
   no work.
@@ -592,7 +610,9 @@ role, so that row-level security applies: each piece of work queued once and tak
 held by only one of two workers claiming at once, taken again with its attempt counted once a
 lease runs out, and given back without counting it. It takes over work whose worker died, fails
 work after its last attempt, gives back the work of a worker that is stopped, stops the work of a
-worker whose claim another took, and follows a run and a scoring job through their events. Then
+worker whose claim another took, cancels at once a run nothing holds, interrupts a recording whose
+process stopped renewing it, fails the run or scoring job of a submit that fails, and follows a
+run and a scoring job through their events. Then
 it serves the core in a process of its own (`tests/evals/queue_fixture.py`), launches a run, and
 stops that process with `SIGKILL` while the run is queued, and again while its first case is in
 flight: started again, the process takes the run once the lease runs out and completes it, and a
@@ -957,8 +977,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). The targets the user defines are in
-  `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)). `locks/`
-  holds an empty file per process working on a run, which that process holds an OS lock on
+  `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)).
+  `martian.db` also holds the worker's queue, in which each run is held by what works on it
   ([runs whose process stopped](#runs-whose-process-stopped)).
   `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
   and an application can record its traces there with MLflow tracing
@@ -1156,7 +1176,8 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
   reads (`store.dataset_id`, `dataset_digest`) and the suite version (`suite_id`,
   `suite_version`, `suite_digest`, and `provenance.suite` with its API id, its name and
   `model_judges`, whether it has a model judge).
-- **The run.** `LocalWorker` hands each piece of work to a `ProcessWorker` whose HTTP targets
+- **The run.** `LocalWorker` queues each piece of work, and its worker, served beside the app,
+  hands it to a `ProcessWorker` whose HTTP targets
   ([targets](#targets)) are the local targets, read from the data folder at each check and each
   run (`LocalTargets.http_targets`), so each run's process receives them as written. Its setup,
   `worker_services(home)`, opens the data folder's stores in the new process, gives the worker
@@ -1168,8 +1189,8 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 - **The suite.** With a suite, the worker records a queued scoring job of that suite version when
   it starts the run, so the UI shows it from the start. Each judge that names no model is pinned
   to the default judge model ([judge models](#judge-models)) when the job is recorded, as the
-  scoring route pins it. Once the run's process ends, the job runs in a process of its own if the
-  run completed (`execute_scoring`: the suite's scorers and policies over the saved outputs, its
+  scoring route pins it. Once the run's process ends, the job is queued and runs in a process of
+  its own if the run completed (`execute_scoring`: the suite's scorers and policies over the saved outputs, its
   judges on the SDK judge, which reads the provider's key from the environment `martian ui` runs
   in; a skipped case has no output, so its scores are errors and the job ends `partial`), and is
   `cancelled` otherwise ("The run did not complete, so its suite did not score it").
@@ -1193,57 +1214,53 @@ frozen launch runs too.
 
 #### Runs whose process stopped
 
-Work is not queued durably (MorningHQ/martian-notes#139): a run runs while the processes working
-on it do. Each of them holds the run with an OS lock on its own file in the data folder's
-`locks/`, `<run id>.server.lock` or `<run id>.process.lock` (`RunLock` in
-`martian.evals.local_runs`), and the operating system releases the lock when the process ends,
-however it ends, a crash, a kill or a reboot included:
+Runs and scoring jobs are queued durably in the data folder's `martian.db`
+([the durable queue](#the-durable-queue)), and `martian ui` serves the queue beside the app:
+`LocalWorker` is a `QueueWorker` that starts each piece of work in a process of its own. Each run
+is held by what works on it: a claim on the run's entry in the queue, whose lease, 10 seconds
+(`LEASE_SECONDS` in `martian.evals.local_runs`), that process renews.
 
 | Holder | Holds the run |
 | --- | --- |
-| `martian ui`, the server that admitted the run | From submitting it until the run's process has ended |
-| The run's own process | While it runs the run, even when `martian ui` stops first |
-| `martian evals run` | From before it records the run until the run ends |
+| `martian ui`'s worker | From taking the run from the queue until the run's process has ended and the run's suite scoring job is queued or cancelled. The run's process ends with the worker |
+| `martian evals run` | From before it records the run until the run ends (`RunHold`, a `recording` claim) |
 
-A queued or running run that no process holds any more, and one with no lock file, such as a run an
-earlier release left `running`, is interrupted: nothing will finish it, and it would block every
-launch with `409`. It is finished in two places:
-
-- **When `martian ui` starts**, before it admits a run (`finish_interrupted`): each such run is
-  `failed`, or `cancelled` when a stop had been asked, with the `error` "Interrupted: the process
-  working on this run stopped before it finished", and its suite's queued scoring job is
-  `cancelled` ("The run did not complete, so its suite did not score it"). The server's log names
-  each run it finished. A new run is then admitted, and an interrupted run can run again.
-- **When it is cancelled** (`POST /v1/evals/{run_id}/cancel`): a running run that no process holds
-  is `cancelled` at once with the same `error`, and its suite's job is cancelled, even when a stop
-  had been asked before (`LocalWorker.cancel_interrupted`, the worker's `InterruptedRuns`). This
-  finishes a run whose process was killed while `martian ui` kept running, such as a
-  `martian evals run` stopped with `kill -9`.
-
-A run another live process holds is left alone: a `martian evals run` recording into the same data
-folder, or a run's process that outlived the `martian ui` that started it, which then finishes
-the run. Such a run keeps blocking launches until it ends, and cancelling it asks its process to
-stop, as for any running run.
+- **A run whose `martian ui` stopped**, however it stopped, a crash, a kill or a power cut
+  included, stays in the queue, and its run's process ends with it. The next `martian ui` on the
+  folder takes the run again once its lease runs out and runs it from the start in a new process:
+  its cases are called again and replace the results recorded before. A `martian ui` stopped with
+  Ctrl+C gives its work back at once. A scoring job is taken again the same way. A run's suite
+  scoring job is queued once the run completes, or cancelled when it did not ("The run did not
+  complete, so its suite did not score it"), before the run leaves the queue, so a stop in between
+  does neither twice nor never.
+- **A run whose `martian evals run` stopped** cannot be taken again: the run is that process's.
+  Once its lease runs out, `martian ui`'s worker finishes it, `failed`, or `cancelled` when a stop
+  had been asked, with the `error` "Interrupted: the process working on this run stopped before
+  it finished". Cancelling it (`POST /v1/evals/{run_id}/cancel`) once its lease ran out finishes
+  it at once with the same `error` (`LocalWorker.cancel_interrupted`, the worker's
+  `InterruptedRuns`). While its process lives, the run is left alone: it blocks launches until it
+  ends, and cancelling it asks its process to stop, as for any running run.
+- **A queued or running run that is not in the queue at all**, such as one an earlier release left
+  `running`, is finished as interrupted when `martian ui` starts, before it admits a run
+  (`finish_interrupted`), with the same `error`, and its suite's queued scoring job is cancelled.
+  The server's log names each run it finished. A new run is then admitted, and an interrupted run
+  can run again.
 
 What this does not do:
 
-- Scoring jobs are not covered. A suite's scoring job that a stopped `martian ui` would have
-  started after its run completed stays `queued` until it is cancelled. A scoring job whose process
-  was killed stays `running`, so scoring that run again is `409`, until the durable queue.
-- Each `martian ui` only finishes runs when it starts. Two servers on one data folder are not
-  coordinated: one that starts while the other is between recording a run and holding it could
-  take that run for interrupted. Keep one `martian ui` per data folder.
-- Locks need processes that share one operating system's locks, as SQLite's own locking does: a
-  data folder on a network share, or shared between a container and a host whose file locks do
-  not reach each other, is not supported. On Windows the locks use `msvcrt`; CI tests them on
-  Linux only.
+- A run taken again runs from the start; resuming after the cases already done is
+  MorningHQ/martian-notes#141. The traces the first attempt recorded stay in the store.
+- Two servers on one data folder never run one piece of work at once, but each takes work as it
+  comes. Keep one `martian ui` per data folder.
+- A lease is measured on the machine's clock. A data folder shared by machines whose clocks
+  disagree by more than a few seconds is not supported, nor, as for SQLite, one on a network share.
 
-`tests/evals/test_local_runs.py` kills a `martian ui` and its run's process while the run waits on
-its target, and checks that the restarted server shows the run interrupted, cancels its suite's
-job and admits a run that completes; that a run another live process holds is left alone and
-counts against launches, and that cancelling it once that process is killed finishes it; that runs
-with no lock are finished at start; and that `martian evals run` holds its run while it records
-it.
+`tests/evals/test_local_runs.py` kills a `martian ui` while its run waits on its target, and checks
+that the run's process ended with it and that the restarted server takes the run again once its
+lease runs out, completes it and scores it with its suite; that a run another live process holds
+is left alone and counts against launches, and that cancelling it once that process is killed and
+its lease ran out finishes it; that runs not in the queue are finished at start; and that
+`martian evals run` holds its run while it records it.
 
 ### The local edition in a container
 

@@ -26,10 +26,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from martian.evals.model import Target, digest
+from martian.evals.records.queue import SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app
 from martian.evals.store import MemoryStore
-from martian.evals.worker import Credentials, InProcessWorker, ProcessWorker
+from martian.evals.worker import Credentials, InProcessWorker, ProcessWorker, QueueWorker
 from tests.evals.process_fixture import (
     HTTP_TARGET,
     KEY_NAME,
@@ -319,6 +320,26 @@ def test_a_run_completes_in_its_own_process_on_an_install_with_no_martian_agents
     assert {request["authorization"] for request in endpoint.requests} == {f"Bearer {KEY}"}
     assert len(endpoint.requests) == CALLED_CASES
     assert KEY.encode() not in stored  # the run's process read it from its own credentials only
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["process-worker", "queue-worker"])
+def test_a_run_reads_and_checks_only_the_target_it_names(tmp_path, endpoint, queued):
+    """Another target the worker has, under some other id, that it would refuse is never read: not
+    when the launch checks its own target, before the run is recorded, and not when the run's
+    process starts (MorningHQ/martian-notes#337)."""
+    refused = Target(kind="function", file="agent.py", function="target")
+
+    def worker_for(records: SqlRecordStore) -> Any:
+        targets = {HTTP_TARGET: http_target(endpoint.url), str(uuid.uuid4()): refused}
+        runner = ProcessWorker(http_services, records, targets=targets, options={"folder": str(tmp_path)})
+        if not queued:
+            return runner
+        queue = SqlWorkQueue(f"sqlite:///{tmp_path / 'martian.db'}")
+        return QueueWorker(queue, runner, records, in_process=True, lease_seconds=5, poll_seconds=0.05)
+
+    run, _ = _in_own_process(tmp_path, worker_for, HTTP_TARGET)
+    assert (run["state"], run["passed"], run["failed"], run["error"]) == ("completed", 1, 1, ""), run
+    assert len(endpoint.requests) == CALLED_CASES
 
 
 def test_registered_agents_still_run_through_martian_agents_in_their_own_process(tmp_path, endpoint):

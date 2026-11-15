@@ -51,7 +51,7 @@ from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_
 from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
-from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work
+from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work, Worker
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
 
 if TYPE_CHECKING:
@@ -71,6 +71,8 @@ JUDGE_MODEL_VERSION_KEY = "martian.judge.model_version"
 JUDGE_ENDPOINT_KEY = "martian.judge.endpoint"
 JUDGE_VERSION_KEY = "martian.judge.version"
 JUDGE_ERROR_LENGTH = 500
+INTERRUPTED = "Interrupted: the process working on this run stopped before it finished"
+NOT_ACCEPTED = "The worker did not accept this work, so nothing ran"
 
 
 def _now() -> datetime:
@@ -606,6 +608,29 @@ async def take_over(records: RecordStore, work: Work) -> None:
     job = await _job(records, principal, project, work.run_id, work.job_id or "")
     if job is not None and job.state == "running":
         await _move_job(records, principal, project, job, {"state": "queued"}, "running")
+
+
+async def interrupt(records: RecordStore, principal: Principal, run: Run, state: RunState) -> Run:
+    """Finish ``run``, queued or running, which nothing is working on any more, as ``state``
+    (``failed``, or ``cancelled`` when someone asked to stop it) with :data:`INTERRUPTED` as its
+    error. Raises ``StoreError`` (``conflict``) when the run changed meanwhile."""
+    now = _now()
+    changes: dict[str, Any] = {"state": state, "error": INTERRUPTED, "finished_at": now}
+    if state == "cancelled":
+        changes["cancel_requested_at"] = run.cancel_requested_at or now
+    return await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
+
+
+async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> None:
+    """``worker.submit(work)``, for a route that has just recorded the work ``queued``. If the worker
+    refuses it or fails, the record is marked ``failed`` with :data:`NOT_ACCEPTED` and the error is
+    raised again, so a failed submit never leaves a run or scoring job queued, which would block
+    the next launch or scoring request."""
+    try:
+        await worker.submit(work)
+    except Exception:
+        await fail_unfinished(records, work, NOT_ACCEPTED)
+        raise
 
 
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:

@@ -28,17 +28,28 @@ from sqlalchemy import create_engine, text, update
 
 from martian.evals.model import Case, CaseResult, Run, ScoringJob, StoreRef, Target
 from martian.evals.records import Event
-from martian.evals.records.queue import SqlWorkQueue
+from martian.evals.records.queue import RECORDING, SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import work_queue
 from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER, create_app
 from martian.evals.store import EvalStore, MemoryStore
-from martian.evals.worker import InProcessWorker, Lifecycle, QueueWorker, Runner, TargetCall, Work, Worker
+from martian.evals.worker import (
+    InProcessWorker,
+    InterruptedRuns,
+    Lifecycle,
+    QueueWorker,
+    Runner,
+    TargetCall,
+    Work,
+    Worker,
+    dump_work,
+)
+from martian.evals.worker.execute import INTERRUPTED, NOT_ACCEPTED
 from martian.evals.worker.queue import STOPPED_TOO_OFTEN, entry_id
 from martian.evals.worker.scorers import builtin_scorer
 from tests.evals import queue_fixture, test_records
 from tests.evals.record_contract import ORG_A, ORG_B
-from tests.evals.write_fixture import AGENT, agent, publish, request_id
+from tests.evals.write_fixture import AGENT, Inert, agent, publish, request_id, serve
 
 POSTGRES_URL, needs_postgres = test_records.POSTGRES_URL, test_records.needs_postgres
 schema, owner_url = test_records.schema, test_records.owner_url  # the record tests' fixtures
@@ -240,7 +251,8 @@ def test_the_routes_hand_work_to_the_queue_and_its_worker_runs_it(records: SqlRe
     store = MemoryStore()
     asyncio.run(publish(store))
     worker = queue_worker(store, records, queue)
-    assert isinstance(worker, Worker) and isinstance(worker, Lifecycle) and not worker.judges
+    assert isinstance(worker, Worker) and isinstance(worker, Lifecycle) and isinstance(worker, InterruptedRuns)
+    assert not worker.judges
     app = create_app(
         store=store, records=records, principal=lambda: SINGLE_USER, worker=worker, entitlements=lambda _p: ENTERPRISE
     )
@@ -261,6 +273,34 @@ def test_the_routes_hand_work_to_the_queue_and_its_worker_runs_it(records: SqlRe
         # faq-3 has no output to score, so the job is partial.
         assert (job.id, job.state, job.succeeded, job.errors) == (scored.json()["id"], "partial", 2, 1)
     assert asyncio.run(queue.pending()) == 0
+
+
+class Refusing(Inert):
+    """A worker whose submit fails after the route recorded the work, as a queue that is away does."""
+
+    async def submit(self, work: Work) -> None:
+        raise RuntimeError("the queue is away")
+
+
+def test_a_submit_that_fails_leaves_no_run_or_scoring_job_queued(records: SqlRecordStore) -> None:
+    client, core = serve(MemoryStore(), records, entitlements=lambda _p: ENTERPRISE)
+    with client:
+        assert client.portal is not None
+        completed = core.completed_run()
+        client.app.state.martian_evals_worker = Refusing()  # type: ignore[attr-defined]
+        for _ in range(2):  # the first refusal blocks no later launch with 409
+            with pytest.raises(RuntimeError, match="the queue is away"):
+                core.launch(request_id=request_id())
+        page = client.portal.call(records.list_runs, SINGLE_USER, DEFAULT_PROJECT)
+        refused = [run for run in page.items if run.id != completed["id"]]
+        assert [(run.state, run.error) for run in refused] == [("failed", NOT_ACCEPTED)] * 2
+        for _ in range(2):  # nor a later scoring request
+            with pytest.raises(RuntimeError, match="the queue is away"):
+                client.post(
+                    f"/v1/evals/{completed['id']}/scores", json={"request_id": request_id(), "scorers": ["exact_match"]}
+                )
+        jobs = client.portal.call(records.list_scoring_jobs, SINGLE_USER, DEFAULT_PROJECT, completed["id"])
+        assert [(job.state, job.error) for job in jobs] == [("failed", NOT_ACCEPTED)] * 2
 
 
 async def test_work_whose_worker_died_is_taken_again_and_run_from_the_start(
@@ -372,6 +412,38 @@ async def test_a_worker_whose_claim_another_took_stops_its_work(
         assert calls(tmp_path, "faq-2") == [] and (await stored(records, run)).counts.passed == 0
     finally:
         await worker.stop()
+
+
+async def test_a_run_nothing_holds_is_cancelled_at_once_and_a_recording_whose_process_stopped_is_interrupted(
+    records: SqlRecordStore, queue: SqlWorkQueue
+) -> None:
+    worker = queue_worker(MemoryStore(), records, queue)
+
+    async def recorded() -> tuple[Run, Work]:
+        """A run another process records itself, as ``martian evals run`` does."""
+        run = Run(id=str(uuid.uuid4()), project_id=DEFAULT_PROJECT, source="local", state="running")
+        await records.create_run(SINGLE_USER, run)
+        return run, Work(kind="run", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run.id)
+
+    held, work = await recorded()
+    claim = await queue.hold(SINGLE_USER, DEFAULT_PROJECT, entry_id(work), RECORDING, dump_work(work), 60)
+    # While a live claim holds it, cancelling it waits for its next case.
+    assert await worker.cancel_interrupted(SINGLE_USER, held) is None
+    await queue.done(claim)
+    # Held by nothing, it is cancelled at once.
+    stopped = await worker.cancel_interrupted(SINGLE_USER, held)
+    assert stopped is not None and (stopped.state, stopped.error) == ("cancelled", INTERRUPTED)
+
+    # The worker never runs a recording; once its process stops renewing it, it is interrupted.
+    gone, work = await recorded()
+    await queue.hold(SINGLE_USER, DEFAULT_PROJECT, entry_id(work), RECORDING, dump_work(work), 0.2)
+    await worker.start()
+    try:
+        await worker.drain()
+    finally:
+        await worker.stop()
+    finished = await stored(records, gone)
+    assert (finished.state, finished.error, finished.finished_at is not None) == ("failed", INTERRUPTED, True)
 
 
 async def test_scoring_jobs_publish_their_progress_as_runs_do(records: SqlRecordStore, queue: SqlWorkQueue) -> None:

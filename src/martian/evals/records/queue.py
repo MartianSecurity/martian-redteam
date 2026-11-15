@@ -16,6 +16,11 @@ runs out, and each claim counts an attempt. Lease times are this process's clock
 hosts of the workers that share one queue need clocks within a small part of the lease of each
 other.
 
+A process that does work itself, outside any worker, can hold it in the queue the same way
+(:meth:`SqlWorkQueue.hold`), so that its end is noticed if it stops: a ``recording`` claim, which
+no worker runs, and which the worker that claims it after its lease ran out finishes as
+interrupted.
+
 The queue keeps the work as JSON and knows nothing of what it means; the worker writes and reads
 it (:mod:`martian.evals.worker.queue`). Each row belongs to the organisation's space, as every
 record does. On Postgres row-level security filters on it again; a claim, which takes the next
@@ -45,6 +50,9 @@ T = TypeVar("T")
 
 QUEUED = "queued"
 CLAIMED = "claimed"
+RECORDING = "recording"
+"""The kind of a run that a process records itself and holds in the queue (:meth:`SqlWorkQueue.hold`),
+beside the kinds of work a worker runs, ``run`` and ``scoring``."""
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,35 @@ class SqlWorkQueue:
             work=work,
         )
         await self._run(space, lambda connection: connection.execute(statement.on_conflict_do_nothing()))
+
+    async def hold(
+        self,
+        principal: Principal,
+        project_id: str,
+        entry_id: str,
+        kind: str,
+        work: dict[str, Any],
+        lease_seconds: float,
+    ) -> Claim:
+        """Put ``work`` in the queue already claimed by the caller for ``lease_seconds``: a process
+        that does the work itself, outside any worker, and holds it in the queue so that its end is
+        noticed if it stops (``martian evals run`` holding the run it records). Renew and remove it
+        as a worker's claim. Raises ``IntegrityError`` when ``entry_id`` is in the queue already."""
+        space, token, now = space_of(principal), uuid.uuid4().hex, _now()
+        statement = work_queue.insert().values(
+            space=space,
+            project_id=project_id,
+            id=entry_id,
+            kind=kind,
+            state=CLAIMED,
+            attempts=1,
+            token=token,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
+            created_at=now,
+            work=work,
+        )
+        await self._run(space, lambda connection: connection.execute(statement))
+        return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
 
     async def claim(self, lease_seconds: float) -> Claim | None:
         """Take the oldest piece of work that is queued, or whose claim's lease ran out, and hold it
@@ -221,6 +258,20 @@ class SqlWorkQueue:
 
         return await self._run(space, held)
 
+    async def contains(self, principal: Principal, project_id: str, entry_id: str) -> bool:
+        """Whether ``entry_id`` is in the queue: queued, or claimed, whether or not its lease ran out."""
+        space = space_of(principal)
+
+        def contains(connection: Connection) -> bool:
+            found = connection.execute(
+                select(work_queue.c.id).where(
+                    work_queue.c.space == space, work_queue.c.project_id == project_id, work_queue.c.id == entry_id
+                )
+            ).first()
+            return found is not None
+
+        return await self._run(space, contains)
+
     async def pending(self) -> int:
         """How many pieces of work, of every organisation, are in the queue: queued or claimed."""
         return int(
@@ -230,4 +281,4 @@ class SqlWorkQueue:
         )
 
 
-__all__ = ["CLAIMED", "QUEUED", "Claim", "SqlWorkQueue"]
+__all__ = ["CLAIMED", "QUEUED", "RECORDING", "Claim", "SqlWorkQueue"]

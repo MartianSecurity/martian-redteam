@@ -17,10 +17,11 @@
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
 
-The process holds the run (:class:`~martian.evals.local_runs.RunLock`) from before the run is
-recorded until it ends, so ``martian ui`` leaves the run alone while it runs. A run whose process
-was killed, so that it could not record its end, is finished as interrupted when ``martian ui``
-starts or when the run is cancelled there.
+The process holds the run in the data folder's queue (:class:`~martian.evals.local_runs.RunHold`)
+from before the run is recorded until it ends, so ``martian ui`` leaves the run alone while it
+runs. A run whose process was killed, so that it could not record its end, is finished as
+interrupted once its hold's lease runs out, by a ``martian ui`` serving the folder, or at once when
+the run is cancelled there.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
 
 if TYPE_CHECKING:
-    from martian.evals.local_runs import RunLock
+    from martian.evals.local_runs import RunHold
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,7 @@ class RunRecorder:
     def __init__(self, home: Path, suite: Suite) -> None:
         from martian.evals.local import LocalEditionError, open_stores
 
-        self._lock: RunLock | None = None
+        self._hold: RunHold | None = None
         try:
             self.store, self.records = open_stores(home)
         except LocalEditionError as error:
@@ -101,7 +102,7 @@ class RunRecorder:
         return _wait(self._start(planned=planned, total=total, limit=limit, reused=reused))
 
     async def _start(self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase]) -> Run:
-        from martian.evals.local_runs import PROCESS, RunLock
+        from martian.evals.local_runs import RunHold
 
         now = datetime.now(UTC)
         suite = self.suite
@@ -130,7 +131,7 @@ class RunRecorder:
             started_at=now,
         )
         # Held before the run is recorded, so no process ever finds it running and not held.
-        self._lock = RunLock(self.home, run.id, PROCESS)
+        self._hold = await RunHold.take(self.home, run.id)
         run = await self.store.start_run(SINGLE_USER, run)
         self.run = await self.records.create_run(SINGLE_USER, run)
         await self._write(reused, traces=False)
@@ -166,8 +167,8 @@ class RunRecorder:
                 else:
                     _wait(self._end("failed", f"the run stopped early: {type(error).__name__}"))
         finally:
-            if self._lock is not None:
-                self._lock.release()
+            if self._hold is not None:
+                self._hold.release()
             self.records.close()
 
     async def _end(self, state: RunState, error: str) -> Run:

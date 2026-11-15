@@ -26,6 +26,14 @@ takes it with :meth:`QueueWorker.serve`, one piece at a time, and runs it with i
   again.
 - **What it never does.** It never retries a target or a judge, and work that ends ``failed`` stays
   failed: only a worker that stopped before the work ended makes it run again.
+- **Runs recorded outside the queue.** A process that records a run itself, such as
+  ``martian evals run``, holds it in the queue as a ``recording`` claim, which it renews
+  (:meth:`~martian.evals.records.queue.SqlWorkQueue.hold`). The worker never runs one: once its
+  lease runs out, the process recording it is gone, and the worker finishes the run as interrupted
+  (:data:`~martian.evals.worker.execute.INTERRUPTED`).
+- **Cancelling.** It tells the cancel route whether anything is working on a running run
+  (:class:`~martian.evals.worker.InterruptedRuns`): a run no live claim holds is cancelled at once
+  as interrupted, since no worker will reach its next case.
 
 So restarting the API process loses no queued or running run, whether its worker runs in that
 process or in another. Progress events are the record store's (``records.events``), as with any
@@ -40,11 +48,12 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
-from martian.evals.model import Target
+from martian.evals.model import Run, Target
 from martian.evals.records import RecordStore
-from martian.evals.records.queue import Claim, SqlWorkQueue
+from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
+from martian.evals.store import StoreError
 from martian.evals.worker import Runner, Work
-from martian.evals.worker.execute import fail_unfinished, take_over
+from martian.evals.worker.execute import fail_unfinished, interrupt, take_over
 from martian.evals.worker.process import dump_work, load_work
 
 if TYPE_CHECKING:
@@ -108,6 +117,15 @@ class QueueWorker:
         await self._queue.put(work.principal, work.project_id, entry_id(work), work.kind, dump_work(work))
         self._wake.set()
 
+    async def cancel_interrupted(self, principal: Principal, run: Run) -> Run | None:
+        """The cancel route's question (``InterruptedRuns``): cancel the running ``run`` at once, as
+        interrupted, when no live claim holds it, so nothing would reach its next case; None while
+        one does, which then stops it before its next case."""
+        work = Work(kind="run", principal=principal, project_id=run.project_id, run_id=run.id)
+        if await self._queue.held(principal, run.project_id, entry_id(work)):
+            return None
+        return await interrupt(self._records, principal, run, "cancelled")
+
     # --- serving ---------------------------------------------------------------------------------
 
     async def start(self) -> None:
@@ -134,7 +152,10 @@ class QueueWorker:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._wake.wait(), self._poll)
                 continue
-            await self._handle(claim)
+            try:
+                await self._handle(claim)
+            except Exception:  # noqa: BLE001 - the database is away; the claim runs out and is taken again
+                log.exception("The worker could not end its turn on %s", claim.id)
 
     async def drain(self) -> None:
         """Wait until the queue holds no work, of any organisation: for the local edition and for
@@ -151,6 +172,10 @@ class QueueWorker:
 
     async def _handle(self, claim: Claim) -> None:
         work = load_work(claim.work)
+        if claim.kind == RECORDING:  # the process recording this run stopped before it ended
+            await self._interrupted(work)
+            await self._queue.done(claim)
+            return
         if claim.attempt > self._max_attempts:
             log.error("%s work on run %s: its worker stopped %d times", work.kind, work.run_id, claim.attempt - 1)
             await fail_unfinished(self._records, work, STOPPED_TOO_OFTEN)
@@ -166,6 +191,18 @@ class QueueWorker:
             raise
         if ended:
             await self._queue.done(claim)
+
+    async def _interrupted(self, work: Work) -> None:
+        run = await self._records.get_run(work.principal, work.project_id, work.run_id)
+        if run is None or run.state not in ("queued", "running"):
+            return
+        try:
+            await interrupt(self._records, work.principal, run, "cancelled" if run.cancel_requested_at else "failed")
+        except StoreError as error:
+            if error.kind != "conflict":
+                raise
+            return  # it moved on meanwhile
+        log.warning("Run %s was interrupted: the process recording it stopped", run.code or run.id)
 
     async def _run(self, work: Work) -> None:
         await take_over(self._records, work)

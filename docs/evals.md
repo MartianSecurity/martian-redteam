@@ -168,8 +168,8 @@ reasons, and each case's trace with your target's own spans. **Compare** pairs t
 same data case by case, and **Traces** lists every case's trace. A case reused from an earlier
 run keeps its verdict but not its trace, which stays with the run that graded it. A run that
 stops early shows as failed, or cancelled when interrupted. A run whose process was killed shows
-as running until `martian ui` next starts, or until you cancel it there, and then as interrupted
-([runs whose process stopped](evals-core.md#runs-whose-process-stopped)). How a run maps onto the
+as running for about ten seconds while `martian ui` serves the folder, or until it next starts,
+and then as interrupted ([runs whose process stopped](evals-core.md#runs-whose-process-stopped)). How a run maps onto the
 Evals objects is in [command-line runs](evals-core.md#command-line-runs).
 
 **Traces from your application.** An application instrumented with MLflow tracing can record into
