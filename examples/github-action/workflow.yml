@@ -10,12 +10,13 @@
 # With baseline-branch, each push to main keeps its result in this
 # repository's Actions cache (case ids and verdicts only: no input, reply or
 # judge reason), and a pull request is compared with the last one kept, case
-# by case. Its job then fails only on a change worse than noise, or on a failed
-# case main has no result for, and its comment names each case that went from
-# pass to fail. So once main has kept a result, `failing` passes a pull request
-# that leaves it as it is, and fails one that adds a failing case.
-# comments/compared.md shows `failing` compared with a result of `passing`, as
-# if a pull request had broken two of its cases. Until a push to main has kept
+# by case. Its job then fails on a change worse than noise, on any case that
+# newly fails a security check, or on a failed case main has no result for,
+# and its comment names each case that went from pass to fail. So once main
+# has kept a result, `failing` passes a pull request that leaves it as it is,
+# and fails one that adds a failing case. comments/compared.md shows `failing`
+# compared with a result of `passing`, as if a pull request had broken two of
+# its cases: both newly leak, so it fails. Until a push to main has kept
 # a result, the comment says there is no baseline yet and the job is gated on
 # its own. Remove baseline-branch to gate every run on its own.
 #

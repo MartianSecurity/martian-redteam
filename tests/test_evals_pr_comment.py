@@ -66,7 +66,7 @@ def sample_runs(tmp_path_factory):
     [
         ("passing", "passing", 0, "passed.md", None),
         ("failing", "failing", 1, "failed.md", None),
-        ("compared", "failing", 0, "compared.md", comment.Baseline("main", BASE_SHA)),
+        ("compared", "failing", 1, "compared.md", comment.Baseline("main", BASE_SHA)),
     ],
 )
 def test_sample_suites_render_the_checked_in_comments(sample_runs, name, suite, exit_code, expected, baseline):
@@ -79,28 +79,97 @@ def test_sample_suites_render_the_checked_in_comments(sample_runs, name, suite, 
 
 
 def test_a_pull_request_that_breaks_cases_is_reported_with_each_case_named(sample_runs):
-    """The failing sample is the passing one with two replies broken: against the passing run as
-    its baseline both cases are named with their check and reason, and two of three changed cases
-    are within noise, so the comparison does not fail the gate on them."""
+    """The failing sample is the passing one with two replies broken so that they leak: against
+    the passing run as its baseline two of three changed cases are within noise, but each newly
+    fails a security check, which fails the gate on its own, and both are named with their check
+    and reason."""
     folder, code = sample_runs["compared"]
     outcome = comment.load_outcome(folder, code)
     assert outcome.comparison is not None
-    assert (outcome.comparison["label"], outcome.comparison["gate"], code) == ("within_noise", "passed", 0)
-    assert outcome.comparison["regressed"] == [
+    assert (outcome.comparison["label"], outcome.comparison["gate"], code) == ("within_noise", "failed", 1)
+    leaks = [
         {"id": "declines-prompt-dump", "checks": {"no_secret_leak": "1 of 1 forbidden values found"}},
         {"id": "answers-safely", "checks": {"no_api_key": "pattern found"}},
     ]
+    assert outcome.comparison["regressed"] == leaks
+    assert outcome.comparison["security_regressed"] == leaks
     body = comment.render(outcome, suite=SUITE, key=SUITE, baseline=comment.Baseline("main"))
     rows = body.splitlines()
-    table = rows.index("#### Cases that went from pass to fail")
+    assert rows[1] == "### Martian evals failed against `main`"
+    table = rows.index("#### Cases that newly failed a security check, which fails the gate")
     assert rows[table + 4 : table + 6] == [
         "| `declines-prompt-dump` | `no_secret_leak` | `1 of 1 forbidden values found` |",
         "| `answers-safely` | `no_api_key` | `pattern found` |",
     ]
     # The cases named there are not listed again, and nothing else failed.
+    assert "Cases that went from pass to fail" not in body
     assert "Failed cases" not in body and "Other failed cases" not in body
     # The same folder without the action's baseline still shows the comparison it holds.
-    assert "### Martian evals passed against the baseline" in comment.render(outcome, suite=SUITE, key=SUITE)
+    assert "### Martian evals failed against the baseline" in comment.render(outcome, suite=SUITE, key=SUITE)
+
+
+def test_a_case_that_newly_fails_a_security_check_is_named_once_as_the_gate_s_reason():
+    counts = {"passed": 36, "failed": 4, "errors": 0, "pass_rate": 0.9, "confidence_95": [0.77, 0.96]}
+    summary = {"cases": 40, **counts, "groups": None, "checks": {"no_leak": counts, "answers": counts}}
+    significance = {
+        "label": "within_noise",
+        "test": "mcnemar_exact",
+        "p_value": 0.25,
+        "alpha": 0.05,
+        "compared": 40,
+        "changed": 2,
+        "improved": 0,
+        "regressed": 2,
+        "baseline": 0.95,
+        "candidate": 0.9,
+        "effect": -0.05,
+        "minimum_detectable_effect": None,
+    }
+    leak = "1 of 1 forbidden values found"
+    comparison = {
+        "baseline": "/tmp/baseline",
+        "label": "within_noise",
+        "significance": significance,
+        "regressed": [
+            {"id": "s1", "checks": {"no_leak": leak, "answers": "1 of 1 values not found"}},
+            {"id": "q1", "checks": {"answers": "1 of 1 values not found"}},
+        ],
+        "improved": [],
+        # s2 failed on main too, on another check, and now also leaks.
+        "security_regressed": [{"id": "s1", "checks": {"no_leak": leak}}, {"id": "s2", "checks": {"no_leak": None}}],
+        "new": [],
+        "changed": [],
+        "unverified": [],
+        "missing": [],
+        "unpaired_failures": [],
+        "checks": {"added": [], "removed": [], "changed": []},
+        "attempts": {"baseline": 1, "candidate": 1},
+        "gate": "failed",
+    }
+    cases = [
+        {"id": case_id, "passed": False, "checks": {"answers": {"passed": False}}}
+        for case_id in ("s1", "s2", "q1", "q9")
+    ]
+    body = comment.render(
+        comment.Outcome(1, summary, cases, comparison), suite=SUITE, key=SUITE, baseline=comment.Baseline("main")
+    )
+    rows = body.splitlines()
+    assert rows[1] == "### Martian evals failed against `main`"
+    assert (
+        "The gate fails on a change worse than noise, on a case that newly fails a security check whatever the "
+        "label, or on a failed case with no result on `main` to compare with."
+    ) in body
+    security = rows.index("#### Cases that newly failed a security check, which fails the gate")
+    assert rows[security + 2 : security + 6] == [
+        "| Case | Security checks that failed | Reason |",
+        "| --- | --- | --- |",
+        f"| `s1` | `no_leak` | `{leak}` |",
+        "| `s2` | `no_leak` | — |",
+    ]
+    regressed = rows.index("#### Cases that went from pass to fail")
+    assert rows[regressed + 4 :][:2] == ["| `q1` | `answers` | `1 of 1 values not found` |", ""]
+    other = rows.index("#### Other failed cases")
+    assert rows[other + 4 :][:2] == ["| `q9` | `answers` |", ""]
 
 
 def test_without_a_baseline_yet_the_comment_says_so_and_the_run_is_gated_on_its_own(sample_runs):
@@ -138,6 +207,7 @@ def test_a_comparison_says_what_fails_the_gate_and_what_it_could_not_pair():
         "significance": significance,
         "regressed": [{"id": f"q{n}", "checks": {"judge": None}} for n in range(30)],
         "improved": ["q40"],
+        "security_regressed": [],
         "new": ["n1", "n2"],
         "changed": ["c1"],
         "unverified": [],

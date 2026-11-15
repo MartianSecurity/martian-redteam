@@ -381,9 +381,16 @@ class Suite(_Model):
             )
         return self
 
+    def security_checks(self) -> list[str]:
+        """The labels of the security checks, in suite order. Their attempts combine by ``all``
+        unless they name a rule, and compared with a baseline a case that newly fails one fails
+        the gate whatever the noise label (:mod:`martian.evals.baseline`)."""
+        return [check.label for check in self.checks if check.security]
+
     def repeat_plan(self) -> dict[str, Any]:
         """The attempts of each case, the suite's rule, and each check's rule and where it came from."""
-        checks = [(check.label, check.combine, check.security) for check in self.checks]
+        security = self.security_checks()
+        checks = [(check.label, check.combine, check.label in security) for check in self.checks]
         return plan(self.repeats, self.combine, checks)
 
 
@@ -1304,7 +1311,8 @@ def _verdicts(
     suite: Suite, records: list[dict[str, Any]], cases: list[dict[str, Any]], repeats: dict[str, Any] | None
 ) -> dict[str, Any]:
     """The run's verdicts file (:func:`martian.evals.baseline.verdicts`). A check's definition counts
-    its judge for an LLM judge and, with repeats, the rule its attempts combine by."""
+    its judge for an LLM judge and, with repeats, the rule its attempts combine by. The file names the
+    suite's security checks, which a comparison with it as the candidate gates on case by case."""
     from martian.evals import baseline as baselines
 
     judge = (
@@ -1326,5 +1334,10 @@ def _verdicts(
     plain = {check.label for check in suite.checks if repeats or check.type in baselines.PLAIN_REASONS}
     digests = {case["id"]: baselines.case_digest(case["inputs"], case["expectations"]) for case in cases}
     return baselines.verdicts(
-        records, digests, checks=checks, plain=plain, attempts=repeats["attempts"] if repeats else 1
+        records,
+        digests,
+        checks=checks,
+        plain=plain,
+        security=suite.security_checks(),
+        attempts=repeats["attempts"] if repeats else 1,
     )
