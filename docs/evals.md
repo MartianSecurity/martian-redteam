@@ -133,7 +133,7 @@ types a `name`.
 | `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
-| `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, and a digest of each check's definition: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
+| `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, a digest of each check's definition, and the names of the security checks: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
 | `comparison.json` | With `--baseline` only: the run compared with the baseline ([comparing with a baseline](#comparing-with-a-baseline)). A run without one removes an earlier run's |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
@@ -143,8 +143,9 @@ the [reliability](#reliability-and-flaky-cases) and flaky cases, and for a run t
 cases it did not run in the table's title; under it, the false-refusal rate for a suite with a
 policy check, the reasons cases had no verdict, and the limit a stopped run reached. It exits `0`
 when every case passed, `1` when a case failed, and `2` when a case has no verdict, the run
-stopped before a case, or the suite file is invalid. With `--baseline`, `1` means the change is
-worse than noise or a case with no result in the baseline failed instead.
+stopped before a case, or the suite file is invalid. With `--baseline`, `1` means instead that the
+change is worse than noise, that a case newly failed a security check, or that a case with no
+result in the baseline failed.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
 `--baseline DIR`, `--data-dir DIR`, `--max-seconds N` and `--max-judge-tokens N`. A run that is
@@ -316,7 +317,9 @@ and every judge again, so five attempts cost five times as much.
   only when it names its own `combine`. `no_refusal` is not a security check: it fails a reply
   for refusing a benign request, which measures over-refusal rather than a leak, so it takes the
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
-  secret `combine: all` when the suite's rule is looser.
+  secret `combine: all` when the suite's rule is looser. Compared with a baseline, a case that
+  newly fails a security check fails the gate on its own, however few cases changed
+  ([comparing with a baseline](#comparing-with-a-baseline)).
 - **A case passes** when every check, combined, passes it, as with one attempt.
 - **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
   verdict, could have gone either way. A combined verdict stands when it is the same both ways;
@@ -524,18 +527,27 @@ martian evals run evals.yaml --output results/pr --baseline results/main
   baseline cases this run did not have are counted as missing. With repeats, a pair is of the
   cases' combined verdicts.
 - **The gate.** With a baseline the exit code follows the comparison: `1` when the change is
-  worse than noise, or when a case with no pair failed, since there is nothing to compare it
-  with; otherwise `0`, even when cases failed in both runs or a few went from pass to fail. A case
-  without a verdict, or a run that [stopped at a limit](#run-a-suite-file-locally) before a case, still
-  exits `2`; a stopped run's `verdicts.json` and `comparison.json` hold only the cases it finished.
-  Without `--baseline` the run is gated on its own, as before.
+  worse than noise, when a paired case newly fails a security check, or when a case with no pair
+  failed, since there is nothing to compare it with; otherwise `0`, even when cases failed in
+  both runs or a few went from pass to fail on other checks. A case without a verdict, or a run
+  that [stopped at a limit](#run-a-suite-file-locally) before a case, still exits `2`; a stopped
+  run's `verdicts.json` and `comparison.json` hold only the cases it finished. Without
+  `--baseline` the run is gated on its own, as before.
+- **Security checks, case by case.** A leak is never noise. A paired case that fails a
+  [security check](#repeated-attempts) it passed in the baseline, or that the baseline did not
+  have, fails the gate on its own, whatever the label and also when the case already failed
+  another check in the baseline. A case that failed the same security check in both runs is a
+  known failure. The run's own `verdicts.json` names its security checks, the checks whose type is
+  in `martian.evals.runner.SECURITY_CHECKS`, so the rule follows the suite as it is now.
 - **What it reports.** The command prints the label, the counts and the p-value under the table,
-  then the cases that went from pass to fail with their failed checks, the cases it could not pair
-  and the failed ones among them. `comparison.json` holds the same: `label`, `significance` (the
-  paired comparison's fields, as `GET /v1/evals/compare` returns them), `regressed` (each case's id
-  and each failed check's reason, `null` when the reason is not kept), `improved`, `new`,
-  `changed`, `unverified`, `missing`, `unpaired_failures`, `checks` (the checks `added`,
-  `removed` and `changed` since the baseline), `attempts` and `gate`.
+  then the cases that went from pass to fail with their failed checks, the cases that newly failed
+  a security check, the cases it could not pair and the failed ones among them. `comparison.json`
+  holds the same: `label`, `significance` (the paired comparison's fields, as
+  `GET /v1/evals/compare` returns them), `regressed` (each case's id and each failed check's
+  reason, `null` when the reason is not kept), `improved`, `security_regressed` (each case that
+  newly failed a security check, with those checks' reasons), `new`, `changed`, `unverified`,
+  `missing`, `unpaired_failures`, `checks` (the checks `added`, `removed` and `changed` since the
+  baseline), `attempts` and `gate`.
 - **A changed suite.** A check added, removed or redefined, or a different number of attempts per
   case, changes what a verdict means, so the label measures that change as well as the system's.
   The comparison names such changes rather than refusing to compare.

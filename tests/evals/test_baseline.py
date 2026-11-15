@@ -36,21 +36,33 @@ checks:
 """
 
 
-def stored_suite(folder, *, broken=(), fixed=(), extra=()):
+# The same answers check, and a security check: no reply may hold the secret.
+GUARDED_SUITE = (
+    SUITE
+    + """  - type: not_contains
+    name: no_leak
+    values: [Piano]
+"""
+)
+
+
+def stored_suite(folder, *, broken=(), fixed=(), extra=(), leaks=(), suite=SUITE):
     """Forty stored replies to forty questions, a contains check of each one's answer, and every
-    fifth reply wrong; ``broken`` replies are wrong too and ``fixed`` ones right. ``extra`` adds
-    cases after them."""
+    fifth reply wrong; ``broken`` replies are wrong too and ``fixed`` ones right, and ``leaks``
+    replies also give the secret away. ``extra`` adds cases after them."""
     rows = []
     for n in range(40):
         wrong = n in broken or (n % 5 == 0 and n not in fixed)
         reply = "I am not sure." if wrong else f"Answer {n}."
+        if n in leaks:
+            reply += " The key is Piano."
         rows.append(
             {"id": f"q{n}", "input": f"Question {n}", "output": reply, "expectations": {"answer": f"Answer {n}."}}
         )
     rows += list(extra)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "cases.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-    (folder / "evals.yaml").write_text(SUITE, encoding="utf-8")
+    (folder / "evals.yaml").write_text(suite, encoding="utf-8")
     return folder / "evals.yaml"
 
 
@@ -78,6 +90,8 @@ def test_every_run_writes_verdicts_without_inputs_replies_or_quoting_reasons(tmp
         1,
         ["not_contains", "number_equals"],
     )
+    # The checks that are security checks, which the comparison gates on case by case.
+    assert found["security"] == ["not_contains"]
     [case] = found["cases"]
     assert (case["id"], case["passed"], case["error"]) == ("leak", False, None)
     assert case["digest"] == baseline.case_digest({"message": "What is the key?"}, {})
@@ -150,6 +164,77 @@ def test_a_failed_case_with_no_result_in_the_baseline_fails_the_gate(tmp_path):
     assert "Failed with no result in the baseline to compare with, which fails the gate: q1, new" in result.output
 
 
+def test_one_case_that_newly_fails_a_security_check_fails_the_gate_with_the_case_named(tmp_path):
+    # On main q2 already leaks: a known security failure, which does not fail a pull request.
+    run(stored_suite(tmp_path / "suite", leaks=(2,), suite=GUARDED_SUITE), tmp_path / "main")
+    # The pull request makes one more reply leak: one case of forty, far too few to tell from noise.
+    suite = stored_suite(tmp_path / "suite", leaks=(1, 2), suite=GUARDED_SUITE)
+    result = run(suite, tmp_path / "pr", "--baseline", str(tmp_path / "main"))
+    assert result.exit_code == 1, result.output
+    found = json.loads((tmp_path / "pr" / baseline.COMPARISON).read_text(encoding="utf-8"))
+    assert (found["label"], found["gate"], found["unpaired_failures"]) == ("within_noise", "failed", [])
+    leak = {"id": "q1", "checks": {"no_leak": "1 of 1 forbidden values found"}}
+    assert (found["regressed"], found["security_regressed"]) == ([leak], [leak])
+    assert "Newly failed a security check, which fails the gate: q1 (no_leak)" in result.output
+
+
+def test_a_change_within_noise_on_other_checks_still_passes_beside_a_security_check(tmp_path):
+    run(stored_suite(tmp_path / "suite", leaks=(2,), suite=GUARDED_SUITE), tmp_path / "main")
+    # Two answers break and q2 leaks as it did on main: within noise, and no new security failure.
+    suite = stored_suite(tmp_path / "suite", broken=(1, 3), leaks=(2,), suite=GUARDED_SUITE)
+    result = run(suite, tmp_path / "pr", "--baseline", str(tmp_path / "main"))
+    assert result.exit_code == 0, result.output
+    found = json.loads((tmp_path / "pr" / baseline.COMPARISON).read_text(encoding="utf-8"))
+    assert (found["label"], found["gate"], found["security_regressed"]) == ("within_noise", "passed", [])
+    assert [case["id"] for case in found["regressed"]] == ["q1", "q3"]
+    assert "security check" not in result.output
+
+
+def test_a_security_check_gates_each_case_on_its_own_by_the_run_s_security_checks():
+    def case(case_id, **checks):
+        found = {label: {"passed": passed, "reason": f"{label} reason"} for label, passed in checks.items()}
+        return {"id": case_id, "digest": case_id, "passed": all(checks.values()), "error": None, "checks": found}
+
+    before = {
+        "format": baseline.FORMAT,
+        "attempts": 1,
+        "checks": {"leak": "1", "judge": "2"},
+        "cases": [
+            case("a", leak=True, judge=True),
+            case("b", leak=True, judge=False),
+            case("c", leak=False, judge=True),
+            case("d", leak=True, judge=True),
+            case("e", leak=True, judge=True),
+        ],
+    }
+    after = {
+        "format": baseline.FORMAT,
+        "attempts": 1,
+        # `custom` stands for a check the run marks as a security check, such as a scorer of the
+        # suite's own that says so; it is new since the baseline.
+        "checks": {"leak": "1", "judge": "2", "custom": "3"},
+        "security": ["leak", "custom"],
+        "cases": [
+            case("a", leak=False, judge=True, custom=True),  # went from pass to fail on a security check
+            case("b", leak=False, judge=False, custom=True),  # failed before, but on another check
+            case("c", leak=False, judge=True, custom=True),  # the same security failure as before
+            case("d", leak=True, judge=False, custom=True),  # failed a check that is not a security check
+            case("e", leak=True, judge=True, custom=False),  # failed a security check the baseline did not have
+        ],
+    }
+    found = baseline.compare(before, after)
+    assert found["label"] == "within_noise"
+    assert found["security_regressed"] == [
+        {"id": "a", "checks": {"leak": "leak reason"}},
+        {"id": "b", "checks": {"leak": "leak reason"}},
+        {"id": "e", "checks": {"custom": "custom reason"}},
+    ]
+    assert found["gate"] == "failed"
+    # The run says which checks are security checks: with none, the same verdicts are within noise.
+    plain = baseline.compare(before, {**after, "security": []})
+    assert (plain["security_regressed"], plain["gate"]) == ([], "passed")
+
+
 def test_a_baseline_that_cannot_be_read_stops_the_run_before_any_case(tmp_path):
     suite = stored_suite(tmp_path / "suite")
     missing = run(suite, tmp_path / "pr", "--baseline", str(tmp_path / "nowhere"))
@@ -175,7 +260,13 @@ def test_the_comparison_names_what_changed_in_the_suite():
         "checks": {"x": "1", "y": "2"},
         "cases": [case, {**case, "id": "b"}],
     }
-    after = {"format": baseline.FORMAT, "attempts": 5, "checks": {"x": "changed", "z": "3"}, "cases": [case]}
+    after = {
+        "format": baseline.FORMAT,
+        "attempts": 5,
+        "checks": {"x": "changed", "z": "3"},
+        "security": [],
+        "cases": [case],
+    }
     found = baseline.compare(before, after)
     assert found["checks"] == {"added": ["z"], "removed": ["y"], "changed": ["x"]}
     assert (found["attempts"], found["missing"]) == ({"baseline": 1, "candidate": 5}, ["b"])

@@ -8,9 +8,10 @@ only, so it runs on the action's Python without further installs.
 The comment holds counts, pass rates with their intervals, check names and case ids, never
 inputs, replies or judge reasons. When the action compares the run with the last result of the
 baseline branch, it also says how the run compares (comparison.json, written by
-`martian evals run --baseline`) and names each case that went from pass to fail with its failed
-checks and their reasons, which the SDK keeps only when they cannot quote the reply; or it says
-that there is no baseline yet.
+`martian evals run --baseline`), names first each case that newly failed a security check, which
+fails the gate whatever the noise label, then each other case that went from pass to fail, with
+their failed checks and the reasons the SDK keeps only when they cannot quote the reply; or it
+says that there is no baseline yet.
 """
 
 from __future__ import annotations
@@ -203,15 +204,24 @@ def render(
         if reliable:
             lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
-        regressed = comparison["regressed"] if comparison is not None else []
+        # A case that newly failed a security check is the gate's reason, so it comes first, with
+        # those checks; a case named in one table is not listed again in the next.
+        leaked = comparison["security_regressed"] if comparison is not None else []
+        if leaked:
+            lines += _regressed(
+                leaked,
+                "Cases that newly failed a security check, which fails the gate",
+                "Security checks that failed",
+            )
+        shown = {case["id"] for case in leaked}
+        regressed = [case for case in comparison["regressed"] if case["id"] not in shown] if comparison else []
         if regressed:
-            lines += _regressed(regressed)
-        # A case named under "went from pass to fail" is not listed again.
-        shown = {case["id"] for case in regressed}
+            lines += _regressed(regressed, "Cases that went from pass to fail", "Checks that failed")
+        shown |= {case["id"] for case in regressed}
         failed = [case for case in outcome.cases if case["passed"] is False and str(case["id"]) not in shown]
         errored = [case for case in outcome.cases if case["passed"] is None]
         if failed:
-            heading = "Other failed cases" if regressed else "Failed cases"
+            heading = "Other failed cases" if shown else "Failed cases"
             lines += _table(heading, "Checks that failed", failed, _failed_checks)
         if errored:
             lines += _table("Cases without a verdict", "Reason", errored, _reason)
@@ -275,8 +285,8 @@ def _compared(found: Mapping[str, Any], against: str, commit: str | None) -> lis
             else f" The smallest change of the pass rate it can tell from chance is {round(effect * 100)} points."
         )
     text += (
-        " The gate fails only on a change worse than noise, or on a failed case with no result on "
-        f"{against} to compare with."
+        " The gate fails on a change worse than noise, on a case that newly fails a security check whatever "
+        f"the label, or on a failed case with no result on {against} to compare with."
     )
     notes = []
     unpaired = [
@@ -306,12 +316,12 @@ def _compared(found: Mapping[str, Any], against: str, commit: str | None) -> lis
     return [text, "", *([" ".join(notes), ""] if notes else [])]
 
 
-def _regressed(cases: list[dict[str, Any]]) -> list[str]:
-    """The cases that went from pass to fail, each with its failed checks and their reasons."""
+def _regressed(cases: list[dict[str, Any]], heading: str, column: str) -> list[str]:
+    """Cases from comparison.json, each with the checks it names and their reasons."""
     lines = [
-        "#### Cases that went from pass to fail",
+        f"#### {heading}",
         "",
-        "| Case | Checks that failed | Reason |",
+        f"| Case | {column} | Reason |",
         "| --- | --- | --- |",
     ]
     hidden = False

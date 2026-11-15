@@ -85,7 +85,8 @@ def run_evals(
             file_okay=False,
             show_default=False,
             help="Suite file only: an earlier run's output folder. Compare with it case by case and gate on "
-            "the comparison: fail on a change worse than noise or on a failed case it has no result for.",
+            "the comparison: fail on a change worse than noise, on any case that newly fails a security check, "
+            "or on a failed case it has no result for.",
         ),
     ] = None,
     max_seconds: Annotated[
@@ -296,6 +297,12 @@ def _comparison_lines(found: dict[str, Any]) -> list[str]:
         shown = ", ".join(f"{case['id']} ({', '.join(case['checks'])})" for case in found["regressed"][:10])
         more = len(found["regressed"]) - 10
         lines.append(f"From pass to fail: {shown}" + (f" and {more} more" if more > 0 else ""))
+    if leaked := found["security_regressed"]:
+        shown = ", ".join(f"{case['id']} ({', '.join(case['checks'])})" for case in leaked[:10])
+        more = len(leaked) - 10
+        lines.append(
+            f"Newly failed a security check, which fails the gate: {shown}" + (f" and {more} more" if more > 0 else "")
+        )
     unpaired = [(found["new"], "new"), (found["changed"], "with changed inputs or expectations")]
     unpaired.append((found["unverified"], "without a verdict in one of the runs"))
     if counted := [f"{len(ids)} {what}" for ids, what in unpaired if ids]:

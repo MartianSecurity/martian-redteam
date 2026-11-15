@@ -49,9 +49,10 @@ inputs:
     description: >
       Branch whose last result a pull request is compared with, usually the
       default branch. A push to it keeps the run's result; a pull request is
-      compared with the last result kept and fails only on a change worse than
-      noise or on a failed case with no result to compare with. Empty turns the
-      comparison off and gates every run on its own.
+      compared with the last result kept and fails on a change worse than
+      noise, on any case that newly fails a security check, or on a failed case
+      with no result to compare with. Empty turns the comparison off and gates
+      every run on its own.
     required: false
     default: ""
 
@@ -186,8 +187,8 @@ runs:
 
     # The suite's exit code is the gate: 0 passed, 1 a case failed, 2 a case
     # has no verdict or the suite file is invalid. Compared with a baseline,
-    # 1 is a change worse than noise or a failed case with no result to
-    # compare with.
+    # 1 is a change worse than noise, a case that newly fails a security
+    # check, or a failed case with no result to compare with.
     - name: Apply the suite result
       if: always() && steps.run.outputs.exit-code != ''
       shell: bash
