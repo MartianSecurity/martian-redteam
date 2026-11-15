@@ -31,14 +31,25 @@ checks:
 behind an API needs no Python file.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, and can be stopped and resumed. To browse traces and judge reasons,
-point `mlflow ui` at the local store, or set `mlflow.tracking_uri` in the suite file to log to
-your own MLflow server. [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md)
-has the full guide: data formats, every check, provider setup and results.
+prints a summary table, and can be stopped and resumed. It is also recorded for `martian ui`
+(below), which shows each case's verdict, reasons and trace and compares runs; set
+`mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
+[Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full
+guide: data formats, every check, provider setup and results.
+
+On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
+push and keeps one comment with the result, also without a Martian account. See
+[gate and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
+  service; see
+  [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
+  The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
+  login, so never expose it publicly
+  ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   deterministic checks (`contains`, `not_contains`, `matches`, `not_matches`, `is_json`),
   pinned datasets, Backend-scored regression gates and recorded CI sessions.

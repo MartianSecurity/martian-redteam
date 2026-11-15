@@ -45,7 +45,7 @@ TraceRecorder holds bounded events locally (default 1000). Tool calls record sta
 
 The [Mars Market refund customer agent](https://github.com/MorningHQ/MartianCustomerAgents/tree/main/refund-support-acceptance) demonstrates Bedrock model instrumentation, authenticated runtime configuration, customer-scoped commerce tools and a trace retrieval endpoint. Session authentication, expiry, replay protection and trace export remain responsibilities of the host application. No replacement service-specific MCP servers are bundled with this SDK.
 
-Its standalone Docker build consumes this SDK as a named source context. The SDK's .dockerignore includes only package metadata, README and source; local credentials, environments and caches are excluded from the build context.
+Its standalone Docker build consumes this SDK as a named source context. The SDK's .dockerignore includes only package metadata, the lockfile, README, license files and source; local credentials, environments and caches are excluded from the build context.
 
 Private customer repositories can materialize a reviewed SDK revision without a personal access token when this repository is shared with the organization for Actions access:
 

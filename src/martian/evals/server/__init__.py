@@ -1,5 +1,5 @@
-"""The evals core: the ``/v1/evals`` API over an injected store, record store, principal and
-entitlements.
+"""The evals core: the ``/v1/evals`` API over an injected store, record store, principal,
+entitlements and worker.
 
 The same core serves every edition. An edition builds it with ``create_app`` and supplies the
 things the core never imports:
@@ -10,12 +10,17 @@ things the core never imports:
   :data:`SINGLE_USER` for the local edition, or the server's session lookup;
 - ``entitlements``: a function from a principal to its :class:`Entitlements`, such as
   ``lambda p: entitlements_for(resolve_edition(plan=...))``. The default is Community.
+- ``worker``: a :class:`~martian.evals.worker.Worker` that runs what the write routes start, such
+  as :class:`~martian.evals.worker.InProcessWorker`. Without one, a route that starts a run or a
+  scoring job answers ``503``.
 
 Routes read them through :func:`current_principal`, :func:`current_entitlements`,
-:func:`current_store` and :func:`current_records`, and a route that serves a paid feature declares
-``dependencies=[Depends(require_entitlement(key))]``. Every route is in the shape of the frozen
-evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
-``datasets``. The write routes are ported from the server in MorningHQ/martian-notes#101.
+:func:`current_store`, :func:`current_records` and ``current_worker``. A route that serves a paid
+feature declares ``dependencies=[Depends(require_entitlement(key))]``, and a write route declares
+the capability it needs with ``require_capability(name)``. Every route is in the shape of the
+frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
+``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
+``projects``, ``views`` and ``drafts``.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from martian.evals.records import RecordStore
-from martian.evals.server import datasets, runs, traces
+from martian.evals.server import datasets, drafts, launch, projects, reviews, runs, scoring, suites, traces, views
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
 from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.dependencies import (
@@ -36,7 +41,9 @@ from martian.evals.server.dependencies import (
     current_principal,
     current_records,
     current_store,
+    current_worker,
     ensure_entitled,
+    require_capability,
     require_entitlement,
 )
 from martian.evals.server.entitlements import (
@@ -56,6 +63,7 @@ from martian.evals.server.entitlements import (
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.server.projection import DEFAULT_PROJECT, NO_AGENT, result_id, score_id
 from martian.evals.store import EvalStore, StoreError, StoreStatus
+from martian.evals.worker import Worker
 
 STORE_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
@@ -92,6 +100,7 @@ def create_app(
     records: RecordStore,
     principal: PrincipalProvider,
     entitlements: EntitlementsProvider = lambda _principal: COMMUNITY,
+    worker: Worker | None = None,
     **fastapi_options: Any,
 ) -> FastAPI:
     """The evals core as an application. ``principal`` is a FastAPI dependency, so it can read the
@@ -101,13 +110,31 @@ def create_app(
         raise TypeError("store must implement martian.evals.store.EvalStore")
     if not isinstance(records, RecordStore):
         raise TypeError("records must implement martian.evals.records.RecordStore")
+    if worker is not None and not isinstance(worker, Worker):
+        raise TypeError("worker must implement martian.evals.worker.Worker")
     app = FastAPI(title="Martian Evals", **fastapi_options)
     app.state.martian_evals_store = store
     app.state.martian_evals_records = records
     app.state.martian_evals_entitlements = entitlements
+    app.state.martian_evals_worker = worker
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
-    for part in (router, datasets.router, runs.explorer, traces.router, runs.router):
+    for part in (
+        router,
+        datasets.router,
+        runs.explorer,
+        traces.router,
+        launch.router,
+        scoring.router,
+        reviews.router,
+        reviews.explorer,
+        suites.router,
+        suites.explorer,
+        projects.router,
+        views.router,
+        drafts.router,
+        runs.router,
+    ):
         app.include_router(part)
     return app
 
@@ -137,10 +164,12 @@ __all__ = [
     "current_principal",
     "current_records",
     "current_store",
+    "current_worker",
     "ensure_entitled",
     "entitlements_for",
     "highest_role",
     "organisation_principal",
+    "require_capability",
     "require_entitlement",
     "resolve_edition",
     "result_id",

@@ -114,9 +114,10 @@ is independent (`CATALOG_VERSION`); graph/policy revisions come from the service
 
 This repository is the home of the open-source evals core. The names stay as they are: the
 repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
-and the command `martian`. Everything here is Apache-2.0. Paid Enterprise features live in the
-private Martian backend and console, which use the core; this repository holds no commercially
-licensed code. The repository is private until the open-source launch.
+and the command `martian`. Everything here is Apache-2.0, except `src/martian/ui/`: a build of the
+Evals app from the private frontend, whose packages carry no licence yet
+(MorningHQ/martian-notes#220). Paid Enterprise features live in the private Martian backend and
+console, which use the core; this repository holds no commercially licensed code. The repository is private until the open-source launch.
 
 The core grows into this layout. Paths marked as planned do not exist yet; the issue named
 next to each one creates it.
@@ -125,12 +126,14 @@ next to each one creates it.
 | --- | --- | --- |
 | `src/martian/evals/` | SDK: suite runner, suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
-| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists with the read routes; the write routes are MorningHQ/martian-notes#101 |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes |
 | `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
-| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts), portable to SQLite and Postgres | Exists |
-| `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
-| `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
-| `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |
+| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views), portable to SQLite and Postgres | Exists |
+| `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
+| `src/martian/evals/run_record.py` | `martian evals run` recording each suite-file run through the store and the record store, so `martian ui` shows it ([command-line runs](evals-core.md#command-line-runs)) | Exists |
+| `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; publishing it from a tagged release is MorningHQ/martian-notes#223 |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists with an in-process worker; a durable queue is MorningHQ/martian-notes#139, one process per run #140 |
+| `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MorningHQ/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
 
 ## CI and scoring
 

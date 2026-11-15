@@ -276,7 +276,7 @@ def invoke_response_judge(
     rate_limit_wait_seconds: float = 0.0,
     headers: Mapping[str, str] | None = None,
 ) -> Feedback:
-    # Reuse routing, credentials and wire transforms from MLflow 3.16.1.
+    # Reuse routing, credentials and wire transforms from the pinned MLflow.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
     try:
         provider, model = parse_model_uri(model_uri)

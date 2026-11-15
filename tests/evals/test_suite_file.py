@@ -240,7 +240,13 @@ async def test_a_suite_round_trips_through_the_record_store(tmp_path):
     try:
         saved = await records.save_suite(SINGLE_USER, "p1", suite)
         stored = await records.get_suite(SINGLE_USER, "p1", suite.id)
-        assert stored == saved == suite.model_copy(update={"version": 1})
+        # The store adds who saved the version when; a suite file has no place for either.
+        assert saved.created_by == "local" and saved.created_at is not None
+        assert (
+            stored
+            == saved
+            == suite.model_copy(update={"version": 1, "created_at": saved.created_at, "created_by": "local"})
+        )
         assert yaml.safe_load(suite_to_yaml(stored)) == EVERY_FIELD_URL
         # A changed run setting is a change to the suite: the store keeps it as a new version.
         write(tmp_path, {**EVERY_FIELD_URL, "concurrency": 2})

@@ -5,9 +5,11 @@
 The suite names a data file (JSONL or CSV), the checks to apply, and optionally the target under
 test: a Python function, or an HTTP endpoint. Nothing here contacts the Martian platform: a
 function target runs in this process, a URL target is called from it, LLM judges call the model
-you configure, and MLflow uses a local store in the output folder unless you point it at your
-own server. A run can be stopped and started again; a finished case is skipped while nothing that
-produced its verdict has changed. Use ``martian ci`` when a result must be recorded on the platform.
+you configure, and MLflow's evaluation harness uses a local store in the output folder unless you
+point it at your own server. The run, its case results, scores and traces are also recorded in the
+local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
+a finished case is skipped while nothing that produced its verdict has changed. Use ``martian ci``
+when a result must be recorded on the platform.
 """
 
 from __future__ import annotations
@@ -619,12 +621,33 @@ def run_suite(
     limit: int | None = None,
     resume: bool = True,
     progress: Callable[[str], None] | None = None,
+    home: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run the suite and return its summary. Writes results.jsonl, summary.json and junit.xml."""
+    """Run the suite and return its summary. Writes results.jsonl, summary.json and junit.xml, and
+    records the run, its case results, scores and traces in the local edition's data folder
+    (``home``, else ``MARTIAN_EVALS_HOME``, else ``~/.martian/evals``), where ``martian ui``
+    shows it (:mod:`martian.evals.run_record`). The returned summary also names that run, under
+    ``run``; summary.json does not.
+
+    The suite is read through the shared model (:func:`martian.evals.suite_file.load_suite_file`),
+    so a field the model has no place for is refused with the field named, never ignored.
+    """
+    from martian.evals.local import data_folder
+    from martian.evals.run_record import GradedCase, RunRecorder
+    from martian.evals.suite_file import load_suite_file
+
+    model, model_cases = load_suite_file(path)
     suite, base = load_suite(path)
-    cases = load_cases(
-        base / suite.data if not Path(suite.data).is_absolute() else suite.data, input_key=suite.input_key
-    )
+    cases: list[dict[str, Any]] = [
+        {
+            "id": case.id,
+            "inputs": dict(case.inputs),
+            "expectations": dict(case.expectations),
+            **({} if case.outputs is None else {"outputs": case.outputs}),
+        }
+        for case in model_cases
+    ]
+    total = len(cases)
     if limit is not None:
         cases = cases[:limit]
     stored = [case for case in cases if "outputs" in case]
@@ -638,96 +661,113 @@ def run_suite(
     labels = [check.label for check in suite.checks]
 
     folder = Path(output) if output is not None else base / suite.output
-    results = Results(folder, resume=resume)
-    suite_print = _suite_fingerprint(suite, base)
-    prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
-    # An earlier verdict is reused only when it was produced by exactly this suite and case.
-    finished = {i: r for i, r in results.records().items() if r["passed"] is not None and i in prints}
-    done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
-    invalidated = len(finished) - len(done)
-    todo = [case for case in cases if case["id"] not in done]
-    say = progress or (lambda message: None)
-    message = f"{len(cases)} cases, {len(cases) - len(todo)} already done"
-    if invalidated:
-        plural = "result" if invalidated == 1 else "results"
-        message += f", {invalidated} earlier {plural} discarded because the suite, the data or the target changed"
-    say(message)
+    # Opened before the output folder changes, so a data folder that cannot be opened stops here.
+    with RunRecorder(data_folder(home), model) as recorder:
+        results = Results(folder, resume=resume)
+        suite_print = _suite_fingerprint(suite, base)
+        prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
+        positions = {case["id"]: position for position, case in enumerate(cases)}
+        # An earlier verdict is reused only when it was produced by exactly this suite and case.
+        finished = {i: r for i, r in results.records().items() if r["passed"] is not None and i in prints}
+        done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
+        invalidated = len(finished) - len(done)
+        todo = [case for case in cases if case["id"] not in done]
+        say = progress or (lambda message: None)
+        message = f"{len(cases)} cases, {len(cases) - len(todo)} already done"
+        if invalidated:
+            plural = "result" if invalidated == 1 else "results"
+            message += f", {invalidated} earlier {plural} discarded because the suite, the data or the target changed"
+        say(message)
 
-    import mlflow
+        import mlflow
 
-    from martian.evals._mlflow import active_experiment_id, restore_active_experiment_id
-    from martian.evals.evaluate import evaluate_rows
-    from martian.evals.gate import _interpret
-    from martian.evals.scorers import output_text
+        from martian.evals._mlflow import active_experiment_id, restore_active_experiment_id
+        from martian.evals.evaluate import evaluate_rows
+        from martian.evals.gate import _interpret
+        from martian.evals.scorers import output_text
 
-    # Leave MLflow as it was found: another evaluation in this process must not inherit this
-    # run's store, experiment or worker settings.
-    previous_uri = mlflow.get_tracking_uri()
-    previous_experiment = active_experiment_id()
-    restored = ("MLFLOW_GENAI_EVAL_MAX_WORKERS", "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "MLFLOW_EXPERIMENT_ID")
-    previous_env = {name: os.environ.get(name) for name in restored}
-    os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(concurrency or suite.concurrency)
-    os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "true"  # otherwise the first case runs twice
-    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
-    started = time.monotonic()
-    try:
-        mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")
-        mlflow.set_experiment(suite.mlflow.experiment or Path(path).stem)
-        for start in range(0, len(todo), suite.batch):
-            batch = todo[start : start + suite.batch]
-            data = []
-            for case in batch:
-                row: dict[str, Any] = {
-                    "inputs": case["inputs"],
-                    "expectations": _with_suite_criteria(case, suite),
-                    "tags": {"martian_case_id": case["id"]},
-                }
-                if "outputs" in case:
-                    row["outputs"] = case["outputs"]
-                data.append(row)
-            frame: Any = evaluate_rows(
-                data=data, scorers=scorers, predict_fn=target
-            ).result_df  # never None: evaluate_rows raises
-            by_id = {case["id"]: case for case in batch}
-            recorded: set[str] = set()
-            for position in range(len(frame)):
-                case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
-                recorded.add(case["id"])
-                response = frame["response"].iloc[position] if "response" in frame.columns else None
-                state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
-                broke = _missing(response) or "ERROR" in state
-                # A function target's exception may hold anything, so only a URL target gives a reason.
-                reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
-                    "the target call failed" if broke else None
-                )
-                verdicts: dict[str, dict[str, Any]] = {}
-                for label in labels:
-                    value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
-                    rationale = (
-                        frame[f"{label}/rationale"].iloc[position] if f"{label}/rationale" in frame.columns else None
-                    )
-                    detail = (
-                        frame[f"{label}/error_message"].iloc[position]
-                        if f"{label}/error_message" in frame.columns
-                        else None
-                    )
-                    passed = None if broke else _interpret(value, None)
-                    verdicts[label] = {
-                        "passed": passed,
-                        "rationale": None if _missing(rationale) else str(rationale),
-                        "error": None
-                        if passed is not None
-                        else (
-                            "the target failed"
-                            if broke
-                            else str(detail)[:300]
-                            if not _missing(detail)
-                            else "no verdict"
-                        ),
+        def graded(case: dict[str, Any], record: dict[str, Any], trace: Any = None) -> GradedCase:
+            return GradedCase(
+                position=positions[case["id"]],
+                record=record,
+                expectations=case["expectations"],
+                trace=trace if isinstance(trace, str) else None,
+            )
+
+        recorder.start(
+            planned=len(cases),
+            total=total,
+            limit=limit,
+            reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
+        )
+        # Leave MLflow as it was found: another evaluation in this process must not inherit this
+        # run's store, experiment or worker settings.
+        previous_uri = mlflow.get_tracking_uri()
+        previous_experiment = active_experiment_id()
+        restored = ("MLFLOW_GENAI_EVAL_MAX_WORKERS", "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "MLFLOW_EXPERIMENT_ID")
+        previous_env = {name: os.environ.get(name) for name in restored}
+        os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(concurrency or suite.concurrency)
+        os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "true"  # otherwise the first case runs twice
+        os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
+        started = time.monotonic()
+        try:
+            mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")
+            mlflow.set_experiment(suite.mlflow.experiment or Path(path).stem)
+            for start in range(0, len(todo), suite.batch):
+                batch = todo[start : start + suite.batch]
+                data = []
+                for case in batch:
+                    row: dict[str, Any] = {
+                        "inputs": case["inputs"],
+                        "expectations": _with_suite_criteria(case, suite),
+                        "tags": {"martian_case_id": case["id"]},
                     }
-                values = [verdict["passed"] for verdict in verdicts.values()]
-                results.append(
-                    {
+                    if "outputs" in case:
+                        row["outputs"] = case["outputs"]
+                    data.append(row)
+                frame: Any = evaluate_rows(
+                    data=data, scorers=scorers, predict_fn=target
+                ).result_df  # never None: evaluate_rows raises
+                by_id = {case["id"]: case for case in batch}
+                recorded: list[GradedCase] = []
+                for position in range(len(frame)):
+                    case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
+                    response = frame["response"].iloc[position] if "response" in frame.columns else None
+                    state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
+                    broke = _missing(response) or "ERROR" in state
+                    # A function target's exception may hold anything, so only a URL target gives a reason.
+                    reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
+                        "the target call failed" if broke else None
+                    )
+                    verdicts: dict[str, dict[str, Any]] = {}
+                    for label in labels:
+                        value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
+                        rationale = (
+                            frame[f"{label}/rationale"].iloc[position]
+                            if f"{label}/rationale" in frame.columns
+                            else None
+                        )
+                        detail = (
+                            frame[f"{label}/error_message"].iloc[position]
+                            if f"{label}/error_message" in frame.columns
+                            else None
+                        )
+                        passed = None if broke else _interpret(value, None)
+                        verdicts[label] = {
+                            "passed": passed,
+                            "rationale": None if _missing(rationale) else str(rationale),
+                            "error": None
+                            if passed is not None
+                            else (
+                                "the target failed"
+                                if broke
+                                else str(detail)[:300]
+                                if not _missing(detail)
+                                else "no verdict"
+                            ),
+                        }
+                    values = [verdict["passed"] for verdict in verdicts.values()]
+                    record = {
                         "id": case["id"],
                         "passed": None if any(v is None for v in values) else all(values),
                         "checks": verdicts,
@@ -736,14 +776,16 @@ def run_suite(
                         "error": reason,
                         "fingerprint": prints[case["id"]],
                     }
-                )
-            # MLflow leaves out a row whose trace it could not read back. That case has no
-            # verdict, so it is an error now and is graded again on the next run.
-            for case in batch:
-                if case["id"] not in recorded:
-                    missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
-                    results.append(
-                        {
+                    results.append(record)
+                    trace = frame["trace"].iloc[position] if "trace" in frame.columns else None
+                    recorded.append(graded(case, record, trace))
+                # MLflow leaves out a row whose trace it could not read back. That case has no
+                # verdict, so it is an error now and is graded again on the next run.
+                seen = {item.record["id"] for item in recorded}
+                for case in batch:
+                    if case["id"] not in seen:
+                        missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
+                        record = {
                             "id": case["id"],
                             "passed": None,
                             "checks": {label: dict(missing) for label in labels},
@@ -752,21 +794,24 @@ def run_suite(
                             "error": None,
                             "fingerprint": prints[case["id"]],
                         }
-                    )
-            say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
-    finally:
-        mlflow.set_tracking_uri(previous_uri)
-        restore_active_experiment_id(previous_experiment)
-        for name, value in previous_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+                        results.append(record)
+                        recorded.append(graded(case, record))
+                recorder.graded(recorded)
+                say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
+        finally:
+            mlflow.set_tracking_uri(previous_uri)
+            restore_active_experiment_id(previous_experiment)
+            for name, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
-    final = results.records()
-    ordered = [final[case["id"]] for case in cases if case["id"] in final]
-    summary = _summary(ordered, labels, time.monotonic() - started, invalidated)
-    summary["output"] = str(folder)
-    (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)
-    return summary
+        final = results.records()
+        ordered = [final[case["id"]] for case in cases if case["id"] in final]
+        summary = _summary(ordered, labels, time.monotonic() - started, invalidated)
+        summary["output"] = str(folder)
+        (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)
+        recorder.finish()
+    return {**summary, "run": recorder.reference()}

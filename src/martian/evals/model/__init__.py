@@ -201,6 +201,8 @@ class Suite(_Object):
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
     digest: Digest
+    created_at: datetime | None = None
+    created_by: str | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -213,9 +215,10 @@ class Suite(_Object):
 
 
 def suite_digest(suite: Suite) -> str:
-    """The digest of a suite's definition: every field but ``id``, ``version`` and ``digest``.
-    Run settings count, so a store that keeps one version per digest never drops a change to them."""
-    return digest(suite.model_dump(mode="json", exclude={"id", "version", "digest"}))
+    """The digest of a suite's definition: every field but ``id``, ``version``, ``digest`` and who
+    saved the version when. Run settings count, so a store that keeps one version per digest never
+    drops a change to them."""
+    return digest(suite.model_dump(mode="json", exclude={"id", "version", "digest", "created_at", "created_by"}))
 
 
 class Counts(_Object):
@@ -250,6 +253,8 @@ class Run(_Object):
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the run. Whoever executes it stops before its next case."""
     store: StoreRef = StoreRef()
 
 
@@ -299,11 +304,15 @@ class Score(_Object):
 
 
 class ScoringJob(_Object):
-    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them."""
+    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them.
+    A job that applies a saved suite names its version and carries the suite's policies."""
 
     id: Identifier
     run_id: Identifier
     scorers: list[ScorerVersion] = Field(min_length=1)
+    policies: list[Policy] = Field(default_factory=list)
+    suite_id: str | None = None
+    suite_version: int | None = Field(default=None, ge=1)
     state: RunState
     total: int = Field(default=0, ge=0)
     succeeded: int = Field(default=0, ge=0)
@@ -312,6 +321,8 @@ class ScoringJob(_Object):
     requested_by: str | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the job. Whoever executes it stops before its next case."""
 
 
 class ReviewQuestion(_Object):

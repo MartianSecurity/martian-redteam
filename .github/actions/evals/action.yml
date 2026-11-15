@@ -1,0 +1,112 @@
+# Run one eval suite file and report it on the pull request, in one comment
+# that every push edits. Callers check out their repository first.
+# `martian evals run` runs locally: a suite of deterministic checks or stored
+# replies needs no Martian account and no secret. The job needs
+# `contents: read` and `pull-requests: write`. Pull requests from forks and
+# from Dependabot get a read-only token: the report then goes to the job
+# summary only, with a warning. Use `pull_request`, never
+# `pull_request_target`: the suite runs the pull request's code.
+# The action fails with the suite's exit code after reporting. It does not
+# upload artifacts; the caller should upload the output folder with
+# if: always(). Walks up from github.action_path to pyproject.toml (package
+# root) and installs the SDK from there, like .github/actions/validate.
+# See docs/gate-and-ci.md.
+name: Martian Evals
+description: Run a Martian eval suite file and keep one pull-request comment with its result
+
+inputs:
+  suite:
+    description: Path to the suite file (evals.yaml), relative to the caller workspace
+    required: true
+  output:
+    description: >
+      Folder for results.jsonl, summary.json and junit.xml, relative to the
+      caller workspace. Give each suite its own folder.
+    required: false
+    default: results/evals
+  github-token:
+    description: Token that writes the comment; it needs pull-requests write
+    required: false
+    default: ${{ github.token }}
+  comment-key:
+    description: >
+      Names the comment this run keeps up to date. Empty uses the suite path.
+      Give each job its own key when several jobs run the same suite on one
+      pull request, for example a model matrix.
+    required: false
+    default: ""
+  comment-author:
+    description: >
+      Login that writes the comment. Change it only when github-token is not
+      the workflow token.
+    required: false
+    default: github-actions[bot]
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        version: "0.10.0"
+        python-version: "3.12"
+
+    - name: Install martian-sdk
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo_root="${GITHUB_ACTION_PATH}"
+        while [ ! -f "${repo_root}/pyproject.toml" ]; do
+          parent="$(cd "${repo_root}/.." && pwd)"
+          if [ "${parent}" = "${repo_root}" ]; then
+            echo "could not find pyproject.toml above ${GITHUB_ACTION_PATH}" >&2
+            exit 1
+          fi
+          repo_root="${parent}"
+        done
+        # A second use of this action in the same job reuses the environment.
+        uv venv --allow-existing "${RUNNER_TEMP}/martian-evals"
+        uv pip install --python "${RUNNER_TEMP}/martian-evals" "${repo_root}[evals]"
+        echo "root=${repo_root}" >> "${GITHUB_OUTPUT}"
+
+    # Inputs reach the scripts through env and are referenced as quoted shell
+    # variables, never by expression substitution, so a crafted input cannot
+    # inject commands.
+    - name: Run suite
+      id: run
+      shell: bash
+      env:
+        MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+      run: |
+        set -uo pipefail
+        # Every run that finishes rewrites summary.json. Removing it first means
+        # a run that stops early cannot be reported with an earlier result.
+        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json"
+        status=0
+        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --output "$MARTIAN_EVALS_OUTPUT" || status=$?
+        echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+
+    - name: Report on the pull request
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        MARTIAN_EVALS_ROOT: ${{ steps.install.outputs.root }}
+        MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        MARTIAN_EVALS_COMMENT_KEY: ${{ inputs.comment-key }}
+        MARTIAN_EVALS_COMMENT_AUTHOR: ${{ inputs.comment-author }}
+        MARTIAN_EVALS_PR_NUMBER: ${{ github.event.pull_request.number }}
+        MARTIAN_EVALS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: '"${RUNNER_TEMP}/martian-evals/bin/python" "${MARTIAN_EVALS_ROOT}/scripts/evals_pr_comment.py"'
+
+    # The suite's exit code is the gate: 0 passed, 1 a case failed, 2 a case
+    # has no verdict or the suite file is invalid.
+    - name: Apply the suite result
+      if: always() && steps.run.outputs.exit-code != ''
+      shell: bash
+      env:
+        MARTIAN_EVALS_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+      run: exit "$MARTIAN_EVALS_EXIT_CODE"
