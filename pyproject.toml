@@ -70,8 +70,8 @@ include = [
 # scripts/check_release.py refuses distributions whose UI is not this build. See docs/releasing.md.
 [tool.martian.ui]
 version = "0.1.0"
-commit = "50a92b1721153a9caad2bfa13e5db2168024617a"
-digest = "sha256:bcb88cda2ad9e0b44a8e1f0f216089c93cea06a50c71c20ec867d66acf1436a8"
+commit = "d9970bfd152242410bea622f501874b7358aa64a"
+digest = "sha256:f37e273ab8fe64a384ef8d20d6675bd2c484fc0fc001d47ac4857ea17c55c9bf"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
