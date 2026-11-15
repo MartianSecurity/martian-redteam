@@ -8,7 +8,8 @@ the one the ``x-martian-project-id`` header names. Traces only; the core serves 
   so the server's sign-in refuses a request without credentials before the body is read. The
   principal's most privileged role must be one that writes (owner, admin or member).
 - **Traces.** Spans are grouped by trace id. A trace's id is ``tr-`` and the OpenTelemetry trace id
-  in hex, MLflow's form, and its spans keep their OpenTelemetry span ids. Its name, state, start
+  in hex, MLflow's form (:func:`mlflow_trace_id`), and its spans keep their OpenTelemetry span
+  ids. Its name, state, start
   and latency are its root span's (the span without a parent); until the root span arrives the
   trace is ``in_progress``. Everything else (kind, model, tokens, session, user, request and
   response) is the trace conventions mapping, applied by the store's ``record_trace``.
@@ -19,6 +20,11 @@ the one the ``x-martian-project-id`` header names. Traces only; the core serves 
   one trace cannot lose each other's spans; processes sharing one store do not coordinate.
 - **Limits.** A body, and a gzip or deflate body once decompressed, of at most
   :data:`MAX_BODY_BYTES`; more is ``413``.
+- **An edition's own route.** :func:`export` is the endpoint after the principal: an edition that
+  signs exporters in differently from its other routes serves a route of its own, with
+  :class:`OtlpRoute`, and calls it with the principal and store it chose, its own mapping from
+  OpenTelemetry trace ids to the store's (:data:`TraceIds`) and its own body limit. Martian Cloud
+  does, to keep one organisation's ids apart from another's.
 - **Answers.** ``200`` with an ``ExportTraceServiceResponse`` in the request's encoding. Spans the
   core cannot take (an invalid trace or span id, or a trace the store refuses) are rejected and
   the rest written: the response's ``partial_success`` counts them and says why, as OTLP defines.
@@ -70,6 +76,12 @@ PROJECT_HEADER = "x-martian-project-id"
 MAX_BODY_BYTES = 16 * 1024 * 1024
 """The largest body the endpoint reads, 16 MiB, before and after decompression."""
 
+TraceIds = Callable[[Principal, str, bytes], str]
+"""How an exported trace's store id is made, from the principal, the store's key of the project the
+traces go to and the OpenTelemetry trace id (16 bytes). The id must be one the store takes; the
+same arguments must give the same id, so that a trace's spans sent in several requests, or sent
+again, make one trace."""
+
 PROTOBUF = "application/x-protobuf"
 JSON = "application/json"
 _INFLATE = {"gzip": 16 + zlib.MAX_WBITS, "deflate": zlib.MAX_WBITS}
@@ -118,16 +130,21 @@ class OtlpRoute(APIRoute):
 router = APIRouter(tags=["OpenTelemetry"], route_class=OtlpRoute)
 
 
-async def _body(request: Request) -> bytes:
-    """The request's body, decompressed, refused past :data:`MAX_BODY_BYTES`."""
+def mlflow_trace_id(_principal: Principal, _project: str, trace_id: bytes) -> str:
+    """The core's :data:`TraceIds`: ``tr-`` and the OpenTelemetry trace id in hex, MLflow's form."""
+    return "tr-" + trace_id.hex()
+
+
+async def _body(request: Request, limit: int) -> bytes:
+    """The request's body, decompressed, refused past ``limit`` bytes."""
     declared = request.headers.get("content-length", "")
-    if ascii_digits(declared) and int(declared) > MAX_BODY_BYTES:
-        raise HTTPException(413, f"The body is larger than {MAX_BODY_BYTES} bytes")
+    if ascii_digits(declared) and int(declared) > limit:
+        raise HTTPException(413, f"The body is larger than {limit} bytes")
     chunks, size = [], 0
     async for chunk in request.stream():
         size += len(chunk)
-        if size > MAX_BODY_BYTES:
-            raise HTTPException(413, f"The body is larger than {MAX_BODY_BYTES} bytes")
+        if size > limit:
+            raise HTTPException(413, f"The body is larger than {limit} bytes")
         chunks.append(chunk)
     body = b"".join(chunks)
     coding = (request.headers.get("content-encoding") or "identity").strip().lower()
@@ -137,11 +154,11 @@ async def _body(request: Request) -> bytes:
         raise HTTPException(415, f"Content-Encoding {coding} is not supported; send gzip, deflate or none")
     inflater = zlib.decompressobj(_INFLATE[coding])
     try:
-        found = inflater.decompress(body, MAX_BODY_BYTES + 1)
+        found = inflater.decompress(body, limit + 1)
     except zlib.error:
         raise HTTPException(400, f"The body is not valid {coding}") from None
-    if len(found) > MAX_BODY_BYTES:
-        raise HTTPException(413, f"The decompressed body is larger than {MAX_BODY_BYTES} bytes")
+    if len(found) > limit:
+        raise HTTPException(413, f"The decompressed body is larger than {limit} bytes")
     if not inflater.eof:
         raise HTTPException(400, f"The body is not valid {coding}")
     return found
@@ -267,6 +284,22 @@ def _answer(encoding: str, rejected: int, reasons: list[str]) -> Response:
 
 @router.post(TRACES_PATH, response_model=None)
 async def export_traces(request: Request, principal: PrincipalDep, store: StoreDep) -> Response:
+    return await export(request, principal, store)
+
+
+async def export(
+    request: Request,
+    principal: Principal,
+    store: EvalStore,
+    *,
+    trace_ids: TraceIds = mlflow_trace_id,
+    max_body_bytes: int | None = None,
+) -> Response:
+    """Record the request's spans as ``principal``'s traces in ``store``, and answer as OTLP does:
+    everything ``POST /v1/traces`` does once its principal and store are known, the role check
+    first. ``trace_ids`` makes each trace's store id; ``max_body_bytes`` is the largest body, as
+    sent and decompressed, :data:`MAX_BODY_BYTES` when not given. The request's application must
+    hold the trace write lock ``create_app`` sets (``state.martian_evals_trace_writes``)."""
     if highest_role(principal.roles) not in WRITERS:
         raise HTTPException(403, "Requires member role")
     encoding = _encoding(request)
@@ -277,7 +310,7 @@ async def export_traces(request: Request, principal: PrincipalDep, store: StoreD
         project_id = uuid.UUID(named) if named else None
     except ValueError:
         raise HTTPException(400, f"{PROJECT_HEADER} must be a project id") from None
-    body = await _body(request)
+    body = await _body(request, MAX_BODY_BYTES if max_body_bytes is None else max_body_bytes)
     exported = _decode(body, encoding)
     project = await writable_project(store, principal, project_id)
 
@@ -287,7 +320,7 @@ async def export_traces(request: Request, principal: PrincipalDep, store: StoreD
         if not _valid(otlp):
             invalid += 1
             continue
-        traces.setdefault("tr-" + otlp.trace_id.hex(), []).append(_span(otlp))
+        traces.setdefault(trace_ids(principal, project, otlp.trace_id), []).append(_span(otlp))
     if invalid:
         rejected += invalid
         reasons.append(f"{invalid} span(s) without a valid trace id, span id or parent span id")

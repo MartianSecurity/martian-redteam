@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import socket
 import threading
@@ -19,7 +20,7 @@ import httpx
 import pytest
 import requests
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from google.rpc.status_pb2 import Status as RpcStatus
 from opentelemetry.exporter.otlp.proto.http import Compression
@@ -37,6 +38,7 @@ from martian.evals.local import create_local_app
 from martian.evals.model import Project, Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app, organisation_principal, otlp
+from martian.evals.server.dependencies import PrincipalDep
 from martian.evals.store import REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED, MemoryStore, StoreError
 from martian.evals.store.mlflow_local import TRACE_SPAN_KEY, MlflowStore
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
@@ -242,6 +244,50 @@ def test_a_request_without_credentials_is_refused(records):
     client = TestClient(app)
     assert [t["id"] for t in search(client, bearer)] == [trace_id_of(span)]
     assert search(client, {"Authorization": "Bearer token-b"}) == []
+
+
+def test_an_edition_serving_its_own_route_maps_trace_ids_and_limits_the_body(records):
+    """``otlp.export`` is the endpoint for an edition that signs exporters in on a route of its
+    own: the trace ids are the edition's mapping of the OpenTelemetry ids, the body limit is the
+    edition's, and the rest is the core's."""
+    store = MemoryStore()
+    mapped: list[tuple[str | None, str, bytes]] = []
+
+    def per_organisation(principal: Principal, project: str, trace_id: bytes) -> str:
+        mapped.append((principal.organisation_id, project, trace_id))
+        return "tr-" + hashlib.sha256(f"{principal.organisation_id}:{project}:".encode() + trace_id).hexdigest()[:32]
+
+    app = create_app(store=store, records=records, principal=signed_in)
+    exporters = APIRouter(route_class=otlp.OtlpRoute)
+
+    @exporters.post("/ingest", response_model=None)
+    async def ingest(request: Request, principal: PrincipalDep) -> Response:
+        return await otlp.export(request, principal, store, trace_ids=per_organisation, max_body_bytes=2048)
+
+    app.include_router(exporters)
+    client = TestClient(app)
+    a, b = {"Authorization": "Bearer token-a"}, {"Authorization": "Bearer token-b"}
+    child, root = json_span(CHILD, parent=ROOT, offset_ms=10), json_span(ROOT, name="answer")
+    for headers, body in ((a, json_body(child)), (a, json_body(root, child)), (b, json_body(root))):
+        sent = client.post("/ingest", content=body, headers={**JSON, **headers})
+        assert (sent.status_code, sent.json()) == (200, {})
+
+    assert set(mapped) == {("org-a", "default", bytes.fromhex(TRACE)), ("org-b", "default", bytes.fromhex(TRACE))}
+    ours = per_organisation(TOKENS["token-a"], "default", bytes.fromhex(TRACE))
+    theirs = per_organisation(TOKENS["token-b"], "default", bytes.fromhex(TRACE))
+    # The two requests of org-a's trace merge under the mapped id, apart from org-b's.
+    assert [(t["id"], t["name"], t["state"]) for t in search(client, a)] == [(ours, "answer", "OK")]
+    assert [(t["id"], t["name"]) for t in search(client, b)] == [(theirs, "answer")]
+    detail = client.get(f"/v1/evals/traces/{ours}", headers=a).json()
+    assert [s["id"] for s in detail["spans"]] == [ROOT, CHILD]
+
+    large = client.post("/ingest", content=json_body(root) + " " * 2048, headers={**JSON, **a})
+    assert (large.status_code, large.json()) == (413, {"message": "The body is larger than 2048 bytes"})
+    viewer = client.post("/ingest", content=json_body(root), headers={**JSON, "Authorization": "Bearer token-viewer"})
+    assert (viewer.status_code, viewer.json()) == (403, {"message": "Requires member role"})
+    # The core's own route keeps MLflow's form of the OpenTelemetry id.
+    assert client.post("/v1/traces", content=json_body(root), headers={**JSON, **b}).status_code == 200
+    assert {t["id"] for t in search(client, b)} == {theirs, "tr-" + TRACE}
 
 
 def test_spans_of_one_trace_in_several_requests_make_one_trace(store, records):
