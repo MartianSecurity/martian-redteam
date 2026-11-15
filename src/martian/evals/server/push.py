@@ -14,7 +14,8 @@ route the Martian server serves.
 
 - ``GET /v1/push``: the organisation a push writes into and the format version read here.
 - ``PUT /v1/push/runs/{run_id}``: the run, its project and its finished scoring jobs. The
-  answer names each case the server holds a result of, with the scores it holds of it.
+  answer names each case the server holds a result of, with the scores it holds of it (scorer,
+  scoring job and source).
 - ``POST /v1/push/runs/{run_id}/cases``: some of the run's cases, each with its result, its
   scores and every trace they refer to, or traces of the run alone.
 
@@ -182,9 +183,9 @@ class RunHeld(BaseModel):
     run_id: str
     created: bool
     """Whether this request recorded the run; false when the server held it already."""
-    cases: dict[str, list[tuple[str, str]]]
-    """Each case the server holds a result of, with the scorer and scoring job (empty for the
-    run's own) of each score it holds of the case."""
+    cases: dict[str, list[tuple[str, str, str]]]
+    """Each case the server holds a result of, with the scorer, the scoring job (empty for the
+    run's own) and the source of each score it holds of the case."""
 
 
 class CasesPushed(BaseModel):
@@ -321,9 +322,10 @@ async def _record_trace(store: EvalStore, principal: Principal, trace: Trace, ma
 
 
 async def _held(records: RecordStore, principal: Principal, project_id: str, run_id: str) -> dict[str, Any]:
-    """Each case of the run the record store holds a result of, with the scorer and scoring job of
-    each score it holds of it."""
-    held: dict[str, list[tuple[str, str]]] = {}
+    """Each case of the run the record store holds a result of, with the scorer, scoring job and
+    source of each score it holds of it: more than the record store tells scores apart by, so a
+    score is known by the same key here and in the data folder however the record store keys it."""
+    held: dict[str, list[tuple[str, str, str]]] = {}
     offset = 0
     while True:
         page = await records.list_results(principal, project_id, run_id, offset=offset, limit=1000)
@@ -333,7 +335,7 @@ async def _held(records: RecordStore, principal: Principal, project_id: str, run
         offset += 1000
     for score in await records.list_scores(principal, project_id, run_id):
         if score.case_id in held:
-            held[score.case_id].append((score.scorer, score.scoring_job_id or ""))
+            held[score.case_id].append((score.scorer, score.scoring_job_id or "", score.source))
     return held
 
 

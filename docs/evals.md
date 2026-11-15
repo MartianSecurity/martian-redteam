@@ -321,8 +321,9 @@ it lacks, such as a run since or a scoring job that has finished, and a push tha
 continues where it stopped (exit code `130` for Ctrl+C, `2` for a server it could not reach: run
 the same command again). A run still running is left for a later push. Runs of the default project
 go with any key that may write evals; a run of another project creates that project on the server,
-which needs an admin, and the Martian server's API keys write as members, so it refuses those runs
-for now. The command names each run the server refused and why, and exits `2`: one that changed
+which needs an admin, and the Martian server's API keys and service accounts write as members, so
+it pushes those runs only into projects the server already has. A service account limited to one
+project pushes that project's runs only. The command names each run the server refused and why, and exits `2`: one that changed
 here after it was pushed, for example. Reviews, artifacts and the dataset version a run read stay
 here. What goes and how the ids map: [pushed runs](evals-core.md#pushed-runs).
 

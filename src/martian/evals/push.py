@@ -154,6 +154,11 @@ def _size(lines: list[dict[str, Any]]) -> int:
     return sum(len(json.dumps(line, ensure_ascii=False).encode("utf-8")) for line in lines)
 
 
+def _score_held(score: dict[str, Any]) -> tuple[str, str, str]:
+    """How the server's ``PUT`` names a score it holds: its scorer, scoring job and source."""
+    return (score["scorer"], score.get("scoring_job_id") or "", score["source"])
+
+
 def _trace_ids(result: dict[str, Any], scores: list[dict[str, Any]]) -> set[str]:
     """Every trace a case result and its scores refer to."""
     found = {(result.get("store") or {}).get("trace_id")}
@@ -228,7 +233,7 @@ async def _push_run(
             "scoring_jobs": jobs,
         },
     )
-    on_server = {case: {(scorer, job) for scorer, job in keys} for case, keys in (held.get("cases") or {}).items()}
+    on_server = {case: {tuple(key) for key in keys} for case, keys in (held.get("cases") or {}).items()}
 
     batch, sent, traced = _Batch(run_line), 0, 0
     referenced: set[str] = set()
@@ -255,7 +260,7 @@ async def _push_run(
         case_scores = scores.get(result["case_id"], [])
         trace_ids = _trace_ids(result, case_scores)
         referenced |= trace_ids
-        keys = {(line["score"]["scorer"], line["score"].get("scoring_job_id") or "") for line in case_scores}
+        keys = {_score_held(line["score"]) for line in case_scores}
         if result["case_id"] in on_server and keys <= on_server[result["case_id"]]:
             continue
         traces = await traces_of(sorted(trace_ids))
