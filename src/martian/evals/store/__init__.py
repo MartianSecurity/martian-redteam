@@ -144,8 +144,10 @@ class EvalStore(Protocol):
         ...
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
-        """Traces without their spans. A binding may give a preview of a long request or response,
-        and says so in the trace's metadata (``REQUEST_PREVIEW_TRUNCATED``)."""
+        """Traces without their spans. A page may hold fewer than ``limit`` traces, or none, and
+        still have a ``next_cursor``: only a ``next_cursor`` of ``None`` ends the search. A binding
+        may give a preview of a long request or response, and says so in the trace's metadata
+        (``REQUEST_PREVIEW_TRUNCATED``)."""
         ...
 
     async def search_sessions(

@@ -32,6 +32,7 @@ from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAl
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
 from mlflow.tracking import fluent as _fluent
+from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
 
@@ -65,12 +66,12 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
     ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
     ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.request_preview"),
-    ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.response_preview"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
     ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
     ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
+    ("mlflow.utils.search_utils", "SearchTraceUtils.create_page_token"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
 )
 
@@ -84,10 +85,10 @@ RUN_ARTIFACT_URI_LENGTH: int = SqlRun.artifact_uri.type.length
 """The length of MLflow's ``runs.artifact_uri`` column, which keeps a run's artifact location:
 200 characters. Postgres enforces it; SQLite does not."""
 
-TRACE_PREVIEW_LENGTH: int = min(SqlTraceInfo.request_preview.type.length, SqlTraceInfo.response_preview.type.length)
-"""The length of MLflow's ``trace_info.request_preview`` and ``response_preview`` columns, which
-keep a trace's previews: 1,000 characters, the length MLflow tracing shortens its own previews to.
-Postgres enforces it; SQLite does not."""
+TRACE_PREVIEW_LENGTH: int = SqlTraceInfo.request_preview.type.length
+"""The length of MLflow's ``trace_info.request_preview`` column, and of ``response_preview`` beside
+it, which keep a trace's previews: 1,000 characters, the length MLflow tracing shortens its own
+previews to. Postgres enforces it; SQLite does not."""
 
 
 def active_experiment_id() -> str | None:
@@ -146,6 +147,16 @@ def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, 
     return store._load_dataset_records(dataset_id, page_token=page_token)
 
 
+def trace_page_token(offset: int) -> str | None:
+    """MLflow's page token for a trace search that starts after its first ``offset`` traces, or
+    ``None`` for the first page. MLflow's SQL store pages traces by offset; the token is its own
+    encoding of the offset, which it does not promise to keep."""
+    if offset == 0:
+        return None
+    token: bytes = SearchTraceUtils.create_page_token(offset)  # type: ignore[no-untyped-call]
+    return token.decode("ascii")
+
+
 def mlflow_test_attr() -> str:
     """The attribute ``@mlflow.test`` sets on a test function. Imported late: it loads pytest."""
     from mlflow.pytest.decorator import MLFLOW_TEST_ATTR
@@ -188,4 +199,5 @@ __all__ = [
     "parse_model_uri",
     "provider_instance",
     "restore_active_experiment_id",
+    "trace_page_token",
 ]
