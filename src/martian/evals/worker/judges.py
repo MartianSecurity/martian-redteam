@@ -24,8 +24,11 @@ on its own model when the request names none, and reads the provider's key from 
 
 :func:`agents_judge` sends the request to martian-agents' judge route
 (``POST /v1/martian/targets/{target_id}/judge``), as the Martian server does, and checks the
-reply as the server does. Agents judges on the model its operator configured, so it refuses a
-request pinned to a model or an endpoint.
+reply as the server does. Agents judges on the request's model when its operator allows that
+model, and on its operator's own model when the request names none. It names models
+``provider/model`` where the core names them ``provider:/model``, so the request's model is
+sent and the model Agents reports is recorded in each form. A request pinned to an endpoint is
+refused, since Agents calls its models itself.
 """
 
 from __future__ import annotations
@@ -223,6 +226,32 @@ AGENTS_STATUS = {
 }
 """What a failed judge call says. Agents' own error detail is never repeated: a refused request's
 detail can hold the text it was given."""
+AGENTS_MODEL_REFUSED = "judge_model_not_allowed"
+"""The code of Agents' refusal of a model its operator has not allowed (HTTP 422)."""
+AGENTS_MODEL = re.compile(r"([a-z][a-z0-9_-]{0,39})/([^\s/]{1,119})")
+"""A model as Agents names it, ``provider/model``, such as ``bedrock/zai.glm-5``."""
+
+
+def _agents_model(uri: str) -> str:
+    """A judge's MLflow model URI as Agents names the model: ``bedrock:/zai.glm-5`` is
+    ``bedrock/zai.glm-5``."""
+    provider, _, name = uri.partition(":/")
+    return f"{provider}/{name}"
+
+
+def _model_uri(name: Any) -> str | None:
+    """The MLflow model URI of a model Agents reports, or None for a name not in its form."""
+    found = AGENTS_MODEL.fullmatch(name) if isinstance(name, str) else None
+    return f"{found[1]}:/{found[2]}" if found else None
+
+
+def _refusal_code(response: httpx.Response) -> str | None:
+    """The ``code`` of a structured refusal from Agents, never its text."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return detail.get("code") if isinstance(detail, dict) else None
 
 
 def _definition(scorer: ScorerVersion) -> dict[str, Any]:
@@ -267,12 +296,16 @@ def agents_judge(
 ) -> Judge:
     """martian-agents as the worker's judge. ``base_url`` is Agents' address; ``connection`` gives
     the target, authorization and headers for a request's principal. One call per request, never
-    retried; Agents bounds its own model call."""
+    retried; Agents bounds its own model call. The request's model, when it names one, is sent as
+    Agents names it, and Agents refuses one its operator has not allowed."""
     origin = base_url.rstrip("/")
 
     async def judge(request: JudgeRequest) -> JudgeResult:
-        if request.model is not None or request.endpoint is not None:
-            raise JudgeError(f"The Agents judge runs on its operator's model; this judge is pinned to {request.model}")
+        if request.endpoint is not None:
+            raise JudgeError(
+                "The Agents judge calls its models itself, not at an endpoint; "
+                f"this judge is served at {request.endpoint}"
+            )
         if not request.job_id:
             raise JudgeError("The Agents judge needs the scoring job's id")
         builtins: list[str] = []
@@ -303,12 +336,23 @@ def agents_judge(
         }
         if definitions:
             body["definitions"] = definitions
+        if request.model is not None:
+            body["model"] = _agents_model(request.model)
         path = f"/v1/martian/targets/{quote(found.target_id, safe='')}/judge"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=5), trust_env=False) as client:
                 response = await client.post(origin + path, json=body, headers=dict(found.headers))
         except httpx.HTTPError:
             raise JudgeError("Agents could not be reached") from None
+        if (
+            response.status_code == 422
+            and request.model is not None
+            and _refusal_code(response) == AGENTS_MODEL_REFUSED
+        ):
+            raise JudgeError(
+                f"Agents does not allow the judge model {request.model}; "
+                "its operator lists the models it allows in EVALS_JUDGE_MODELS"
+            )
         if response.status_code != 200:
             raise JudgeError(
                 AGENTS_STATUS.get(response.status_code, f"Agents' judge answered HTTP {response.status_code}")
@@ -320,13 +364,12 @@ def agents_judge(
         by_name = {d["name"]: d["definition"] for d in definitions}
         requested = set(builtins) | set(by_name)
         scores = reply.get("scores") if isinstance(reply, dict) else None
-        model = reply.get("model") if isinstance(reply, dict) else None
+        model = _model_uri(reply.get("model")) if isinstance(reply, dict) else None
         revision = reply.get("revision") if isinstance(reply, dict) else None
         if (
             not isinstance(scores, dict)
             or set(scores) != requested
-            or not isinstance(model, str)
-            or not 1 <= len(model) <= 160
+            or model is None
             or revision != AGENTS_REVISIONS[1 if definitions else 0]
             or any(
                 not isinstance(score, dict)
