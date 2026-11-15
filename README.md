@@ -45,7 +45,8 @@ push and keeps one comment with the result, also without a Martian account. See
 
 - `martian evals run`: a suite file run locally, as above.
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
-  service; see
+  service. It runs evals against endpoints you define with your own key, and runs them again;
+  see
   [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
   It also shows the traces an application records into it with
   [MLflow tracing](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
