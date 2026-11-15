@@ -2,6 +2,12 @@
 
 import os
 
+# MLflow's usage telemetry is off in every process that imports the evals package: `martian ui`,
+# `martian evals run`, the eval gate, a server that serves the core and each worker process, which
+# inherits the setting. MLflow decides when it is first imported whether to start its telemetry
+# client, so this comes before any MLflow import here. MLFLOW_DISABLE_TELEMETRY=false in the
+# environment turns it back on. See docs/security-and-data.md#telemetry.
+os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
 # The SDK owns its tracing setup; an agent-skill startup hint is unnecessary here.
 # An explicit application setting continues to take precedence.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")

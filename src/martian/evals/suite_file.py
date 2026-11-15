@@ -25,7 +25,7 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Case, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
+from martian.evals.model import Case, Repeats, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
 
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
@@ -84,6 +84,9 @@ SUITE_FILE_FIELDS = {
     "checks.max_calls": "ScorerVersion.parameters.max_calls",
     "checks.min_turns": "ScorerVersion.parameters.min_turns",
     "checks.max_turns": "ScorerVersion.parameters.max_turns",
+    "checks.combine": "Suite.repeats.checks, by the check's label",
+    "repeats": "Suite.repeats.attempts",
+    "combine": "Suite.repeats.combine",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -93,7 +96,10 @@ SUITE_FILE_FIELDS = {
     "mlflow.experiment": "RunSettings.mlflow_experiment",
 }
 
-# The check fields each check type uses besides `type` and `name`, as the file names them.
+# The fields every check type takes: its type, its label and the rule its attempts combine by.
+COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
+
+# The check fields each check type uses besides COMMON_CHECK_FIELDS, as the file names them.
 # Loading refuses the others.
 _TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
 _TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
@@ -137,7 +143,7 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
 }
 
 # The fields of a JSONL case that the runner reads.
-_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations"})
+_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations", "group"})
 _DEFAULT_FUNCTION = runner.TargetRef.model_fields["function"].default
 _DEFAULT_INPUT_KEY = runner.Suite.model_fields["input_key"].default
 # Suite fields a suite file does not hold: loading it gives them from its name and its data, and
@@ -179,7 +185,13 @@ def _cases(file: Path, input_key: str) -> list[Case]:
     for position, row in enumerate(rows, 1):
         try:
             cases.append(
-                Case(id=row["id"], inputs=row["inputs"], expectations=row["expectations"], outputs=row.get("outputs"))
+                Case(
+                    id=row["id"],
+                    inputs=row["inputs"],
+                    expectations=row["expectations"],
+                    outputs=row.get("outputs"),
+                    tags={runner.GROUP_TAG: row["group"]} if "group" in row else {},
+                )
             )
         except ValidationError as error:
             raise ConfigError(f"case {position} does not fit the model: {_problems(error)}") from None
@@ -195,7 +207,7 @@ def _refuse_unread_fields(file: Path) -> None:
         if unknown := sorted(set(record) - _CASE_FIELDS):
             raise ConfigError(
                 f"data line {number}: a case has no field {', '.join(unknown)}; "
-                "its fields are id, input or inputs, output or outputs, and expectations"
+                "its fields are id, input or inputs, output or outputs, expectations and group"
             )
         for one, other in (("input", "inputs"), ("output", "outputs")):
             if one in record and other in record:
@@ -231,6 +243,11 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
             "target": _target(file_suite.target),
             "scorers": [_scorer(position, check, file_suite.judge) for position, check in enumerate(file_suite.checks)],
             "settings": _settings(file_suite),
+            "repeats": Repeats(
+                attempts=file_suite.repeats,
+                combine=file_suite.combine,
+                checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
+            ),
         }
     except ValidationError as error:
         raise ConfigError(f"the suite does not fit the model: {_problems(error)}") from None
@@ -253,7 +270,7 @@ def _target(reference: runner.TargetRef | None) -> Target:
 def _options(check: runner.CheckSpec) -> dict[str, Any]:
     """The options a check entry gives, under the names the file uses for them."""
     fields = type(check).model_fields
-    given = check.model_fields_set - {"type", "name"}
+    given = check.model_fields_set - COMMON_CHECK_FIELDS
     return {fields[key].alias or key: getattr(check, key) for key in given}
 
 
@@ -324,13 +341,15 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
         raise ConfigError("a data file needs at least one case")
     lines = []
     for position, case in enumerate(cases, 1):
-        if case.tags or case.metadata:
-            raise ConfigError(f"case {position}: a data file has no place for tags or metadata")
+        if set(case.tags) - {runner.GROUP_TAG} or case.metadata:
+            raise ConfigError(f"case {position}: a data file has no place for tags other than its group, or metadata")
         row: dict[str, Any] = {"id": case.id, "inputs": case.inputs}
         if case.expectations:
             row["expectations"] = case.expectations
         if case.outputs is not None:
             row["outputs"] = case.outputs
+        if runner.GROUP_TAG in case.tags:
+            row["group"] = case.tags[runner.GROUP_TAG]
         lines.append(json.dumps(row, ensure_ascii=False) + "\n")
     return "".join(lines)
 
@@ -351,10 +370,17 @@ def _file(suite: Suite) -> dict[str, Any]:
     file: dict[str, Any] = {"data": suite.dataset_location}
     if (target := _target_file(suite.target, settings)) is not None:
         file["target"] = target
-    checks = [_check_file(position, scorer) for position, scorer in enumerate(suite.scorers)]
+    repeats = suite.repeats
+    checks = [
+        _check_file(position, scorer, repeats.checks.get(scorer.name)) for position, scorer in enumerate(suite.scorers)
+    ]
     if (judge := _judge_file(suite.scorers, settings)) is not None:
         file["judge"] = judge
     file["checks"] = checks
+    if repeats.attempts != 1:
+        file["repeats"] = repeats.attempts
+    if repeats.combine != "all":
+        file["combine"] = repeats.combine
     for name in ("concurrency", "batch", "output"):
         if (value := getattr(settings, name)) is not None:
             file[name] = value
@@ -420,7 +446,7 @@ def _judge_file(scorers: list[ScorerVersion], settings: RunSettings) -> dict[str
     return written | transport
 
 
-def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:
+def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> dict[str, Any]:
     where = f"scorers.{position}"
     if scorer.version:
         raise ConfigError(f"{where}: a suite file does not pin a scorer version")
@@ -445,11 +471,14 @@ def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:
     written: dict[str, Any] = {"type": scorer.type}
     if scorer.name != _label(scorer.type):
         written["name"] = scorer.name
+    if combine is not None:
+        written["combine"] = combine
     return written | options
 
 
 __all__ = [
     "CHECK_OPTIONS",
+    "COMMON_CHECK_FIELDS",
     "SUITE_FILE_FIELDS",
     "cases_to_jsonl",
     "load_suite_file",
