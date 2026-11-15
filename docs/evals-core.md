@@ -14,7 +14,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | Its `ServerWorker`: each piece of work in a `ProcessWorker` process of its own with the agent's target lease, so no two organisations' runs share a process; the durable queue, so that a restart loses no run, is MorningHQ/martian-notes#139 ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | Its `ServerWorker`: each piece of work in a `ProcessWorker` process of its own with the agent's target lease, so no two organisations' runs share a process; the durable queue, so that a restart loses no run, is MartianSecurity/martian-notes#139 ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 | `agent_names` | An async function from a principal and agent ids to the agents' display names (`AgentNames`), optional | None: a run carries the name its worker pinned with the target | Its agent registry |
 
@@ -494,7 +494,7 @@ All paths are under `/v1/evals`. How the core carries them out:
   `POST /{run_id}/assessments/{id}/sync` delivers a score the store does not hold yet and answers
   `pending` while its delivery waits. An annotation, a queue, a question, a judge and a published
   dataset are still written to the store in the request. The outbox is one table and a loop; the
-  durable job queue (MorningHQ/martian-notes#139) can later run `deliver_due` as one of its kinds of
+  durable job queue (MartianSecurity/martian-notes#139) can later run `deliver_due` as one of its kinds of
   work.
 - **Dataset drafts** live in the record store's default project. A record (`id`, `input`,
   `expected_output`, `status`, `metadata`) is a case: an object `input` is its `inputs`, a text one
@@ -1114,7 +1114,7 @@ sets judge models and the default judge model only to models Agents allows. With
 the call uses the route's static authorization of the target. The Martian server admits each
 call with a target lease instead: its connection returns the lease as an
 `X-Martian-Target-Lease` header and the item it admits as `action_id`, which the request sends
-(`app/evals_worker.py` in MorningHQ/MartianBackend). It is separate from the worker's
+(`app/evals_worker.py` in MartianSecurity/MartianBackend). It is separate from the worker's
 `AgentExecutor`, which calls registered agents as targets.
 
 **What a score says when there is no verdict.** A judge that fails with a message it can show
@@ -3308,17 +3308,17 @@ export holds, resuming, and what the receiving store assigns are in [data export
 
 | Piece | Issue |
 | --- | --- |
-| The signed offline licence file | MorningHQ/martian-notes#131 |
-| The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
-| The Martian server's work on the durable queue (`QueueWorker`) with a worker process of its own ([the Martian server](#the-martian-server)) | MorningHQ/martian-notes#139 |
-| LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
-| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
+| The signed offline licence file | MartianSecurity/martian-notes#131 |
+| The Martian server's queue worker process | MartianSecurity/martian-notes#139, after MartianSecurity/martian-notes#102 |
+| The Martian server's work on the durable queue (`QueueWorker`) with a worker process of its own ([the Martian server](#the-martian-server)) | MartianSecurity/martian-notes#139 |
+| LLM judges of a whole conversation | MartianSecurity/martian-notes#176 |
+| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 
 ## The Martian server
 
-MorningHQ/MartianBackend depends on this package and mounts the core on its own application
+MartianSecurity/MartianBackend depends on this package and mounts the core on its own application
 (`app/evals_core.py` there), without `create_app`: it includes the routers of the frozen contract
 and binds the core's dependencies with FastAPI's dependency overrides. `current_principal` is its
 session lookup (`organisation_principal` with the member's role, names and platform-admin flag),

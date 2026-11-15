@@ -282,7 +282,7 @@ def test_registered_agents_run_through_martian_agents_and_never_over_direct_http
         run = finished(core, REGISTERED_AGENT)
         assert (run["state"], run["passed"], run["failed"]) == ("completed", 1, 1)
         # The record store keeps the executor's pin; the run routes show only the pin's kind, agent
-        # id, name and digest (READER_PROVENANCE, MorningHQ/martian-notes#352).
+        # id, name and digest (READER_PROVENANCE, MartianSecurity/martian-notes#352).
         assert "target_id" not in run["provenance"]["target"]
         kept = core.client.portal.call(core.records.get_run, SINGLE_USER, DEFAULT_PROJECT, run["id"])
         assert kept is not None and kept.provenance["target"]["target_id"] == f"agent-{REGISTERED_AGENT}"

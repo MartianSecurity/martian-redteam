@@ -14,7 +14,7 @@ one, so the newest status is the one delivered. A store refusal of kind ``invali
 delivery as ``failed``; anything else is retried.
 
 The outbox is one table and a loop, not a job queue. The durable job queue
-(MorningHQ/martian-notes#139) can later take ``deliver_due`` as one of its kinds of work.
+(MartianSecurity/martian-notes#139) can later take ``deliver_due`` as one of its kinds of work.
 """
 
 from __future__ import annotations

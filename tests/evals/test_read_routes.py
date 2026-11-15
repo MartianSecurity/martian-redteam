@@ -295,7 +295,7 @@ NO_RUN = {
 
 
 def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_path):
-    # MorningHQ/martian-notes#352. The CI run, a console run whose stop was asked and a run of it
+    # MartianSecurity/martian-notes#352. The CI run, a console run whose stop was asked and a run of it
     # again, read through every route that answers with a run or what a run holds, the core's and
     # the local edition's. The record store keeps all of their provenance.
     store, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
