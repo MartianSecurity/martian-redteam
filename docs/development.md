@@ -40,14 +40,16 @@ uv sync --locked
 uv run ruff format src tests examples scripts
 uv run ruff check src tests examples scripts
 uv run --extra mcp mypy src
-uv run pytest -q
+uv run --extra evals pytest -q -n auto
 uv run python -m compileall -q src
 ```
 
-Optional local coverage (CI always produces XML + JUnit):
+`-n auto` runs the suite on one pytest-xdist worker per CPU; see [Parallel runs](#parallel-runs).
+
+Optional local coverage (CI always produces XML + JUnit; pytest-cov combines the workers' data):
 
 ```bash
-uv run pytest -q --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+uv run --extra evals pytest -q -n auto --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 ```
 
 Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK namespaces.
@@ -60,8 +62,8 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | --- | --- | --- |
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
 | `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
-| `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
-| `evals-core` | The evals core's tests, with the stores on Postgres too | 3.12 |
+| `test` | `uv sync --locked`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `evals-core` | The evals core's tests with `-n auto`, with the stores on Postgres too | 3.12 |
 | `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
 | `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), throwaway venv install, `validate examples/config.yaml` | 3.12 |
 | `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases | 3.12 |
@@ -113,6 +115,41 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
+
+### Parallel runs
+
+CI and the local command run the suite on pytest-xdist with `-n auto`, one worker per CPU. Any two
+tests may run at the same time, in two workers or in two checkouts sharing one Postgres database,
+so a test keeps its state to itself:
+
+- Files go under `tmp_path`, which pytest makes per test and per worker. Tests that start pytest in
+  a subprocess give it its own temporary folder and `MARTIAN_EVALS_STORE_DIR`.
+- Postgres tests use randomly named schemas and roles, drop them afterwards, and do not hold
+  connections between tests. MLflow keeps an engine for each database URL until the process exits,
+  so the Postgres MLflow store tests run it without a connection pool
+  (`MLFLOW_SQLALCHEMYSTORE_POOLCLASS=NullPool`); otherwise every test's pool stays open and a full
+  run uses up the server's connection limit. A test that reads the database catalog allows for
+  other tests' schemas.
+- Loopback servers bind port 0. A test that needs a port nothing answers on keeps the socket bound
+  while it runs, so no other worker's server is given that port.
+- The MLflow tracking URI and active experiment, `martian.evals.state.STATE` and environment
+  variables are process-wide, so each worker has its own. Fixtures that change them restore them
+  afterwards.
+
+For debugging (`--pdb`, `-s`) or a failure that appears only in parallel, run serially by leaving
+out `-n auto` or passing `-n 0`. Each worker imports MLflow, and some tests start further pytest
+processes, so on a machine short of memory give a fixed count such as `-n 4`.
+
+Wall-clock time of the full suite (849 tests) with Postgres on a 12-CPU workstation that was also
+running other test suites:
+
+| Command | Workers | Time |
+| --- | --- | --- |
+| `pytest -q` | 1 | about 15.5 minutes (940 s) |
+| `pytest -q -n auto` | 12 | about 4.5 minutes (255 to 277 s over three runs) |
+
+The longest single tests start pytest in a subprocess and take 20 to 40 seconds each in a parallel
+run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 
 ## MLflow upgrades
 

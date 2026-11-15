@@ -21,6 +21,14 @@ def no_telemetry(monkeypatch):
     monkeypatch.delenv("MLFLOW_WORKSPACE", raising=False)
 
 
+@pytest.fixture
+def unpooled(monkeypatch):
+    """MLflow keeps each database URL's engine, and its open connections, for the life of the
+    process, and every Postgres test's schema is a new URL. Without a pool a test's connections
+    close as it finishes, so a full run, or several on one server, stay within its connection limit."""
+    monkeypatch.setenv("MLFLOW_SQLALCHEMYSTORE_POOLCLASS", "NullPool")
+
+
 class MlflowTracingContract:
     """Traces an application records with MLflow tracing itself, read through the binding. A
     binding's class provides ``tracking_uri``: the database the store keeps MLflow's tables in."""
@@ -95,6 +103,7 @@ class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract):
 
 
 @pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run the store contract on Postgres")
+@pytest.mark.usefixtures("unpooled")
 class TestMlflowStoreOnPostgres(StoreContract, MlflowTracingContract):
     @pytest.fixture
     def schema(self) -> str:
@@ -143,6 +152,7 @@ async def test_each_organisation_and_the_local_user_get_their_own_workspace(tmp_
 
 
 @pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to check the schema on Postgres")
+@pytest.mark.usefixtures("unpooled")
 async def test_mlflow_tables_live_in_their_own_postgres_schema(tmp_path):
     from sqlalchemy import create_engine, text
 
