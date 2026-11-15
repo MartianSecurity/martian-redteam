@@ -52,6 +52,11 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
 
 
+def counts(check: dict) -> tuple[int, int, int]:
+    """A check's counts in summary.json, without its pass rate and interval."""
+    return check["passed"], check["failed"], check["errors"]
+
+
 def config_file(folder: Path, config: dict) -> Path:
     path = folder / "promptfooconfig.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -114,7 +119,7 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     home = tmp_path / "evals-home"
     summary = run_suite(out / "evals.yaml", home=home)
     assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (3, 2, 1, 0)
-    assert summary["checks"]["starts_with"] == {"passed": 2, "failed": 1, "errors": 0}
+    assert counts(summary["checks"]["starts_with"]) == (2, 1, 0)
     summary = run_suite(out / "evals-2.yaml", home=home)
     assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (2, 2, 0, 0)
     assert (out / "results" / "summary.json").exists() and (out / "results-2" / "summary.json").exists()
