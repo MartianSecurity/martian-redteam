@@ -141,6 +141,19 @@ saved_views = Table(
     Column("record", JSON, nullable=False),
 )
 
+judge_calibrations = Table(
+    "martian_judge_calibrations",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("judge", String(ID), nullable=False),
+    Column("version", String(40), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_judge_calibrations_judge", "space", "project_id", "judge", "version", "created_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -151,4 +164,5 @@ TABLES = (
     dataset_drafts,
     dataset_draft_cases,
     saved_views,
+    judge_calibrations,
 )

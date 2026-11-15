@@ -2,8 +2,8 @@
 
 MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, registered judges
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
-it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and
-the Traces page's saved views.
+it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
+Traces page's saved views and each judge version's calibrations.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``). Projects live in MLflow, as experiments.
 CI gate sessions stay with the server's CI gate.
@@ -54,6 +54,34 @@ class SavedView(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class JudgeCalibration(BaseModel):
+    """A judge version's agreement with people's labels, saved as its calibration
+    (:mod:`martian.evals.calibration`). The core's own record, so it is not part of the shared
+    model.
+
+    ``report`` is the version's item of the agreement report when it was saved, as
+    ``GET /v1/evals/judge-agreement`` gives it, with ``labelled`` the items it rests on, and
+    ``traces_examined`` and ``traces_truncated`` what the report read. ``model`` and ``endpoint``
+    are the model the judge version ran on then: its own, or the default judge model when it names
+    none. A calibration is never changed: a newer one of the same judge version takes its place,
+    and a score names the one that applied when it was made."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    project_id: Identifier
+    judge: Identifier
+    version: str = Field(min_length=1, max_length=40)
+    model: str | None = None
+    endpoint: str | None = None
+    labelled: int = Field(ge=0)
+    traces_examined: int = Field(default=0, ge=0)
+    traces_truncated: bool = False
+    report: dict[str, Any] = Field(default_factory=dict)
+    created_by: Identifier | None = None
+    created_at: datetime | None = None
 
 
 @runtime_checkable
@@ -212,6 +240,23 @@ class RecordStore(Protocol):
         """Remove the view while it is at ``expected_revision``."""
         ...
 
+    # Judge calibrations: every one is kept, and the newest of a judge version is its calibration.
+    async def save_calibration(
+        self, principal: Principal, project_id: str, calibration: JudgeCalibration
+    ) -> JudgeCalibration:
+        """Record a calibration. Saving the same id again returns the stored one."""
+        ...
+
+    async def get_calibration(
+        self, principal: Principal, project_id: str, calibration_id: str
+    ) -> JudgeCalibration | None: ...
+
+    async def list_calibrations(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[JudgeCalibration]:
+        """Every calibration of the project, or of one judge's versions, newest first."""
+        ...
+
 
 RECORD_METHODS = frozenset(
     name for name in vars(RecordStore) if not name.startswith("_") and callable(getattr(RecordStore, name))
@@ -223,6 +268,7 @@ __all__ = [
     "EventBus",
     "EventsLost",
     "InProcessEvents",
+    "JudgeCalibration",
     "RecordStore",
     "SavedView",
     "Subscription",

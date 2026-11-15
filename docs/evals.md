@@ -493,7 +493,9 @@ A judge's pass rate says how often it passes, not how often it is right. `martia
 compares a judge version's verdicts with the labels people gave the same items. The evals core
 reports it for every judge version of a project (`GET /v1/evals/judge-agreement`), the Evals UI
 shows it on the Judges page, and the SDK computes it from scores and reviews or from a suite-file
-run's results. No model is called.
+run's results. A report saved as a judge version's [calibration](#calibration) says when the
+judge was last checked, and each judge score names the calibration that applied. No model is
+called.
 
 **What counts as a label.** A person's answer: a complete review of a case result, which labels
 the criterion its review question names, or human feedback on a trace, such as an annotation or
@@ -557,8 +559,51 @@ compares any two sets of values item by item, the first the one being checked; a
 | Where | What |
 | --- | --- |
 | [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read |
-| The Evals UI's Judges page | An agreement panel with a row per judge version, and each version's agreement in its version history. The Martian server does not serve the route yet, so against the server the page shows neither |
+| The Evals UI's Judges page | An agreement panel with a row per judge version, its calibration with its date or "Unchecked", and an action to save a measured report as its calibration; each version's agreement and calibration in its version history; and on a judge score's detail, the calibration that applied. The Martian server does not serve these routes yet, so against the server the page shows none of them |
 | `martian evals run` | Nothing: people label after the run. Use `results_agreement` on its results, or review it in `martian ui` |
+
+### Calibration
+
+A judge version's calibration is its agreement report saved as the record of when it was last
+checked (`martian.evals.calibration`). Nothing saves one by itself: someone saves the current
+report, on the Judges page, with `POST /v1/evals/judge-calibrations` on the evals core, or from
+the SDK. No model is called.
+
+- **What can be calibrated.** A registered judge version, or a built-in model judge
+  (`correctness`, `safety` or `policy`, version `v1`). Only a measured report is saved: 30 or more
+  labelled items of a judge whose verdicts are compared. Fewer items, or a free-text judge, is
+  refused. A suite file's judge is a check of that file, not a judge version the core registers,
+  so it has no calibration; use `results_agreement` on its results.
+- **What it holds.** The version's report as the agreement route gives it, the number of
+  labelled items, when it was saved and who saved it, and the model the version ran on then: its
+  own, or the default judge model for a judge that names none. Every calibration is kept; the
+  newest of a judge version is its calibration.
+- **Checked or unchecked.** A judge version is `checked` while it runs on the model its newest
+  calibration was measured on. Otherwise it is `unchecked`: `none` when it has no calibration,
+  `model_changed` when the model it runs on changed since, such as a judge that names no model
+  after the default judge model changed. A new version of a judge, with a new prompt, rubric or
+  model, starts with no calibration.
+- **Scores name the calibration that applied.** Every judge score of a scoring job records the
+  calibration that applied when it was made in its metadata, the assessment's `provenance`, as
+  `martian.calibration_id`: the judge version's newest calibration when the job started, if it was
+  measured on the model the job runs the judge on, else `none`. A suite-file run's judge scores
+  name `none`. A later calibration does not change what an earlier score names.
+
+```python
+from martian.evals.calibration import save_calibration
+
+# The judge's current report in the local edition's data folder, saved as its calibration.
+calibration = save_calibration("polite_tone", 2)          # data_dir=..., project_id=... to choose
+print(calibration.id, calibration.labelled, calibration.model, calibration.report["agreement"])
+```
+
+`save_calibration` works on the local edition's data folder (`--data-dir`, `MARTIAN_EVALS_HOME`
+or `~/.martian/evals`) as its single user, and reads the default judge model from the folder's
+`settings.json`. A refusal raises `StoreError`: `not_found` for a judge version the project does
+not have, `invalid` for a report that is not measured. A `request_id` makes a repeated call return
+the same calibration. [The evals core](evals-core.md#read-routes) lists each judge version's
+calibration and status, and serves one calibration by the id a score names. The Martian server does
+not serve these routes yet.
 
 ## Use
 

@@ -10,7 +10,9 @@
 - Each case graded in the run is a ``CaseResult`` with a ``Score`` per check, mapped from its
   ``results.jsonl`` record by :func:`~martian.evals.model.from_results_record`, and a trace: the one
   MLflow's evaluation harness recorded for the case, with its spans, copied into the store under a
-  new id and carrying the scores.
+  new id and carrying the scores. A judge check's score names no calibration
+  (:data:`~martian.evals.calibration.NO_CALIBRATION`): a suite file's judge is no judge version
+  the core registers, so it has none.
 - A case whose verdict is reused from an earlier run in the same output folder keeps that verdict.
   Its result in this run has no trace: the trace stays with the run that graded the case.
 - When the suite runs each case more than once, the run's ``provenance`` holds the repeats under
@@ -41,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals.calibration import CALIBRATION_KEY, NO_CALIBRATION
 from martian.evals.model import (
     CaseResult,
     CaseStatus,
@@ -267,7 +270,13 @@ class RunRecorder:
         now = datetime.now(UTC)
         result = result.model_copy(update={"expectations": dict(case.expectations), "finished_at": now})
         judged = [
-            score.model_copy(update={"source_id": scorer.model or "", "created_at": now})
+            score.model_copy(
+                update={
+                    "source_id": scorer.model or "",
+                    "created_at": now,
+                    "metadata": {CALIBRATION_KEY: NO_CALIBRATION},
+                }
+            )
             if (scorer := self._scorers.get(score.scorer)) is not None and scorer.kind == "llm_judge"
             else score.model_copy(update={"created_at": now})
             for score in scores
@@ -319,6 +328,7 @@ class RunRecorder:
             passed=verdict.passed,
             rationale=verdict.rationale,
             error=verdict.error,
+            metadata={CALIBRATION_KEY: NO_CALIBRATION} if judge else {},
             created_at=result.finished_at,
         )
 
