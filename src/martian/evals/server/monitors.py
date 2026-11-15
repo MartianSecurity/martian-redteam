@@ -20,6 +20,9 @@ matching new traces in passes (:mod:`martian.evals.worker.monitor`); the request
 - Pausing stops the monitor before its next trace; resuming scores the traces from then on, not
   the ones recorded while it was paused. Deleting removes it and its progress; the scores it
   stored stay on their traces.
+- ``GET /monitors/{id}/trends`` is each scorer's pass rate or mean in consecutive windows, with its
+  95% interval (:mod:`martian.evals.trends`), read from the monitor's record of the traces it
+  scored, by time and bounded as a threshold's window is: never the project's traces.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the core's routes follow the contract's style.
@@ -27,15 +30,16 @@ the core's routes follow the contract's style.
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from martian.evals.model import ScorerVersion
-from martian.evals.records import Monitor, MonitorFilter, MonitorProgress, RecordStore
+from martian.evals.records import THRESHOLD_WINDOW_BOUND, Monitor, MonitorFilter, MonitorProgress, RecordStore
 from martian.evals.server.dependencies import (
     JudgeSettingsDep,
     PrincipalDep,
@@ -49,8 +53,10 @@ from martian.evals.server.principal import Principal
 from martian.evals.server.projection import derived_id, project_key, project_out, user_out
 from martian.evals.server.runs import project_keys, writable_key
 from martian.evals.server.scoring import with_models
+from martian.evals.server.thresholds import MEAN_ONLY, PASS_RATE_ONLY
 from martian.evals.server.write_schemas import JudgeReference, ScorerName
 from martian.evals.store import EvalStore
+from martian.evals.trends import TREND_POINTS, Measure, monitor_trends, trend_windows
 from martian.evals.worker import RunsMonitors, Work, Worker
 from martian.evals.worker.scorers import CODE_SCORERS, JUDGE_SCORERS, builtin_scorer
 
@@ -241,6 +247,41 @@ async def get_monitor(
     monitor_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep
 ) -> dict[str, Any]:
     return await _out(records, principal, await _find(store, records, principal, monitor_id))
+
+
+def scorer_measure(scorer: ScorerVersion) -> Measure | None:
+    """How a trend measures a scorer's values, as a threshold on it may: a built-in check or
+    judge by the measure it has, a registered judge by the kind of its answers, ``pass_rate`` for
+    yes or no and ``mean`` for a number. None for a judge whose answers are neither."""
+    if scorer.name in PASS_RATE_ONLY:
+        return "pass_rate"
+    if scorer.name in MEAN_ONLY:
+        return "mean"
+    kind = scorer.criteria.get("kind", "boolean")
+    return "pass_rate" if kind == "boolean" else "mean" if kind == "numeric" else None
+
+
+@router.get("/monitors/{monitor_id}/trends", response_model=None, dependencies=[MONITORING])
+async def monitor_trend(
+    monitor_id: uuid.UUID,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    span_seconds: Annotated[int, Query(ge=60, le=30 * 86400)] = 86400,
+    bucket_seconds: Annotated[int, Query(ge=60, le=86400)] = 3600,
+) -> dict[str, Any]:
+    if math.ceil(span_seconds / bucket_seconds) > TREND_POINTS:
+        raise HTTPException(
+            422, f"A trend has at most {TREND_POINTS} points: widen bucket_seconds or shorten span_seconds"
+        )
+    monitor = await _find(store, records, principal, monitor_id)
+    now = _now()
+    windows = trend_windows(now, span_seconds, bucket_seconds)
+    rows = await records.scored_monitored_traces(
+        principal, monitor.project_id, monitor.id, since=windows[0][0], until=now, limit=THRESHOLD_WINDOW_BOUND
+    )
+    measures = {scorer.name: scorer_measure(scorer) for scorer in monitor.scorers}
+    return {"monitor_id": monitor.id, "bucket_seconds": bucket_seconds, **monitor_trends(rows, measures, windows)}
 
 
 @router.post("/monitors/{monitor_id}/pause", response_model=None, dependencies=[MONITORING, SCORE])

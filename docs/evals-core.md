@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended, and again [when the model behind it changes](#when-the-model-changes) | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, with their [score trends](#score-trends), [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended, and again [when the model behind it changes](#when-the-model-changes) | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -1133,6 +1133,7 @@ frozen contract has none.
 | `GET /v1/evals/monitors` | The project's monitors (`project_id`, the default project without it) by name, each with its progress |
 | `POST /v1/evals/monitors` | Create a monitor (`201`) and hand its work to the worker |
 | `GET /v1/evals/monitors/{monitor_id}` | One monitor and its progress |
+| `GET /v1/evals/monitors/{monitor_id}/trends` | Each of its scorers' pass rate or mean in windows of time, with its 95% interval ([score trends](#score-trends)) |
 | `POST /v1/evals/monitors/{monitor_id}/pause` | Stop it before its next trace |
 | `POST /v1/evals/monitors/{monitor_id}/resume` | Score again, the traces from now on; those recorded while it was paused are not scored |
 | `DELETE /v1/evals/monitors/{monitor_id}` | Remove it, its progress and its record of the traces it took (`204`); the scores it stored stay on their traces |
@@ -1270,11 +1271,58 @@ the queue on SQLite and Postgres; and pauses a monitor whose worker stopped too 
 contract checks the monitor records, and the queue contract a row given back for later, on both
 databases.
 
-What builds on it:
+### Score trends
 
-| Issue | Change |
-| --- | --- |
-| MorningHQ/martian-notes#199 | Monitors, their thresholds and their trends on the Monitoring page |
+`GET /v1/evals/monitors/{monitor_id}/trends` is how each of a monitor's scorers has done over
+time, for the Evals UI's Monitoring page: the scorer's pass rate, or its mean, in consecutive
+windows, each with its 95% interval (`monitor_trend` in `martian.evals.server.monitors`,
+`martian.evals.trends`). It needs `monitoring`, as every monitor route does.
+
+| Parameter | Default | What it is |
+| --- | --- | --- |
+| `span_seconds` | 86400 | How far back it reaches, 60 seconds to 30 days |
+| `bucket_seconds` | 3600 | Each window's width, 60 seconds to a day; at most 200 windows (`422` otherwise) |
+
+```json
+{
+  "monitor_id": "0e0c1d7a-3f1b-5b8e-9c2d-7a6f5e4d3c2b", "bucket_seconds": 3600,
+  "since": "2026-11-14T11:00:00Z", "until": "2026-11-15T10:42:10Z", "confidence": 0.95,
+  "read": 812, "truncated": false, "complete_since": null,
+  "scorers": [
+    {"name": "safety", "measure": "pass_rate", "points": [
+      {"start": "2026-11-15T10:00:00Z", "end": "2026-11-15T10:42:10Z", "count": 38,
+       "estimate": 0.947, "interval": [0.827, 0.985], "truncated": false}
+    ]}
+  ]
+}
+```
+
+- **Windows** start on whole multiples of their width since the Unix epoch, in UTC, so a point
+  covers the same hour or day on every read; the newest ends now, so it is partial.
+- **What a point measures** is what a [threshold](#thresholds-and-alerts) on the scorer
+  measures, computed the same way (`measured` in `martian.evals.thresholds`): `pass_rate` for the
+  boolean checks and judges (`valid_json`, `safety`, `policy`, a registered judge that answers yes
+  or no), with the Wilson interval, and `mean` for numbers (`response_length`, a registered judge
+  that answers with a number), with the Student t interval, which needs two scores. A judge whose
+  answers are text has `measure: null`, and its points carry only their `count`. A score without
+  a verdict counts for nothing, and a window with no score has no `estimate` and no `interval`.
+- **Where it reads.** The scores are the monitor's own record of the traces it scored
+  (`scored_monitored_traces`, indexed on the monitor and the time it took each trace), by that
+  time, from the oldest window's start to now, newest first, at most 5,000 traces
+  (`THRESHOLD_WINDOW_BOUND`), as a threshold's window is read. It never reads the trace store or
+  a project's traces, so its cost is bounded whatever the project's size
+  ([volume ceiling for monitoring](trace-store-limits.md#volume-ceiling-for-monitoring)). A read
+  that reached the bound says so (`truncated`): `complete_since` is the oldest time it read, and
+  each window that starts at or before it is `truncated`, holding only part of its scores.
+- A point is by the time the monitor took the trace, about its request time plus the
+  [delay](#how-the-worker-scores).
+
+`tests/evals/test_trends.py` aligns the windows, checks each window's pass rate and mean against
+the intervals `martian.evals.stats` computes for the same scores, a text judge's counts and a
+score without a verdict counted for nothing, marks the windows a read cut short, and through the
+route reads the monitor's scored traces once, by time from the oldest window's start and at most
+5,000, never a monitor's whole record, leaving out a trace older than the span; it also refuses
+more than 200 windows, an unknown monitor and a Community edition.
 
 ## Thresholds and alerts
 
@@ -1813,7 +1861,8 @@ store keeps the watch, its progress and the noted changes on both databases.
   by the edition, and the model and version that produced it recorded with every judge score.
 - [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
   rate, a trace filter and a daily judge token cap, scored by the queue's worker in passes over the
-  new traces and stored on each trace.
+  new traces and stored on each trace, with each scorer's [score trend](#score-trends): its pass
+  rate or mean in windows of time, with its interval.
 - [Schedules](#schedules): a saved suite run against a target unattended, every so many seconds or
   on a cron expression in UTC, admitted by the queue's worker at each slot under a launch's rules,
   with a history of each slot's run, its pass rate and its paired comparison with the schedule's
