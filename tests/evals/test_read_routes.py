@@ -375,6 +375,7 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
         ("get", "/v1/evals/compare", "/v1/evals/compare", {"params": {"baseline_id": ci.id, "candidate_id": ci.id}}),
         ("get", "/v1/evals/{run_id}", f"/v1/evals/{ci.id}", {}),
         ("get", "/v1/evals/{run_id}/attempts", f"/v1/evals/{ci.id}/attempts", {}),
+        ("get", "/v1/evals/{run_id}/turns", f"/v1/evals/{ci.id}/turns", {}),
         ("get", "/v1/evals/{run_id}/workbench", f"/v1/evals/{ci.id}/workbench", {}),
         ("get", "/v1/evals/{run_id}/provenance", f"/v1/evals/{ci.id}/provenance", {}),
         (

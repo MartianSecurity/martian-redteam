@@ -2505,7 +2505,7 @@ scoring job, with the agent's target lease; not the durable queue yet), `current
 each organisation's default judge model, and `current_agent_names` its agent registry. It
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
 names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
-contract (`GET /v1/evals/{run_id}/attempts`, OpenTelemetry's `POST /v1/traces`). So a route reads
+contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`). So a route reads
 what an edition supplies only through these dependencies, never from `create_app`'s
 `app.state` (the OTLP route's write lock is the exception, and the server does not mount it).
 `tests/evals/test_write_routes.py` serves the scorers route on an application of its own that
