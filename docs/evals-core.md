@@ -439,6 +439,42 @@ whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
 `test_worker_targets.py`, `test_worker_queue.py`, `test_worker_limits.py` and
 `test_worker_concurrency.py` cover the worker.
 
+### Suite audits
+
+The core adds two routes of its own (`martian.evals.server.audits`), which the server's frozen
+contract does not have, so its version 3 is unchanged. They [audit](evals.md#audit-a-suite) a saved
+suite version: its scorers grade the replies of the built-in do-nothing and cheating targets in
+place of a target's, and the result is kept with that suite version.
+
+| Route | What it does | Capability |
+| --- | --- | --- |
+| `POST /v1/evals/suites/{suite_version_id}/audit` | `{"dataset_name": "...", "max_items": 100}`: audit the suite version over the first `max_items` (1 to 1,000, default 100) cases of a published dataset, and store the result with the suite version, replacing its earlier audit. `201` with the audit | `saveSuites` |
+| `GET /v1/evals/suites/{suite_version_id}/audit` | The suite version's latest audit; `404` when it has none | |
+
+- **What it grades.** Each case is read as the worker reads it, by its prompt and expected text;
+  a case without both is skipped and counted in `result.skipped`, as a run skips it. The suite's
+  built-in code scorers grade every reply: `exact_match`, `contains_expected` and `valid_json` by
+  their value, and `response_length` by its policy's threshold, which a reply passes at or above
+  for the direction `higher` (asking for a length) and at or below for `lower` (a bound). A
+  policy's threshold over the run's pass rate does not apply to one reply.
+- **Not audited, and listed under `result.not_audited`.** The judges (`correctness`, `safety`,
+  `policy` and registered judges): the core makes no model call in a request, so the audit does
+  not ask them. A [custom Python scorer](#custom-scorers-in-the-worker), which runs in the worker,
+  not in the request. `response_length` when its policy sets no threshold.
+- **No target and no model is called**, so the audit runs in the request, on a thread of its own.
+- **The response** is the stored audit: `suite_version_id`, `suite_id`, `version`, `suite_digest`,
+  `dataset` (`name` and `digest`), `flagged`, `actor_id` (who audited it, as **Users** under
+  [read routes](#read-routes) names a person), `created_at`, and `result`, the audit as
+  `martian evals audit` writes it ([the audit's result](evals.md#the-audits-result)) with
+  `skipped`.
+- **Refusals.** A suite version not saved is `404`, a dataset not published `422` ("Unknown
+  dataset"), and a role without `saveSuites` `403`.
+- **Each version has its own.** Saving the suite again makes a version with no audit until it is
+  audited; the earlier version keeps its audit.
+
+`tests/evals/test_audit.py` audits a saved suite version through the routes, and
+`tests/evals/record_contract.py` stores and replaces an audit on SQLite and Postgres.
+
 ## The worker
 
 `martian.evals.worker` is what the write routes hand long-running work to, in place of the
@@ -1112,6 +1148,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own route for the attempts of repeated cases, with the run's reliability and its
   flaky cases.
+- [Suite audits](#suite-audits): the core's own routes that audit a saved suite version with the
+  built-in do-nothing and cheating targets and keep the result with it.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
@@ -1507,8 +1545,8 @@ written by one MLflow release reads back the same on the next.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
-page's saved views.
+on, scoring jobs, the human review chain, versioned suites and their audits, editable dataset
+drafts and the Traces page's saved views.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -1541,6 +1579,11 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   See [what store errors contain](security-and-data.md#what-store-errors-contain).
 - A suite version records who saved it and when (`Suite.created_by`, `created_at`). A draft can be
   renamed or described (`edit_draft`) and removed with its cases (`delete_draft`).
+- A suite version keeps its latest [audit](#suite-audits) (`SuiteAudit` in `martian.evals.records`,
+  the core's own record, which the shared model does not have because the server keeps no audits):
+  `put_suite_audit` stores one, replacing the version's earlier audit, and refuses a suite version
+  not saved with `not_found`; `get_suite_audit` reads it. Migration `0005` adds its table,
+  `martian_suite_audits`, and storing one publishes a `suite` event.
 - A saved view (`SavedView` in `martian.evals.records`) is UI state, not evaluation content, so it
   is not part of the shared model: `save_view` creates one or, naming the revision it read,
   replaces it; `get_view`, `list_views` and `delete_view` read and remove them. Migration `0002`

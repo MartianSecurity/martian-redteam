@@ -67,6 +67,11 @@ WRITE_OPERATIONS = [
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own route, which the server's contract does not have (MorningHQ/martian-notes#180).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts")}
+# The core's suite audits (MorningHQ/martian-notes#214).
+OWN_NAMES |= {
+    ("get", "/v1/evals/suites/{suite_version_id}/audit"),
+    ("post", "/v1/evals/suites/{suite_version_id}/audit"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),
