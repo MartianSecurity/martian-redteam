@@ -40,6 +40,7 @@ from martian.evals.data_export import (
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
 from martian.evals.local_runs import INTERRUPTED
+from martian.evals.manifests import checked_cases, manifest_for
 from martian.evals.mlflow_import import import_mlflow_store
 from martian.evals.model import (
     Case,
@@ -63,6 +64,7 @@ from martian.evals.model import (
     Trace,
     suite_digest,
 )
+from martian.evals.outbox import save_queue_item
 from martian.evals.records import (
     RECORD_METHODS,
     Alert,
@@ -105,6 +107,7 @@ REASSIGNED = {
     "datasets.jsonl": ("dataset", {"created_at", "created_by"}),
     "drafts.jsonl": ("draft", {"revision", "updated_at", "updated_by"}),
     "views.jsonl": ("view", {"revision", "updated_at"}),
+    "manifests.jsonl": ("manifest", {"published_at"}),
     # An import creates monitors and schedules paused, whatever they were (checked on its own).
     "monitors.jsonl": ("monitor", {"revision", "updated_at", "state"}),
     "schedules.jsonl": ("schedule", {"revision", "updated_at", "state"}),
@@ -318,7 +321,9 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         }
     )
     await records.add_review(principal, project, answered)
-    await store.set_queue_item(principal, project, queue.id, traced[0], "completed")
+    # Through the outbox, as the review routes set it: a delivery the export leaves out.
+    delivered = await save_queue_item(store, records, principal, project, queue.id, traced[0], "completed")
+    assert delivered.state == "delivered"
 
     # A run admitted but never started: in the record store only.
     queued_id, _ = ids()
@@ -385,6 +390,15 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     await records.publish_draft(
         principal, project, done.id, expected_revision=saved_done.revision, digest=second.digest
     )
+    # The manifest that pins the version publishing wrote, and a publication that never finished.
+    second_cases = (await store.read_cases(principal, project, second.id, offset=0, limit=10)).items
+    pinned = manifest_for(
+        str(uuid.uuid4()), project, "support", second_cases, draft_id=done.id, published_by=principal.user_id
+    )
+    await records.begin_publication(principal, project, pinned.model_copy(update={"started_at": T0}))
+    await records.finish_publication(principal, project, pinned.id, second.id)
+    abandoned = manifest_for(str(uuid.uuid4()), project, "support next", cases[:2], draft_id=draft.id)
+    await records.begin_publication(principal, project, abandoned.model_copy(update={"started_at": T0}))
     for visibility in ("private", "organization"):
         await records.save_view(
             principal,
@@ -699,10 +713,12 @@ def table_rows(database: Path, space: str) -> dict[str, int]:
 
 def assert_tables_round_trip(source: Path, target: Path, space: str) -> None:
     """Every table the export carries holds rows in the source, and as many in the fresh install;
-    the import queued nothing, for a run, a monitor or a schedule."""
+    the outbox's deliveries stay behind, and the import queued nothing, for a run, a monitor or a
+    schedule."""
     before, after = table_rows(source, space), table_rows(target, space)
     assert {name: before[name] > 0 for name in EXPORTED_TABLES} == dict.fromkeys(EXPORTED_TABLES, True)
     assert {name: after[name] for name in EXPORTED_TABLES} == {name: before[name] for name in EXPORTED_TABLES}
+    assert (before["martian_deliveries"] > 0, after["martian_deliveries"]) == (True, 0)
     assert after["martian_work_queue"] == 0
 
 
@@ -770,6 +786,10 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     assert again.lines("runs.jsonl") == 2
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
+    # The published version is still pinned by its manifest: a run reads it only as published.
+    published = [d for d in await target.list_datasets(ORG_A, "default") if d.version == 2]
+    assert (await target_records.manifest_of(ORG_A, "default", published[0].id)) is not None
+    assert len(await checked_cases(target, target_records, ORG_A, "default", published[0])) == 3
     [schedule] = await target_records.list_schedules(ORG_A, "default")
     assert await target.get_dataset(ORG_A, "default", schedule.dataset_id) is not None
     # The threshold's webhook signs nothing until its secret is given again, once.
@@ -969,8 +989,9 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 1}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 1; this SDK reads version 2"):
+    # An export of the second format, before dataset publications were in it.
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 2}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 2; this SDK reads version 3"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")

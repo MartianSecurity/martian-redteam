@@ -62,6 +62,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from martian.evals._digits import ascii_digits
 from martian.evals.records import Alert, RecordStore
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ def verify(
     """Whether a webhook delivery is the installation's: ``signature`` is :func:`sign` of the
     ``timestamp`` header and the raw ``body`` with ``secret``, compared in constant time, and the
     timestamp is within ``tolerance_seconds`` of ``now`` (this machine's clock by default)."""
-    if not timestamp.isdigit():
+    if not ascii_digits(timestamp):
         return False
     if abs((time.time() if now is None else now) - int(timestamp)) > tolerance_seconds:
         return False

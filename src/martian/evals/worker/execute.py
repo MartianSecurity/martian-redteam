@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.evals import _custom
 from martian.evals.limits import Budget
+from martian.evals.manifests import checked_cases
 from martian.evals.model import (
     Case,
     CaseResult,
@@ -86,7 +87,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("martian.evals.worker")
 
-CASE_PAGE = 1000
 MAX_SCORED_RESULTS = 1000
 EXACT_MATCH_SCORER = "exact_match"
 STOPPED = "Stopped before this target request"
@@ -238,23 +238,6 @@ async def _fail_run(records: RecordStore, principal: Principal, run: Run, detail
         )
 
 
-async def active_cases(
-    store: EvalStore, principal: Principal, dataset_id: str, *, limit: int | None
-) -> tuple[list[Case], bool]:
-    """The dataset's active cases in order, at most ``limit``, and whether there were more."""
-    found: list[Case] = []
-    offset = 0
-    while limit is None or len(found) <= limit:
-        page = await store.read_cases(principal, DEFAULT_PROJECT, dataset_id, offset=offset, limit=CASE_PAGE)
-        found.extend(case for case in page.items if is_active(case))
-        offset += len(page.items)
-        if page.next_cursor is None:
-            break
-    if limit is None or len(found) <= limit:
-        return found, False
-    return found[:limit], True
-
-
 async def _run_cases(
     store: EvalStore,
     records: RecordStore,
@@ -279,7 +262,15 @@ async def _run_cases(
     if dataset is None or (run.dataset_digest is not None and dataset.digest != run.dataset_digest):
         await _fail_run(records, principal, run, "Dataset identity changed; submit a new eval run")
         return
-    cases, truncated = await active_cases(store, principal, dataset.id, limit=run.max_cases)
+    # Every case, checked against the version's manifest when Martian published it.
+    try:
+        everything = await checked_cases(store, records, principal, DEFAULT_PROJECT, dataset)
+    except StoreError as error:
+        await _fail_run(records, principal, run, error.detail)
+        return
+    active = [case for case in everything if is_active(case)]
+    limit = run.max_cases
+    cases, truncated = (active[:limit], True) if limit is not None and len(active) > limit else (active, False)
     # The cases a worker that stopped part way already finished: their results are kept, their
     # target is not called again, and they count as they are.
     finished = await finished_cases(records, principal, run, cases)
