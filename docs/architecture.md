@@ -119,10 +119,12 @@ is independent (`CATALOG_VERSION`); graph/policy revisions come from the service
 
 This repository is the home of the open-source evals core. The names stay as they are: the
 repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
-and the command `martian`. Everything here is Apache-2.0, except `src/martian/ui/`: a build of the
-Evals app from the private frontend, whose packages carry no licence yet
-(MorningHQ/martian-notes#220). Paid Enterprise features live in the private Martian backend and
-console, which use the core; this repository holds no commercially licensed code. The repository is private until the open-source launch.
+and the command `martian`. Everything here is Apache-2.0 except the third-party code bundled in
+`src/martian/ui/`, a build of the Evals app from the private frontend: the app's own packages are
+Apache-2.0, and the third-party packages and the Inter font bundled with them keep their licences,
+which the build's `third-party-licenses.md` lists. `NOTICE` attributes both. Paid Enterprise
+features live in the private Martian backend and console, which use the core; this repository holds
+no commercially licensed code.
 
 The core grows into this layout. Paths marked as planned do not exist yet; the issue named
 next to each one creates it.
