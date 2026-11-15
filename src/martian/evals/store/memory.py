@@ -32,7 +32,15 @@ from martian.evals.model import (
     query_order,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_session_search, cursor_offset, text_matches
+from martian.evals.store import (
+    TRACE_DELETE_LIMIT,
+    StoreError,
+    StoreStatus,
+    check_session_search,
+    check_trace_deletion,
+    cursor_offset,
+    text_matches,
+)
 from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
@@ -300,6 +308,36 @@ class MemoryStore:
         traces = [self._trace(principal, project_id, trace_id) for trace_id in trace_ids]
         for trace in traces:
             self._traces[(_space(principal), project_id, trace.id)] = trace.model_copy(update={"run_id": run_id})
+
+    def _delete(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        """Remove the traces the project holds, with their scores and their review queue items."""
+        space = _space(principal)
+        deleted = [t for t in dict.fromkeys(trace_ids) if self._traces.pop((space, project_id, t), None) is not None]
+        for trace_id in deleted:
+            self._scores.pop((space, project_id, trace_id), None)
+        for (s, p, _), items in self._items.items():
+            if s == space and p == project_id:
+                for trace_id in deleted:
+                    items.pop(trace_id, None)
+        return deleted
+
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        check_trace_deletion(trace_ids=trace_ids)
+        self._project(principal, project_id)
+        return self._delete(principal, project_id, trace_ids)
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        check_trace_deletion(limit=limit)
+        self._project(principal, project_id)
+        space = _space(principal)
+        older = sorted(
+            (trace.request_time, trace.id)
+            for (s, p, _), trace in self._traces.items()
+            if s == space and p == project_id and trace.request_time is not None and trace.request_time < before
+        )
+        return self._delete(principal, project_id, [trace_id for _, trace_id in older[:limit]])
 
     # --- scores ------------------------------------------------------------------------------
 
