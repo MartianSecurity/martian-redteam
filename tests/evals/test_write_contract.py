@@ -75,6 +75,37 @@ OWN_NAMES |= {
 }
 # The core's inspection of a run for cheating (MorningHQ/martian-notes#217).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/cheating"), ("post", "/v1/evals/{run_id}/cheating/review-queue")}
+# The core's own monitor routes, which the contract does not have either (MorningHQ/martian-notes#196).
+OWN_NAMES |= {
+    ("get", "/v1/evals/monitors"),
+    ("post", "/v1/evals/monitors"),
+    ("get", "/v1/evals/monitors/{monitor_id}"),
+    ("post", "/v1/evals/monitors/{monitor_id}/pause"),
+    ("post", "/v1/evals/monitors/{monitor_id}/resume"),
+    ("delete", "/v1/evals/monitors/{monitor_id}"),
+}
+# And its monitors' score trends (MorningHQ/martian-notes#199).
+OWN_NAMES |= {("get", "/v1/evals/monitors/{monitor_id}/trends")}
+# And its threshold routes (MorningHQ/martian-notes#198).
+OWN_NAMES |= {
+    ("get", "/v1/evals/thresholds"),
+    ("post", "/v1/evals/thresholds"),
+    ("get", "/v1/evals/thresholds/{threshold_id}"),
+    ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
+    ("delete", "/v1/evals/thresholds/{threshold_id}"),
+}
+# And the route that gives an imported threshold's webhook its secret again (MorningHQ/martian-notes#361).
+OWN_NAMES |= {("post", "/v1/evals/thresholds/{threshold_id}/secret")}
+# And its schedule routes (MorningHQ/martian-notes#197).
+OWN_NAMES |= {
+    ("get", "/v1/evals/schedules"),
+    ("post", "/v1/evals/schedules"),
+    ("get", "/v1/evals/schedules/{schedule_id}"),
+    ("get", "/v1/evals/schedules/{schedule_id}/runs"),
+    ("post", "/v1/evals/schedules/{schedule_id}/pause"),
+    ("post", "/v1/evals/schedules/{schedule_id}/resume"),
+    ("delete", "/v1/evals/schedules/{schedule_id}"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),

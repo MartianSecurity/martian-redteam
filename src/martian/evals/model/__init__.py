@@ -183,10 +183,22 @@ class DatasetDraft(_Object):
     updated_at: datetime | None = None
 
 
+HEADER_NAME = r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$"
+"""An HTTP header name: one or more of the characters RFC 9110 allows in a token."""
+MODEL_NAME_LENGTH = 200
+"""The longest model name a trace, a run or a schedule keeps."""
+
+
 class Target(_Object):
     """The thing under test. An HTTP target's ``url`` and ``headers`` are kept as the suite file
     writes them, with ``${NAME}`` references unexpanded: the values a run reads from the
-    environment are never part of the model."""
+    environment are never part of the model.
+
+    An HTTP target may say where its response reports the model that answered:
+    ``model_path``, a path into the JSON response written as ``response_path`` is (``model`` for
+    an OpenAI-compatible reply), or ``model_header``, a response header. Unset, each is left out
+    when the target is written, so a target without them keeps the digest it had before the
+    fields existed."""
 
     kind: TargetKind
     file: str | None = None
@@ -196,17 +208,29 @@ class Target(_Object):
     response_path: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = None
+    model_path: str | None = Field(default=None, min_length=1, max_length=200)
+    model_header: str | None = Field(default=None, pattern=HEADER_NAME)
 
     @model_validator(mode="after")
     def fields_for_kind(self) -> Target:
         given = {
             name
-            for name in ("file", "function", "url", "body", "response_path", "headers", "agent_id")
+            for name in (
+                "file",
+                "function",
+                "url",
+                "body",
+                "response_path",
+                "headers",
+                "agent_id",
+                "model_path",
+                "model_header",
+            )
             if getattr(self, name)
         }
         allowed = {
             "function": {"file", "function"},
-            "http": {"url", "body", "response_path", "headers"},
+            "http": {"url", "body", "response_path", "headers", "model_path", "model_header"},
             "agent": {"agent_id"},
             "stored": set(),
         }[self.kind]
@@ -215,7 +239,18 @@ class Target(_Object):
             raise ValueError(f"a {self.kind} target needs {', '.join(missing)}")
         if extra := sorted(given - allowed):
             raise ValueError(f"{', '.join(extra)} does not apply to a {self.kind} target")
+        if self.model_path and self.model_header:
+            raise ValueError("a target reports its model at model_path or in model_header, not both")
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_unset_model_source(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict):
+            for name in ("model_path", "model_header"):
+                if written.get(name, "") is None:
+                    del written[name]
+        return written
 
 
 class ScorerVersion(_Object):
@@ -676,12 +711,14 @@ class Trace(_Object):
 
 
 class TraceQuery(_Object):
-    """Which traces of a project to return, newest first unless ``oldest_first``."""
+    """Which traces of a project to return, newest first unless ``oldest_first``. ``model`` keeps
+    the traces whose model is exactly that name."""
 
     project_id: Identifier
     run_id: str | None = None
     session_id: str | None = None
     user_id: str | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=MODEL_NAME_LENGTH)
     trace_ids: list[Identifier] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=500)
     states: list[TraceState] = Field(default_factory=list)
@@ -893,8 +930,10 @@ def from_results_record(
 
 __all__ = [
     "ATTEMPT_RECORD_FIELDS",
+    "HEADER_NAME",
     "MAX_ATTEMPTS",
     "MAX_TURNS",
+    "MODEL_NAME_LENGTH",
     "MODEL_VERSION",
     "SESSION_TRACE_LIMIT",
     "TURN_RECORD_FIELDS",

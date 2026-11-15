@@ -21,7 +21,13 @@ any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds 
 ``limits`` are the installation's limits for a run that has none of its own
 (:class:`~martian.evals.model.RunLimits`). ``scorers`` are the custom Python scorers it runs, by name
 (:data:`~martian.evals.worker.execute.InstalledScorers`); each is checked when the worker is
-built, so one that reads an argument a worker does not give is refused before any work.
+built, so one that reads an argument a worker does not give is refused before any work. A
+monitor's work is one pass over its project's new traces (:mod:`martian.evals.worker.monitor`),
+which reads a trace ``monitor_settle_seconds`` after its request time, then evaluates the
+thresholds on the monitor's scores and delivers their alerts with ``alerts``, an installation's
+:class:`~martian.evals.alerts.AlertSettings`, which send nothing unless given. After a scheduled
+run's suite job, it records the run's gate result and does the same for the thresholds on the
+schedule's gate results (:func:`~martian.evals.worker.schedule.record_gate`).
 """
 
 from __future__ import annotations
@@ -32,17 +38,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from martian.evals import _custom
+from martian.evals.alerts import AlertSender, AlertSettings
 from martian.evals.model import Run, RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import InstalledScorers, execute_run, execute_scoring
+from martian.evals.worker.monitor import SETTLE_SECONDS, execute_monitor
+from martian.evals.worker.schedule import record_gate
 from martian.evals.worker.targets import own_target, target_call, target_pin
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
 OTHER_ORGANISATION = "This worker runs one organisation's work; another organisation's work needs a process of its own"
+NOT_A_RUNNERS = "A schedule's turn admits a run; the queue's worker takes it itself and never hands it to a runner"
 
 
 class InProcessWorker:
@@ -60,7 +70,11 @@ class InProcessWorker:
         scorers: InstalledScorers | None = None,
         limits: RunLimits | None = None,
         private_paths: Iterable[str | Path] = (),
+        monitor_settle_seconds: float = SETTLE_SECONDS,
+        alerts: AlertSettings | None = None,
     ) -> None:
+        if monitor_settle_seconds < 0:
+            raise ValueError("monitor_settle_seconds is 0 or more")
         self._store = store
         self._records = records
         self._organisation = organisation_id
@@ -77,11 +91,18 @@ class InProcessWorker:
         for function in self._scorers.values():
             _custom.arguments(function, _custom.WORKER_ARGUMENTS)
         self._limits = limits
+        self._settle = monitor_settle_seconds
+        self._alerts = AlertSender(alerts)
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
     def judges(self) -> bool:
         return self._judge is not None
+
+    @property
+    def alert_channels(self) -> frozenset[str]:
+        """The channels this worker sends thresholds' alerts on (``SendsAlerts``)."""
+        return frozenset(self._alerts.channels)
 
     def _check_organisation(self, principal: Principal) -> None:
         if principal.organisation_id != self._organisation:
@@ -135,7 +156,14 @@ class InProcessWorker:
                 timeout_seconds=self._timeout,
                 limits=self._limits,
             )
-        else:
+        elif work.kind == "scoring":
             await execute_scoring(
                 self._store, self._records, work, judge=self._judge, scorers=self._scorers, limits=self._limits
             )
+            await record_gate(self._records, work, alerts=self._alerts)
+        elif work.kind == "monitor":
+            await execute_monitor(
+                self._store, self._records, work, judge=self._judge, settle_seconds=self._settle, alerts=self._alerts
+            )
+        else:
+            raise ValueError(NOT_A_RUNNERS)
