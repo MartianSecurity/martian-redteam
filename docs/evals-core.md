@@ -14,6 +14,7 @@ builds it with `create_app` and supplies these:
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 | `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` with the agents it can call and, optionally, a judge | Its own worker ([the worker](#the-worker)) |
+| `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -33,7 +34,9 @@ app = create_app(
 `store` and `records` are both required: the store holds projects, datasets, traces and run
 telemetry, and the record store holds runs, results, reviews and the other
 [records](#the-record-store). `worker` is optional: without one, a route that starts a run or a
-scoring job answers `503` ("This installation runs no evaluation worker"). Routes read the
+scoring job answers `503` ("This installation runs no evaluation worker"). `judge_settings` is
+optional too: without it no default judge model is set, and setting one answers `503` ("This
+installation keeps no default judge model"). Routes read the
 injected values through `current_principal`, `current_entitlements`, `current_store`,
 `current_records` and `current_worker` (`martian.evals.server.dependencies`). `principal` is a
 FastAPI dependency, so it can declare its own parameters (a header, a cookie) and raise `401`. A
@@ -114,7 +117,7 @@ assigning review work to someone else needs `assignReviews`, and changing anothe
 ## Bootstrap response
 
 `GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
-same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 2 of
+same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3 of
 `contracts/evals-api.json` in MorningHQ/MartianBackend). The local edition answers:
 
 ```json
@@ -160,7 +163,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
 Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
-version 2 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
+version 3 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
@@ -233,7 +236,7 @@ questions, dataset drafts and operations, Monitoring) are [write routes](#write-
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v2.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 
@@ -241,7 +244,7 @@ date-times checked.
 
 The core serves the routes that launch, score and review runs and that edit datasets, suites,
 judges, review queues, projects and saved views. Each is a port of the server's route onto the
-store, the record store and the worker, and each operation is the one in version 2 of the frozen
+store, the record store and the worker, and each operation is the one in version 3 of the frozen
 contract:
 
 | Routes | What they do | Module |
@@ -249,7 +252,8 @@ contract:
 | `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a registered agent over a published dataset and hand it to the worker; stop it | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
-| `GET`, `POST /judges` | Registered judges, a new version for each registration | `suites` |
+| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on | `suites` |
+| `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
 | `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
 | `POST /traces/{trace_id}/annotations` | A person's feedback or expectation on a trace | `reviews` |
@@ -282,7 +286,10 @@ All paths are under `/v1/evals`. How the core carries them out:
   `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
   registered judges pinned by name and version, or a saved suite version's scorers and policies
   (`suite_version_id`). Judge scorers need a worker with a judge (`Worker.judges`); without one
-  they are refused (`422`) and `GET /scorers` shows them unavailable. One active scoring job per
+  they are refused (`422`) and `GET /scorers` shows them unavailable. Each judge scorer is pinned
+  to its model when the job is admitted: the judge's own, or the default judge model when it
+  names none, built-in judges included. A job keeps that model when the default changes later,
+  and two jobs on different models do not compare as scored alike. One active scoring job per
   run: the server's bound of one per organisation, which limits model use, belongs to the worker
   that runs the jobs. A job's scores sit beside the run's own, and each scored value is also kept
   on its case's trace.
@@ -350,9 +357,11 @@ marked `failed` with its reason, never left running.
 `InProcessWorker(store, records, targets={agent_id: call}, judge=None, target_timeout_seconds=120)`
 runs each piece of work as a task of the API's event loop. A target is an async function from a
 `Case` to its output (`TargetCall`); a judge is an async function from a `JudgeRequest` (the
-prompt, expected text, output and the judge scorers to apply) to a `JudgeResult` (the model and a
-verdict per scorer). `drain()` waits for the work submitted so far. Work is lost with the process:
-a run interrupted by a restart stays `running` until the durable queue.
+prompt, expected text, output, the judge scorers to apply, and the `model` and `endpoint` they are
+pinned to) to a `JudgeResult` (the `model` it used, the `model_version` the provider reported, and
+a verdict per scorer). A scoring job sends one request per model its judges are pinned to
+([judge models](#judge-models)). `drain()` waits for the work submitted so far. Work is lost with
+the process: a run interrupted by a restart stays `running` until the durable queue.
 
 What builds on it:
 
@@ -361,8 +370,50 @@ What builds on it:
 | MorningHQ/martian-notes#139 | A durable job queue and worker process: `submit` enqueues |
 | MorningHQ/martian-notes#140 | One process per evaluation run, executing each `Work` |
 | MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
-| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge |
+| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge, on the model and endpoint each request names |
+| MorningHQ/martian-notes#135 | A key store for each organisation's provider keys |
 | MorningHQ/martian-notes#116 | Run and run again from the local UI |
+
+## Judge models
+
+Each judge runs on a model of its own, or on the default judge model when it names none.
+
+- **A judge's model.** `POST /judges` takes `model`, an MLflow model URI (`<provider>:/<model>`,
+  such as `openai:/gpt-4o-mini`), and `endpoint`, the base address of the OpenAI-compatible
+  endpoint that serves it (`http://localhost:4000/v1`). Both are optional and part of the version,
+  so a new model is a new version, and `GET /judges` returns them in each version's `definition`.
+  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`.
+- **The default judge model.** `GET /judge-model` answers `{"model", "endpoint", "selectable"}`
+  for the principal's organisation; `PUT /judge-model` sets it (`manageJudges`), and `{}` clears
+  it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
+  included. With none set, the worker's judge uses its own model. `selectable` says whether the
+  installation runs a judge on the model it names: always `true` here; the Martian server answers
+  `false`, because its judges run in Agents on the operator's model (`docs/evals-workbench.md` in
+  MorningHQ/MartianBackend). Where the default lives is the edition's `JudgeSettings`:
+  `FileJudgeSettings` keeps the local edition's in `settings.json` in its data folder, since the
+  local edition has no organisation; `MemoryJudgeSettings` keeps each organisation's in memory, for
+  tests; the server keeps an organisation's with the organisation when it mounts the core
+  (MorningHQ/martian-notes#102).
+- **Pinned when a job is admitted.** A scoring job records each judge scorer with the model it will
+  run on, and the worker sends one `JudgeRequest` per model and endpoint. A judge that answers from
+  another model than the request names gets an error on each of those scores ("The judge answered
+  with ..., not ..., the model this judge is pinned to"), never a verdict.
+- **Recorded with every score.** A judge score's `source_id` is the model and the version the
+  provider reported, `model@model_version` (`openai:/gpt-4o-mini@gpt-4o-mini-2024-07-18`), or the
+  model alone when none was reported. Its metadata, the assessment's `provenance`, holds
+  `martian.judge.model`, `martian.judge.model_version` and `martian.judge.endpoint`; a judge score
+  with no verdict still names the model it was pinned to. The same values are on the case's trace.
+- **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
+  its own environment, and a per-organisation key store is MorningHQ/martian-notes#135. An
+  endpoint is a plain `http` or `https` address, so one with a user name, password, query or
+  fragment is refused (`422`), as is an endpoint without a model or with a provider other than
+  `openai`. Headers for the judge's endpoint (`judge.headers` in a suite file) are how the
+  endpoint is reached, not what is judged, and may carry a key, so they are not part of a judge
+  definition.
+
+`tests/evals/test_judge_models.py` scores one run with two registered judges on two models and a
+built-in judge on the default, keeps a job's model when the default changes, refuses a key in an
+endpoint, and keeps the local edition's default in its data folder.
 
 ## What exists
 
@@ -379,6 +430,8 @@ What builds on it:
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface with its in-process implementation.
+- [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
+  by the edition, and the model and version that produced it recorded with every judge score.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -567,6 +620,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
   folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
   page reads again, since the UI gets no live event from another process.
+- The default judge model is a local setting, `judge_model` in `settings.json` in the data folder
+  (`FileJudgeSettings`), set from the Judges page or `PUT /v1/evals/judge-model`. The file is
+  written when the default is first set ([judge models](#judge-models)).
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
   and a session. The local edition answers it with the fixed principal, so the UI needs no
   sign-in:
@@ -617,7 +673,7 @@ docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data
 ```
 
 Then open http://127.0.0.1:7600/ on the server. The `martian-evals` volume holds `mlflow.db`,
-`artifacts/` and `martian.db`, so the data outlives `docker stop` and `docker start`, and a new
+`artifacts/`, `martian.db` and `settings.json`, so the data outlives `docker stop` and `docker start`, and a new
 container started on the same volume. To keep the data in a folder of the server instead, mount
 that folder at `/data`; the image's user, uid 10001, must be able to write to it.
 

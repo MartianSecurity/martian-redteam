@@ -7,7 +7,10 @@
   API id is derived from the suite's id and its version.
 - A judge is a registered scorer in the store, in the default project or the one asked for: an
   ``llm_judge`` scorer of type ``instructions`` whose ``criteria`` hold the definition and the
-  ``operation_id`` (the ``request_id``) that registered it. Each registration is a new version.
+  ``operation_id`` (the ``request_id``) that registered it, and whose ``model`` and ``endpoint``
+  are the model it runs on. Each registration is a new version.
+- The default judge model, for judges that name none, is the edition's ``JudgeSettings``: an
+  organisation's on the server, a local setting in the local edition.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -20,11 +23,18 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from martian.evals.judge_settings import JudgeModel
 from martian.evals.model import Policy, ScorerVersion, Suite, suite_digest
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, require_capability
+from martian.evals.server.dependencies import (
+    JudgeSettingsDep,
+    PrincipalDep,
+    RecordsDep,
+    StoreDep,
+    require_capability,
+)
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, policy_out, project_key, suite_version_id
 from martian.evals.server.runs import writable_project
-from martian.evals.server.write_schemas import JudgeVersionRequest, SuiteRequest
+from martian.evals.server.write_schemas import JudgeModelOut, JudgeModelRequest, JudgeVersionRequest, SuiteRequest
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -33,7 +43,11 @@ explorer = APIRouter(prefix="/v1/evals", tags=["evaluation explorer"])
 CRITERIA_REVISION = "martian-eval-criteria-v1"
 JUDGE_TYPE = "instructions"
 JUDGE_FIELDS = ("name", "description", "instructions", "kind", "options", "minimum", "maximum")
-MODEL_POLICY = "Operator-configured judge model. Actual model identity is recorded on every executed assessment."
+MODEL_FIELDS = ("model", "endpoint")
+MODEL_POLICY = (
+    "Each judge runs on its own model, or on the default judge model when it names none. "
+    "The model and version that produced it are recorded on every executed assessment."
+)
 
 
 # --- suites -----------------------------------------------------------------------------------
@@ -128,7 +142,11 @@ def judge_out(scorer: ScorerVersion) -> dict[str, Any]:
         "version": int(scorer.version),
         "native_id": None,
         "operation_id": scorer.criteria.get("operation_id"),
-        "definition": {field: scorer.criteria[field] for field in JUDGE_FIELDS},
+        "definition": {
+            **{field: scorer.criteria[field] for field in JUDGE_FIELDS},
+            "model": scorer.model,
+            "endpoint": scorer.endpoint,
+        },
         "created_at_ms": None,
     }
 
@@ -162,7 +180,7 @@ async def judges(
 )
 async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
     key = await writable_project(store, principal, body.project_id)
-    definition = body.model_dump(mode="json", include=set(JUDGE_FIELDS))
+    definition = body.model_dump(mode="json", include={*JUDGE_FIELDS, *MODEL_FIELDS})
     versions = await store.scorer_versions(principal, key, body.name)
     supported = [v for v in versions if is_judge(v)]
     if mine := next((v for v in supported if v.criteria.get("operation_id") == str(body.request_id)), None):
@@ -179,10 +197,35 @@ async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, sto
             name=body.name,
             kind="llm_judge",
             type=JUDGE_TYPE,
-            criteria={**definition, "operation_id": str(body.request_id)},
+            model=body.model,
+            endpoint=body.endpoint,
+            criteria={
+                **{field: definition[field] for field in JUDGE_FIELDS},
+                "operation_id": str(body.request_id),
+            },
         ),
     )
     return judge_out(registered)
+
+
+# --- the default judge model ---------------------------------------------------------------------
+
+
+@explorer.get("/judge-model", response_model=JudgeModelOut)
+async def judge_model(principal: PrincipalDep, settings: JudgeSettingsDep) -> JudgeModelOut:
+    found = await settings.default_model(principal) if settings is not None else JudgeModel()
+    # The core's worker gives each judge the model it names, so the choice is always offered.
+    return JudgeModelOut(model=found.model, endpoint=found.endpoint, selectable=True)
+
+
+@explorer.put("/judge-model", response_model=JudgeModelOut, dependencies=[Depends(require_capability("manageJudges"))])
+async def set_judge_model(
+    body: JudgeModelRequest, principal: PrincipalDep, settings: JudgeSettingsDep
+) -> JudgeModelOut:
+    if settings is None:
+        raise HTTPException(503, "This installation keeps no default judge model")
+    saved = await settings.set_default_model(principal, JudgeModel(model=body.model, endpoint=body.endpoint))
+    return JudgeModelOut(model=saved.model, endpoint=saved.endpoint, selectable=True)
 
 
 __all__ = ["explorer", "is_judge", "router", "suite_out"]
