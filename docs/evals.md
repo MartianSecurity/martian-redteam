@@ -596,7 +596,8 @@ data folder: `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, s
 `~/.martian/evals/cache`.
 
 - **What is cached.** A URL target's calls, and every LLM judge's, through the judges' shared
-  provider call (both stages of a judge that reviews its draft). A function target's calls only
+  provider call (both stages of a judge that reviews its draft, and each member of a
+  [panel](#a-panel-of-judges), by its own model). A function target's calls only
   with `functions: true`: a function is your code and may do more than answer, such as write to a
   database or send a message, so replaying it is your choice. Deterministic checks call no model,
   and neither does a [`python` check](#custom-python-checks): it is your code, so it runs on every
@@ -677,7 +678,7 @@ for a fresh one:
 | The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
 | The local Evals UI's data folder | The run's `provenance.cache`: the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled |
-| `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call |
+| `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call. A panel is marked only when every member was replayed; its tokens are those of the members that made a call |
 
 ## Conversations
 
@@ -1220,7 +1221,10 @@ martian evals run evals.yaml --output results/pr --baseline results/main
   baseline), `attempts` and `gate`.
 - **A changed suite.** A check added, removed or redefined, or a different number of attempts per
   case, changes what a verdict means, so the label measures that change as well as the system's.
-  The comparison names such changes rather than refusing to compare.
+  The comparison names such changes rather than refusing to compare. An LLM judge check is
+  redefined by its criteria, `judge.model` and `judge.inference_params`; a
+  [panel](#a-panel-of-judges) check by its members and `judge.inference_params`, not by
+  `judge.model`, which it does not use.
 - **A matrix.** Each combination is compared with the same combination of the baseline, and
   one the baseline has no result of is gated on its own
   ([a matrix of prompts and models](#a-matrix-of-prompts-and-models)).
@@ -1311,7 +1315,9 @@ A panel names 2 to 9 different models. Name an odd number, so that a full panel 
 judge is a model call, so a panel of three costs three single judges, and a run's
 `max_judge_tokens` ([time limits and budgets](#run-a-suite-file-locally)) counts the tokens of
 every member that gave a verdict, which the panel's feedback adds up; a member that gave a verdict
-and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge. The rule reads pass/fail
+and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge.
+With the [cache of model calls](#a-cache-of-model-calls) on, each member's call is cached on its
+own, by its model, and a member replayed from the cache counts 0 tokens. The rule reads pass/fail
 verdicts, which every SDK judge gives. MLflow's own ensemble (`make_scorer_ensemble` with
 `majority_vote` in `mlflow.genai.scorers`) fails when any member errors and breaks a tie by
 sorting the answers, so the panel has its own rule.

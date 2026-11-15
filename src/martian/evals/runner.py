@@ -2232,10 +2232,9 @@ def _cache_report(suite: Suite, cache: ModelCallCache) -> dict[str, Any]:
     """summary.json's ``cache``, and the recorded run's ``provenance.cache``: the cache's
     ``folder``, ``ttl_seconds`` and ``functions``, and this run's ``hits``, ``calls`` and
     ``stored`` for the ``target`` and the ``judge`` calls, each None when the suite makes no such
-    call that the cache holds (no target or a function target it leaves out; no LLM judge but the
-    conversation judges, whose calls it never holds)."""
+    call that the cache holds (no target or a function target it leaves out; no LLM judge)."""
     counts = cache.counts()
-    judged = any(check.type in JUDGES and check.type not in CONVERSATION_JUDGES for check in suite.checks)
+    judged = any(check.type in JUDGES for check in suite.checks)
     return cache.settings() | {
         "target": counts["target"] if _target_cached(suite, cache.functions) else None,
         "judge": counts["judge"] if judged else None,
@@ -2873,10 +2872,11 @@ def _verdicts(
     suite: Suite, records: list[dict[str, Any]], cases: list[dict[str, Any]], repeats: dict[str, Any] | None
 ) -> dict[str, Any]:
     """The run's verdicts file (:func:`martian.evals.baseline.verdicts`). A check's definition counts
-    its judge for an LLM judge and, with repeats, the rule its attempts combine by; a simulated
-    user's goal verdict counts the simulator. A conversation case's digest counts its turns or its
-    simulated user. The file names the suite's security checks, which a comparison with it as the
-    candidate gates on case by case."""
+    its judge for an LLM judge (for a panel, its members and the judge's settings but not
+    ``judge.model``, which it does not use) and, with repeats, the rule its attempts combine by; a
+    simulated user's goal verdict counts the simulator. A conversation case's digest counts its
+    turns or its simulated user. The file names the suite's security checks, which a comparison
+    with it as the candidate gates on case by case."""
     from martian.evals import baseline as baselines
 
     judge = (
@@ -2884,15 +2884,25 @@ def _verdicts(
         if suite.judge
         else None
     )
+
+    def judged_by(check: CheckSpec) -> dict[str, Any] | None:
+        if check.type not in JUDGES or judge is None:
+            return None
+        return judge if check.panel is None else {key: value for key, value in judge.items() if key != "model"}
+
     checks = {
         check.label: baselines.digest(
             {
-                # The default scope is left out, as in the suite's fingerprint, so a check keeps
-                # the digest it had before scopes existed.
+                # A check without a panel, or of the default scope, leaves the field out, as in the
+                # suite's fingerprint, so a check keeps the digest it had before panels and scopes
+                # existed.
                 "check": check.model_dump(
-                    mode="json", exclude={"combine"} | ({"scope"} if check.scope == "turn" else set())
+                    mode="json",
+                    exclude={"combine"}
+                    | ({"panel"} if check.panel is None else set())
+                    | ({"scope"} if check.scope == "turn" else set()),
                 ),
-                "judge": judge if check.type in JUDGES else None,
+                "judge": judged_by(check),
                 "combine": repeats["checks"][check.label]["combine"] if repeats else None,
             }
         )

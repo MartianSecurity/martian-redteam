@@ -238,3 +238,18 @@ def test_push_refuses_what_is_not_a_prompt_of_the_suite_file(tmp_path, args, edi
     assert problem in result.output
     # Nothing was pushed.
     assert local_ui(tmp_path).get("/v1/evals/prompts").json() == {"items": []}
+
+
+def test_a_run_s_readers_see_its_matrix_prompt_versions_and_cache_and_nothing_else_of_them():
+    from martian.evals.server.projection import reader_provenance
+
+    used = {"axis": "prompt", "value": "terse", "name": "support.terse", "version": 2, "digest": "d" * 64}
+    matrix = {"id": "prompt=terse", "values": {"prompt": "terse"}, "axes": [], "invocation": "i-1"}
+    cache = {"folder": "/data/cache", "ttl_seconds": 60.0, "functions": False, "target": None, "judge": None}
+    kept = {
+        "matrix": {**matrix, "pinned": "kept for the server"},
+        "prompts": [{**used, "text": "Answer in one sentence."}, "not an object"],
+        "cache": {**cache, "entries": ["kept for the server"]},
+    }
+    # Each prompt version of the list shows the keys the allowlist gives, as an object's keys do.
+    assert reader_provenance(kept) == {"matrix": matrix, "prompts": [used], "cache": cache}

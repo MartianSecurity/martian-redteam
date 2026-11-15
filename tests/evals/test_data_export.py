@@ -1086,10 +1086,20 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    # An export of the fourth format, before the organisation's prompts were in it.
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 4}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 4; this SDK reads version 5"):
-        await import_data(*fresh, ORG_A, folder)
+    # Version 3 was two formats, one with the dataset publications and one with the prompts, and
+    # version 4 added the judge calibrations without the prompts: version 5 holds all of them, and
+    # an export of any of those is refused.
+    for older in (3, 4):
+        (folder / MANIFEST).write_text(json.dumps({**found, "version": older}), encoding="utf-8")
+        with pytest.raises(ExportError, match=f"format version {older}; this SDK reads version 5"):
+            await import_data(*fresh, ORG_A, folder)
+    # A version 5 folder without the prompt files, or without the dataset publications, is refused.
+    (folder / MANIFEST).write_text(json.dumps(found), encoding="utf-8")
+    for name in ("prompts.jsonl", "manifests.jsonl"):
+        (folder / name).rename(folder / f"{name}.away")
+        with pytest.raises(ExportError, match=f"is missing {name}"):
+            await import_data(*fresh, ORG_A, folder)
+        (folder / f"{name}.away").rename(folder / name)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
     with pytest.raises(ExportError, match="is not finished"):

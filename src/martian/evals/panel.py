@@ -37,7 +37,9 @@ scores, and the core's scores alike:
 A panel's feedback also keeps the tokens its members used, added up over the members that gave a
 verdict, under the keys a judge's feedback keeps its usage in (``mlflow.assessment.judgeInputTokens``
 and ``judgeOutputTokens``, as text), so ``max_judge_tokens`` counts every member; when a member that gave a
-verdict reported no usage, the panel reports none either.
+verdict reported no usage, the panel reports none either. A member replayed from the cache of model
+calls (``martian.cache: hit``, :mod:`martian.evals.cache`) made no call and counts 0, and a panel
+every member of which was replayed is marked ``martian.cache: hit`` itself.
 
 A panel's score names the panel as its source, ``panel:`` and a digest of its members
 (:func:`panel_source`), the same for the same members in any order.
@@ -55,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from martian.evals._digits import ascii_digits
+from martian.evals.cache import HIT_KEY
 from martian.evals.limits import INPUT_TOKENS, OUTPUT_TOKENS
 from martian.evals.model import MAX_PANEL, MIN_PANEL, digest
 
@@ -219,46 +222,54 @@ def member_sources(metadata: Mapping[str, Any]) -> list[str]:
 # --- the Python API ------------------------------------------------------------------------------
 
 
-def _member_vote(model: str, member: Any, call: dict[str, Any]) -> tuple[Vote, str, tuple[int, int] | None]:
-    """One member's vote on one case, the judge version it reported, if any, and the tokens its
-    provider reported it used, input and output, if it reported both. ``member`` is an MLflow
-    scorer; ``Scorer.run`` gives it the arguments it takes, as MLflow's evaluation does."""
+Voted = tuple[Vote, str, tuple[int, int] | None, bool]
+"""A member's vote, the judge version it reported, its usage and whether it was replayed."""
+
+
+def _member_vote(model: str, member: Any, call: dict[str, Any]) -> Voted:
+    """One member's vote on one case, the judge version it reported, if any, the tokens its
+    provider reported it used, input and output, if it reported both, and whether its judgment was
+    replayed from the cache of model calls, which made no call and so used none, (0, 0).
+    ``member`` is an MLflow scorer; ``Scorer.run`` gives it the arguments it takes, as MLflow's
+    evaluation does."""
     from mlflow.entities import Feedback
 
     try:
         feedback = member.run(**call)
     except ValidationError:
         # Pydantic's message holds the text it was given.
-        return Vote(model, None, "The judge's reply could not be read"), "", None
+        return Vote(model, None, "The judge's reply could not be read"), "", None, False
     except ValueError as error:
         # The SDK judges' own messages: fixed text naming the setting to check, never the
         # provider's error text or the graded text.
-        return Vote(model, None, str(error) or "The judge gave no verdict"), "", None
+        return Vote(model, None, str(error) or "The judge gave no verdict"), "", None, False
     except Exception as error:  # noqa: BLE001 - a member that fails in any way does not vote
-        return Vote(model, None, f"The judge failed: {type(error).__name__}"), "", None
+        return Vote(model, None, f"The judge failed: {type(error).__name__}"), "", None, False
     if not isinstance(feedback, Feedback):
         feedback = Feedback(value=feedback)
     metadata = dict(feedback.metadata or {})
     version = str(metadata.get(MODEL_VERSION_KEY, ""))
     if feedback.error is not None or type(feedback.value) is not bool:
         reason = feedback.error_message if feedback.error is not None else "The judge gave no pass/fail verdict"
-        return Vote(model, None, str(reason or "The judge gave no verdict"), model_version=version), "", None
+        return Vote(model, None, str(reason or "The judge gave no verdict"), model_version=version), "", None, False
     vote = Vote(model, feedback.value, feedback.rationale or "", model_version=version)
     sent, received = metadata.get(INPUT_TOKENS), metadata.get(OUTPUT_TOKENS)
+    if sent is None and received is None and metadata.get(HIT_KEY) == "hit":
+        return vote, str(metadata.get(JUDGE_VERSION_KEY, "")), (0, 0), True
     try:
         usage = (int(sent), int(received)) if sent is not None and received is not None else None
     except (TypeError, ValueError):
         usage = None
-    return vote, str(metadata.get(JUDGE_VERSION_KEY, "")), usage
+    return vote, str(metadata.get(JUDGE_VERSION_KEY, "")), usage, False
 
 
-def _usage(voted: Sequence[tuple[Vote, str, tuple[int, int] | None]]) -> dict[str, str]:
+def _usage(voted: Sequence[Voted]) -> dict[str, str]:
     """The tokens the members that gave a verdict used, added up, under the keys a judge's
     feedback keeps its usage in (:mod:`martian.evals.limits`), so a run's judge token limit counts
     every member a panel asked; as text, like the rest of a panel's metadata. None when no member
     gave a verdict, or when one that did reported no usage: the panel's usage is then unknown, as
     a single judge's is when it reports none."""
-    counted = [usage for vote, _, usage in voted if vote.passed is not None]
+    counted = [usage for vote, _, usage, _ in voted if vote.passed is not None]
     if not counted or any(usage is None for usage in counted):
         return {}
     return {
@@ -316,12 +327,15 @@ def judge_panel(
         with ThreadPoolExecutor(max_workers=len(members), thread_name_prefix=f"panel-{label}") as pool:
             futures = [pool.submit(copy_context().run, _member_vote, model, member, call) for model, member in members]
             voted = [future.result() for future in futures]
-        decision = decide([vote for vote, _, _ in voted])
+        decision = decide([vote for vote, _, _, _ in voted])
         metadata: dict[str, Any] = decision.metadata()
-        versions = {version for _, version, _ in voted if version}
+        versions = {version for _, version, _, _ in voted if version}
         if len(versions) == 1:
             metadata[JUDGE_VERSION_KEY] = versions.pop()
         metadata |= _usage(voted)
+        # As a judge that reviews its draft is, a panel is replayed only when every member was.
+        if all(replayed for _, _, _, replayed in voted):
+            metadata[HIT_KEY] = "hit"
         if decision.passed is None:
             return Feedback(
                 name=label,

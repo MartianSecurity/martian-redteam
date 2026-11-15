@@ -425,6 +425,9 @@ routes, and the local edition's [launch and run again](#local-runs)), the proven
 | `simulator` | The model that played the simulated users: `model`, `parameters`, `version` |
 | `limits` | `max_seconds`, `max_judge_tokens` ([limits](#limits-stopping-and-resuming)) |
 | `stopped` | `limit`, `value`, `used`, `message` |
+| `matrix` | A suite-file run's combination of its [matrix](evals.md#a-matrix-of-prompts-and-models): `id`, `values`, `axes`, `invocation` |
+| `prompts` | A list, one object per axis whose value is a registered [prompt version](#prompt-versions)'s text: `axis`, `value`, `name`, `version`, `digest` |
+| `cache` | A suite-file run's use of the [cache of model calls](evals.md#a-cache-of-model-calls): `folder`, `ttl_seconds`, `functions`, `target`, `judge` |
 | `model` | The model the run's target reported ([the model a target reports](#the-model-a-target-reports)): `name`, `cases` |
 | `schedule` | The [schedule](#schedules) that admitted the run: `id`, `name`, `slot`; `model_change` (`from`, `to`) when the run was for a change of the model, and `trigger` (`model_change`) when that change had a slot of its own |
 | `inspect` | What an [imported Inspect log](#imported-inspect-logs) records: `log`, `log_sha256`, `format`, `log_version`, `status`, `eval_id`, `run_id`, `eval_set_id`, `task`, `task_id`, `task_version`, `task_file`, `model`, `created`, `epochs`, `dataset`, `tags`, `packages`, `results`, `model_usage` |
@@ -432,7 +435,7 @@ routes, and the local edition's [launch and run again](#local-runs)), the proven
 | `mlflow` | What a [copied MLflow run](#copied-mlflow-stores) records: `source` (the store, a URL without its password), `schema_revision`, `experiment_id`, `experiment`, `run_id`, `run_name`, `status`, `user`, `run_type`, `metrics`, `params`, `tags`, `datasets` |
 
 A key or a sub-key the run does not have is left out, and a value of another form than the table
-gives is not shown. Nothing else a run's provenance holds is in any response:
+gives is not shown; of a list, each object shows the keys the table gives. Nothing else a run's provenance holds is in any response:
 
 - **A CI run's `provenance.ci`.** The server's CI gate records there the run's attribution with
   the CI token that uploaded it (`token_id`, `token_name`) and the digests of the upload request
@@ -1332,7 +1335,8 @@ built-in judge on the default, keeps a job's model when the default changes, ref
 endpoint, and keeps the local edition's default in its data folder.
 `tests/evals/test_judge_panel.py` covers the panel's rule, a panel in Python and in a suite file
 against a loopback endpoint, and a registered panel the worker grades with a fake judge: one
-member's error still decides, no majority is an error, every vote is on the score, and a panel is
+member's error still decides, no majority is an error, every vote is on the score, every
+combination of a suite's matrix is graded by the panel on its own replies, and a panel is
 reported and calibrated as one judge.
 
 ## Prompt versions
@@ -3196,7 +3200,8 @@ through the same routes, validated against the contract.
 `tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
 conversation verdicts, the turns route, each turn's trace and the session its turns share.
 `tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
-the simulator model, and for personas built from transcripts and from the data folder's sessions;
+the simulator model, in each combination of a matrix under its own token limit, and for personas
+built from transcripts and from the data folder's sessions;
 `tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
 [fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
 

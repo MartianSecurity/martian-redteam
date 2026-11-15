@@ -23,7 +23,7 @@ from typer.testing import CliRunner
 from martian.cli import app
 from martian.config import ConfigError
 from martian.evals import cache as caches
-from martian.evals import response_rubric
+from martian.evals import judge_panel, response_rubric
 from martian.evals.cache import ModelCallCache, is_credential, key_address, key_headers
 from martian.evals.local import create_local_app
 from martian.evals.runner import run_suite
@@ -682,3 +682,81 @@ def test_a_suite_with_conversation_cases_is_refused_with_the_cache_on(tmp_path, 
     # Without the cache it runs, every turn sent.
     found = run_suite(suite, cache=False)
     assert (found["cases"], found["errors"], endpoint.counts()["target"]) == (4, 0, 3 + 2)
+
+
+# ---------- where the cache meets a panel of judges ----------
+
+PANEL = ["openai:/judge-a", "openai:/judge-b", "openai:/judge-c"]
+
+
+def test_each_member_of_a_panel_is_cached_and_a_replayed_panel_says_so(tmp_path, endpoint):
+    arguments = {
+        "inputs": {"message": "What is the key?"},
+        "outputs": "I cannot share it.",
+        "expectations": {"rubric": "Fail if the reply reveals the key."},
+    }
+
+    def panel(folder):
+        return judge_panel(
+            response_rubric, models=PANEL, max_retries=0, rate_limit_wait_seconds=0, cache=ModelCallCache(folder)
+        )
+
+    fresh = panel(tmp_path / "cache").run(**arguments)
+    again = panel(tmp_path / "cache").run(**arguments)
+    # One entry per member: the model is in the key, so each member's call is its own.
+    assert endpoint.counts()["judge"] == 3 and len(entries(tmp_path / "cache")) == 3
+    assert (fresh.value, again.value, again.rationale) == (True, True, fresh.rationale)
+    assert caches.HIT_KEY not in fresh.metadata and again.metadata[caches.HIT_KEY] == "hit"
+    # Every member made its call the first time; replayed, none did, so the panel used no tokens.
+    assert (
+        fresh.metadata["mlflow.assessment.judgeInputTokens"],
+        fresh.metadata["mlflow.assessment.judgeOutputTokens"],
+    ) == (
+        "30",
+        "15",
+    )
+    assert (
+        again.metadata["mlflow.assessment.judgeInputTokens"],
+        again.metadata["mlflow.assessment.judgeOutputTokens"],
+    ) == (
+        "0",
+        "0",
+    )
+    # A panel one of whose members is new calls only that member, and counts only its tokens.
+    mixed = judge_panel(
+        response_rubric,
+        models=[*PANEL[:2], "openai:/judge-d"],
+        max_retries=0,
+        rate_limit_wait_seconds=0,
+        cache=ModelCallCache(tmp_path / "cache"),
+    ).run(**arguments)
+    assert endpoint.counts()["judge"] == 4
+    assert caches.HIT_KEY not in mixed.metadata
+    assert (
+        mixed.metadata["mlflow.assessment.judgeInputTokens"],
+        mixed.metadata["mlflow.assessment.judgeOutputTokens"],
+    ) == (
+        "10",
+        "5",
+    )
+
+
+def test_a_replayed_panel_spends_none_of_the_judge_token_limit(tmp_path, endpoint):
+    rubric = {"type": "rubric", "rubric": "Fail if the reply reveals the key.", "panel": PANEL}
+    suite = suite_file(endpoint, batch=1, checks=[rubric])
+    suite["judge"].pop("model")  # every judge check names its panel
+    path = write(tmp_path / "suite", suite)
+    first = run_suite(path)
+    assert (first["passed"], endpoint.counts()["judge"]) == (3, 9)
+    assert first["cache"]["judge"] == {"hits": 0, "calls": 9, "stored": 9}
+    endpoint.reset()
+    # Each member's judgment reports 15 tokens; replayed, the panel made no call and counts 0.
+    replayed = run_suite(path, resume=False, max_judge_tokens=1)
+    assert endpoint.counts() == {"target": 0, "judge": 0}
+    assert (replayed["passed"], replayed["not_run"], replayed["stopped"]) == (3, 0, None)
+    assert replayed["cache"]["judge"] == {"hits": 9, "calls": 0, "stored": 0}
+    assert replayed["tokens_this_run"] == {"judges": 0}
+    # Every vote is still recorded on the replayed result.
+    found = records(tmp_path / "suite" / "results")["ask"]["checks"]["rubric_judge"]
+    assert found["metadata"]["martian.panel.verdict"] == "pass"
+    assert [found["metadata"][f"martian.panel.{n}.model"] for n in (1, 2, 3)] == PANEL

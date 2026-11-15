@@ -317,6 +317,49 @@ def test_a_conversation_case_is_paired_by_its_turns_and_a_check_s_default_scope_
     suite = Suite(data="cases.jsonl", checks=[CheckSpec(type="length", name="short", max_length=10)])
     first, second = _verdicts(suite, [record], [talk], None), _verdicts(suite, [record], [changed], None)
     assert first["cases"][0]["digest"] != second["cases"][0]["digest"]
-    # The default scope is left out of a check's digest, so a baseline from before scopes pairs.
-    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope"})
+    # The default scope is left out of a check's digest, and so is the panel of a check without
+    # one, so a baseline from before scopes and panels pairs.
+    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope", "panel"})
     assert first["checks"]["short"] == baseline.digest({"check": check, "judge": None, "combine": None})
+
+
+def test_a_panel_check_s_digest_counts_its_members_and_not_the_judge_model_and_keeps_no_votes():
+    from martian.evals.runner import CheckSpec, JudgeConfig, Suite, _verdicts
+
+    case = {"id": "a", "inputs": {"message": "Hi"}, "expectations": {}}
+    votes = {"martian.panel.verdict": "fail", "martian.panel.1.reason": "The reply says: the key is piano."}
+    record = {
+        "id": "a",
+        "passed": False,
+        "error": None,
+        "checks": {
+            "tone": {"passed": True, "rationale": "Polite."},
+            "brief": {"passed": False, "rationale": "The reply says: the key is piano.", "metadata": votes},
+        },
+    }
+
+    def written(model="openai:/a", panel=("openai:/b", "openai:/c"), params=None):
+        suite = Suite(
+            data="cases.jsonl",
+            judge=JudgeConfig(model=model, inference_params=params or {}),
+            checks=[
+                CheckSpec(type="rubric", name="tone", rubric="Pass if polite."),
+                CheckSpec(type="guidelines", name="brief", guidelines=["Be brief."], panel=list(panel)),
+            ],
+        )
+        return _verdicts(suite, [record], [case], None)
+
+    first = written()
+    # A panel's members grade it, so judge.model, which only the single judge uses, is not in its digest.
+    other_model = written(model="openai:/z")
+    assert other_model["checks"]["tone"] != first["checks"]["tone"]
+    assert other_model["checks"]["brief"] == first["checks"]["brief"]
+    other_members = written(panel=("openai:/b", "openai:/d"))
+    assert other_members["checks"]["brief"] != first["checks"]["brief"]
+    assert other_members["checks"]["tone"] == first["checks"]["tone"]
+    # The judge's settings apply to every member, so they count for the panel too.
+    warmer = written(params={"temperature": 0.5})
+    assert warmer["checks"]["brief"] != first["checks"]["brief"] and warmer["checks"]["tone"] != first["checks"]["tone"]
+    # The votes and their reasons quote the reply: the verdicts file keeps neither, as for one judge.
+    assert first["cases"][0]["checks"]["brief"] == {"passed": False, "reason": None}
+    assert "martian.panel" not in json.dumps(first) and "piano" not in json.dumps(first)
