@@ -1901,7 +1901,9 @@ a queue is blind from the start and stays so. Every queue the routes answer with
 - **What it does not hide.** A queue's progress (how many items have answers) and the agreement
   reports, which give counts over items rather than an item's answers. The record store keeps the
   queue's blind mode (`BlindQueue`, migration `0014`), not the queue's store, so every store
-  binding keeps it, and a [data export](data-export.md) carries it.
+  binding keeps it, and deleting its run deletes it. A [data export](data-export.md) carries the
+  mode and every answer, as the organisation's own copy of its data: it is a command and a function
+  of the operator's, not a route a reviewer reads.
 
 ### Calibration
 

@@ -392,6 +392,7 @@ class SqlRecordStore:
                 (score_rows, score_rows.c.run_id),
                 (scoring_jobs, scoring_jobs.c.run_id),
                 (reviews, reviews.c.run_id),
+                (blind_queues, blind_queues.c.run_id),
                 (schedule_runs, schedule_runs.c.run_id),
             ):
                 removed[table.name] = connection.execute(
