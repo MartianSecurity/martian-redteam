@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
-from martian.evals import _numeric, _policy
+from martian.evals import _numeric, _policy, _tool_calls
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 
@@ -70,6 +70,10 @@ CHECKS = (
     "no_secrets",
     "resists_injection",
     "no_refusal",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
+    "step_count",
 )
 # Checks that look for given text, from `values` or from each case's `expectation` key.
 TEXT_CHECKS = (
@@ -90,6 +94,8 @@ NUMERIC_CHECKS = ("number_equals", "sums_to", "reconciles", "table_equals")
 # with a no_refusal check, reports how many of its benign cases were refused (false_refusals).
 REFUSAL_PASSING = ("no_prohibited_phrases", "no_personal_data", "no_secrets", "resists_injection")
 POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
+# Checks of the agent's tool calls, read from the trace of the target's call or from its reply.
+TOOL_CHECKS = _tool_calls.TOOL_CHECKS
 
 
 class _Model(BaseModel):
@@ -211,6 +217,10 @@ class CheckSpec(_Model):
         "no_secrets",
         "resists_injection",
         "no_refusal",
+        "tool_called",
+        "tool_not_called",
+        "tool_trajectory",
+        "step_count",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
@@ -249,6 +259,17 @@ class CheckSpec(_Model):
     # and values that may appear.
     kinds: list[str] | None = None
     allow: list[str] = Field(default_factory=list)
+    # Tool-call checks: the calls (a tool's name, or {name, arguments}) or, for tool_trajectory,
+    # the steps (a call, or a list of the calls one model turn makes), how arguments match, the
+    # order, the bounds, and where the calls are read (the trace, or the reply).
+    calls: list[Any] | None = None
+    arguments_match: str | None = None
+    order: str | None = None
+    source: str | None = None
+    min_calls: int | None = None
+    max_calls: int | None = None
+    min_turns: int | None = None
+    max_turns: int | None = None
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
@@ -280,7 +301,24 @@ class CheckSpec(_Model):
             _policy.check_values(self.type, self.values)
         if self.type in ("no_personal_data", "no_secrets"):
             _policy.data_options(check=self.type, kinds=self.kinds, allow=self.allow)
+        if self.type in TOOL_CHECKS:
+            self.tool_options()
         return self
+
+    def tool_options(self) -> _tool_calls.ToolOptions:
+        """The options of a tool-call check, read as the check reads them, so a bad one is
+        refused when the suite loads."""
+        given: dict[str, Any] = {"source": self.source, "max_calls": self.max_calls}
+        if self.min_calls is not None:
+            given["min_calls"] = self.min_calls
+        if self.type == "step_count":
+            return _tool_calls.tool_options(self.type, min_turns=self.min_turns, max_turns=self.max_turns, **given)
+        given.update(
+            calls=self.calls or (), expectation=self.expectation, arguments_match=self.arguments_match or "subset"
+        )
+        if self.type == "tool_trajectory":
+            given["order"] = self.order or "exact"
+        return _tool_calls.tool_options(self.type, **given)
 
     def _numeric_options(self) -> Any:
         """The options of a numeric or table check, read as the check reads them, so a bad one
@@ -348,6 +386,19 @@ class Suite(_Model):
             raise ValueError(
                 f"{', '.join(calls)} measures the target's call, and a suite without a target grades stored "
                 "outputs, which no call produced; name a target or remove the check"
+            )
+        tools = [check for check in self.checks if check.type in TOOL_CHECKS]
+        traced = [check.label for check in tools if check.source == "trace"]
+        if traced and self.target is None:
+            raise ValueError(
+                f"{', '.join(traced)} reads the trace of the target's call, and a suite without a target grades "
+                "stored outputs, which no call produced; read the tool calls in the stored reply (source: reply)"
+            )
+        untraced = [check.label for check in tools if check.source != "reply"]
+        if untraced and self.target is not None and self.target.url is not None:
+            raise ValueError(
+                f"{', '.join(untraced)} reads the tool calls in the trace of the target's call, and a URL target's "
+                "call records none; set source: reply to read them in its response"
             )
         costs = [check.label for check in self.checks if check.type == "cost"]
         if costs and self.target is not None and self.target.url is not None:
@@ -719,6 +770,24 @@ def _build_check(check: CheckSpec) -> Any:
             return deterministic.resists_injection(*check.values, expectation=check.expectation, name=name)
         case "no_refusal":
             return deterministic.no_refusal(expectation=check.expectation, name=name)
+    tools: dict[str, Any] = {"source": check.source, "name": name}
+    calls = {"expectation": check.expectation, "arguments_match": check.arguments_match or "subset", **tools}
+    match check.type:
+        case "tool_called":
+            least = 1 if check.min_calls is None else check.min_calls
+            return deterministic.tool_called(*(check.calls or ()), min_calls=least, max_calls=check.max_calls, **calls)
+        case "tool_not_called":
+            return deterministic.tool_not_called(*(check.calls or ()), **calls)
+        case "tool_trajectory":
+            return deterministic.tool_trajectory(*(check.calls or ()), order=check.order or "exact", **calls)
+        case "step_count":
+            return deterministic.step_count(
+                min_turns=check.min_turns,
+                max_turns=check.max_turns,
+                min_calls=check.min_calls,
+                max_calls=check.max_calls,
+                **tools,
+            )
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 

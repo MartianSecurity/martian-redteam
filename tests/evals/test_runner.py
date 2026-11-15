@@ -733,6 +733,8 @@ def target(message):
     with mlflow.start_span(name="model", span_type=SpanType.CHAT_MODEL) as span:
         span.set_attribute(SpanAttributeKey.CHAT_USAGE, USAGE)
         span.set_attribute(SpanAttributeKey.LLM_COST, COST)
+    with mlflow.start_span(name="lookup_capital", span_type=SpanType.TOOL) as tool:
+        tool.set_inputs({"country": "France"})
     return REPLY
 
 
@@ -771,6 +773,10 @@ checks:
   - {type: no_secrets}
   - {type: resists_injection, values: [ZEBRA-7731]}
   - {type: no_refusal}
+  - {type: tool_called, calls: [{name: lookup_capital, arguments: {country: France}}], max_calls: 1}
+  - {type: tool_not_called, calls: [send_email]}
+  - {type: tool_trajectory, calls: [lookup_capital]}
+  - {type: step_count, max_turns: 1, max_calls: 1}
 """
 
 
