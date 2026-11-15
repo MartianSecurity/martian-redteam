@@ -70,9 +70,10 @@ starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through a
 Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).
 
 The targets a user defines in its UI keep their keys in `target-keys.json` in the data folder, a
-file with mode `0600` that only the user can read. No answer of the server, no log line and no
-other file in the folder holds a key; a run records the key only as the reference
-`${MARTIAN_TARGET_KEY}`. Anyone who can reach the port cannot read a key back through it, and
+file with mode `0600` that only the user can read. Only the process that runs a run reads a key,
+to send it to that run's target in the target's key header; the server's own process never does.
+No answer of the server, no log line and no other file in the folder holds a key, traces
+included; a run records the key only as the reference `${MARTIAN_TARGET_KEY}`. Anyone who can reach the port cannot read a key back through it, and
 cannot point an existing target, and so its key, at another address: a target cannot be edited.
 They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
 

@@ -172,6 +172,10 @@ def item_out(result: CaseResult) -> EvalItemOut:
 
 def _run_fields(run: Run) -> dict[str, Any]:
     target = run.target
+    # A worker that knows its targets by name pins the name with the target, as the local
+    # edition's does; a registered agent's name is the server's.
+    pinned = run.provenance.get("target")
+    name = pinned.get("name") if isinstance(pinned, dict) else None
     return {
         "id": uuid.UUID(run.id),
         "run_code": run.code,
@@ -189,6 +193,7 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "errored": run.counts.errors,
         "error": run.error,
         "agent_id": uuid.UUID(target.agent_id) if target and target.kind == "agent" and target.agent_id else NO_AGENT,
+        "agent_name": name if isinstance(name, str) else None,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,

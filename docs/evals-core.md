@@ -13,7 +13,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the agents it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: each run in a process of its own, against the user's [local targets](#local-runs) | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -355,13 +355,14 @@ to a `JudgeResult` (the model and a verdict per scorer). There are two workers:
 - `InProcessWorker(store, records, organisation_id=None, targets={agent_id: call}, judge=None,
   target_timeout_seconds=120)` runs each piece of work as a task of the calling process's event
   loop. It runs one organisation's work, `organisation_id` (`None` is the single local user), and
-  raises `ValueError` from `check_target` and `submit` for any other's. It serves the local
-  edition and tests, and runs the work inside each of `ProcessWorker`'s processes. `drain()` waits
+  raises `ValueError` from `check_target` and `submit` for any other's. It serves tests and runs
+  the work inside each of `ProcessWorker`'s processes. `drain()` waits
   for the work submitted so far. Work is lost with the process: a run interrupted by a restart
   stays `running` until the durable queue.
 - `ProcessWorker(setup, records, agents=[agent_id], judges=False, options={...})` runs each piece
   of work in a new process of its own, which exits when the work is done. An installation that
-  serves organisations uses it.
+  serves organisations uses it, and so does the local edition's `LocalWorker`
+  ([local runs](#local-runs)), because a run's MLflow state would otherwise be the server's.
 
 ### One process per run
 
@@ -419,7 +420,6 @@ What builds on it:
 | MorningHQ/martian-notes#139 | A durable job queue: `submit` enqueues, and each `Work` taken from the queue gets a process of its own |
 | MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
 | MorningHQ/martian-notes#133 | The SDK judge as the worker's judge, built by the setup in each run's process |
-| MorningHQ/martian-notes#116 | Run and run again from the local UI, with the [local targets](#local-targets) |
 
 ## What exists
 
@@ -428,9 +428,11 @@ What builds on it:
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
-- `martian ui`, the local edition: the core and the Evals UI from one process, with no login, and
-  the targets its user defines in place of an Agents registry. See
-  [the local edition](#the-local-edition-martian-ui) and [local targets](#local-targets).
+- `martian ui`, the local edition: the core and the Evals UI from one process, with no login, the
+  targets its user defines in place of an Agents registry, and runs started in the UI, each in a
+  process of its own, which run again with their saved settings. See
+  [the local edition](#the-local-edition-martian-ui), [local targets](#local-targets) and
+  [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
@@ -639,6 +641,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). The targets the user defines are in
   `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)).
+- The worker is `LocalWorker` (`martian.evals.local_runs`): each run started in the UI runs in a
+  process of its own against a local target, and a finished one runs again with the same settings
+  ([local runs](#local-runs)).
   `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
   and an application can record its traces there with MLflow tracing
   ([below](#traces-from-an-application)). What another process writes while the UI is open shows
@@ -779,20 +784,85 @@ Where the keys are and are not:
   Nothing logs a key, and `martian.db` and `mlflow.db` never hold one.
 - In the shared model a local target is an `http` `Target` whose key header names
   `${MARTIAN_TARGET_KEY}` (`LocalTargets.model_target`), so a run that records it keeps the
-  reference, never the key. `LocalTargets.key(id)` is the one way to read a key, for the worker that
-  calls the target.
+  reference, never the key. `LocalTargets.key(id)` is the one way to read a key, and only each
+  run's process reads it, through `LocalTargets.credential(principal, target_id, name)`, which
+  answers `${MARTIAN_TARGET_KEY}` with the key and any other name with nothing
+  ([local runs](#local-runs)).
 
 A launch from the local UI names the chosen target by its id in the launch request's `agent_id`,
-the frozen contract's one target field. Running it is MorningHQ/martian-notes#116: until then the
-local edition has no worker, so a launch is answered `503`. That issue's worker resolves the id
-with `LocalTargets.get` in `Worker.check_target`, records `LocalTargets.model_target` as the run's
-target and fills in the key from `LocalTargets.key` when it calls it. Editing a target is not
-built; remove it and define it again.
+the frozen contract's one target field. Editing a target is not built; remove it and define it
+again. A run already recorded keeps its results and its pin of the target.
 
 `tests/evals/test_local_targets.py` defines, lists and removes targets of both kinds, refuses
 targets that would not work, maps each kind onto the shared model, checks the key file's mode, and
-runs every target route on the server `martian ui` runs to check that the key is in no answer, no
-log record at any level, nothing printed and no file in the data folder but the key file.
+runs every target route on the server `martian ui` runs, then a full run of a target that takes a
+key, scored with a suite, and a run again, to check that the key reaches the target and is in no
+request but the one that defined it, no answer, no log record at any level, nothing the server or
+a run's process printed and no file in the data folder but the key file, traces included. The
+server's own process is made to fail if it ever reads a key.
+
+### Local runs
+
+A run started in the local UI runs on this machine, in a process of its own, against a local
+target (`martian.evals.local_runs`). The **Run eval** dialog names a target, a published dataset,
+a record budget and, optionally, a saved suite version; a finished run's **Run again** repeats it.
+
+The routes are the local edition's, outside the frozen `/v1/evals` contract. The UI uses them in
+place of `POST /v1/evals`, which the local edition also serves, for runs without a suite:
+
+| Route | What it does |
+| --- | --- |
+| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, and an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`). `202` with the queued run, as the launch |
+| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
+
+```json
+{"request_id": "…", "agent_id": "<target id>", "dataset_name": "support-faq", "max_items": 100,
+ "suite_version_id": "<suite version id>"}
+```
+
+- **Admission** is the launch's (`admit_run` in `martian.evals.server.launch`): one run at a time
+  (`409`), run codes from `EV-1001`, idempotent by `request_id` (the same `request_id` with other
+  settings is `409`). A target that is not defined is `404` ("Target not found"), a dataset not
+  published `422`, a suite version not saved `404`. A suite with a model judge is `422`: the local
+  edition's worker has no judge.
+- **What a run keeps.** The run names the target by id (`Run.target`, kind `agent`) and pins it in
+  `provenance.target`: its id, its name and its definition as the shared model's target, with the
+  key as `${MARTIAN_TARGET_KEY}`. The run's `agent_name` is the target's name. It keeps the
+  published dataset version it reads (`store.dataset_id`, `dataset_digest`) and the suite version
+  (`suite_id`, `suite_version`, `suite_digest`, and `provenance.suite` with its API id and name).
+- **The run.** `LocalWorker` hands each piece of work to a `ProcessWorker`, whose setup,
+  `worker_services(home)`, opens the data folder's stores in the new process and builds a call for
+  each local target there (`LocalTargets.call`): one JSON `POST` per case with no retry, no
+  redirect and no proxy from the environment, `{{input}}` filled with the case's prompt and
+  `${MARTIAN_TARGET_KEY}` with the key, read through `LocalTargets.credential` each time the
+  target is called. The work is the core's (`execute_run`): each output graded by exact match, a
+  trace per called case. A call that fails is the case's error, in words that never hold the
+  address, a header, the key or the response.
+- **The suite.** With a suite, the worker records a queued scoring job of that suite version when
+  it starts the run, so the UI shows it from the start. Once the run's process ends, the job runs
+  in a process of its own if the run completed (`execute_scoring`: the suite's scorers and
+  policies over the saved outputs; a skipped case has no output, so its scores are errors and the
+  job ends `partial`), and is `cancelled` otherwise ("The run did not complete, so its suite did
+  not score it").
+- **Run again** repeats a run that has finished (`completed`, `partial`, `failed` or `cancelled`;
+  a queued or running one is `409`) with what it kept: the same target, the same dataset version,
+  even when a newer one is published, the same suite version, even when the suite has a newer one,
+  and the same record budget. The new run names the one it repeats in `provenance.repeat_of`. A
+  run with no saved settings, such as a suite-file run from `martian evals run` or a CI run, is
+  `422`; a run whose target was removed is `404` ("Target not found").
+- **The key.** The server's own process never reads a key: only each run's process does, and no
+  request but the one that defines a target, no answer, log line, trace or record holds one.
+
+Work runs while `martian ui` does. A run whose process had not finished when the server stopped
+stays `running`, as with every worker until the durable queue (MorningHQ/martian-notes#139), and
+then blocks the next launch with `409`.
+
+`tests/evals/test_local_runs.py` starts runs through these routes on `martian ui`'s application,
+with a loopback HTTP target that wants the key, and checks that the run completes in its own
+process with its results, traces and the suite's scores, that the server's process never reads
+the key, that run again keeps the target, dataset version, suite version and budget when newer
+versions exist, the refusals above, the suite job of a run that does not complete, and that the
+frozen launch runs too.
 
 ### The local edition in a container
 

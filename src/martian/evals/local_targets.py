@@ -34,7 +34,8 @@ never with the values sent: FastAPI's own answer repeats them, and a target's va
 
 A launch from the local UI names a local target by its id in the launch request's ``agent_id``,
 the frozen contract's one target field, which a target's id fits. The local edition's worker
-resolves it with :meth:`LocalTargets.get`: MorningHQ/martian-notes#116.
+(:class:`martian.evals.local_runs.LocalWorker`) resolves it with :meth:`LocalTargets.get`, and
+each run's process calls it through :meth:`LocalTargets.call`, which reads the key there.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
@@ -49,9 +50,10 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
@@ -67,7 +69,12 @@ from pydantic import (
 )
 
 from martian.evals import runner
-from martian.evals.model import Target
+from martian.evals.model import Case, Target
+from martian.evals.server.principal import SINGLE_USER, Principal
+from martian.evals.server.projection import prompt_text
+
+if TYPE_CHECKING:
+    from martian.evals.worker import TargetCall
 
 DEFINITIONS_FILE = "targets.json"
 KEYS_FILE = "target-keys.json"
@@ -80,10 +87,14 @@ target always does. In ``Authorization`` the key goes as ``Bearer <key>``; in an
 
 MODEL_RESPONSE_PATH = "choices.0.message.content"
 
+_PROMPT = "\x00prompt"
+"""Where a call keeps the case's prompt for ``{{input}}``: a name no ``{{inputs.NAME}}`` can give."""
+
 TargetKind = Literal["http", "model"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}")
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FIELDS: dict[str, frozenset[str]] = {
     "http": frozenset({"url", "body", "response_path", "key_header"}),
@@ -314,6 +325,73 @@ class LocalTargets:
             reference = f"${{{KEY_REFERENCE}}}"
             headers[header] = f"Bearer {reference}" if header.lower() == "authorization" else reference
         return Target(kind="http", url=url, body=body, response_path=response_path, headers=headers)
+
+    def credential(self, principal: Principal, target_id: str, name: str, /) -> str | None:
+        """The value of ``${name}`` in the target ``target_id``'s header: its key when ``name`` is
+        ``MARTIAN_TARGET_KEY``, read with :meth:`key`; ``None`` otherwise. It has the signature of
+        the worker's ``Credentials`` (MorningHQ/martian-notes#137), and the single local user is
+        the only principal."""
+        return self.key(target_id) if name == KEY_REFERENCE else None
+
+    def call(self, target: LocalTarget, *, timeout_seconds: float) -> TargetCall:
+        """The worker's call of ``target`` (:meth:`model_target`): one JSON ``POST`` per case, with
+        no retry, no redirect and no proxy from the environment. ``body`` is filled in as a suite
+        file's URL target's, except that ``{{input}}`` is the case's prompt, the text a registered
+        agent is sent. Each ``${NAME}`` in a header is filled in from :meth:`credential` each time
+        the target is called, in the process that calls it, so the key is read only there. A
+        failed call raises :class:`~martian.evals.runner.TargetCallError` in the SDK's own words,
+        which never hold the address, a header, the key or anything the target sent back."""
+        endpoint = self.model_target(target)
+        url, template = str(endpoint.url), endpoint.body
+        steps = [part for part in (endpoint.response_path or "").split(".") if part]
+
+        def filled(header: str, value: str) -> str:
+            def credential(match: re.Match[str]) -> str:
+                found = self.credential(SINGLE_USER, target.id, match[1])
+                if not found:
+                    raise runner.TargetCallError(f"the target's {header} header needs its key; define the target again")
+                return found
+
+            return _REFERENCE.sub(credential, value)
+
+        async def send(case: Case) -> Any:
+            headers = {name: filled(name, value) for name, value in endpoint.headers.items()}
+            body = runner._fill(template, {**case.inputs, _PROMPT: prompt_text(case.inputs)}, _PROMPT)
+            try:
+                async with httpx.AsyncClient(
+                    timeout=timeout_seconds, follow_redirects=False, trust_env=False
+                ) as client:
+                    response = await client.post(url, headers=headers, json=body)
+            except Exception as error:  # noqa: BLE001 - its text could hold the address or the key
+                raise runner.TargetCallError(f"the target could not be reached: {type(error).__name__}") from None
+            if not response.is_success:
+                raise runner.TargetCallError(f"the target returned HTTP {response.status_code}")
+            if not steps:
+                return response.text
+            try:
+                reply = response.json()
+            except ValueError:
+                raise runner.TargetCallError(
+                    "the target's response is not JSON, so response_path cannot be read"
+                ) from None
+            return _reply_at(reply, steps)
+
+        return send
+
+
+def _reply_at(reply: Any, steps: list[str]) -> Any:
+    """The value at ``response_path`` in a target's JSON response, as a suite file's URL target
+    reads it."""
+    for step in steps:
+        if isinstance(reply, dict) and step in reply:
+            reply = reply[step]
+        elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
+            reply = reply[int(step)]
+        else:
+            raise runner.TargetCallError("the target's response has no value at response_path")
+    if reply is None:
+        raise runner.TargetCallError("the target's response has no value at response_path")
+    return reply
 
 
 class _WithoutValues(APIRoute):

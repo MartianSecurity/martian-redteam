@@ -10,6 +10,9 @@ read, and submits it to the worker. The worker calls the target later; the reque
 - One run at a time per organisation: another queued or running run is ``409``.
 - Run codes count up from ``EV-1001``, as on the server.
 
+:func:`admit_run` is the admission itself, which the local edition's launch and run again share
+(:mod:`martian.evals.local_runs`).
+
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
 """
@@ -18,11 +21,13 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from martian.evals.model import Run, RunState, StoreRef, Target
+from martian.evals.model import DatasetVersion, Run, RunState, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
     PrincipalDep,
@@ -32,12 +37,12 @@ from martian.evals.server.dependencies import (
     require_capability,
 )
 from martian.evals.server.principal import Principal
-from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
+from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out, suite_version_id
 from martian.evals.server.runs import find_run, lookup_run, project_keys, project_runs, writable_project
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
-from martian.evals.worker import Work
+from martian.evals.worker import Work, Worker
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -82,6 +87,69 @@ def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
     )
 
 
+async def admit_run(
+    store: EvalStore,
+    records: RecordStore,
+    worker: Worker,
+    principal: Principal,
+    *,
+    run_id: str,
+    project: str,
+    target: Target,
+    pin: dict[str, Any],
+    dataset: DatasetVersion,
+    max_cases: int,
+    suite: Suite | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> Run:
+    """Record a queued run of ``target`` over the published ``dataset`` version and submit it to
+    the worker, once the request is checked and the worker has pinned the target (``pin``). One
+    run at a time per organisation: another queued or running run is ``409``.
+
+    A launch admits every run this way. The local edition's launch also names a saved ``suite``
+    version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
+    ``provenance.suite``), and adds its own ``provenance``."""
+    if await _active(store, records, principal):
+        raise HTTPException(409, "An eval run is already in progress")
+    admitted: dict[str, Any] = {
+        "dataset": {"id": dataset.id, "digest": dataset.digest, "content_sha256": None},
+        "agent": {"id": target.agent_id, "artifact_revision": None, "revision_source": "unavailable"},
+        "model_version": None,
+        "prompt_version": None,
+        "target": pin,
+    }
+    if suite is not None:
+        admitted["suite"] = {
+            "id": suite.id,
+            "version": suite.version,
+            "version_id": str(suite_version_id(suite.id, suite.version)),
+            "name": suite.name,
+            "digest": suite.digest,
+        }
+    run = Run(
+        id=run_id,
+        project_id=project,
+        code=await _next_code(store, records, principal),
+        source="console",
+        state="queued",
+        suite_id=suite.id if suite else None,
+        suite_version=suite.version if suite else None,
+        suite_digest=suite.digest if suite else None,
+        dataset_name=dataset.name,
+        dataset_digest=dataset.digest,
+        target=target,
+        scorers=[builtin_scorer("exact_match")],
+        max_cases=max_cases,
+        provenance={**admitted, **(provenance or {})},
+        requested_by=principal.user_id,
+        created_at=_now(),
+        store=StoreRef(dataset_id=dataset.id),
+    )
+    run = await records.create_run(principal, run)
+    await worker.submit(Work(kind="run", principal=principal, project_id=project, run_id=run.id))
+    return run
+
+
 @router.post("", response_model=EvalRunOut, status_code=202, dependencies=[Depends(require_capability("run"))])
 async def request_run(
     body: EvalRunRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: WorkerDep
@@ -97,32 +165,18 @@ async def request_run(
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
-    if await _active(store, records, principal):
-        raise HTTPException(409, "An eval run is already in progress")
-    run = Run(
-        id=run_id,
-        project_id=project,
-        code=await _next_code(store, records, principal),
-        source="console",
-        state="queued",
-        dataset_name=dataset.name,
-        dataset_digest=dataset.digest,
+    run = await admit_run(
+        store,
+        records,
+        worker,
+        principal,
+        run_id=run_id,
+        project=project,
         target=target,
-        scorers=[builtin_scorer("exact_match")],
+        pin=pin,
+        dataset=dataset,
         max_cases=body.max_items,
-        provenance={
-            "dataset": {"id": dataset.id, "digest": dataset.digest, "content_sha256": None},
-            "agent": {"id": str(body.agent_id), "artifact_revision": None, "revision_source": "unavailable"},
-            "model_version": None,
-            "prompt_version": None,
-            "target": pin,
-        },
-        requested_by=principal.user_id,
-        created_at=_now(),
-        store=StoreRef(dataset_id=dataset.id),
     )
-    run = await records.create_run(principal, run)
-    await worker.submit(Work(kind="run", principal=principal, project_id=project, run_id=run.id))
     return run_out(run)
 
 
@@ -155,4 +209,4 @@ async def cancel_eval(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDe
     raise HTTPException(409, "The run changed while stopping it; try again")
 
 
-__all__ = ["router", "run_id_for"]
+__all__ = ["ACTIVE", "admit_run", "router", "run_id_for"]
