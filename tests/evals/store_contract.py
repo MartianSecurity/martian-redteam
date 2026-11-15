@@ -35,6 +35,17 @@ ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
 T0 = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 
 
+def text_of_length(length: int, words: str, end: str) -> str:
+    """``words`` repeated to ``length`` characters, ending in ``end``, so that a copy shortened
+    anywhere is told apart from the whole."""
+    return (words * (length // len(words) + 1))[: length - len(end)] + end
+
+
+LONG_REQUEST = text_of_length(100_000, "Retrieved context for the question. ", "What is the refund window?")
+"""A prompt with retrieved context: 100,000 characters."""
+LONG_RESPONSE = text_of_length(100_000, "An answer quoting the policy at length. ", "Thirty days.")
+
+
 def cases(*texts: str) -> list[Case]:
     return [
         Case(id=f"c{i}", inputs={"message": text}, expectations={"secret": "piano"}) for i, text in enumerate(texts)
@@ -264,6 +275,101 @@ class StoreContract:
         await refused("not_found", store.link_traces(ORG_A, "p1", "r1", ["missing"]))
         await refused("not_found", store.link_traces(ORG_A, "p1", "missing", ["t1"]))
         await refused("not_found", store.set_trace_tag(ORG_A, "p1", "missing", "k", "v"))
+
+    async def test_a_span_with_no_start_time_leaves_its_trace_at_the_time_it_was_given(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        # As an imported Inspect sample that failed before the model answered: its messages have no times.
+        start = T0.timestamp() * 1000
+        spans = [
+            Span(id="sample", name="task", kind="AGENT", status="error", start_ms=start, end_ms=start + 2000),
+            Span(id="unanswered", parent_id="sample", name="messages", kind="UNKNOWN", status="error"),
+        ]
+        await store.record_trace(ORG_A, trace("t1", state="error", latency_ms=2000.0, spans=spans))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None
+        assert (read.request_time, read.latency_ms, read.spans) == (T0, 2000.0, spans)
+        page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", since=T0))
+        assert [t.id for t in page.items] == ["t1"]
+
+    async def test_a_long_request_and_response_are_kept_whole(self, store: EvalStore, project: Project) -> None:
+        """Read back, a trace has its request and its response whole. A search may return a
+        preview of either instead; the trace's metadata then says that preview was shortened."""
+        span = Span(id="s1", name="model call", kind="LLM", status="ok", inputs={"q": 1}, outputs="a")
+        await store.record_trace(ORG_A, trace("t1", request=LONG_REQUEST, response=LONG_RESPONSE, spans=[span]))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None
+        assert (read.request, read.response, read.spans) == (LONG_REQUEST, LONG_RESPONSE, [span])
+        (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
+        for field, whole in (("request", LONG_REQUEST), ("response", LONG_RESPONSE)):
+            key = f"martian.{field}_preview_truncated"
+            shown: str = getattr(found, field)
+            assert found.metadata.get(key) == read.metadata.get(key), key
+            if read.metadata.get(key) == "true":
+                assert len(shown) < len(whole) and shown.endswith("...") and whole.startswith(shown[:-3])
+            else:
+                assert key not in read.metadata and shown == whole
+
+    async def test_a_trace_keeps_the_state_it_was_recorded_with(self, store: EvalStore, project: Project) -> None:
+        span = Span(id="s1", name="model call", kind="LLM", status="ok")
+        states = ("ok", "error", "in_progress", "unknown")
+        for state in states:
+            await store.record_trace(ORG_A, trace(f"{state}-alone", state=state))
+            await store.record_trace(ORG_A, trace(f"{state}-with-spans", state=state, spans=[span]))
+        found = {t.id: t.state for t in (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items}
+        for state in states:
+            for trace_id in (f"{state}-alone", f"{state}-with-spans"):
+                read = await store.get_trace(ORG_A, "p1", trace_id)
+                assert read is not None and (read.state, found[trace_id]) == (state, state), trace_id
+
+    async def test_every_filter_pages_through_exactly_its_traces(self, store: EvalStore, project: Project) -> None:
+        # Seven traces a minute apart; t2, t5 and t6 are r1's, t1 and t4 errors, t3 and t6 hold "refund".
+        await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="local", state="running"))
+        for number in range(7):
+            await store.record_trace(
+                ORG_A,
+                trace(
+                    f"t{number}",
+                    minutes=number,
+                    state="error" if number in (1, 4) else "ok",
+                    run_id="r1" if number in (2, 5, 6) else None,
+                    session_id=f"s{number % 2}",
+                    user_id="alice" if number < 4 else "bob",
+                    tags={"route": f"r{number % 3}"},
+                    response="a refund" if number in (3, 6) else f"answer t{number}",
+                ),
+            )
+
+        async def paged(**query: object) -> list[str]:
+            """Every page of the query, two traces at a time: a page may hold fewer than its limit,
+            and only a missing next_cursor ends the search."""
+            ids: list[str] = []
+            cursor = None
+            for _ in range(20):
+                page = await store.search_traces(
+                    ORG_A,
+                    TraceQuery(project_id="p1", limit=2, cursor=cursor, **query),  # type: ignore[arg-type]
+                )
+                ids += [t.id for t in page.items]
+                if (cursor := page.next_cursor) is None:
+                    return ids
+            raise AssertionError("the search never ended")
+
+        assert await paged() == ["t6", "t5", "t4", "t3", "t2", "t1", "t0"]
+        assert await paged(oldest_first=True) == ["t0", "t1", "t2", "t3", "t4", "t5", "t6"]
+        assert await paged(run_id="r1") == ["t6", "t5", "t2"]
+        assert await paged(run_id="r1", oldest_first=True, states=["ok"]) == ["t2", "t5", "t6"]
+        assert await paged(session_id="s0") == ["t6", "t4", "t2", "t0"]
+        assert await paged(user_id="bob", tags={"route": "r1"}) == ["t4"]
+        assert await paged(states=["error"]) == ["t4", "t1"]
+        assert await paged(trace_ids=["t0", "t3", "t5", "missing"]) == ["t5", "t3", "t0"]
+        assert await paged(since=T0 + timedelta(minutes=2), until=T0 + timedelta(minutes=5)) == ["t4", "t3", "t2"]
+        assert await paged(text="REFUND") == ["t6", "t3"]
+        assert await paged(text="answer", run_id="r1") == ["t5", "t2"]
+        # A session search groups the same traces as the first page of the search.
+        refunds = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", text="refund"))
+        assert [(s.id, s.turns) for s in refunds.items] == [("s0", 1), ("s1", 1)]
+        assert (refunds.traces_examined, refunds.has_more) == (2, False)
 
     async def test_scores_are_kept_with_their_trace(self, store: EvalStore, project: Project) -> None:
         await store.record_trace(ORG_A, trace("t1"))

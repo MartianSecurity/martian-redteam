@@ -2,20 +2,23 @@
 MARTIAN_TEST_POSTGRES_URL names a database it may create schemas in."""
 
 import contextlib
+import json
 import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from martian.evals.model import Counts, Project, Run, Trace, TraceQuery
+from martian.evals.model import Counts, Project, Run, Span, Trace, TraceQuery
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
-from martian.evals.store import EvalStore
+from martian.evals.store import REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED, EvalStore, StoreError
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
-from tests.evals.store_contract import ORG_A, StoreContract
-from tests.evals.trace_samples import MODEL, QUESTION, sample_spans
+from tests.evals.store_contract import LONG_REQUEST, LONG_RESPONSE, ORG_A, T0, StoreContract, trace
+from tests.evals.trace_samples import ANSWER, MODEL, QUESTION, sample_spans
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
 LONGEST_ARTIFACT_ROOT = 157
@@ -164,6 +167,246 @@ class MlflowTracingContract:
         own = await store.get_trace(SINGLE_USER, "p1", recorded["in its own run"])
         assert own is not None and own.run_id is None
         assert (await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r2"))).items == []
+        # The run's pages merge its two searches, on the tag and on the MLflow run, in order.
+        by_one = TraceQuery(project_id="p1", run_id="r1", oldest_first=True, limit=1)
+        first = await store.search_traces(SINGLE_USER, by_one)
+        rest = await store.search_traces(SINGLE_USER, by_one.model_copy(update={"cursor": first.next_cursor}))
+        assert [t.id for t in first.items + rest.items] == [tagged.id, recorded["in the run"]]
+        assert rest.next_cursor is None
+        # A trace linked to another run is that run's alone, wherever MLflow tracing recorded it.
+        await store.start_run(SINGLE_USER, Run(id="r2", project_id="p1", source="local", state="running"))
+        await store.link_traces(SINGLE_USER, "p1", "r2", [recorded["in the run"]])
+        r1 = await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r1"))
+        r2 = await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r2"))
+        assert ([t.id for t in r1.items], [t.id for t in r2.items]) == ([tagged.id], [recorded["in the run"]])
+
+
+class MlflowPagingContract:
+    """How the binding reads traces: a page or a session search reads only its own traces, through
+    MLflow's paging with every filter MLflow has, and free text, which only this process can
+    filter, reads a bounded number of traces a call."""
+
+    @pytest.fixture
+    def reads(self, store: EvalStore, monkeypatch) -> list[int]:
+        """How many traces each of the store's MLflow trace searches returned."""
+        counts: list[int] = []
+        mlflow_store = store._store  # type: ignore[attr-defined]
+        search = mlflow_store.search_traces
+
+        def counted(*args: object, **kwargs: object) -> object:
+            page, token = search(*args, **kwargs)
+            counts.append(len(page))
+            return page, token
+
+        monkeypatch.setattr(mlflow_store, "search_traces", counted)
+        return counts
+
+    async def test_a_page_reads_only_its_own_traces(self, store: EvalStore, reads: list[int]) -> None:
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="local", state="running"))
+        for number in range(12):
+            await store.record_trace(
+                ORG_A,
+                trace(
+                    f"t{number}",
+                    minutes=number,
+                    state="error" if number % 4 == 0 else "ok",
+                    session_id=f"s{number % 3}",
+                    user_id=f"u{number % 2}",
+                    tags={"route": f"r{number % 2}"},
+                    run_id="r1" if number < 6 else None,
+                ),
+            )
+        # Each query's page of three (or fewer when fewer match) is all MLflow returns.
+        for fields, expected in (
+            ({}, 3),
+            ({"oldest_first": True}, 3),
+            ({"session_id": "s1"}, 3),
+            ({"user_id": "u0"}, 3),
+            ({"tags": {"route": "r1"}}, 3),
+            ({"states": ["error"]}, 3),
+            ({"trace_ids": ["t1", "t2"]}, 2),
+            ({"since": T0 + timedelta(minutes=10)}, 2),
+            ({"until": T0 + timedelta(minutes=1)}, 1),
+            ({"run_id": "r1"}, 3),
+        ):
+            reads.clear()
+            page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", limit=3, **fields))  # type: ignore[arg-type]
+            assert (len(page.items), sum(reads)) == (expected, expected), fields
+        reads.clear()
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1"), max_traces=5)
+        assert (sessions.traces_examined, sessions.has_more, sum(reads)) == (5, True, 5)
+
+    async def test_free_text_reads_a_bounded_number_of_traces_and_pages_on(
+        self, store: EvalStore, reads: list[int], monkeypatch
+    ) -> None:
+        from martian.evals.store import mlflow_local
+
+        monkeypatch.setattr(mlflow_local, "TRACE_SCAN_LIMIT", 4)
+        monkeypatch.setattr(mlflow_local, "_SCAN_CHUNK", 3)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        for number in range(10):
+            response = "a needle" if number in (0, 1, 6) else "hay"
+            await store.record_trace(ORG_A, trace(f"t{number}", minutes=number, response=response, session_id="s"))
+
+        async def pages(limit: int) -> list[tuple[list[str], int]]:
+            """Each call's traces, and how many traces it read, until no cursor is left."""
+            found, cursor = [], None
+            while True:
+                reads.clear()
+                query = TraceQuery(project_id="p1", text="needle", limit=limit, cursor=cursor)
+                page = await store.search_traces(ORG_A, query)
+                found.append(([t.id for t in page.items], sum(reads)))
+                if (cursor := page.next_cursor) is None:
+                    return found
+
+        assert await pages(50) == [(["t6"], 4), ([], 4), (["t1", "t0"], 2)]
+        assert await pages(1) == [(["t6"], 4), ([], 4), (["t1"], 2), (["t0"], 1)]
+        reads.clear()
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", text="needle"))
+        assert (sessions.traces_examined, sessions.has_more, sum(reads)) == (1, True, 4)
+
+    @pytest.mark.parametrize(
+        ("cursor", "run_id"),
+        [
+            *((cursor, None) for cursor in ("²", "١", "page-2", "9" * 19, "-1", "+1", " 1", "1\n", "1e3", "1.2")),
+            ("1", "r1"),  # a run's search is two MLflow searches, so its cursor holds two offsets
+            ("1.2.3", "r1"),
+        ],
+    )
+    async def test_a_cursor_this_store_did_not_return_is_refused(
+        self, store: EvalStore, cursor: str, run_id: str | None
+    ) -> None:
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="local", state="running"))
+        await store.record_trace(ORG_A, trace("t1", run_id="r1"))
+        with pytest.raises(StoreError) as caught:
+            await store.search_traces(ORG_A, TraceQuery(project_id="p1", run_id=run_id, cursor=cursor))
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+        # The largest offset a cursor holds reads past the end.
+        page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", cursor="9" * 18))
+        assert (page.items, page.next_cursor) == ([], None)
+
+
+class TraceLayoutContract:
+    """Where the binding keeps a trace's request and response in MLflow, as MLflow tracing keeps
+    them: whole as the inputs and outputs of the trace's root span, and shortened to MLflow's
+    previews of 1,000 characters in ``trace_info``, whose columns Postgres limits to that."""
+
+    async def test_the_request_and_response_are_whole_in_the_root_span_and_previewed_in_the_trace(
+        self, store: EvalStore
+    ) -> None:
+        from martian.evals.store.mlflow_local import MlflowStore, _mlflow_trace_id
+
+        assert isinstance(store, MlflowStore)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        span = Span(id="s1", name="model call", kind="LLM", status="ok", inputs={"q": 1}, outputs="a")
+        for trace_id, request, response, spans in (
+            ("long", LONG_REQUEST, LONG_RESPONSE, [span]),
+            ("short", "hi", "hello", []),
+        ):
+            fields = {"request": request, "response": response, "spans": spans}
+            await store.record_trace(ORG_A, Trace(id=trace_id, project_id="p1", name="chat", state="ok", **fields))
+
+        def native(trace_id: str) -> Any:
+            """The trace as MLflow itself reads it."""
+            return store._store.get_trace(_mlflow_trace_id(trace_id), allow_partial=True)
+
+        long = await store._call(ORG_A, lambda: native("long"))
+        # MLflow's previews, shortened as MLflow tracing shortens its own: 997 characters and "...".
+        assert long.info.request_preview == LONG_REQUEST[:997] + "..."
+        assert long.info.response_preview == LONG_RESPONSE[:997] + "..."
+        # Whole as the root span's inputs and outputs, where MLflow's own reader finds a trace's request.
+        assert json.loads(long.data.request) == LONG_REQUEST
+        assert json.loads(long.data.response) == LONG_RESPONSE
+        (root,) = [s for s in long.data.spans if s.parent_id is None]
+        assert [(s.name, s.parent_id) for s in long.data.spans if s is not root] == [("model call", root.span_id)]
+        # Not a second time in trace metadata, whose values Postgres limits to 8,000 characters.
+        assert all(len(value) <= 1000 for value in long.info.trace_metadata.values())
+        short = await store._call(ORG_A, lambda: native("short"))
+        assert (short.info.request_preview, short.info.response_preview) == ("hi", "hello")
+        assert (json.loads(short.data.request), json.loads(short.data.response)) == ("hi", "hello")
+
+        # Through the binding: whole when read, MLflow's previews in a search, and the trace's
+        # metadata says which previews were shortened.
+        read = await store.get_trace(ORG_A, "p1", "long")
+        assert read is not None
+        assert (read.request, read.response, read.spans) == (LONG_REQUEST, LONG_RESPONSE, [span])
+        # Every trace the binding records also names its trace conventions mapping version.
+        mapped = {MAPPING_KEY: MAPPING_VERSION}
+        shortened = {"martian.request_preview_truncated": "true", "martian.response_preview_truncated": "true"}
+        assert read.metadata == {**shortened, **mapped}
+        found = {t.id: t for t in (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items}
+        previews = (long.info.request_preview, long.info.response_preview)
+        assert (found["long"].request, found["long"].response) == previews
+        assert found["long"].metadata == {**shortened, **mapped}
+        assert (found["short"].request, found["short"].response, found["short"].metadata) == ("hi", "hello", mapped)
+        assert (await store.get_trace(ORG_A, "p1", "short")).spans == []  # type: ignore[union-attr]
+
+    async def test_the_request_a_traces_own_root_span_gives_is_kept_whole_in_one_root_span(
+        self, store: EvalStore
+    ) -> None:
+        """A trace that says nothing but its spans, as the OpenTelemetry endpoint records one: the
+        mapping gives its request and response from its own root span, never the binding's, and
+        the binding's root span keeps them whole, once, when the trace is recorded again."""
+        from martian.evals.store.mlflow_local import TRACE_SPAN_KEY, MlflowStore, _mlflow_trace_id
+
+        assert isinstance(store, MlflowStore)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        agent, model_call, tool = sample_spans("openinference")
+        whole = {"input.value": LONG_REQUEST, "output.value": LONG_RESPONSE}
+        agent = agent.model_copy(update={"attributes": {**agent.attributes, **whole}})
+
+        def roots() -> list[Any]:
+            """The trace's spans without a parent, as MLflow itself reads them."""
+            native = store._store.get_trace(_mlflow_trace_id("t1"), allow_partial=True)
+            return [s for s in native.data.spans if s.parent_id is None]
+
+        for spans in ([agent, model_call], [agent, model_call, tool]):
+            # Recorded again with one more span, as the OpenTelemetry endpoint merges a later batch.
+            await store.record_trace(ORG_A, Trace(id="t1", project_id="p1", name="turn", state="ok", spans=spans))
+            read = await store.get_trace(ORG_A, "p1", "t1")
+            assert read is not None
+            assert (read.request, read.response, read.model) == (LONG_REQUEST, LONG_RESPONSE, MODEL)
+            assert [(s.id, s.parent_id) for s in read.spans] == [(agent.id, None)] + [
+                (s.id, agent.id) for s in spans[1:]
+            ]
+            assert [s.kind for s in read.spans] == ["AGENT", "LLM", "TOOL"][: len(spans)]
+            (root,) = await store._call(ORG_A, roots)
+            assert root.get_attribute(TRACE_SPAN_KEY) is True
+            assert (root.inputs, root.outputs) == (LONG_REQUEST, LONG_RESPONSE)
+            (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
+            assert (found.request, found.response) == (LONG_REQUEST[:997] + "...", LONG_RESPONSE[:997] + "...")
+            assert (found.metadata[REQUEST_PREVIEW_TRUNCATED], found.metadata[RESPONSE_PREVIEW_TRUNCATED]) == (
+                "true",
+                "true",
+            )
+
+    async def test_a_trace_recorded_without_a_mapping_version_is_mapped_from_its_own_spans(
+        self, store: EvalStore, monkeypatch
+    ) -> None:
+        """A trace the binding wrote, with its root span, before it mapped traces is mapped as it is
+        read: from the trace's own spans, with the request its own root span gives where the
+        trace's was empty, as if it had been mapped when it was recorded."""
+        from martian.evals.store import mlflow_local
+
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        agent, model_call, _ = sample_spans("openinference")
+        with monkeypatch.context() as unmapped:
+            unmapped.setattr(mlflow_local, "map_trace", lambda trace: trace)
+            await store.record_trace(
+                ORG_A, Trace(id="t1", project_id="p1", name="turn", state="ok", spans=[agent, model_call])
+            )
+        (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
+        assert (found.metadata[MAPPING_KEY], found.request, found.model) == (MAPPING_VERSION, "", None)
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.metadata[MAPPING_KEY] == MAPPING_VERSION
+        assert (read.request, read.response, read.model, read.tokens) == (QUESTION, ANSWER, MODEL, 20)
+        assert [(s.id, s.parent_id, s.kind) for s in read.spans] == [
+            (agent.id, None, "AGENT"),
+            (model_call.id, agent.id, "LLM"),
+        ]
 
 
 def artifact_root_of_length(tmp_path: Path, length: int) -> Path:
@@ -250,7 +493,9 @@ class ArtifactRootContract:
         assert await store.get_run(ORG_A, "p2", "r3") == later
 
 
-class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract, ArtifactRootContract):
+class TestMlflowStoreOnSqlite(
+    StoreContract, MlflowTracingContract, MlflowPagingContract, TraceLayoutContract, ArtifactRootContract
+):
     @pytest.fixture
     def tracking_uri(self, tmp_path) -> str:
         return f"sqlite:///{tmp_path / 'mlflow.db'}"
@@ -275,7 +520,9 @@ class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract, ArtifactRoot
 
 @pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run the store contract on Postgres")
 @pytest.mark.usefixtures("unpooled")
-class TestMlflowStoreOnPostgres(StoreContract, MlflowTracingContract, ArtifactRootContract):
+class TestMlflowStoreOnPostgres(
+    StoreContract, MlflowTracingContract, MlflowPagingContract, TraceLayoutContract, ArtifactRootContract
+):
     @pytest.fixture
     def schema(self) -> str:
         return f"mlflow_test_{uuid.uuid4().hex[:10]}"
