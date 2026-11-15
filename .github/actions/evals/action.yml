@@ -10,7 +10,11 @@
 # upload artifacts; the caller should upload the output folder with
 # if: always(). Walks up from github.action_path to pyproject.toml (package
 # root) and installs the SDK from there, like .github/actions/validate.
-# See docs/gate-and-ci.md.
+# With baseline-branch, a push to that branch keeps the run's verdicts.json
+# (no inputs, replies or judge reasons) in the repository's Actions cache, and
+# a pull request is compared with the last one kept: `martian evals run
+# --baseline` gates on the comparison. The cache needs no permission and no
+# paid service. See docs/gate-and-ci.md.
 name: Martian Evals
 description: Run a Martian eval suite file and keep one pull-request comment with its result
 
@@ -32,7 +36,8 @@ inputs:
     description: >
       Names the comment this run keeps up to date. Empty uses the suite path.
       Give each job its own key when several jobs run the same suite on one
-      pull request, for example a model matrix.
+      pull request. A suite's own matrix needs no key: its combinations share
+      one comment and one baseline.
     required: false
     default: ""
   comment-author:
@@ -41,6 +46,16 @@ inputs:
       the workflow token.
     required: false
     default: github-actions[bot]
+  baseline-branch:
+    description: >
+      Branch whose last result a pull request is compared with, usually the
+      default branch. A push to it keeps the run's result; a pull request is
+      compared with the last result kept and fails on a change worse than
+      noise, on any case that newly fails a security check, or on a failed case
+      with no result to compare with. Empty turns the comparison off and gates
+      every run on its own.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -73,20 +88,88 @@ runs:
     # Inputs reach the scripts through env and are referenced as quoted shell
     # variables, never by expression substitution, so a crafted input cannot
     # inject commands.
+    # A push to baseline-branch keeps its result ("keep"); a pull request is
+    # compared with the last one kept ("compare"). Each suite (comment-key)
+    # has its own cache entries, saved only on baseline-branch, so a pull
+    # request's own runs never become its baseline: a cache saved by a pull
+    # request run is scoped to that pull request, and none is saved here.
+    - name: Find the baseline
+      id: baseline
+      shell: bash
+      env:
+        MARTIAN_EVALS_BASELINE_BRANCH: ${{ inputs.baseline-branch }}
+        MARTIAN_EVALS_COMMENT_KEY: ${{ inputs.comment-key || inputs.suite }}
+      run: |
+        set -euo pipefail
+        mode=""
+        if [ -n "$MARTIAN_EVALS_BASELINE_BRANCH" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            mode=compare
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/${MARTIAN_EVALS_BASELINE_BRANCH}" ]; then
+            mode=keep
+          fi
+        fi
+        suite_key="$(printf '%s' "$MARTIAN_EVALS_COMMENT_KEY" | sha256sum | cut -c1-16)"
+        {
+          echo "mode=${mode}"
+          echo "dir=${RUNNER_TEMP}/martian-evals-baseline/${suite_key}"
+          echo "key=martian-evals-baseline-v1-${suite_key}-"
+        } >> "${GITHUB_OUTPUT}"
+
+    # The primary key never exists; the prefix restores the newest entry kept
+    # on this branch's base or the default branch.
+    - name: Restore the baseline
+      if: steps.baseline.outputs.mode == 'compare'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.baseline.outputs.dir }}
+        key: ${{ steps.baseline.outputs.key }}none
+        restore-keys: ${{ steps.baseline.outputs.key }}
+
     - name: Run suite
       id: run
       shell: bash
       env:
         MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
         MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_BASELINE_MODE: ${{ steps.baseline.outputs.mode }}
+        MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
       run: |
         set -uo pipefail
-        # Every run that finishes rewrites summary.json. Removing it first means
-        # a run that stops early cannot be reported with an earlier result.
-        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json"
+        # Every run that finishes rewrites these: summary.json, or matrix.json
+        # for a suite with a matrix. Removing them first means a run that stops
+        # early cannot be reported, or kept, with an earlier result.
+        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/matrix.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json"
+        baseline=()
+        if [ "$MARTIAN_EVALS_BASELINE_MODE" = "compare" ] && [ -f "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json" ]; then
+          baseline=(--baseline "$MARTIAN_EVALS_BASELINE_DIR")
+          commit="$(head -c 64 "${MARTIAN_EVALS_BASELINE_DIR}/commit" 2>/dev/null | tr -cd '0-9a-f')"
+          echo "baseline-commit=${commit}" >> "${GITHUB_OUTPUT}"
+        fi
         status=0
-        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --output "$MARTIAN_EVALS_OUTPUT" || status=$?
+        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --output "$MARTIAN_EVALS_OUTPUT" "${baseline[@]}" || status=$?
         echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+
+    # Only a run in which every case has a verdict (exit 0 or 1) is kept.
+    - name: Prepare the baseline
+      id: keep
+      if: steps.baseline.outputs.mode == 'keep' && (steps.run.outputs.exit-code == '0' || steps.run.outputs.exit-code == '1')
+      shell: bash
+      env:
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$MARTIAN_EVALS_BASELINE_DIR"
+        cp "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json"
+        printf '%s\n' "$GITHUB_SHA" > "${MARTIAN_EVALS_BASELINE_DIR}/commit"
+
+    - name: Keep the baseline
+      if: steps.keep.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.baseline.outputs.dir }}
+        key: ${{ steps.baseline.outputs.key }}${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: Report on the pull request
       shell: bash
@@ -100,10 +183,14 @@ runs:
         MARTIAN_EVALS_COMMENT_AUTHOR: ${{ inputs.comment-author }}
         MARTIAN_EVALS_PR_NUMBER: ${{ github.event.pull_request.number }}
         MARTIAN_EVALS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        MARTIAN_EVALS_BASELINE_BRANCH: ${{ steps.baseline.outputs.mode == 'compare' && inputs.baseline-branch || '' }}
+        MARTIAN_EVALS_BASELINE_SHA: ${{ steps.run.outputs.baseline-commit }}
       run: '"${RUNNER_TEMP}/martian-evals/bin/python" "${MARTIAN_EVALS_ROOT}/scripts/evals_pr_comment.py"'
 
     # The suite's exit code is the gate: 0 passed, 1 a case failed, 2 a case
-    # has no verdict or the suite file is invalid.
+    # has no verdict or the suite file is invalid. Compared with a baseline,
+    # 1 is a change worse than noise, a case that newly fails a security
+    # check, or a failed case with no result to compare with.
     - name: Apply the suite result
       if: always() && steps.run.outputs.exit-code != ''
       shell: bash

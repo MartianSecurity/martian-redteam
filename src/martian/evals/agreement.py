@@ -54,6 +54,13 @@ per queue and question and per question across queues, as the evals core's
   a complete one is their answer, and a pending one withdraws it. A review that names no reviewer,
   or whose queue is not reported, counts for nobody. An item is ``shared`` when two or more
   reviewers answered it, and only shared items are compared.
+- **Blind answers.** In a queue with blind double review (``blind``, the queues' ids;
+  :mod:`martian.evals.server.blind`) each reviewer counts with the answer they gave blind
+  (``Review.blind``), before they could read anyone else's, not with an answer they gave after.
+  A queue's report says so with ``blind``. Across queues, a question that a blind queue asks is
+  compared on the blind queues' blind answers only, and says so; one no blind queue asks, on
+  every queue's answers. Answers given in sight of each other agree more for the wrong reason, so
+  they are not mixed into a blind report.
 - **Two reviewers or more.** With two reviewers across the shared items, their answers are paired
   item by item: ``method`` is ``cohen`` (Cohen's kappa, :func:`cohen_kappa`) for pass/fail and
   categories, and ``lin`` (Lin's concordance, :func:`concordance`) for numbers. With more,
@@ -74,6 +81,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -575,6 +583,7 @@ class ReviewerAgreement:
     mean_absolute_difference: float | None = None
     mean_absolute_difference_confidence_95: Interval | None = None
     concordance: float | None = None
+    blind: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """The report as the evals core serves it."""
@@ -595,6 +604,7 @@ class ReviewerAgreement:
             "mean_absolute_difference": self.mean_absolute_difference,
             "mean_absolute_difference_confidence_95": _interval(self.mean_absolute_difference_confidence_95),
             "concordance": self.concordance,
+            "blind": self.blind,
         }
 
 
@@ -618,10 +628,16 @@ class QueueAgreement:
 
 
 def compare_reviewers(
-    items: Iterable[Mapping[str, Value]], kind: Kind, *, question: str = "", minimum: int = MINIMUM_LABELLED
+    items: Iterable[Mapping[str, Value]],
+    kind: Kind,
+    *,
+    question: str = "",
+    minimum: int = MINIMUM_LABELLED,
+    blind: bool = False,
 ) -> ReviewerAgreement:
     """People's answers to one question of ``kind`` against each other. Each item maps a reviewer
-    to their answer; an answer that is None or of another kind is left out."""
+    to their answer; an answer that is None or of another kind is left out. ``blind`` says the
+    answers were given blind."""
     if minimum < 1:
         raise ValueError("minimum must be at least 1")
     if kind not in KINDS:
@@ -644,6 +660,7 @@ def compare_reviewers(
         "reviewers": len(people),
         "incomparable": incomparable,
         "minimum": minimum,
+        "blind": blind,
     }
     if kind == "text":
         return ReviewerAgreement(**counts, status="not_comparable")
@@ -685,14 +702,15 @@ def compare_reviewers(
 
 
 def _answers(
-    reviews: Iterable[Review], queue_ids: set[str], *, by_queue: bool
+    reviews: Iterable[Review], queue_ids: set[str], *, by_queue: bool, blind: AbstractSet[str] = frozenset()
 ) -> dict[tuple[str, ...], dict[str, Value]]:
     """Each item's answers by reviewer: each reviewer's newest review of the item, when it is
-    complete. An item is its queue (``by_queue``), run, case and question."""
+    complete, and in a queue of ``blind`` the answer they gave blind. An item is its queue
+    (``by_queue``), run, case and question."""
     newest = _newest(
         (((r.queue_id or "") if by_queue else "", r.run_id, r.case_id, r.criterion, r.reviewer), r)
         for r in reviews
-        if r.reviewer and r.queue_id in queue_ids
+        if r.reviewer and r.queue_id in queue_ids and (r.queue_id not in blind or r.blind)
     )
     found: dict[tuple[str, ...], dict[str, Value]] = {}
     for (queue, run, case, question, reviewer), review in newest.items():
@@ -702,14 +720,19 @@ def _answers(
 
 
 def queue_agreement(
-    reviews: Iterable[Review], queues: Iterable[ReviewQueue], *, minimum: int = MINIMUM_LABELLED
+    reviews: Iterable[Review],
+    queues: Iterable[ReviewQueue],
+    *,
+    minimum: int = MINIMUM_LABELLED,
+    blind: AbstractSet[str] = frozenset(),
 ) -> list[QueueAgreement]:
     """Each review queue's reviewers' agreement on each of its questions, in the order the queues
     are given. ``reviews`` are reviews of the queues' cases, every link of each chain
     (``list_reviews(..., current_only=False)``): an answer a later review replaced still counts for
-    the reviewer who gave it."""
+    the reviewer who gave it. A queue in ``blind`` has blind double review, and its report compares
+    the answers given blind."""
     queues = list(queues)
-    answers = _answers(reviews, {queue.id for queue in queues}, by_queue=True)
+    answers = _answers(reviews, {queue.id for queue in queues}, by_queue=True, blind=blind)
     grouped: dict[tuple[str, str], list[dict[str, Value]]] = {}
     for (queue_id, _, _, question), found in answers.items():
         grouped.setdefault((queue_id, question), []).append(found)
@@ -719,7 +742,13 @@ def queue_agreement(
             name=queue.name,
             run_id=queue.run_id,
             questions=tuple(
-                compare_reviewers(grouped.get((queue.id, q.name), []), q.kind, question=q.name, minimum=minimum)
+                compare_reviewers(
+                    grouped.get((queue.id, q.name), []),
+                    q.kind,
+                    question=q.name,
+                    minimum=minimum,
+                    blind=queue.id in blind,
+                )
                 for q in queue.questions
             ),
         )
@@ -728,21 +757,39 @@ def queue_agreement(
 
 
 def question_agreement(
-    reviews: Iterable[Review], queues: Iterable[ReviewQueue], *, minimum: int = MINIMUM_LABELLED
+    reviews: Iterable[Review],
+    queues: Iterable[ReviewQueue],
+    *,
+    minimum: int = MINIMUM_LABELLED,
+    blind: AbstractSet[str] = frozenset(),
 ) -> list[ReviewerAgreement]:
     """Reviewers' agreement on each question the queues ask, across every queue that asks it, by
     question name. A question's kind is its kind in the newest queue that asks it; an answer of
-    another kind is counted in ``incomparable``. ``reviews`` are as :func:`queue_agreement` takes."""
+    another kind is counted in ``incomparable``. ``reviews`` are as :func:`queue_agreement` takes.
+    A question that a queue of ``blind`` asks is compared on the blind queues' answers given blind
+    only, and says so."""
     queues = sorted(queues, key=lambda queue: (queue.created_at or _OLDEST, queue.id), reverse=True)
     kinds: dict[str, Kind] = {}
+    blinded: set[str] = set()
     for queue in queues:
         for question in queue.questions:
             kinds.setdefault(question.name, question.kind)
-    grouped: dict[str, list[dict[str, Value]]] = {}
-    for (_, _, _, name), found in _answers(reviews, {queue.id for queue in queues}, by_queue=False).items():
-        grouped.setdefault(name, []).append(found)
+            if queue.id in blind:
+                blinded.add(question.name)
+    reviews = list(reviews)
+    grouped: dict[tuple[bool, str], list[dict[str, Value]]] = {}
+    for only_blind, ids in ((False, {q.id for q in queues}), (True, {q.id for q in queues if q.id in blind})):
+        for (_, _, _, name), found in _answers(reviews, ids, by_queue=False, blind=blind).items():
+            grouped.setdefault((only_blind, name), []).append(found)
     return [
-        compare_reviewers(grouped.get(name, []), kinds[name], question=name, minimum=minimum) for name in sorted(kinds)
+        compare_reviewers(
+            grouped.get((name in blinded, name), []),
+            kinds[name],
+            question=name,
+            minimum=minimum,
+            blind=name in blinded,
+        )
+        for name in sorted(kinds)
     ]
 
 

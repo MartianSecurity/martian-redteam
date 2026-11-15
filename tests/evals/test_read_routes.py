@@ -340,15 +340,16 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
             "provenance": {**pinned, "repeat_of": ci.id},
         }
     )
-    # A console run that stopped at one of its limits, which the local edition resumes.
+    # Console runs that stopped at one of their limits, which the local edition resumes, and the contract.
     resumable = stopping.model_copy(
         update={"id": str(uuid.uuid4()), "code": "EV-1004", "state": "stopped", "cancel_requested_at": None}
     )
+    resumable_by_contract = resumable.model_copy(update={"id": str(uuid.uuid4()), "code": "EV-1005"})
     traced = trace_id()
 
     async def record() -> None:
         await store.create_project(SINGLE_USER, Project(id=DEFAULT_PROJECT, name="Default"))
-        for run in (ci, stopping, repeated, resumable):
+        for run in (ci, stopping, repeated, resumable, resumable_by_contract):
             await records.create_run(SINGLE_USER, run)
         await store.start_run(SINGLE_USER, ci)
         await store.record_trace(SINGLE_USER, Trace(id=traced, project_id=DEFAULT_PROJECT, state="ok", run_id=ci.id))
@@ -359,7 +360,7 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
 
     asyncio.run(record())
     # Room for the resumed run beside the one still running, and review queues for the cheating queue.
-    local = local_entitlements(concurrency=5)
+    local = local_entitlements(concurrency=6)
     entitlements = dataclasses.replace(local, features=local.features | {"review_queues"})
     app = create_app(
         store=store,
@@ -387,6 +388,7 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
             {},
         ),
         ("post", "/v1/evals/{run_id}/cancel", f"/v1/evals/{stopping.id}/cancel", {}),
+        ("post", "/v1/evals/{run_id}/resume", f"/v1/evals/{resumable_by_contract.id}/resume", {"json": {}}),
         # The core's inspection of a run for cheating (MartianSecurity/martian-notes#217) reads the
         # run's record and shows its id and code.
         ("get", "/v1/evals/{run_id}/cheating", f"/v1/evals/{ci.id}/cheating", {}),

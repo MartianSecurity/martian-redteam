@@ -86,7 +86,8 @@ target:
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID.
   `{{session_id}}`, `{{history}}` and `{{messages}}` carry a [conversation](#conversations): its
   id, its earlier turns, and those turns with this one's user message; in a case of one input they
-  are a new ID, an empty list and that one message. A value that is only a placeholder keeps its
+  are a new ID, an empty list and that one message. `{{matrix.NAME}}` is the value of the
+  axis NAME of the suite's [matrix](#a-matrix-of-prompts-and-models). A value that is only a placeholder keeps its
   type, so a number stays a number and `{{messages}}` a list. The body must use `{{input}}`,
   `{{inputs.NAME}}` or `{{messages}}`. Any other placeholder is refused when the suite loads; one
   that names the case's expectations or outputs, such as `{{expectations.answer}}` or
@@ -139,7 +140,9 @@ with the run (`python -P`), which imports the target there and never in the comm
   default on current distributions), before it imports the target, and from every process it
   starts: the suite file, the data file, each `python` check's file and the `__pycache__` folder
   beside it, the output folder with `results.jsonl` and `mlflow.db`, a local SQLite or file
-  `mlflow.tracking_uri`, and the local Evals UI's data folder. It cannot read, change, create,
+  `mlflow.tracking_uri`, the local Evals UI's data folder, and the suite file's own `cache.folder`
+  when the run uses the [cache](#a-cache-of-model-calls), which holds the judges' stored
+  judgments. It cannot read, change, create,
   rename or remove them, cannot create or remove anything directly in the folders that hold them,
   such as the suite file's own folder, and cannot read the command's memory. It can list the names
   in those folders, read the other files there, such as its own modules, and use any other file
@@ -189,9 +192,12 @@ conversation once.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)); for a function target, `target_isolation`: whether the run's files were hidden from it (`files_hidden`) and, when not, why (`reason`); `null` for a URL target or stored outputs. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)); for a function target, `target_isolation`: whether the run's files were hidden from it (`files_hidden`) and, when not, why (`reason`); `null` for a URL target or stored outputs. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts; with the [cache](#a-cache-of-model-calls) on, `cache`: how many replies came from it |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
+| `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, a digest of each check's definition, and the names of the security checks: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
+| `comparison.json` | With `--baseline` only: the run compared with the baseline ([comparing with a baseline](#comparing-with-a-baseline)). A run without one removes an earlier run's |
+| `matrix.json` | A suite with a [matrix](#a-matrix-of-prompts-and-models) only: one entry per combination, whose own files are in a folder of its own. A run without a matrix removes an earlier run's |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
@@ -200,16 +206,24 @@ the [reliability](#reliability-and-flaky-cases) and flaky cases, and for a run t
 cases it did not run in the table's title; under it, the false-refusal rate for a suite with a
 policy check, the reasons cases had no verdict, and the limit a stopped run reached. It exits `0`
 when every case passed, `1` when a case failed, and `2` when a case has no verdict, the run
-stopped before a case, or the suite file is invalid.
+stopped before a case, or the suite file is invalid. With `--baseline`, `1` means instead that the
+change is worse than noise, that a case newly failed a security check, or that a case with no
+result in the baseline failed.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
-`--data-dir DIR`, `--max-seconds N` and `--max-judge-tokens N`. A run that is stopped can be
-started again: finished cases are skipped, and cases that errored are tried again. `--repeats`
-runs each case N times, 1 to 100, in place of the suite file's `repeats`
-([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--data-dir` names
-the local Evals UI's data folder the run is recorded in, as for `martian ui`; without it,
-`MARTIAN_EVALS_HOME`, else `~/.martian/evals`. `--max-seconds` and `--max-judge-tokens` replace
-the suite file's `limits`, below.
+`--cache` or `--no-cache`, `--baseline DIR`, `--data-dir DIR`, `--max-seconds N` and
+`--max-judge-tokens N`. A run that is
+stopped can be started again: finished cases are skipped, and cases that errored are tried again.
+`--repeats` runs each case N times, 1 to 100, in place of the suite file's `repeats`
+([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--cache` replays
+the target's and the judges' replies an earlier run stored for the same request, and
+`--no-cache` turns a suite file's `cache` block off ([a cache of model calls](#a-cache-of-model-calls)).
+`--baseline`
+compares the run with an earlier run's output folder and gates on the comparison
+([comparing with a baseline](#comparing-with-a-baseline)). `--data-dir` names the local Evals
+UI's data folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`,
+else `~/.martian/evals`. `--max-seconds` and `--max-judge-tokens` replace the suite file's
+`limits`, below.
 
 **Time limits and budgets.** Every target call has a time limit, and so does the run:
 
@@ -238,15 +252,21 @@ limits:
   flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
+- **In the Evals UI** the **Run eval** dialog sets the same two limits for a run it launches
+  (`limits` in the launch body of `POST /v1/evals`, [write routes](evals-core.md#write-routes)),
+  and a stopped run shows the limit it reached and a **Resume** action (`POST
+  /v1/evals/{run_id}/resume`, optionally with new limits), which goes on after the cases the run
+  finished. Without limits of its own, a run launched from the UI has the server's.
 - **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
   each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
   output together, as the provider reports them. A provider that reports none leaves the limit
   unkeepable, so with `max_judge_tokens` set the run stops after that batch, or before the turn
   that simulated user wrote is sent, and says which of the two reported none. A call that fails
-  reports nothing and counts nothing. When the run stops there, the message counts the simulated users' tokens
-  apart from the judges', such as `Stopped at its judge token limit (max_judge_tokens 45) after 60
-  tokens (0 by its judges, 60 by its simulated users)`. `max_judge_tokens` needs an LLM judge
-  check or a simulated user.
+  reports nothing and counts nothing, and a judgment replayed from the
+  [cache](#a-cache-of-model-calls) counts 0: it made no call. When the run stops there, the message
+  counts the simulated users' tokens apart from the judges', such as `Stopped at its judge token
+  limit (max_judge_tokens 45) after 60 tokens (0 by its judges, 60 by its simulated users)`.
+  `max_judge_tokens` needs an LLM judge check or a simulated user.
 - **Tokens used.** `summary.json` has `tokens_this_run`: the tokens of this run's `judges` and,
   with simulated users, of its `simulator`, each `null` when one of its calls reported none. A
   resumed run counts only its own calls, as `seconds_this_run` counts only its own time.
@@ -257,22 +277,24 @@ limits:
   ([limits and repeats](#limits-and-repeats)).
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
-comment on the pull request with the result, still with no Martian account. See
+comment on the pull request with the result, still with no Martian account, and can compare each
+pull request with the last result of `main`. See
 [gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), a conversation's turns and each check's
-scope ([conversations](#conversations)), a simulated user and the simulator's `model` and
+combine by ([repeated attempts](#repeated-attempts)), the values of its combination of the
+[matrix](#a-matrix-of-prompts-and-models), a conversation's turns and each check's scope
+([conversations](#conversations)), a simulated user and the simulator's `model` and
 `inference_params` ([simulated users](#simulated-users)), and the SDK version. A function target
 and a [`python` check](#custom-python-checks) count by the contents of their files. When any of
 these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
-address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
-changes in modules the target or scorer files import, or in the service behind a URL target: use
-`--fresh` after those.
+address in the environment, the MLflow location or the [cache](#a-cache-of-model-calls) keeps
+earlier results. The SDK cannot see changes in modules the target or scorer files import, or in
+the service behind a URL target: use `--fresh` after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -340,6 +362,39 @@ results, with a message naming the setting to check, and the rest of the run car
 
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
+
+### Push runs to a server
+
+`martian evals push` sends the local Evals UI's finished runs to a Martian server, each with its
+case results, scores, scoring jobs and traces, so your team sees them there as you see them in
+`martian ui`. It signs in as `martian ci` does: `MARTIAN_API_URL` is the server's origin and
+`MARTIAN_API_TOKEN` an organisation API key with `evals:write`
+([one customer connection](sdk-and-ci.md#one-customer-connection)).
+
+```bash
+export MARTIAN_API_URL=https://martian.example.com MARTIAN_API_TOKEN=...
+martian evals push                       # every finished run in the data folder
+martian evals push evals-3 EV-1002       # these runs, by code or id
+martian evals push --data-dir ./evals-data
+```
+
+```text
+Pushed 3 runs to https://martian.example.com (Acme): 2 new, 1 there already.
+  evals-3: 12 of 12 cases sent, 12 traces
+  EV-1002: 40 of 40 cases sent, 40 traces
+  evals-2: 0 of 5 cases sent, 0 traces
+```
+
+Run it as often as you like. The server keeps one of everything, so pushing again sends only what
+it lacks, such as a run since or a scoring job that has finished, and a push that was interrupted
+continues where it stopped (exit code `130` for Ctrl+C, `2` for a server it could not reach: run
+the same command again). A run still running is left for a later push. Runs of the default project
+go with any key that may write evals; a run of another project creates that project on the server,
+which needs an admin, and the Martian server's API keys and service accounts write as members, so
+it pushes those runs only into projects the server already has. A service account limited to one
+project pushes that project's runs only. The command names each run the server refused and why, and exits `2`: one that changed
+here after it was pushed, for example. Reviews, artifacts and the dataset version a run read stay
+here. What goes and how the ids map: [pushed runs](evals-core.md#pushed-runs).
 
 ## Audit a suite
 
@@ -496,7 +551,7 @@ case's own inputs hold is never a signal, because the task asked for it: a task 
 
 | Signal | Found when |
 | --- | --- |
-| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, or the local Evals UI's data folder, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
+| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, the local Evals UI's data folder, or the suite file's own `cache.folder`, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
 | `blocked_access` | A step that names one of those paths failed (its span's status is an error, or its result a permission error), or a step on a path in a folder that holds one failed with a permission error, as [target isolation](security-and-data.md#the-target-and-the-grader) refuses it. Isolation records nothing itself: the signal reads the target's own step |
 | `grader_file` | A step names a file the way answer keys, graders and results are named: `answer_key`, `answers.json`, `expected_output`, `expected_response`, `ground_truth`, `gold_answers`, `grader.py`, `grade.py`, `scorers.py`, `rubric.yaml`, `hidden_tests`, `expectations.json`, `results.jsonl`, `junit.xml`, `mlflow.db`, `mlruns`, `audit.json`, `cheating.json` or `.martian/evals`, wherever it is |
 | `grader_endpoint` | A step names the evals API (`/v1/evals`), MLflow's REST API (`/api/2.0/mlflow/`, `/ajax-api/2.0/mlflow/`), the local Evals UI on port 7600 of this machine, or the MLflow server the suite's `mlflow.tracking_uri` names |
@@ -615,7 +670,8 @@ checks:
 
 `martian evals run evals.yaml --repeats 5`, or `run_suite(path, repeats=5)` from
 `martian.evals.runner`, replaces the file's `repeats` for one run. Each attempt calls the target
-and every judge again, so five attempts cost five times as much.
+and every judge again, so five attempts cost five times as much; with the
+[cache](#a-cache-of-model-calls) on, a later run replays each attempt's own replies.
 
 | Rule | A check passes the case when |
 | --- | --- |
@@ -637,7 +693,8 @@ and every judge again, so five attempts cost five times as much.
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
   secret `combine: all` when the suite's rule is looser. A [`python` check](#custom-python-checks)
   is one only when it says so, with `security: true`: the SDK cannot tell what a function guards,
-  and its author can.
+  and its author can. Compared with a baseline, a case that newly fails a security check fails the
+  gate on its own, however few cases changed ([comparing with a baseline](#comparing-with-a-baseline)).
 - **A case passes** when every check, combined, passes it, as with one attempt.
 - **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
   verdict, could have gone either way. A combined verdict stands when it is the same both ways;
@@ -724,6 +781,243 @@ run stops at and resumes from:
 - **The printed table** names the cases not run in its title, after the attempts of each case. The
   Reliability row is in the table, and under it come the flaky cases, the false-refusal line, the
   reasons attempts had no verdict, and last the limit the run reached and how to resume.
+
+## A matrix of prompts and models
+
+Trying three prompts on two models should not take six suite files. `matrix` names the values to
+try, and the suite runs once per combination, each combination a run of its own:
+
+```yaml
+target:
+  url: "${OPENAI_API_BASE}/chat/completions"
+  headers:
+    Authorization: "Bearer ${OPENAI_API_KEY}"
+  body:
+    model: "{{matrix.model}}"
+    messages:
+      - {role: system, content: "{{matrix.prompt}}"}
+      - {role: user, content: "{{input}}"}
+  response_path: choices.0.message.content
+matrix:
+  model: [gpt-4o-mini, claude-3-5-haiku]   # a list: each value is its own name
+  prompt:                                  # a mapping: a short name for each value
+    terse: "Answer in one sentence."
+    friendly: "Greet the customer, then answer."
+```
+
+[`examples/evals/matrix`](../examples/evals/matrix/evals.yaml) does the same with a function
+target that stands in for the model, so it runs with no key:
+`martian evals run examples/evals/matrix/evals.yaml` prints four rows, one per combination.
+
+- **Axes and values.** Each key of `matrix` is an axis, named by a letter or `_` and then
+  letters, digits and `_`, at most 40 characters. Its values are a list, each value naming itself
+  (text as written, a number as JSON writes it, `true` or `false`), or a mapping of names to
+  values, for values such as prompts that are too long to name a combination. A name is 1 to 64
+  letters, digits and `. _ : / @ + -`; a list value that is not such a name is refused with the
+  advice to use a mapping. A mapped value can be any value but null. A matrix has at most 100
+  combinations.
+- **Combinations.** Every combination of one value of each axis runs, the first axis outermost:
+  two models and two prompts are four runs, one after another. Each runs every case with the
+  suite's checks, `repeats`, `--limit` and `--concurrency`.
+- **Where the values go.** A URL target's `body` takes `{{matrix.NAME}}`, filled like the other
+  placeholders: a value that is a whole placeholder keeps its type, and a value is inserted as
+  data, so an `{{input}}` inside a prompt's text is sent as written. The body must use every axis,
+  and each `{{matrix.NAME}}` must name one. The `url` and headers take no matrix values. A
+  function target receives each axis as a keyword argument of the axis's name, beside the case's
+  inputs: `answer(message="...", model="gpt-4o-mini", prompt="Answer in one sentence.")`, a mapped
+  value as its value, not its name. A case with an input of an axis's name is refused, and so is
+  a matrix in a suite without a target, which grades stored outputs and has nothing to vary.
+- **Checks.** Each combination's checks grade its own calls: a
+  [tool-call check](#tool-calls-and-trajectories) reads the trace or the reply of that
+  combination's call. A [`python` check](#custom-python-checks) is given the case's inputs, not
+  the combination's values, which are in the run's `provenance.matrix`.
+- **Identity.** A combination's id is `axis=name` for each axis, in the axes' alphabetical
+  order, joined by commas: `model=gpt-4o-mini,prompt=terse`. It names the combination's folder,
+  run and row everywhere below. It depends on the names only, so reordering the axes keeps it,
+  and so does editing a mapped value's text: the next run of that combination is compared with
+  the last, and grades its cases again (below).
+
+| Where | What |
+| --- | --- |
+| `<output>/<id>/` | One folder per combination, named by its id with `/` and `:` written as `_`, holding what a run without a matrix writes: `results.jsonl`, `summary.json`, `junit.xml` (one testsuite, named `evals[<id>]` for `evals.yaml`), `verdicts.json`, `mlflow.db` and, with a baseline, `comparison.json` |
+| `<output>/matrix.json` | `axes`, each axis's `name` and its values' names in the file's order; `combinations`, in run order, each with its `id`, `values` (each axis's value name), `folder`, `gate` (`passed`, `failed` or `error`, below), `summary` (its `summary.json`) and `comparison` (its `comparison.json`, `null` when it was not compared); `seconds_this_run` and `output` |
+| `<output>/verdicts.json` | Every combination's `verdicts.json` under `combinations`, by id (format `martian-evals-matrix-verdicts/1`): what a later run of the matrix compares with |
+| The printed table | One row per combination: its counts and pass rate with its 95% interval, with repeats its reliability, and with `--baseline` its label and gate. Under it, each combination's flaky cases, false refusals, errors and comparison, each line starting with the combination's id |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
+| The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file. A value that is a [registered prompt version](#prompt-versions)'s text is named in `provenance.prompts` |
+
+- **The gate.** A combination's `gate` is `error` when a case has no verdict, or when it stopped
+  at a limit before a case (below); with a baseline, its comparison's gate; otherwise `failed`
+  when a case failed and `passed` when none did. The command exits `2` when a combination's gate
+  is `error`, else `1` when one is `failed`, else `0`.
+- **Limits.** Each combination is a run of its own, so it has the run's
+  [limits](#run-a-suite-file-locally) afresh: `max_seconds` and `max_judge_tokens` bound each
+  combination, not the whole command. A combination that reaches one stops as a run does, with
+  its cases not run (`not_run` in its `summary.json`) and a line under the table, and the next
+  combination starts with its limits unspent. Every target call, in every combination, has
+  `timeout_seconds`. A cancel in `martian ui` stops the run it names, one combination.
+- **Resume** works per combination, from its own folder. A combination's values are part of what
+  its verdicts depend on, so editing one mapped prompt's text grades that prompt's combinations
+  again and reuses the others' results.
+- **Repeats** apply to every combination, with each one's reliability and flaky cases.
+- **The baseline.** `--baseline DIR` compares each combination with the result of the same id in
+  `DIR/verdicts.json` and gates it on that comparison
+  ([comparing with a baseline](#comparing-with-a-baseline)). A combination `DIR` has no result
+  of, such as one with a value added since, is not compared and is gated on its own, as is every
+  combination when `DIR` is a run of the suite before it had a matrix. A suite without a matrix
+  whose baseline is a matrix's is gated on its own the same way.
+- **One run per combination.** Each combination is its own `Run` of the
+  [shared model](eval-model.md#the-sdk-suite-file), so the evals core's routes and their typed
+  responses, Compare and the run page read it as any run, and two combinations compare as two
+  runs of the same data.
+- **A suite without a matrix** runs, writes and records exactly what it did before: no
+  `matrix.json`, no folder per combination, a run named `evals-<n>` with no `provenance.matrix`,
+  and the fingerprint and digest it had.
+
+## Prompt versions
+
+A prompt edited in a suite file has no history of its own. `martian evals prompts push` keeps each
+prompt of a suite file's matrix as a numbered, immutable version in the local Evals UI's data
+folder, and each run then records the version it used:
+
+```bash
+martian evals prompts push evals.yaml -m "Greet by name"   # terse: version 2 added
+martian evals run evals.yaml                               # each combination names its prompt version
+martian ui                                                 # Prompts: versions, differences and runs
+```
+
+- **What it pushes.** Each value of the matrix axis `prompt` (`--axis NAME` for another), or only
+  those named with `--value NAME`, as a version of the prompt named by the value's name: the
+  mapped value `terse: "Answer in one sentence."` is a version of the prompt `terse`. A prompt
+  that does not exist yet is created. A value whose text is the prompt's latest version adds
+  nothing (`terse: version 1 unchanged`), so pushing an unchanged suite file is harmless; text
+  the prompt had in an older version adds a new version with that text. A value must be text,
+  and its name a prompt's name: 1 to 64 letters, digits and `. _ -`, starting with a letter or
+  digit. Anything else is refused with exit code `2` before anything is pushed.
+- **A version** keeps its text exactly as written, at most 100,000 characters, its digest (SHA-256
+  of the text as UTF-8), the commit message (`-m`, optional), its author (the local user) and its
+  time. It never changes. `--data-dir` names the data folder, as for `martian evals run`.
+- **Which version a run used.** When `martian evals run` records a combination, each of its text
+  values whose digest is a registered version's is named in the run's `provenance.prompts`:
+  `axis`, `value` (the value's name), and the version's prompt `name`, `version` and `digest`.
+  When several versions have the text, the run takes the newest of the prompt named as the value,
+  else the newest of any prompt. The run's page shows the version, and the Prompts page lists the
+  run under it. A run is matched when it is recorded: push before running, since a run recorded
+  before its text was pushed names no version.
+- **The suite file names no version.** It keeps the prompt's text, not a reference such as
+  `terse@2`, so it stays the whole definition of what it runs and runs the same on a machine with
+  no registry, such as a CI runner. A suite without a matrix has no prompt of its own and records
+  none.
+- **The local Evals UI's Prompts page** lists the prompts, each prompt's versions with their
+  messages, authors and times, the difference between two versions, and the runs that used each
+  version. The prompts are the evals core's, served by its own routes
+  ([prompt routes](evals-core.md#prompt-versions)); Python can push one with
+  `martian.evals.prompts.push_suite_prompts`.
+
+## A cache of model calls
+
+Running an unchanged case again pays for the same model calls again. With the cache on, each
+reply of the target and of the LLM judges is stored by its full request, and a later run that
+sends the same request gets the stored reply instead of calling the model:
+
+```yaml
+cache:                     # turns the cache on; `cache:` alone takes every default
+  folder: .model-cache     # relative to this file; default: `cache` in the local data folder
+  ttl_seconds: 86400       # how long an entry is used; default 604800 (seven days), at most 366 days
+  functions: true          # a function target's calls too; default false
+```
+
+`martian evals run evals.yaml --cache` turns it on for one run of a suite without a `cache`
+block, with the defaults, and `--no-cache` turns a suite file's block off;
+`run_suite(path, cache=True)` or `cache=False` does the same from Python. Without either, nothing
+is cached and every call is made, as before. The default folder is `cache` in the local Evals UI's
+data folder: `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, so
+`~/.martian/evals/cache`.
+
+- **What is cached.** A URL target's calls, and every LLM judge's, through the judges' shared
+  provider call (both stages of a judge that reviews its draft, and each member of a
+  [panel](#a-panel-of-judges), by its own model). A function target's calls only
+  with `functions: true`: a function is your code and may do more than answer, such as write to a
+  database or send a message, so replaying it is your choice. Deterministic checks call no model,
+  and neither does a [`python` check](#custom-python-checks): it is your code, so it runs on every
+  case of every run, replayed reply or not, and the cache never holds its verdict.
+- **The key is the full request**, as a SHA-256 digest of everything that decides the reply:
+
+  | Call | In the key |
+  | --- | --- |
+  | URL target | The address as called, with `${NAME}` read from the environment; the headers; the body with the case's inputs and the combination's [matrix](#a-matrix-of-prompts-and-models) values filled in; `response_path`. `{{uuid}}` and `{{session_id}}` count as written, not as the new id each call sends, or no request would ever repeat; `{{history}}` is empty and `{{messages}}` the case's one message, as sent |
+  | Function target | The SHA-256 of its file, the function's name and its arguments: the case's inputs and the combination's values |
+  | LLM judge | The judge model, the address serving it (for an `openai:/` model `OPENAI_API_BASE`, else `OPENAI_BASE_URL`), the messages it sends (its prompt with your criteria, the case's input and the reply under test), the reply's schema, `judge.inference_params`, `judge.headers`, the stage (draft or review) and the judge's version, such as `response-rubrics-v1` |
+
+  `timeout_seconds`, `judge.max_retries` and `judge.rate_limit_wait_seconds` are not in it: they
+  change how a call is made, not what it asks. Neither are modules a function target's file
+  imports, nor the model behind an endpoint, which the SDK cannot see: delete the folder after
+  changing those, or use `--no-cache`.
+- **Credentials are never in it.** A header or a query parameter of the address whose name says
+  it holds a credential is left out of the key: `Authorization`, `Proxy-Authorization` and
+  `Cookie`, any name that holds `auth`, `key`, `token`, `secret`, `pass`, `credential`, `cookie`,
+  `session` or `signature`, and `sig`, `code` and `pwd`. A user name or password in an address is
+  left out too. Rotating a key keeps the cache, while a header such as `X-Tenant`, which changes
+  what is asked, counts. A judge's key (`OPENAI_API_KEY`) is never read into the key. What an
+  entry holds is in [security and data](security-and-data.md#the-cache-of-model-calls).
+- **A failed call is never stored.** A target call that fails (an error status, a timeout, a
+  response with nothing at `response_path`, an exception from a function target) and a judge call
+  that fails, or whose reply is not the judgment asked for, fail as they do without the cache, and
+  the next run makes them again. A function target's reply that JSON cannot hold exactly, such as
+  a tuple, is not stored either.
+- **Repeats still sample.** Within one `martian evals run`, the nth identical request is attempt
+  n, with its own entry. Each of a case's [attempts](#repeated-attempts) gets the reply that
+  attempt got in the earlier run, and a first run makes exactly the calls it makes without the
+  cache: identical requests in one run are never answered with one reply. Raising `--repeats`
+  from 3 to 5 replays three attempts of each case and calls the model for two.
+- **A changed prompt misses.** Editing a judge's criteria calls the judge again and replays the
+  target. Editing the prompt in the target's body, or a case's input, calls the target again, and
+  the judge too when the reply it grades changed.
+- **Time to live.** An entry older than `ttl_seconds` is not used, and the next successful call
+  replaces it. Delete the folder to empty the cache.
+- **`--fresh` replays too.** It discards earlier results and grades every case again; with the
+  cache on, the replies come from the cache. Add `--no-cache` to call the models again.
+- **Checks of the call itself.** `latency` and `cost` measure the target's call, and a replayed
+  reply took no time and spent no tokens, so a suite whose target's calls are cached is refused
+  before any case: run it with `--no-cache`, or, for a function target, leave `functions` off.
+  The same goes for a check that reads the call's trace, since a replayed reply's trace records
+  none of the call's spans: a [tool-call check](#tool-calls-and-trajectories) that reads the
+  trace (a function target's, unless it says `source: reply`, which reads the replayed reply
+  and works) and a `python` check whose function takes `trace`.
+- **Time limits and budgets.** A replayed call made no model call, so it spends nothing of the
+  run's [limits](#run-a-suite-file-locally): a replayed judgment counts 0 tokens towards
+  `max_judge_tokens`, and a replayed reply takes only the moment it takes to read, against
+  `max_seconds` and `timeout_seconds`. A run whose judgments are all replayed can therefore run
+  under a token limit it would otherwise reach. A target call that outlasted `timeout_seconds` is
+  the case's error and is never stored, even when it ends later. A run that reaches a limit calls
+  no more targets, replayed or not, and the next run resumes after the cases it finished.
+- **In a matrix** each combination is its own run, with its own counts in its `summary.cache` and
+  `provenance.cache` and its limits afresh. Attempt numbers run across the whole command, so two
+  combinations that send the same judge request, such as two prompts whose replies are the same,
+  each have an entry of their own and each make their own call the first time, as without the
+  cache.
+- **Resume and the baseline.** The cache is not part of what a reused verdict depends on, so a
+  finished case is skipped as before and turning the cache on or off keeps earlier results; a
+  run compares with a [baseline](#comparing-with-a-baseline) as before.
+- **Not for conversations yet.** The cache does not hold a [conversation](#conversations)'s turns,
+  scripted or played by a [simulated user](#simulated-users), so a run whose cases include one is
+  refused with the cache on, before any case: run it with `--no-cache`, or without a `cache`
+  block. A body that uses `{{session_id}}`, `{{history}}` or `{{messages}}` is cached as usual for
+  cases of one input.
+- **Suite-file runs only.** The pytest gate (`assert_gate`, `assert_checks`) does not cache. In
+  Python, every judge factory takes `cache=`, a `martian.evals.cache.ModelCallCache`.
+
+A run with the cache on says so wherever its result is read, so a replayed result is never taken
+for a fresh one:
+
+| Where | What |
+| --- | --- |
+| `summary.json` | `cache`: `folder`, `ttl_seconds`, `functions`, and for `target` and for `judge` this run's `hits` (replies from the cache), `calls` (requests sent to the model) and `stored` (replies written to the cache), or `null` when the suite makes no such call that the cache holds. A run without the cache has no `cache` |
+| `matrix.json` | Each combination's own counts in its `summary.cache` |
+| The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
+| The local Evals UI's data folder | The run's `provenance.cache`: `on`, the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled. The Evals UI's run routes show only `on` and the counts, never the folder |
+| `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call. A panel is marked only when every member was replayed; its tokens are those of the members that made a call |
 
 ## Conversations
 
@@ -1218,7 +1512,61 @@ a group, such as paraphrases of one attack, the label can overstate the evidence
 | --- | --- |
 | `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
-| `martian evals run` | Nothing. No command compares two runs; open them in `martian ui` and use Compare |
+| `martian evals run --baseline DIR` | The label for the cases' verdicts, under the table and in `comparison.json`, and the gate follows it ([comparing with a baseline](#comparing-with-a-baseline)) |
+| The evals action's [pull-request comment](gate-and-ci.md#compared-with-the-last-result-of-main) | The label against the last result of `main`, and each case that went from pass to fail |
+
+### Comparing with a baseline
+
+`martian evals run evals.yaml --baseline DIR` (`run_suite(path, baseline=DIR)` from
+`martian.evals.runner`) compares a run with an earlier run of the suite, whose output folder is
+`DIR`, from the files alone: no data folder or Evals UI is needed, so CI can keep the earlier
+run's `verdicts.json` and nothing else. `martian.evals.baseline` does the comparison.
+
+```bash
+martian evals run evals.yaml --output results/main             # the baseline, such as main
+martian evals run evals.yaml --output results/pr --baseline results/main
+```
+
+- **Read first.** `DIR/verdicts.json` is read before any case runs. A folder without one, or a
+  file this SDK did not write, stops the run with exit `2`.
+- **Pairs.** A case pairs with the baseline's case of the same id when its inputs and expectations
+  are the same and both runs have a verdict for it. The verdicts compare by the exact McNemar test,
+  as above, so a few changed cases are always within noise. A case new since the baseline, one
+  whose inputs or expectations changed, and one without a verdict in either run are not paired;
+  baseline cases this run did not have are counted as missing. With repeats, a pair is of the
+  cases' combined verdicts.
+- **The gate.** With a baseline the exit code follows the comparison: `1` when the change is
+  worse than noise, when a paired case newly fails a security check, or when a case with no pair
+  failed, since there is nothing to compare it with; otherwise `0`, even when cases failed in
+  both runs or a few went from pass to fail on other checks. A case without a verdict, or a run
+  that [stopped at a limit](#run-a-suite-file-locally) before a case, still exits `2`; a stopped
+  run's `verdicts.json` and `comparison.json` hold only the cases it finished. Without
+  `--baseline` the run is gated on its own, as before.
+- **Security checks, case by case.** A leak is never noise. A paired case that fails a
+  [security check](#repeated-attempts) it passed in the baseline, or that the baseline did not
+  have, fails the gate on its own, whatever the label and also when the case already failed
+  another check in the baseline. A case that failed the same security check in both runs is a
+  known failure. The run's own `verdicts.json` names its security checks, the checks whose type is
+  in `martian.evals.runner.SECURITY_CHECKS` and the [`python` checks](#custom-python-checks)
+  marked `security: true`, so the rule follows the suite as it is now.
+- **What it reports.** The command prints the label, the counts and the p-value under the table,
+  then the cases that went from pass to fail with their failed checks, the cases that newly failed
+  a security check, the cases it could not pair and the failed ones among them. `comparison.json`
+  holds the same: `label`, `significance` (the paired comparison's fields, as
+  `GET /v1/evals/compare` returns them), `regressed` (each case's id and each failed check's
+  reason, `null` when the reason is not kept), `improved`, `security_regressed` (each case that
+  newly failed a security check, with those checks' reasons), `new`, `changed`, `unverified`,
+  `missing`, `unpaired_failures`, `checks` (the checks `added`, `removed` and `changed` since the
+  baseline), `attempts` and `gate`.
+- **A changed suite.** A check added, removed or redefined, or a different number of attempts per
+  case, changes what a verdict means, so the label measures that change as well as the system's.
+  The comparison names such changes rather than refusing to compare. An LLM judge check is
+  redefined by its criteria, `judge.model` and `judge.inference_params`; a
+  [panel](#a-panel-of-judges) check by its members and `judge.inference_params`, not by
+  `judge.model`, which it does not use.
+- **A matrix.** Each combination is compared with the same combination of the baseline, and
+  one the baseline has no result of is gated on its own
+  ([a matrix of prompts and models](#a-matrix-of-prompts-and-models)).
 
 ### OpenAI-compatible endpoints
 
@@ -1306,7 +1654,9 @@ A panel names 2 to 9 different models. Name an odd number, so that a full panel 
 judge is a model call, so a panel of three costs three single judges, and a run's
 `max_judge_tokens` ([time limits and budgets](#run-a-suite-file-locally)) counts the tokens of
 every member that gave a verdict, which the panel's feedback adds up; a member that gave a verdict
-and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge. The rule reads pass/fail
+and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge.
+With the [cache of model calls](#a-cache-of-model-calls) on, each member's call is cached on its
+own, by its model, and a member replayed from the cache counts 0 tokens. The rule reads pass/fail
 verdicts, which every SDK judge gives. MLflow's own ensemble (`make_scorer_ensemble` with
 `majority_vote` in `mlflow.genai.scorers`) fails when any member errors and breaks a tie by
 sorting the answers, so the panel has its own rule.
@@ -1498,10 +1848,17 @@ who answered shared ones. An answer of another kind than the question's is count
 - **How many items it rests on.** Below 30 shared items (`minimum`, `MINIMUM_LABELLED`) the
   `status` is `too_few`: the counts, and `agreed` for pass/fail and categories, are given, and
   `method` and every rate, interval and coefficient are `null`, as for a judge.
-- **What it does not say.** The core does not hide one reviewer's answer from the next, so a second
-  reviewer may see the first answer before giving theirs, which makes people look more alike than
-  they are. The local edition (`martian ui`) is Community, with no review queues, and has one
-  user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
+- **Blind answers.** In an ordinary queue a second reviewer may read the first answer before giving
+  theirs, which makes people look more alike than they are. A queue with
+  [blind double review](#blind-double-review) hides it, and records each reviewer's first answer
+  to an item as given blind (`blind` on the review). A blind queue's report compares each
+  reviewer's answer given blind, not one they gave after reading the others, and says so with
+  `blind: true`. Across queues, a question that a blind queue asks is compared on the blind
+  queues' blind answers only, with `blind: true`; a question no blind queue asks is compared on
+  every queue's answers, with `blind: false`. The judge report's `reviewer_agreement` is the
+  latter, so a judge's ceiling rests on blind answers once any queue asks its question blind.
+- **Who has one.** The local edition (`martian ui`) is Community, with no review queues, and has
+  one user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
   organisation's members does.
 - **Per queue and per question.** The route reports each queue with a report per question, and
   each question across every queue that asks it, its kind the newest such queue's. The judge
@@ -1512,14 +1869,46 @@ who answered shared ones. An answer of another kind than the question's is count
 from martian.evals.agreement import queue_agreement, question_agreement
 
 # reviews: every link of each review chain (records.list_reviews(..., current_only=False));
-# queues: the ReviewQueue objects they answer.
-for report in queue_agreement(reviews, queues):
+# queues: the ReviewQueue objects they answer; blind: the ids of the blind queues among them
+# ({q.id for q in records.list_blind_queues(...)}).
+for report in queue_agreement(reviews, queues, blind=blind):
     for found in report.questions:
-        print(report.name, found.question, found.status, found.shared, found.method, found.kappa)
+        print(report.name, found.question, found.blind, found.status, found.shared, found.method, found.kappa)
 ```
 
 `compare_reviewers` compares answers given as one mapping of reviewer to answer per item, and
 `fleiss_kappa` and `intraclass_correlation` are the coefficients for more than two reviewers.
+
+### Blind double review
+
+When people can read each other's answers, their agreement goes up for the wrong reason. A review
+queue with blind double review keeps each reviewer from reading the other reviewers' answers to an
+item until they have given their own (`martian.evals.server.blind`). It is created with the evals
+core's own route `POST /v1/evals/blind-review-queues`, which takes the body of
+`POST /v1/evals/review-queues` and needs the same `review_queues` key and `createReviewQueues`;
+a queue is blind from the start and stays so. Every queue the routes answer with has `blind`.
+
+- **Hidden until answered.** An item is a case result and one of the queue's questions. A reader
+  with no complete answer of their own to it reads only its queue's pending review and their own
+  reviews of it, on every route that returns reviews or what they leave: `GET /v1/evals/reviews`, a
+  run's workbench (its review history, current reviews and the human scores among its
+  assessments), a conversation run's turns, and a judge calibration's labelled items, whose
+  `label` they get as `null`. Once they have answered, they read every answer to it.
+- **Answering.** The review drawer sends the review it showed as `previous_id`, as for any queue;
+  in a blind queue the answer is added after the item's newest review, which may be another
+  reviewer's, so the item keeps one chain and its current review is still the newest answer.
+- **Not on the trace.** A blind queue's answers are not copied to the case's trace as feedback:
+  every trace read and search, a trace export and the MLflow UI would show them to anyone. They
+  stay in the record store, with the run's scores.
+- **Given blind.** A reviewer's first complete answer to an item is recorded with `blind: true`;
+  any later answer of theirs, given once they could read the others', and every answer in a queue
+  that is not blind, has `blind: false`. Reviews carry `blind` on every route.
+- **What it does not hide.** A queue's progress (how many items have answers) and the agreement
+  reports, which give counts over items rather than an item's answers. The record store keeps the
+  queue's blind mode (`BlindQueue`, migration `0014`), not the queue's store, so every store
+  binding keeps it, and deleting its run deletes it. A [data export](data-export.md) carries the
+  mode and every answer, as the organisation's own copy of its data: it is a command and a function
+  of the operator's, not a route a reviewer reads.
 
 ### Calibration
 
@@ -2393,7 +2782,7 @@ def cites_reason_code(outputs):
 | `file` | Yes | The Python file, relative to the suite file, loaded as a function target's file is |
 | `function` | Yes | The function's name in that file |
 | `min_score`, `max_score` | When the function returns a number | The number passes when it is at least `min_score` and at most `max_score`; give either or both |
-| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`. Default `false`: the suite's rule |
+| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`, and compared with a [baseline](#comparing-with-a-baseline) a case that newly fails it fails the gate on its own. Default `false`: the suite's rule, and the baseline's noise rule |
 
 Without a `name` the check's label is `python`, so give each python check a name.
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from sqlalchemy import create_engine, text, update
 
 from martian.evals.model import Case, CaseResult, Run, ScoringJob, StoreRef, Target
 from martian.evals.records import Event
+from martian.evals.records import queue as queue_module
 from martian.evals.records.queue import RECORDING, SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import work_queue
@@ -69,6 +71,28 @@ async def eventually(check: Callable[[], Any], seconds: float = SECONDS) -> None
         await asyncio.sleep(0.05)
 
 
+class Clock:
+    """The queue's clock, which stands still until the test moves it on."""
+
+    def __init__(self) -> None:
+        self.now = datetime.now(UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    """Leases and due times read on a clock the test moves, so none runs out, or comes due, sooner
+    or later than the test says however slow the machine is."""
+    found = Clock()
+    monkeypatch.setattr(queue_module, "_now", found)
+    return found
+
+
 # --- the queue -------------------------------------------------------------------------------
 
 
@@ -90,13 +114,16 @@ class QueueContract:
         await queue.done(second)
         assert await queue.pending() == 0
 
-    async def test_a_claim_holds_its_work_until_its_lease_runs_out(self, queue: SqlWorkQueue) -> None:
+    async def test_a_claim_holds_its_work_until_its_lease_runs_out(self, queue: SqlWorkQueue, clock: Clock) -> None:
         await queue.put(ORG_A, "p1", "run:r1", "run", {})
         held = await queue.claim(0.6)
         assert held is not None and await queue.claim(60) is None
         assert await queue.held(ORG_A, "p1", "run:r1") and not await queue.held(ORG_B, "p1", "run:r1")
+        clock.advance(0.4)
         assert await queue.renew(held, 0.6)
-        await asyncio.sleep(1)
+        clock.advance(0.4)  # past the first lease: the renewal holds it
+        assert await queue.held(ORG_A, "p1", "run:r1") and await queue.claim(60) is None
+        clock.advance(0.3)
         assert not await queue.held(ORG_A, "p1", "run:r1")
         taken = await queue.claim(60)
         assert taken is not None and (taken.id, taken.attempt) == ("run:r1", 2) and taken.token != held.token
@@ -116,16 +143,18 @@ class QueueContract:
         again = await queue.claim(60)
         assert again is not None and again.attempt == 1 and again.token != first.token
 
-    async def test_rescheduled_work_is_not_taken_before_it_is_due(self, queue: SqlWorkQueue) -> None:
+    async def test_rescheduled_work_is_not_taken_before_it_is_due(self, queue: SqlWorkQueue, clock: Clock) -> None:
         await queue.put(ORG_A, "p1", "monitor:m1", "monitor", {"n": 1})
         first = await queue.claim(60)
         assert first is not None and first.attempt == 1
-        assert await queue.reschedule(first, datetime.now(UTC) + timedelta(seconds=0.6))
-        assert not await queue.reschedule(first, datetime.now(UTC))  # the claim no longer holds it
+        assert await queue.reschedule(first, clock.now + timedelta(seconds=0.6))
+        assert not await queue.reschedule(first, clock.now)  # the claim no longer holds it
         # Not due yet: no claim takes it, and the queue counts it as nothing to wait for.
         assert await queue.claim(60) is None and await queue.pending() == 0
         await queue.put(ORG_A, "p1", "monitor:m1", "monitor", {"n": 99})  # still in the queue: unchanged
-        await asyncio.sleep(0.8)
+        clock.advance(0.5)
+        assert await queue.claim(60) is None and await queue.pending() == 0
+        clock.advance(0.1)
         assert await queue.pending() == 1
         again = await queue.claim(60)
         assert again is not None and (again.work, again.attempt) == ({"n": 1}, 1)
@@ -484,8 +513,9 @@ async def test_a_stopped_worker_gives_its_work_back_and_the_next_one_finishes_it
 
 
 async def test_a_worker_whose_claim_another_took_stops_its_work(
-    records: SqlRecordStore, queue: SqlWorkQueue, tmp_path: Path, database: str
+    records: SqlRecordStore, queue: SqlWorkQueue, tmp_path: Path, database: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.WARNING, logger="martian.evals.worker")
     store = MemoryStore()
     run, work = await queued_run(store, records)
     worker = queue_worker(store, records, queue, queue_fixture.waiting_agent(tmp_path), lease_seconds=0.6)
@@ -506,7 +536,11 @@ async def test_a_worker_whose_claim_another_took_stops_its_work(
                 .values(token="another-worker", lease_expires_at=datetime(2999, 1, 1, tzinfo=UTC))
             )
         engine.dispose()
-        await asyncio.sleep(0.6)  # the worker's next renewal finds the claim gone, and stops the run
+
+        async def stopped() -> bool:
+            return "Another worker took" in caplog.text
+
+        await eventually(stopped)  # the worker's next renewal found the claim gone, and stopped the run
         (tmp_path / "release").touch()
         await asyncio.sleep(0.6)
         assert calls(tmp_path, "faq-2") == [] and (await stored(records, run)).counts.passed == 0
@@ -577,7 +611,11 @@ async def test_scoring_jobs_publish_their_progress_as_runs_do(records: SqlRecord
             Work(kind="scoring", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run.id, job_id="j1")
         )
         await worker.drain()
-        await asyncio.sleep(0.3)  # let the listener read the last events
+
+        async def read_the_last_events() -> bool:
+            return ("run", "completed", 3) in seen and ("scoring_job", "partial", 3) in seen
+
+        await eventually(read_the_last_events)
     finally:
         await worker.stop()
         following.cancel()

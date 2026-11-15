@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from time import monotonic
 from typing import Any, Literal
 
+from martian.evals.cache import HIT_KEY
 from martian.evals.model import RunLimits
 
 INPUT_TOKENS = "mlflow.assessment.judgeInputTokens"
@@ -28,10 +29,11 @@ _CALLER: dict[Spender, str] = {"judges": "the judge", "simulator": "the simulate
 
 def reported_tokens(metadata: Mapping[str, Any]) -> int | None:
     """The tokens one model call used, input and output together, from its metadata, or None when
-    its provider reported none."""
+    its provider reported none. A call replayed from the cache of model calls (``martian.cache:
+    hit``, :mod:`martian.evals.cache`) made no call, so it used none: 0."""
     sent, received = metadata.get(INPUT_TOKENS), metadata.get(OUTPUT_TOKENS)
     if sent is None or received is None:
-        return None
+        return 0 if metadata.get(HIT_KEY) == "hit" else None
     try:
         return int(sent) + int(received)
     except (TypeError, ValueError):
@@ -45,7 +47,8 @@ class Budget:
     and output together: each judgment's and, in ``martian evals run``, each reply of the simulated
     user's. ``max_judge_tokens`` counts them all; :attr:`used` keeps them apart. A call that
     reports none leaves a token limit unkeepable, so a run with one stops then. A call that fails
-    reports nothing and counts nothing."""
+    reports nothing and counts nothing, and a call replayed from the cache of model calls counts 0.
+    Time is the run's wall time, so a replayed call counts only the moment it took to read."""
 
     def __init__(self, limits: RunLimits) -> None:
         self.limits = limits
