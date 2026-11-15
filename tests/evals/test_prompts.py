@@ -168,6 +168,13 @@ async def test_a_version_lists_the_runs_whose_provenance_names_it(core):
     )
     assert detail["run_count"] == 3
     assert client.get("/v1/evals/prompts").json()["items"][0]["run_count"] == 3
+    # A version names its runs through each run's own provenance, so a deleted run (the record
+    # store's delete_run, as retention removes one) is gone from its versions too.
+    await records.delete_run(SINGLE_USER, "default", "00000000-0000-4000-8000-000000000001")
+    detail = client.get("/v1/evals/prompts/terse").json()
+    runs = {v["version"]: [run["run_code"] for run in v["runs"]] for v in detail["versions"]}
+    assert runs == {1: ["evals-3", "evals-1"], 2: []}
+    assert detail["run_count"] == 2
 
 
 def test_a_matrix_run_records_the_prompt_version_each_combination_used(tmp_path):
