@@ -1,8 +1,9 @@
 # Evals core
 
 `martian.evals.server` is the evals core: the `/v1/evals` API that the local edition and the
-Martian server will both serve. It runs on its own, with no Martian backend, and needs only
-`martian-sdk[evals]`.
+Martian server will both serve, and OpenTelemetry's `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). It runs on its own, with no Martian backend, and
+needs only `martian-sdk[evals]`.
 
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
 builds it with `create_app` and supplies these:
@@ -273,12 +274,15 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   question.
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
-  spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
-  spans are not one tree is refused with `409`. A search row's `request` and `response` are what
-  the store's search returns, which on the MLflow binding are MLflow's previews of at most 1,000
-  characters. The trace's detail has them whole, in `info.request_preview` and
-  `info.response_preview`, and when a search shows a shortened preview, the detail's
-  `info.trace_metadata` says so: `martian.request_preview_truncated` or
+  spans as the UI's span inspector reads them (span times are epoch milliseconds). A span's
+  `type`, `model`, `token_usage`, `inputs` and `outputs` are what the
+  [trace conventions](#trace-conventions) mapping reads from it, and `info.trace_metadata` names
+  the mapping version as `martian.trace_mapping`. A trace whose spans are not one tree, or whose
+  mapping version this release does not have, is refused with `409`. A search row's `request`
+  and `response` are what the store's search returns, which on the MLflow binding are MLflow's
+  previews of at most 1,000 characters. The trace's detail has them whole, in
+  `info.request_preview` and `info.response_preview`, and when a search shows a shortened
+  preview, the detail's `info.trace_metadata` says so: `martian.request_preview_truncated` or
   `martian.response_preview_truncated` is `"true"`. The frozen contract has no field for it, so it
   is trace metadata.
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
@@ -696,6 +700,16 @@ endpoint, and keeps the local edition's default in its data folder.
   [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
+- `martian evals import inspect` records Inspect AI logs there as runs:
+  [imported Inspect logs](#imported-inspect-logs).
+- `martian evals import promptfoo` records promptfoo results there as runs, and
+  `martian evals convert promptfoo` writes a promptfoo config as suite files:
+  [promptfoo results and configs](#promptfoo-results-and-configs).
+- `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
+  check: [copied MLflow stores](#copied-mlflow-stores).
+- `martian evals export` writes everything an organisation holds as JSON Lines files with a
+  manifest, and `martian evals import martian` loads them into a fresh install:
+  [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own route for the attempts of repeated cases, with the run's reliability and its
   flaky cases.
@@ -728,12 +742,19 @@ endpoint, and keeps the local edition's default in its data folder.
   than its `limit`, or none, and still have a `next_cursor`; only a `next_cursor` of `None` ends
   a search.
 - `MemoryStore` is the reference implementation, in memory.
+- [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
+  OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
+  `record_trace`.
+- [OpenTelemetry traces](#opentelemetry-traces): `POST /v1/traces` takes OTLP/HTTP traces, in
+  protobuf or JSON, and records them through the store for the edition's principal.
 - `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
   store in the same process, with no MLflow server: SQLite for the local edition, Postgres for
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, scores kept with their trace, versioned scorers,
+  search filters and paging, sessions and users, traces in each attribute style mapped with their
+  attributes kept, scores kept with their trace, the times given to traces and scores kept as
+  given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -775,11 +796,184 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   `TRACE_USER`, which `mlflow.update_current_trace(session_id=..., user=...)` writes).
   `record_trace` writes `Trace.session_id` and `Trace.user_id` to the same keys, so traces from
   Martian runs and traces an application records with MLflow tracing group the same way. The
-  server reads the same keys from its MLflow server. OpenTelemetry's attributes for sessions and
-  users are not read yet; mapping them is MorningHQ/martian-notes#150.
+  server reads the same keys from its MLflow server.
+- A trace that names no session or user gets them from its spans' `gen_ai.conversation.id`,
+  `session.id` and `user.id` attributes ([trace conventions](#trace-conventions)).
 
 The core's `POST /v1/evals/sessions/search` answers with this method's `SessionSearch` (see
 [read routes](#read-routes)).
+
+## Trace conventions
+
+Applications describe a model call, a tool call or an agent step in span attributes, in one of
+three styles: the OpenTelemetry GenAI semantic conventions, OpenInference, or MLflow's own span
+attributes. `martian.evals.trace_conventions` maps all three onto the trace fields the core reads,
+through one versioned table. The current table is `martian-trace-mapping-v1` (`MAPPING_VERSION`),
+and it follows these releases:
+
+| Style | Release mapped |
+| --- | --- |
+| OpenTelemetry GenAI (`gen_ai.*`) | Semantic conventions 1.41.0. Release 1.42.0 moved the GenAI conventions to their own repository, `open-telemetry/semantic-conventions-genai`, which has not released yet. Two older keys are read too: `gen_ai.system` (before 1.37.0) and `gen_ai.usage.prompt_tokens` / `completion_tokens` (before 1.27.0) |
+| OpenInference | `openinference-semantic-conventions` 0.1.45 |
+| MLflow | The span attributes of MLflow 3.18, the release the SDK pins |
+
+A field's keys are tried in the order listed, styles in the order of the columns, and the first
+that gives a value wins:
+
+| Field | OpenTelemetry GenAI | OpenInference | MLflow |
+| --- | --- | --- | --- |
+| Span kind | `gen_ai.operation.name` | `openinference.span.kind` | `mlflow.spanType` |
+| Model | `gen_ai.response.model`, `gen_ai.request.model` | `llm.response.model_name`, `llm.model_name`, `llm.request.model_name`, `embedding.model_name` | `mlflow.llm.model` |
+| Provider | `gen_ai.provider.name`, `gen_ai.system` | `llm.provider`, `llm.system` | `mlflow.llm.provider` |
+| Input tokens | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens` | `llm.token_count.prompt` | `input_tokens` of `mlflow.chat.tokenUsage` |
+| Output tokens | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens` | `llm.token_count.completion` | `output_tokens` of `mlflow.chat.tokenUsage` |
+| Total tokens | none (input plus output) | `llm.token_count.total` | `total_tokens` of `mlflow.chat.tokenUsage` |
+| Inputs | `gen_ai.input.messages`, `gen_ai.tool.call.arguments`, `gen_ai.retrieval.query.text` | `input.value` (decoded when `input.mime_type` is `application/json`), then the flattened `llm.input_messages.*` | `mlflow.spanInputs` |
+| Outputs | `gen_ai.output.messages`, `gen_ai.tool.call.result`, `gen_ai.retrieval.documents` | `output.value`, then the flattened `llm.output_messages.*` | `mlflow.spanOutputs` |
+| Tool executed | `gen_ai.tool.name`, `gen_ai.tool.call.id` | `tool.name`, `tool.id` | A `TOOL` span's name |
+| Tool calls asked for | `tool_call` parts of `gen_ai.output.messages` | `message.tool_calls` of `llm.output_messages.*` | OpenAI's chat format in the outputs (`choices[].message.tool_calls`) |
+| Session | `gen_ai.conversation.id` | `session.id` | `session.id`, as MLflow writes it on a root span it exports |
+| User | `user.id` (OpenTelemetry's general attribute) | `user.id` | `user.id` |
+
+Span kinds are MLflow's span types. OpenTelemetry's operations map as `chat` to `CHAT_MODEL`,
+`text_completion` and `generate_content` to `LLM`, `embeddings` to `EMBEDDING`, `retrieval` to
+`RETRIEVER`, `execute_tool` to `TOOL`, `create_agent` and `invoke_agent` to `AGENT` and
+`invoke_workflow` to `WORKFLOW`. OpenInference's kinds keep their names, except `PROMPT`,
+`DECISION` and `UNKNOWN`, which MLflow has no type for and are not mapped. A value the table does
+not list is not mapped either. Structured values are read whether they arrive as structures or
+as JSON text, and MLflow's JSON-encoded values are decoded.
+
+- `map_attributes(attributes, version=...)` is a pure function over one span's attributes. It
+  returns `SpanFields`: the kind, model, provider, input, output and total tokens (input plus
+  output when no total is reported), inputs, outputs, `tool` (the call a tool span executes, with
+  its inputs as the arguments) and `tool_calls` (the calls a model span asked for), and the
+  session and user. `map_span(span)` adds what the span's own fields say: a `Span`'s kind, inputs
+  and outputs are MLflow's span type, inputs and outputs, and win over its attributes. A kind of
+  `UNKNOWN` counts as unset.
+- `map_trace(trace)` fills what a trace leaves unset from its spans: each span's kind, inputs and
+  outputs; the model, session and user the first span (by start time) gives; the tokens, adding
+  each span's total but leaving out a span whose ancestor reports a total, as MLflow does; and the
+  request and response, as the root span's inputs and outputs in text or JSON. It records the
+  table's version in the trace's metadata as `martian.trace_mapping`. A trace that already names a
+  version is left as it is, so it keeps the fields it was mapped with.
+- **Nothing is dropped.** The mapping never removes or rewrites an attribute, so attributes no
+  convention defines stay on their spans and are shown in the span view's `attributes`. The
+  in-process binding keeps `mlflow.spanType`, `mlflow.spanInputs` and `mlflow.spanOutputs` as the
+  span's kind, inputs and outputs, and MLflow adds its own `mlflow.*` attributes to the spans it
+  stores.
+- **Where it applies.** Every store binding's `record_trace` maps the trace it stores, so traces
+  from `martian evals run`, the worker and the [OpenTelemetry endpoint](#opentelemetry-traces)
+  are mapped as they are recorded. The in-process binding maps a trace that names no
+  version as it reads it, such as one an application recorded with MLflow tracing; a search reads
+  no spans, so such a trace has its model only when it is read on its own. The span view of
+  `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
+  the trace names (the current one when it names none), and refuses a version this release does
+  not have with `409`.
+- **Tool calls** are spans in the shared model: a `TOOL` span whose inputs are the arguments and
+  whose outputs are the result, and the calls a model asked for are in its output messages. The
+  span view keeps the server's fields, so the normalized `tool` and `tool_calls` of `SpanFields`
+  are not in it.
+- **Not mapped** by `martian-trace-mapping-v1`: span events (the model keeps none, so messages that
+  GenAI conventions before 1.37.0 recorded as events are not read), cost (the span view shows
+  `mlflow.llm.cost` as before), cache and reasoning token counts, server tool calls, and tool calls
+  in MLflow outputs other than OpenAI's chat format.
+
+A convention change is a new table, never an edit to a released one. Add a `MappingTable` with a
+new version, such as `martian-trace-mapping-v2`, with the rules and kinds it changes; add it to
+`TABLES` and make `MAPPING_VERSION` its version. Keep every earlier table in `TABLES`: traces
+mapped with it keep showing what they showed, and only traces recorded afterwards, or read without
+a version, use the new one. `tests/evals/test_trace_conventions.py` maps a hand-written sample turn
+in each style (`tests/evals/trace_samples.py`); the store contract records the same samples on every
+binding, and `tests/evals/test_read_routes.py` reads them through the trace routes.
+
+## OpenTelemetry traces
+
+`POST /v1/traces` takes traces over OTLP/HTTP, OpenTelemetry's protocol, so an application
+instrumented with any OpenTelemetry SDK records its traces through the store: they show in
+**Traces**, and their conversations in **Sessions**, mapped with the
+[trace conventions](#trace-conventions). It is for installs whose store runs in the core's
+process, the local edition and on-premises on `MlflowStore`, which have no MLflow server to take
+OpenTelemetry. It is the core's own route (`martian.evals.server.otlp`), beside the server's
+contract, and every edition that builds the core serves it. Traces only: there is no
+`/v1/metrics` or `/v1/logs`.
+
+| Request | |
+| --- | --- |
+| Path | `/v1/traces`, OTLP/HTTP's path for traces, so an exporter given only the server's address (`OTEL_EXPORTER_OTLP_ENDPOINT`) finds it. gRPC is not served |
+| Body | An `ExportTraceServiceRequest`, as `Content-Type: application/x-protobuf` (binary protobuf) or `application/json` (OTLP's JSON encoding, trace and span ids in hex) |
+| `Content-Encoding` | `gzip`, `deflate` or none |
+| `x-martian-project-id` | The project the traces go to, a project id. Without it, the default project, created on its first write |
+| Credentials | Those the edition's principal provider reads, as OTLP headers |
+
+**Who may send traces.** The request's principal is the edition's `principal` dependency, as on
+every route, so the traces go into the principal's organisation, which no other organisation sees.
+
+- A server whose sign-in refuses a request without credentials refuses it here too, with its own
+  status (`401`) and headers, before the body is read. An exporter sends the credential as a
+  header, for example `OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer%20<token>`. A
+  credential the exporter can keep, rather than a browser session, is the edition's to issue.
+- The principal's most privileged role must be one that writes: owner, admin or member. A viewer
+  is refused with `403` ("Requires member role"). The endpoint has no capability of its own,
+  because the capability table is the contract's.
+- **In the local edition, authentication means none.** It has one user and no sign-in, so the
+  endpoint takes the single local user without credentials, like every other route. What keeps
+  others out is what keeps them out of the rest of the local API: it listens on 127.0.0.1 and
+  answers only the `Host` names `127.0.0.1` and `localhost`. A web page cannot send it traces
+  either: OTLP's content types need a CORS preflight, which the server never answers, and a body
+  of any other type is refused with `415` before it is read.
+
+**How spans become traces.**
+
+- Spans are grouped by trace id. A trace's id is `tr-` and the OpenTelemetry trace id in hex,
+  MLflow's form, which the Traces routes take; its spans keep their span ids.
+- The root span, the one without a parent, gives the trace its name, start, latency and state:
+  `ERROR` when the root's status is an error, `OK` otherwise. Everything else (span kinds, model,
+  tokens, session, user, request and response) is the trace conventions mapping, which the
+  store's `record_trace` applies. On the in-process binding the request and response are kept
+  as for any trace: whole in the root span the binding writes, and as previews of at most 1,000
+  characters in a search, flagged in the trace's metadata
+  ([the in-process binding](#the-in-process-binding)).
+- Span attributes are kept as they arrive; bytes become base64 text. A span's status is `OK`,
+  `ERROR` or unset, as sent. Resource and scope attributes, span events and links are not kept:
+  the shared model has no place for them.
+- **Spans of one trace in several requests.** An exporter sends spans as they end, so one trace's
+  spans arrive in several requests, children usually before their root. Each request merges its
+  spans into the trace already stored, a span sent again replacing itself, and records the trace
+  again, so the mapping reads all of its spans. The trace keeps its run, tags (such as its triage
+  status) and scores, and on the in-process binding one root span of the binding's, rewritten
+  with the request and response of each recording. Until its root span arrives the trace is
+  `IN_PROGRESS`, named by its id, and its detail answers `409`, because its spans are not yet one
+  tree; a trace whose root span is never sent stays so. Writes are serialised within one process.
+  Processes sharing one store do not coordinate theirs.
+
+**Answers.**
+
+| Status | When |
+| --- | --- |
+| `200` with an empty `ExportTraceServiceResponse`, in the request's encoding | Every span was written |
+| `200` with `partial_success` | Some spans were rejected and the rest written. `rejected_spans` counts them and `error_message` says why: a span without a valid trace, span or parent span id, or a trace the store refuses, with the store's reason. As OTLP defines, an exporter does not send them again |
+| `400` | The body does not decode, a compressed body is not valid, or `x-martian-project-id` is not a project id |
+| `401` | The edition's sign-in refuses the request |
+| `403` | The principal's role does not write |
+| `404` | `x-martian-project-id` names no project |
+| `409` | The project is archived |
+| `413` | The body is larger than 16 MiB (`MAX_BODY_BYTES`), as sent or decompressed |
+| `415` | Another `Content-Type` or `Content-Encoding` |
+
+A refusal's body is the `google.rpc.Status` OTLP asks for, in the request's encoding, carrying
+only its `message`: `{"message": "Requires member role"}` in JSON.
+
+`tests/evals/test_otlp.py` exports with the OpenTelemetry SDK's OTLP/HTTP exporter
+(`opentelemetry-exporter-otlp-proto-http`, a development dependency) to the local edition on a
+loopback port, each span in a request of its own, and reads the traces back through the Traces
+and Sessions routes in each attribute style. It also exports to a core whose sign-in takes
+bearer tokens, with and without one, and checks spans of one trace in several requests on both
+stores, partial success, the project header and each refusal. On the in-process binding it sends
+a trace whose root span's request and response are longer than a preview in three batches and
+checks after each that MLflow holds one root span of the binding's with them whole, that a search
+shows the flagged previews, and that an application span carrying the root span's marker
+attribute stays one of the trace's spans. The core reads the protobuf
+messages with `opentelemetry-proto`, which `mlflow-skinny` installs.
 
 ## The in-process binding
 
@@ -810,21 +1004,34 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     metrics.
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
     tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
-    metadata keys, [above](#sessions-and-users). MLflow needs every span's start time and starts
-    a trace at its earliest span, so a span with no start time is written at its trace's request
-    time and reads back with no times; it never moves the trace's request time or latency.
+    metadata keys, [above](#sessions-and-users). A span's kind, inputs and outputs are MLflow's
+    span type, inputs and outputs, and its other attributes are kept as they are; an attribute
+    never overwrites the store's own. MLflow needs every span's start time and starts a trace at
+    its earliest span, so a span with no start time is written at its trace's request time and
+    reads back with no times; it never moves the trace's request time or latency.
   - A trace's request and response are kept as MLflow tracing keeps them: whole as the inputs
     and outputs of the trace's root span, and as MLflow's previews in `trace_info`. The binding
     writes that root span, named after the trace, at the trace's request time and state, with the
     trace's own spans as its children; it does not read it back as one of the trace's spans. A
     trace recorded in progress or in an unknown state keeps that state, which MLflow would
-    otherwise take from the root span.
+    otherwise take from the root span. Recording a trace again, as the
+    [OpenTelemetry endpoint](#opentelemetry-traces) does with each batch, rewrites that root span
+    in place, so a trace has one.
+  - A trace's mapping version is its `martian.trace_mapping` metadata, and a trace without one is
+    mapped as it is read ([trace conventions](#trace-conventions)). The mapping reads only the
+    trace's own spans, never the root span the binding writes: `record_trace` maps the trace
+    before it writes that span, so the span holds the request and response the mapping gave, and
+    `get_trace` sets the span aside, taking the request and response from it, before it maps. A
+    trace written before the mapping, with an empty request, is therefore given the request its
+    own root span's inputs give, as if it had been mapped when it was recorded. A trace MLflow
+    tracing recorded has no root span of the binding's and is mapped with all of its spans.
   - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
     a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
     gives as `native.id`). A trace recorded inside an MLflow run that is not a run's, such as one
     an application starts with `mlflow.start_run()`, belongs to no run.
-  - A score is a feedback assessment, and a registered scorer an MLflow scorer.
+  - A score is a feedback assessment, created at the score's `created_at` when it has one, and a
+    registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts, `martian/run.json` among them, are files in the run's folder,
@@ -878,14 +1085,18 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
-database and reads back through the binding their sessions, turns and users, and the run of a
-trace recorded inside a run's MLflow run. It checks that a page and a session search read only
-their own traces from MLflow for every filter MLflow has, that free text reads at most its bound
-a call and pages on, and that a cursor the store did not return is refused. It records a trace
-whose request and response are 100,000 characters each and checks, in MLflow's own reading,
-that they are whole in the root span and shortened in the previews. It starts a run with a
-157-character artifact root, reads runs an earlier release wrote in MLflow's layout, and checks
-that Postgres refuses a longer root before writing. That module belongs to the
+database and reads back through the binding their sessions, turns and users, the run of a
+trace recorded inside a run's MLflow run, and the mapping of a span's OpenInference attributes.
+It checks that a page and a session search read only their own traces from MLflow for every
+filter MLflow has, that free text reads at most its bound a call and pages on, and that a cursor
+the store did not return is refused. It records a trace whose request and response are 100,000
+characters each and checks, in MLflow's own reading, that they are whole in the root span and
+shortened in the previews. It records a trace that says nothing but its spans, and again with one
+more span, and checks that MLflow holds one root span with the request and response the mapping
+read from the trace's own root span, and that a trace recorded without a mapping version is
+mapped from its own spans as it is read. It starts a run with a 157-character artifact root,
+reads runs an earlier release wrote in MLflow's layout, and checks that Postgres refuses a longer
+root before writing. That module belongs to the
 [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
 written by one MLflow release reads back the same on the next.
 
@@ -968,9 +1179,15 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   holds an empty file per process working on a run, which that process holds an OS lock on
   ([runs whose process stopped](#runs-whose-process-stopped)).
   `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
-  and an application can record its traces there with MLflow tracing
-  ([below](#traces-from-an-application)). What another process writes while the UI is open shows
-  when a page reads again, since the UI gets no live event from it.
+  `martian evals import inspect` writes Inspect AI logs there as runs
+  ([imported Inspect logs](#imported-inspect-logs)), `martian evals import promptfoo` writes
+  promptfoo results there as runs ([promptfoo results and configs](#promptfoo-results-and-configs)),
+  `martian evals import mlflow` copies an MLflow tracking store there
+  ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
+  ([data export](#data-export)), and an application can record its traces there with MLflow
+  tracing or send them over OpenTelemetry ([below](#traces-from-an-application)). What another
+  process writes while the UI is open shows when a page reads again, since the UI gets no live
+  event from it.
 - The worker is `LocalWorker` (`martian.evals.local_runs`): each run started in the UI runs in a
   process of its own against a local target, scored by its suite with the SDK judge, and a
   finished one runs again with the same settings ([local runs](#local-runs)).
@@ -998,9 +1215,10 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   `session` is the bootstrap's `principal` with a `session_id`. Nothing checks the token. The
   route belongs to the local edition, not to the core: the Martian server answers the same call
   from its own sign-in.
-- Every path outside the API is a file of the built UI. The UI uses hash routes and relative
-  asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
-  the frontend commit it was built from.
+- The API is the core's `/v1/evals` routes, its `POST /v1/traces` for OpenTelemetry exporters,
+  the session call, and the local targets and runs under `/v1/local`. Every other path is a file
+  of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
+  origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
 - The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it. The container
@@ -1015,14 +1233,17 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
 when no `--ui-dir` is given, the container settings below with their warning, and an application's
-traces ([below](#traces-from-an-application)).
+traces recorded with MLflow tracing ([below](#traces-from-an-application)).
 
 ### Traces from an application
 
+An application's traces show in **Traces**, and their conversations in **Sessions**, in either of
+two ways: MLflow tracing writes them straight into the data folder, as below, or any OpenTelemetry
+SDK sends them to the running `martian ui` ([over OpenTelemetry](#over-opentelemetry)).
+
 An application instrumented with MLflow tracing (`@mlflow.trace`, `mlflow.start_span` or an MLflow
-autolog integration) can record its traces straight into the data folder. `martian ui` then shows
-them in **Traces**, and their conversations in **Sessions**. MLflow's own client writes them into
-the store's database; no other service runs. Start `martian ui` once first, or record a
+autolog integration) can record its traces straight into the data folder. MLflow's own client
+writes them into the store's database; no other service runs. Start `martian ui` once first, or record a
 `martian evals run`, so the data folder and its default project exist. Then start the application
 with these settings in its environment:
 
@@ -1052,6 +1273,9 @@ def answer(message: str, conversation: str, user: str) -> str:
 
 - A trace's session and user are the ones [above](#sessions-and-users). A trace without a session
   is in Traces only.
+- Spans may carry OpenTelemetry GenAI or OpenInference attributes, such as those of an
+  instrumentation library, beside MLflow's. The store maps them as it reads the trace, so the
+  span view shows their model, tokens, inputs and outputs ([trace conventions](#trace-conventions)).
 - A trace recorded inside the application's own MLflow run (`mlflow.start_run()`) belongs to no
   run in the UI; one recorded inside a run's MLflow run belongs to that run
   ([the in-process binding](#the-in-process-binding)).
@@ -1060,7 +1284,7 @@ def answer(message: str, conversation: str, user: str) -> str:
 - MLflow tracing sends traces in the background and sends the rest when the process exits;
   `mlflow.flush_trace_async_logging()` sends them sooner.
 - The database is a file on this machine, so this does not reach the container image or another
-  machine. An OpenTelemetry endpoint for those is MorningHQ/martian-notes#149.
+  machine. From those, send the traces [over OpenTelemetry](#over-opentelemetry).
 
 If the application names the experiment before the default project exists, MLflow creates the
 experiment itself, with its artifacts under the application's working folder, and the store does
@@ -1075,6 +1299,54 @@ python -c 'from mlflow import MlflowClient; c = MlflowClient(); c.rename_experim
 
 `tests/evals/test_local.py` runs such an application in a process of its own, with only these
 settings, and reads its traces, sessions and spans back through the local edition's routes.
+
+#### Over OpenTelemetry
+
+An application instrumented with an OpenTelemetry SDK, in any language, sends its traces to the
+running `martian ui` with the SDK's OTLP/HTTP exporter, at `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). Point the exporter at it with OpenTelemetry's
+own settings:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:7600/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+```
+
+| Setting | What it does |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The endpoint, whole. `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7600` says the same, since an exporter adds `/v1/traces` to it. With `--port`, use that port |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `http/protobuf` or `http/json`, for an SDK whose exporter would otherwise use gRPC, which is not served. Python's `opentelemetry-exporter-otlp-proto-http` sends protobuf whatever it says |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | Only for a project other than the default: `x-martian-project-id=<project id>`. No credentials: the local edition has no sign-in |
+
+In Python, with `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` installed:
+
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))  # reads the settings above
+trace.set_tracer_provider(provider)
+```
+
+- `martian ui` must be running while the application exports; an exporter that cannot reach it
+  drops the spans once its retries run out. A batch processor sends spans every few seconds and
+  the rest when the provider shuts down (`provider.shutdown()`, or `provider.force_flush()`
+  sooner).
+- Spans with OpenTelemetry GenAI, OpenInference or MLflow attributes, such as those an
+  instrumentation library writes, show their model, tokens, inputs and tool calls, and
+  `gen_ai.conversation.id` or `session.id` and `user.id` group them into sessions
+  ([trace conventions](#trace-conventions)).
+- A trace is `IN_PROGRESS` until its root span arrives, usually after its children.
+- To the container image, export to the published port. An application in another container on
+  the same Docker network reaches the server by the container's name, which must then be in
+  `MARTIAN_EVALS_ALLOWED_HOSTS`, or the `Host` check refuses it with `400`
+  ([below](#the-local-edition-in-a-container)).
+
+`tests/evals/test_otlp.py` exports with the Python SDK's exporter to the local edition on a
+loopback port and reads the traces back through the Traces and Sessions routes.
 
 ### Local targets
 
@@ -1355,6 +1627,309 @@ trace search, Compare of two runs with its label (within noise for the same dete
 system twice, worse for a seeded regression), a run that repeats its cases and its attempts, its
 reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot be opened.
 
+## Imported Inspect logs
+
+`martian evals import inspect` records the logs [Inspect AI](https://inspect.aisi.org.uk/) writes
+as runs in the local edition's data folder (`martian.evals.inspect_import`), so `martian ui` opens
+them in Runs and the run detail, compares two of them case by case, shows each case's messages and
+tool calls as a trace, and takes reviews of them. Inspect has no server, permissions or run
+comparison of its own.
+
+```bash
+martian evals import inspect logs/*.eval                 # each log Inspect wrote to logs/
+martian evals import inspect run.json --data-dir ./evals-data
+```
+
+It reads both of Inspect's formats, `.eval` and `.json`, against Inspect's published log schema
+(log format version 2), without Inspect installed; the `zstandard` package in `martian-sdk[evals]`
+reads the Zstandard entries of an `.eval` log. The data folder is `--data-dir`, else
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui`. Each log is one run, written
+through the store and the record store as `SINGLE_USER`, in the default project; the
+[eval model](eval-model.md#inspect-ai-logs) maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, a `stored` target, the state of the log (`success` is `completed`), Inspect's times, and a scorer for each score name. The code is `inspect-`, the task's name and the run's number among that task's imported runs, such as `inspect-my_task-2`. `provenance["inspect"]` keeps the log's path, its SHA-256 and format, the eval id, task, model and status, and Inspect's results with each scorer's metrics |
+| `CaseResult` | One per sample and epoch: the input, the target as `expected_response`, the completion, the sample's error and time |
+| `Score` | One per Inspect score value, the value kept exactly; a dict or list value is one per entry, named `<scorer>/<key>`. Inspect's `C` and `true` pass and `I`, `P`, `N` and `false` fail; numbers have no verdict. Unscored (NaN) is a score with no value and an error. A scorer that called a model is an `llm_judge` with that model as its source |
+| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments |
+
+- A case's status follows its scores: `error` when the sample failed, `failed` when a score fails,
+  else `error` when one is unscored, `passed` when one passes, and `skipped` when none gives a
+  verdict. Two imported runs compare when they cover the same samples; a sample's first epoch has
+  its own id as its case id, so runs with different numbers of epochs pair on it.
+- Every log is read before anything is written, so a file that is not a finished Inspect log
+  (a log still `started`, another format version, one with no samples, a damaged archive) stops
+  the command with exit code `2` and writes nothing. A data folder that cannot be opened does
+  the same.
+- The run is `running` while its cases are written; an import that stops early leaves it
+  `failed`, with `error` naming the exception's type, or `cancelled` when interrupted.
+- Importing the same log again makes another run. The log is not changed or copied: the run
+  names it.
+
+`tests/evals/test_inspect_import.py` imports two real Inspect logs from `tests/fixtures/inspect/`
+(one on GLM 5 in the JSON format, one with two epochs on Inspect's mock model in the `.eval`
+format; `fixture_task.py` there wrote them) and reads them back through the local edition's
+routes: every score against the log, Inspect's metrics recomputed from them, the run and its
+trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
+inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+
+## promptfoo results and configs
+
+A team that tried [promptfoo](https://www.promptfoo.dev/) brings its results and its configs, with
+promptfoo not installed and not a dependency. `martian evals import promptfoo` records a results
+file as runs in the local edition's data folder (`martian.evals.promptfoo_import`), and
+`martian evals convert promptfoo` writes a config as suite files for `martian evals run`
+(`martian.evals.promptfoo_convert`). Neither runs promptfoo or calls its providers.
+
+```bash
+martian evals import promptfoo results.json                    # as `promptfoo eval -o results.json` wrote it
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
+  --judge-model openai:/gpt-4.1-mini --output suite               # llm-rubric as the rubric judge
+```
+
+[`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
+configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
+the results promptfoo writes for that config with its two providers, also written by hand.
+
+### Imported results
+
+The importer reads promptfoo's JSON output file (`evalId`, `results`, `config`, `shareableUrl`,
+`metadata`) whose `results` is an `EvaluateSummary` of version 3, the shape promptfoo's
+[configuration reference](https://www.promptfoo.dev/docs/configuration/reference/#evaluation-outputs)
+gives and promptfoo 0.125 writes. Version 2, with its results table, and the `.jsonl`, `.csv` and
+other output formats are refused. Each provider in the file is one run, written as
+`martian evals import inspect` writes its runs; the [eval model](eval-model.md#promptfoo-results)
+maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, state `completed`, a `stored` target, and a scorer for each assertion type. The model's `Target` has no name, so the provider names the run: its code is `promptfoo-`, the provider's label (else its id) and the run's number among that provider's imported runs, such as `promptfoo-mini-2`, and `provenance["promptfoo"]["provider"]` holds its id and label. The provenance also keeps the file's path and SHA-256, the eval id, the timestamp, the description, the prompts' metrics and promptfoo's stats |
+| `CaseResult` | One per result row (a test, once per prompt and repeat), with case id `test <n>`, `test <n>, prompt <m>` when the eval has several prompts, and ` (repeat <k>)` for a later repeat. Its inputs are the rendered prompt and the vars, its expectations the test's assertions, its output the provider's, and its latency promptfoo's |
+| `Score` | One per assertion promptfoo graded, named after the assertion's type (`icontains`, a second one `icontains (2)`, one inside an `assert-set` `assert-set/regex`). The value and the verdict are the assertion's pass, as a suite file's checks record theirs, so Quality shows each assertion's pass rate; promptfoo's numeric score is `metadata["promptfoo.score"]` and its reason the rationale. Model-graded types (`llm-rubric`, `factuality`, `g-eval` and the others) and red team graders have source `llm_judge` |
+| `Trace` | One span, the provider call, with the prompt, the output, the vars, token use and cost, carrying the case's scores |
+
+- A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
+  grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
+  `threshold` counts as promptfoo counted it.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Every file is read before anything is written, so a file that is not promptfoo results, one
+  of another version, one without rows, or one that has a provider's case twice or two providers
+  with one label stops the command with exit code `2` and writes nothing.
+- The file's `config` section is not copied into the run, only its `description`.
+
+### Converted configs
+
+The converter reads `prompts`, `providers`, `tests` with `vars` and `assert`, and `defaultTest`,
+and writes the suite files where the features map:
+
+- Each test, once per prompt, is a case. The prompt rendered with the test's vars is the input
+  `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
+  `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
+  Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
+  promptfoo. Case ids are the ones the importer gives the same tests' results.
+- `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
+  them. `{{ name }}` in an assertion's value is filled from the test's vars.
+- A suite file applies every check to every case, and promptfoo asserts per test, so tests that
+  need the same checks share a suite: `evals.yaml` and `cases.jsonl`, then `evals-2.yaml`,
+  `cases-2.jsonl` and output folder `results-2` for the next group, and so on. Two tests share a
+  check when they assert the same type the same number of times with the same options; a text
+  check's values and a rubric that differ between them are read from each case's expectations.
+- `--target FILE.py[:FUNCTION]` is the target, called as `FUNCTION(prompt=..., vars=...)` (the
+  function defaults to `target`), and written relative to the suite file. Without it, each
+  test's `providerOutput` is the stored reply the suite grades, and a test without one is not
+  converted.
+- `--judge-model` is the rubric judge's model for `llm-rubric`; without it, `llm-rubric` does not
+  convert. promptfoo's grading `provider` is not read.
+- A folder that already has one of the files to write stops the command with exit code `2` before
+  anything is written, and so does a config with nothing that converts.
+
+Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+the rubric judge). An assertion converts only when its check decides the way promptfoo does;
+everything else is listed:
+
+| promptfoo assertion | Suite check |
+| --- | --- |
+| `contains`, `contains-all` | `contains`, `case_sensitive: true` |
+| `icontains`, `icontains-all` | `contains` |
+| `contains-any`, `icontains-any` | `contains`, `any_of: true` (and `case_sensitive: true` for `contains-any`) |
+| `not-contains`, `not-contains-any` | `not_contains`, `case_sensitive: true` |
+| `not-icontains`, `not-icontains-any` | `not_contains` |
+| `regex`, `not-regex` | `matches`, `not_matches`: the pattern as written, read by Python's `re` (a pattern Python cannot read is listed) |
+| `equals`, `not-equals` (text, a number or a boolean) | `matches`, `not_matches` on `\A<text>\Z` |
+| `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
+| `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
+| `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+| `latency` with a `threshold` above 0, and `--target` | `latency`, `max_ms` the threshold: the target's call took at most that many milliseconds |
+| `cost` with a `threshold` above 0, and `--target` | `cost`, `max_usd` the threshold: the target's call cost at most that many US dollars |
+
+Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
+`-any` or `-all` type given as text is split on commas, as promptfoo splits it. `latency` and
+`cost` pass at the threshold, as promptfoo's do, and a call with no figure to compare is an error
+in both. promptfoo times and prices its provider's call; the checks read the trace MLflow records
+for the target's call, so `cost` needs the target's model calls traced with their token use (a
+target that makes none, such as `examples/promptfoo/agent.py`, gives the check an error, where
+promptfoo takes a cost the provider reports itself). A `threshold` is the limit of these two, not
+a score threshold.
+
+| Listed, not converted | Why |
+| --- | --- |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
+| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
+| `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
+| `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
+| `promptfoo:redteam:pii` and its variants | A model judges whether the reply discloses personal data, names, addresses and records included, and allows what the user gave or the purpose permits. `no_personal_data` finds email addresses and phone, card, IBAN and national id numbers by their form, with no context; add it by hand to use it |
+| `promptfoo:redteam:indirect-prompt-injection` | A model judges whether the reply followed the injected instructions, the assertion's value. `resists_injection` looks for a marker that only following them produces, which a config does not name; add it by hand with one |
+| Other red team graders | Graded by a model with their own prompts |
+| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
+| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
+| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
+
+`not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
+value as written, as promptfoo does. `no_prohibited_phrases`, added by hand, also matches a phrase
+through case, spacing and disguises.
+
+Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
+verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
+`threshold` (except on `latency` and `cost`), `rubricPrompt`, `normalizeUnicode`, `config` and
+unknown options would, so the assertion is listed and not converted, as is one whose value is a `file://` reference or uses
+Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
+`providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
+var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
+providers, prompts that are not text or `.txt` and `.md` files, `tests` or `defaultTest` in a
+file, `scenarios` and every other top-level field are listed. The command prints the list, and
+each suite file holds it as comments at its top, with the tests it covers.
+
+`tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
+through the local edition's routes: both providers' runs, their cases and verdicts, every
+assertion's pass and score against the file, the provenance, a trace, and Compare of the two
+providers; it also covers repeated and nested assertions, grader errors, and the files the command
+refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
+file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
+stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
+and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
+convert is listed.
+
+## Copied MLflow stores
+
+`martian evals import mlflow` copies what a team kept in MLflow into the local edition's data
+folder (`martian.evals.mlflow_import`), so `martian ui` shows it: each experiment as a project,
+its traces with their spans, sessions and users, the evaluation datasets, every assessment, and
+each evaluation run with its cases, which Compare pairs case by case.
+
+```bash
+martian evals import mlflow ./mlflow.db                          # a SQLite tracking store
+martian evals import mlflow 'postgresql://user:password@host/mlflow' --data-dir ./evals-data
+martian evals import mlflow ./mlflow.db --experiment support-bot --dry-run
+```
+
+| Option | What it does |
+| --- | --- |
+| The source | The tracking store: its SQLite database file (`mlflow.db`), or a `sqlite:///` or `postgresql://` URL (read with psycopg; install `martian-sdk[postgres]`). The traces' artifact folder is wherever the store names it |
+| `--data-dir` | The data folder, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui` |
+| `--experiment` | Copy only this experiment, by name or id; repeat for more. Default: every active experiment |
+| `--dry-run` | Check and read the store and report what would be copied, writing nothing |
+
+The version check comes first, before anything else is read. MLflow keeps its schema revision in
+the store's `alembic_version` table, and `mlflow-skinny` 3.18.0 reads one revision, the head of its
+own migrations (`schema_head()` in `martian.evals._mlflow`):
+
+- The same revision: the store is read.
+- An older revision, one an older MLflow wrote: refused. Reading it would mean migrating it, and the
+  import never changes the store it reads, because an older MLflow cannot open a migrated store
+  (a store 3.18.0 opened, 3.16.1 can no longer open). The message says how to copy it anyway: copy
+  the database, upgrade the copy with `mlflow db upgrade <the copy's URL>` on mlflow-skinny 3.18.0,
+  and import the copy.
+- A revision 3.18.0 does not know, which a newer MLflow wrote: refused. A martian-sdk release whose
+  MLflow knows the revision imports it.
+- A database with no schema revision, more than one, or without every table its revision has; a
+  store with experiments in MLflow workspaces other than `default`; a folder (MLflow's file
+  store); an MLflow server's URL: refused.
+
+A refused store stops the command with exit code `2` before the data folder is opened, so nothing
+is written. The store is read over a connection that cannot write: SQLite opened read-only with
+`query_only` on, Postgres with every transaction read-only. Every object is read and mapped before
+anything is written.
+
+**Copy, not attach.** The issue asked to attach to or copy from a store; the import copies.
+Attaching, the core's store reading the team's database in place, would not work as it is and
+would put the team's store at risk:
+
+- The in-process binding expects its own layout: a workspace per organisation, projects as
+  tagged experiments, runs as MLflow runs holding `martian/run.json`, datasets tagged
+  `martian.dataset.*`. MLflow's own experiments, runs and datasets are none of these.
+- Runs, case results and the scores the core gates on live in the record store, not in MLflow, so
+  an attached store would still need its runs copied.
+- Opening the database with the SDK's MLflow migrates an older one in place, after which the
+  team's MLflow cannot open it, and refuses a newer one. Writes from the UI (annotations, reviews,
+  scoring) would land in the team's database.
+- The core's ids differ from MLflow's: runs and projects are UUIDs.
+
+A copy reads the store once, at one schema revision, never writes it, and puts everything in the
+core's own forms, so the data folder is an ordinary one: it keeps working when the team upgrades or
+retires its MLflow. Copying the same store again copies only what is new: ids are derived from
+MLflow's (the trace id, the run id as a UUID, the record id, a project id from the experiment's id
+and creation time), and what an earlier copy wrote is left as it is and reported as there already.
+Read-only attach is feasible later as a separate read-only store binding over a store at the
+pinned revision, mapping as the copy does on every read, but it would have to derive runs and
+case results on each read, refuse every write route, and stop working whenever the team moves its
+MLflow to another revision.
+
+What maps where ([the eval model](eval-model.md#mlflow-tracking-stores) lists every field):
+
+| MLflow | What the copy writes |
+| --- | --- |
+| Experiment | A project with the experiment's name; MLflow's `Default` experiment is the default project. The organisation's limit of 25 projects besides the default one is checked before anything is written |
+| Trace | A trace in the experiment's project, under MLflow's trace id, with its spans, session, user, tags and metadata |
+| Assessment | A score on its trace. A person's feedback and every expectation are annotations, as the UI records them; a judge's or code's feedback is a score. Values are kept, a dict or list as its JSON text; `yes` and `no` are verdicts |
+| Evaluation dataset | A dataset version in the default project, a case per record under the record's id |
+| Run with traces | A run with MLflow's run id as a UUID and code `mlflow-<run name>`: a case per trace, the case's id the record with the same inputs, its scores the run's judge and code feedback. Its MLflow metrics, parameters and dataset are in its provenance |
+
+The command prints what each experiment, run and dataset became, the counts written and the counts
+there already, and what was not copied and why: deleted experiments and runs, runs without traces
+(parameters and metrics only) or still running, assessments a later one overrides, records without
+inputs, traces whose spans are in an artifact store that is not a file on this machine, and the
+registered scorers, labeling schemas, review queues, logged models and registered models or
+prompts the core has no place for.
+
+- `copy_mlflow_store(plan, store, records, principal)` copies into any organisation's store and
+  record store; the command copies into the local edition's, as `SINGLE_USER`.
+- A run is `running` while its cases are written; a copy that stops early leaves it `failed`, or
+  `cancelled` when interrupted, and a later copy leaves it so.
+- The hosted MLflow server's REST API is not read; copy from the database the server keeps (its
+  `--backend-store-uri`). Neither is MLflow's file store.
+- A copied assessment is a new assessment in the data folder's store, dated by the copy; its
+  MLflow creation time is `metadata["mlflow_source.created_at"]`, and a run's scores in the
+  record store keep it as `created_at`.
+
+`tests/evals/test_mlflow_import.py` has mlflow-skinny write a real tracking store
+(`tests/fixtures/mlflow/write_store.py`: traces in two sessions, a person's feedback, an
+expectation, a judge's feedback, a corrected assessment, an evaluation dataset, two
+`mlflow.genai.evaluate` runs, a run without traces and a deleted experiment), copies it and reads
+it back through the local edition's routes: projects, traces, sessions, spans, annotations, the
+dataset, both runs with their cases and scores, their provenance and Compare. It checks the
+source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
+artifact file are read from there, that an older, unknown or missing schema revision, a missing
+table, workspaces and files that are not stores are refused with nothing written, the project
+limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
+Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
+
+## Data export
+
+`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals import martian <folder>` loads an export into a data folder that holds no data
+yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
+interrupted export resumes when it is run again into the same folder. An install that runs the
+core in its own process calls `export_data` and `import_data` with its store, record store and the
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
+an export holds, resuming, and what the receiving store assigns are in
+[data export](data-export.md).
+
 ## Not built yet
 
 | Piece | Issue |
@@ -1368,7 +1943,7 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
-`test_worker_process.py`, `test_worker_targets.py`, `test_no_outbound.py`, `test_worker_judges.py` and the store and
-record tests run the core
-without the backend. The `Evals core`
-job in CI runs them with the model tests, on Postgres as well as SQLite.
+`test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
+`test_worker_judges.py`, `test_otlp.py`, `test_no_outbound.py` and the store and record tests run
+the core without the backend. The `Evals core` job in CI runs them with the model tests, on
+Postgres as well as SQLite.
