@@ -170,6 +170,11 @@ run keeps its verdict but not its trace, which stays with the run that graded it
 stops early shows as failed, or cancelled when interrupted. How a run maps onto the Evals
 objects is in [command-line runs](evals-core.md#command-line-runs).
 
+**Traces from your application.** An application instrumented with MLflow tracing can record into
+the same data folder, so its traces show in **Traces** and its conversations in **Sessions**. Set
+`MLFLOW_TRACKING_URI` to the data folder's `mlflow.db` and three MLflow settings beside it, as in
+[traces from an application](evals-core.md#traces-from-an-application).
+
 **Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
 to the suite file to have MLflow's evaluation harness log there instead of the local store, then
 open the run in the MLflow UI. The run is still recorded for `martian ui`. To browse the local
@@ -641,5 +646,5 @@ signal. It is not a release attestation.
 
 ```bash
 uv sync --locked --extra evals
-uv run --extra evals pytest -q tests/evals
+uv run --extra evals pytest -q -n auto tests/evals
 ```

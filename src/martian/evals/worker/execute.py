@@ -563,3 +563,22 @@ async def _score_results(
         },
         "running",
     )
+
+
+# --- work whose worker stopped --------------------------------------------------------------
+
+
+async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
+    """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
+    as a run's process that exited early: a run or scoring job still queued or running becomes
+    ``failed``. A finished record is left alone."""
+    principal, project = work.principal, work.project_id
+    changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "run":
+        run = await records.get_run(principal, project, work.run_id)
+        if run is not None and run.state in ("queued", "running"):
+            await _move_run(records, principal, run, changes, run.state)
+        return
+    job = await _job(records, principal, project, work.run_id, work.job_id or "")
+    if job is not None and job.state in ("queued", "running"):
+        await _move_job(records, principal, project, job, changes, job.state)

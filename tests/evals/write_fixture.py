@@ -118,6 +118,7 @@ def serve(
     worker = InProcessWorker(
         store,
         records,
+        organisation_id=principal.organisation_id,
         targets=targets or {AGENT: agent},
         judge=judge_with if with_judge else None,
         target_timeout_seconds=2,
