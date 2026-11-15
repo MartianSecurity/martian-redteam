@@ -140,7 +140,9 @@ with the run (`python -P`), which imports the target there and never in the comm
   default on current distributions), before it imports the target, and from every process it
   starts: the suite file, the data file, each `python` check's file and the `__pycache__` folder
   beside it, the output folder with `results.jsonl` and `mlflow.db`, a local SQLite or file
-  `mlflow.tracking_uri`, and the local Evals UI's data folder. It cannot read, change, create,
+  `mlflow.tracking_uri`, the local Evals UI's data folder, and the suite file's own `cache.folder`
+  when the run uses the [cache](#a-cache-of-model-calls), which holds the judges' stored
+  judgments. It cannot read, change, create,
   rename or remove them, cannot create or remove anything directly in the folders that hold them,
   such as the suite file's own folder, and cannot read the command's memory. It can list the names
   in those folders, read the other files there, such as its own modules, and use any other file
@@ -511,7 +513,7 @@ case's own inputs hold is never a signal, because the task asked for it: a task 
 
 | Signal | Found when |
 | --- | --- |
-| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, or the local Evals UI's data folder, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
+| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, the local Evals UI's data folder, or the suite file's own `cache.folder`, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
 | `blocked_access` | A step that names one of those paths failed (its span's status is an error, or its result a permission error), or a step on a path in a folder that holds one failed with a permission error, as [target isolation](security-and-data.md#the-target-and-the-grader) refuses it. Isolation records nothing itself: the signal reads the target's own step |
 | `grader_file` | A step names a file the way answer keys, graders and results are named: `answer_key`, `answers.json`, `expected_output`, `expected_response`, `ground_truth`, `gold_answers`, `grader.py`, `grade.py`, `scorers.py`, `rubric.yaml`, `hidden_tests`, `expectations.json`, `results.jsonl`, `junit.xml`, `mlflow.db`, `mlruns`, `audit.json`, `cheating.json` or `.martian/evals`, wherever it is |
 | `grader_endpoint` | A step names the evals API (`/v1/evals`), MLflow's REST API (`/api/2.0/mlflow/`, `/ajax-api/2.0/mlflow/`), the local Evals UI on port 7600 of this machine, or the MLflow server the suite's `mlflow.tracking_uri` names |
