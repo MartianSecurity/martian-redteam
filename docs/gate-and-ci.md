@@ -66,7 +66,8 @@ comments they produce: [passed](../examples/github-action/comments/passed.md),
 [failed](../examples/github-action/comments/failed.md), and
 [compared](../examples/github-action/comments/compared.md), the failing suite
 compared with a result of the passing one, as a pull request that broke two
-of its cases would be compared with `main`.
+of its cases would be compared with `main`: both newly fail a security check,
+so it fails although two changed cases are within noise.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
@@ -150,19 +151,34 @@ request with the last result of `main`, case by case:
   noise** ([comparing two runs](evals.md#comparing-two-runs)). With fewer than
   six changed cases a change is always within noise.
 - **The gate.** Compared with `main`, the job fails when the change is worse
-  than noise, or when a case with no result on `main` to compare with failed: a
-  new case, one whose inputs or expectations changed, or one without a verdict
-  on `main`. Cases that failed on `main` too, and a few cases that went from
-  pass to fail, within noise, do not fail it. A case without a verdict still
+  than noise; when a case newly fails a security check, whatever the label; or
+  when a case with no result on `main` to compare with failed: a new case, one
+  whose inputs or expectations changed, or one without a verdict on `main`.
+  Cases that failed on `main` too, and a few cases that went from pass to fail
+  on other checks, within noise, do not fail it. A case without a verdict still
   fails the job.
+- **Security checks fail the gate case by case.** One leaked secret or
+  followed injection is never noise. A case that newly fails a
+  [security check](evals.md#repeated-attempts) (`not_contains`, `not_matches`
+  and the policy checks other than `no_refusal`, the types in
+  `martian.evals.runner.SECURITY_CHECKS`) fails the job on its own: it fails
+  the check here and passed it on `main`, or `main` had no such check, also
+  when the case already failed another check on `main`. A case that failed the
+  same security check on `main` is a known failure and does not fail the job.
+  Other checks keep the noise rule, `no_refusal` and LLM judges among them,
+  even a judge that guards a secret.
 - **What the comment says.** The headline says `passed against main` or
   `failed against main`, then the label with the counts it rests on, the
   p-value and the smallest change it can tell, and the cases it could not pair.
-  **Cases that went from pass to fail** names each such case with its failed
-  checks and their reasons. A reason that could quote the reply, an LLM
-  judge's or a numeric, table or schema check's, shows as `—`; `results.jsonl`
-  has it. A suite whose checks or attempts per case changed since `main` says
-  so, because the label then measures that change too.
+  **Cases that newly failed a security check, which fails the gate** names each
+  such case with those checks and their reasons; **Cases that went from pass to
+  fail** names each other case that did, with its failed checks and their
+  reasons.
+  A reason that could quote the reply, an LLM judge's or a numeric, table or
+  schema check's, shows as `—`; `results.jsonl` has it. A suite whose checks or
+  attempts per case changed since `main` says so, because the label then
+  measures that change too. `comparison.json` lists the security cases under
+  `security_regressed`.
 - **No baseline yet.** Until a push to `main` has kept a result for the suite,
   or after GitHub has evicted it (an entry unused for seven days, or beyond the
   repository's cache size), the comment says there is no baseline yet and the

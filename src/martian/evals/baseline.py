@@ -12,11 +12,18 @@ labels the change with :func:`martian.evals.stats.compare_outcomes`, and writes
   both) and a verdict in both. A case whose inputs or expectations changed is not paired: the
   comparison measures a change of the system, not of an edited case.
 - **The gate.** With a baseline the gate is the comparison. The run fails when the change is
-  worse beyond noise (``worse``), or when a case that the baseline has no pair for failed: a new
-  case, one whose inputs or expectations changed, or one the baseline has no verdict for. A case
-  that failed in both runs, and cases that went from pass to fail within noise, do not fail it;
-  the comparison names every case that went from pass to fail. A case without a verdict fails
-  the run as it does without a baseline.
+  worse beyond noise (``worse``); when a paired case newly fails a security check, whatever the
+  label; or when a case that the baseline has no pair for failed: a new case, one whose inputs or
+  expectations changed, or one the baseline has no verdict for. A case that failed in both runs,
+  and cases that went from pass to fail within noise on other checks, do not fail it; the
+  comparison names every case that went from pass to fail. A case without a verdict fails the run
+  as it does without a baseline.
+- **Security checks** are the checks the candidate run names as such in its verdicts file: the
+  checks whose :attr:`martian.evals.runner.CheckSpec.security` is true, which are the types in
+  :data:`martian.evals.runner.SECURITY_CHECKS`. A paired case newly fails one when it failed it in
+  this run and the baseline's case passed it or had no such check. One leaked secret or followed
+  injection is never noise, so each such case fails the gate on its own, also when the case
+  already failed on another check in the baseline.
 - **Reasons.** A failed check's reason is kept only when the SDK wrote it without quoting the
   reply: the deterministic checks in :data:`PLAIN_REASONS`, which report counts, sizes or the
   names the suite gives, and with repeats every check, whose reason is then how its attempts
@@ -92,12 +99,13 @@ def verdicts(
     *,
     checks: Mapping[str, str],
     plain: Collection[str],
+    security: Collection[str],
     attempts: int,
 ) -> dict[str, Any]:
     """The verdicts file of a run: ``records`` are its results.jsonl records in case order,
     ``digests`` each case's :func:`case_digest`, ``checks`` each check's label with a digest of its
-    definition, ``plain`` the labels whose reasons are kept, and ``attempts`` the attempts of each
-    case."""
+    definition, ``plain`` the labels whose reasons are kept, ``security`` the labels of its
+    security checks, and ``attempts`` the attempts of each case."""
     cases = []
     for record in records:
         found = {}
@@ -114,7 +122,13 @@ def verdicts(
                 "checks": found,
             }
         )
-    return {"format": FORMAT, "attempts": attempts, "checks": dict(checks), "cases": cases}
+    return {
+        "format": FORMAT,
+        "attempts": attempts,
+        "checks": dict(checks),
+        "security": [label for label in checks if label in security],
+        "cases": cases,
+    }
 
 
 def load(folder: str | Path) -> dict[str, Any]:
@@ -153,17 +167,21 @@ def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source
     ``significance`` is the exact McNemar comparison of the pairs' verdicts, None without a pair;
     ``label`` its label. ``regressed`` lists each case that went from pass to fail with the reason
     each of its failed checks gave (None when it is not kept), and ``improved`` the cases that went
-    from fail to pass. ``new``, ``changed`` and ``unverified`` are the cases with no pair: not in the
-    baseline, with other inputs or expectations, or without a verdict in either run; ``missing``
-    the baseline's cases this run did not have; ``unpaired_failures`` the cases with no pair that
-    failed, which fail the gate. ``checks`` and ``attempts`` say what changed in the suite itself.
+    from fail to pass. ``security_regressed`` lists each paired case that newly failed one of the
+    candidate's ``security`` checks, with the reason of each such check, and fails the gate.
+    ``new``, ``changed`` and ``unverified`` are the cases with no pair: not in the baseline, with
+    other inputs or expectations, or without a verdict in either run; ``missing`` the baseline's
+    cases this run did not have; ``unpaired_failures`` the cases with no pair that failed, which
+    fail the gate. ``checks`` and ``attempts`` say what changed in the suite itself.
     """
     before = {case["id"]: case for case in baseline["cases"]}
     ran = {case["id"] for case in candidate["cases"]}
+    security: Collection[str] = candidate["security"]
     old: list[bool] = []
     now: list[bool] = []
     regressed: list[dict[str, Any]] = []
     improved: list[str] = []
+    leaked: list[dict[str, Any]] = []
     unpaired: dict[str, list[str]] = {"new": [], "changed": [], "unverified": []}
     failures: list[str] = []
     for case in candidate["cases"]:
@@ -184,6 +202,16 @@ def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source
                 regressed.append({"id": case["id"], "checks": failed})
             elif case["passed"] and not earlier["passed"]:
                 improved.append(case["id"])
+            # Check by check: a case that already failed another check can still newly leak.
+            newly = {
+                label: check.get("reason")
+                for label, check in case["checks"].items()
+                if label in security
+                and check["passed"] is False
+                and earlier["checks"].get(label, {}).get("passed") is not False
+            }
+            if newly:
+                leaked.append({"id": case["id"], "checks": newly})
             continue
         if case["passed"] is False:
             failures.append(case["id"])
@@ -197,6 +225,7 @@ def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source
         "significance": None if found is None else asdict(found),
         "regressed": regressed,
         "improved": improved,
+        "security_regressed": leaked,
         **unpaired,
         "missing": [case_id for case_id in before if case_id not in ran],
         "unpaired_failures": failures,
@@ -206,7 +235,7 @@ def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source
             "changed": [name for name in checks if name in earlier_checks and earlier_checks[name] != checks[name]],
         },
         "attempts": {"baseline": baseline.get("attempts"), "candidate": candidate.get("attempts")},
-        "gate": "failed" if label == "worse" or failures else "passed",
+        "gate": "failed" if label == "worse" or leaked or failures else "passed",
     }
 
 
