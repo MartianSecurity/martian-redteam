@@ -1,4 +1,4 @@
-"""Run and run again from the local UI (MorningHQ/martian-notes#116): a launch from `martian ui` runs
+"""Run and run again from the local UI (MartianSecurity/martian-notes#116): a launch from `martian ui` runs
 in a process of its own against a local target, with a saved suite, and runs again with the same
 settings. The target is a loopback HTTP endpoint the test starts, and the judge's model a loopback
 OpenAI-compatible endpoint; nothing calls a real model."""
@@ -449,7 +449,7 @@ def test_a_suite_with_a_model_judge_runs_on_the_sdk_judge_and_again(client, targ
     assert len(judge_model.requests) == 4
 
 
-# --- runs whose process stopped (MorningHQ/martian-notes#333, #139) --------------------------
+# --- runs whose process stopped (MartianSecurity/martian-notes#333, #139) --------------------------
 
 HOLD = (
     "import asyncio, sys; from pathlib import Path; from martian.evals.local_runs import RunHold; "

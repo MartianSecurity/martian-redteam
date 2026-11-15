@@ -1,5 +1,5 @@
 """One turn of a schedule: the run of a saved suite against a target that its slot makes due
-(MorningHQ/martian-notes#197).
+(MartianSecurity/martian-notes#197).
 
 A schedule (:class:`~martian.evals.records.Schedule`) runs a saved suite version over a pinned
 dataset version against a target, at slots every so many seconds or on a cron expression, in UTC
@@ -34,7 +34,7 @@ their due alerts (:func:`record_gate`, :class:`~martian.evals.thresholds.GateSou
 monitor's pass does for the thresholds on its scores.
 
 A schedule with ``on_model_change`` also runs when the model behind its target changes
-(MorningHQ/martian-notes#200). Its row then comes back every ``model_watch_seconds`` as well as at
+(MartianSecurity/martian-notes#200). Its row then comes back every ``model_watch_seconds`` as well as at
 its slots, and each turn first reads the model (:func:`~martian.evals.worker.model_watch.watch_model`).
 A change it decides is written to the progress before any run is admitted, with the slot that
 will hold it: the regular slot due at the same turn, whose run then stands for the change, or a

@@ -1,5 +1,5 @@
 """Simulated results are labelled, and simulators are checked against real users
-(MorningHQ/martian-notes#194).
+(MartianSecurity/martian-notes#194).
 
 Every place a reader sees a run's results says which of them a simulated user stands behind: the
 printed table, ``summary.json``, the pull-request comment. ``martian evals fidelity`` compares a

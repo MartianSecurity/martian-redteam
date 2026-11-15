@@ -1,4 +1,4 @@
-"""Nothing leaves the machine, and MLflow's telemetry is off (MorningHQ/martian-notes#169).
+"""Nothing leaves the machine, and MLflow's telemetry is off (MartianSecurity/martian-notes#169).
 
 The product's own processes run here with the guard in ``tests/evals/outbound_guard``, which
 refuses and records every connection, datagram and name lookup for an address that is not

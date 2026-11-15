@@ -1,5 +1,5 @@
 """Dataset authoring: a port of the organisation routes of the server's ``app/api/evals_datasets.py``
-and ``app/evals_dataset_drafts.py`` (MorningHQ/MartianBackend) onto the record store and the store.
+and ``app/evals_dataset_drafts.py`` (MartianSecurity/MartianBackend) onto the record store and the store.
 
 A draft is an editable working copy in the record store's default project. Its records are the
 server's (``id``, ``input``, ``expected_output``, ``status``, ``metadata``), kept as cases:
