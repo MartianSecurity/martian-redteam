@@ -27,7 +27,8 @@ suites' model judges run on the SDK judge, on the default judge model in ``setti
 judge's own. When it starts, the server finishes as interrupted each queued or running run that no
 process is working on any more (:func:`~martian.evals.local_runs.finish_interrupted`).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
+The API is under ``/v1``: the core's ``/v1/evals`` routes, its OpenTelemetry ``POST /v1/traces``,
+which takes the fixed principal's traces without credentials, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
 ``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``
 (:mod:`martian.evals.local_runs`). Every other path is a file of the built Evals UI, by default
