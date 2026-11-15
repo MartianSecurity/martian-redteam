@@ -12,7 +12,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 
 1. [Architecture](architecture.md) — three systems, data flow, cost model, what this repo is not
 2. [Setup](setup.md) — install, environment, first local run
-3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, conversation cases graded per turn and as a whole, pass rates and their confidence intervals, comparing two runs, the judges and deterministic checks, and the dataset regression gate
+3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, conversation cases graded per turn and as a whole, simulated users and personas from real conversations, pass rates and their confidence intervals, comparing two runs, the judges and deterministic checks, and the dataset regression gate
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
    - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, and the worker interface
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds

@@ -95,7 +95,9 @@ suite, and the two comments they produce
   **Reliability** row under the pass rate and the
   [flaky cases](evals.md#reliability-and-flaky-cases), for a suite with
   [conversation cases](evals.md#conversations) a **Turns** row with the
-  turns' own counts and how many cases are conversations,
+  turns' own counts and how many cases are conversations, for a suite with
+  [simulated users](evals.md#simulated-users) a `goal_reached` row and the
+  simulator's model,
   and up to 25 failed and 25 unfinished case
   IDs with the checks that did not pass and, for a conversation, the numbers of
   the turns that failed. Inputs, replies and judge reasons stay

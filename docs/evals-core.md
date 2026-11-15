@@ -188,7 +188,7 @@ The core adds two read routes of its own, which the server's contract does not h
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
-| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
+| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -475,7 +475,8 @@ no registered agent, so an install with no martian-agents service runs functions
   could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
   These errors never repeat the address, a header or the response. A call that outlasts the
   worker's `target_timeout_seconds` is `item timed out`.
-- **Conversation cases** (`Case.turns`) run only in suite-file runs, turn by turn. The worker
+- **Conversation cases** (`Case.turns`, and `Case.simulated_user`, whose turns a simulator writes)
+  run only in suite-file runs, turn by turn. The worker
   sends one prompt per case, so it skips a conversation case without calling the target, with
   the reason `item is a conversation, which martian evals run runs turn by turn; the worker sends
   one prompt per item`.
@@ -1323,9 +1324,9 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up |
-| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts; the case result's trace is its first turn with the conversation's verdict, else its first |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts, and tagged `martian.simulated` when a simulated user wrote it; the case result's trace is its first turn with the conversation's verdict, else its first |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
@@ -1355,6 +1356,8 @@ system twice, worse for a seeded regression), a run that repeats its cases and i
 reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot be opened.
 `tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
 conversation verdicts, the turns route, each turn's trace and the session its turns share.
+`tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
+the simulator model, and for personas built from transcripts and from the data folder's sessions.
 
 ## Not built yet
 
@@ -1365,7 +1368,7 @@ conversation verdicts, the turns route, each turn's trace and the session its tu
 | A durable worker | MorningHQ/martian-notes#139 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
-| Simulated users in conversation cases | MorningHQ/martian-notes#192 |
+| How close simulated users come to real ones | MorningHQ/martian-notes#194 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

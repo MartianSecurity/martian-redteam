@@ -7,7 +7,8 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   was admitted with) up to its case limit, calls the target once per case with no retry, and
   grades each output by exact match. Each case that called the target gets a trace in the store,
   with its exact-match score; a case with no usable prompt or expected text is skipped, and so is a
-  conversation case (``Case.turns``), which ``martian evals run`` runs turn by turn. A failed
+  conversation case (``Case.turns``, or a ``Case.simulated_user`` whose turns a simulator writes),
+  which ``martian evals run`` runs turn by turn. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
   the setting to check, anything else with its type.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
@@ -251,7 +252,7 @@ async def _run_case(
     call: TargetCall,
     timeout_seconds: float,
 ) -> tuple[CaseResult, Score | None]:
-    if case.turns:
+    if case.turns or case.simulated_user is not None:
         return _skipped(run, position, case, CONVERSATION), None
     prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
     if not prompt or not expected:

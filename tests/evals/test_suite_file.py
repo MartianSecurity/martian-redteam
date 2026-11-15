@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Policy, Repeats, ScorerVersion, Suite, Target
+from martian.evals.model import Policy, Repeats, ScorerVersion, Simulator, Suite, Target
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.suite_file import (
@@ -47,6 +47,13 @@ EVERY_FIELD_URL = {
         "inference_params": {"temperature": 0, "max_tokens": 512},
         "max_retries": 2,
         "rate_limit_wait_seconds": 60.0,
+        "headers": {"X-Gateway-Key": "${GATEWAY_KEY}"},
+    },
+    "simulator": {
+        "model": "openai:/simulator-model",
+        "inference_params": {"temperature": 0.7},
+        "max_retries": 1,
+        "rate_limit_wait_seconds": 30.0,
         "headers": {"X-Gateway-Key": "${GATEWAY_KEY}"},
     },
     "checks": [
@@ -283,7 +290,11 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "output": "results-all",
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
+        "simulator_max_retries": 1,
+        "simulator_rate_limit_wait_seconds": 30.0,
+        "simulator_headers": {"X-Gateway-Key": "${GATEWAY_KEY}"},
     }
+    assert suite.simulator == Simulator(model="openai:/simulator-model", parameters={"temperature": 0.7})
     assert suite.repeats == Repeats(attempts=3, combine="majority", checks={"no_leak": "any"})
     assert [case.id for case in cases] == ["safe", "json"]
     assert cases[0].inputs == {"prompt": "What is the key?"}
