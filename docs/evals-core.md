@@ -315,7 +315,9 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `martian.response_preview_truncated` is `"true"`. The frozen contract has no field for it, so it
   is trace metadata.
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
-  time and orders by time. The core applies the contract's minimum latency and assessment filters
+  time and orders by time. Text (`q`) matches a trace's name and the start of its request and
+  response, as the store's search does ([free text](#the-in-process-binding)). The core applies
+  the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
   most 1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another,
   it is `409`. A session search is the store's `search_sessions`; with a latency or assessment
@@ -1920,7 +1922,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   `StoreError` with `kind` `not_found`, `conflict` or `invalid`. Another organisation's object
   is `not_found`, the same as a missing one. A page of `search_traces` may hold fewer traces
   than its `limit`, or none, and still have a `next_cursor`; only a `next_cursor` of `None` ends
-  a search.
+  a search. Its free text matches, ignoring case, a trace's name and its request and response
+  up to 1,000 characters, or the first 997 of a longer one, in every binding
+  (`TEXT_SEARCH_REACH` and `text_matches`); `get_trace` gives both whole.
 - `MemoryStore` is the reference implementation, in memory.
 - [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
   OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
@@ -1932,7 +1936,8 @@ store keeps the watch, its progress and the noted changes on both databases.
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, traces in each attribute style mapped with their
+  search filters and paging, how far free text looks into a long request and response, sessions
+  and users, traces in each attribute style mapped with their
   attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
@@ -2249,11 +2254,20 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   first 997 characters and `...` of a longer one, as MLflow tracing shortens its own, because
   Postgres limits `trace_info.request_preview` and `response_preview` to 1,000 characters
   (`TRACE_PREVIEW_LENGTH`). `get_trace` reads them whole from the root span. A search reads only
-  `trace_info`, so its results carry the previews and its text filter matches only them; such a
-  trace's metadata says so (`martian.request_preview_truncated` and
-  `martian.response_preview_truncated`, `"true"`, from `martian.evals.store`). A trace an earlier
-  release wrote has them whole in `martian.request` and `martian.response` metadata and reads
-  back as before.
+  `trace_info`, so its results carry the previews; such a trace's metadata says so
+  (`martian.request_preview_truncated` and `martian.response_preview_truncated`, `"true"`, from
+  `martian.evals.store`). A trace an earlier release wrote has them whole in `martian.request` and
+  `martian.response` metadata and reads back as before.
+- Free text looks in a trace's name and in what the previews hold of its request and response,
+  without the `...`: the whole of one up to 1,000 characters, and the first 997 of a longer one.
+  That is the reach of every binding (`TEXT_SEARCH_REACH` and `text_matches` in
+  `martian.evals.store`; `MemoryStore` cuts its whole texts the same way), and of a trace an
+  earlier release wrote too. MLflow's own `trace.text` filter would reach the whole text, and a
+  span's inputs and outputs with it, but the database looks for it in the content of every span
+  of the project, without an index, in every call: at 100,000 traces one such search took 10
+  seconds, against 0.13 to 0.17 seconds for a call of the binding's, which reads at most 1,000
+  traces ([trace store limits](trace-store-limits.md#what-limits-what)). The binding does not use
+  it.
 - On Postgres, a value of a trace's own metadata is still at most 8,000 characters, MLflow's
   `trace_request_metadata.value`; a longer one is refused as `invalid`, naming `record_trace` and
   that table, not the text. SQLite does not enforce the length.

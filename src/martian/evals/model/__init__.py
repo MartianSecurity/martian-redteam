@@ -712,7 +712,9 @@ class Trace(_Object):
 
 class TraceQuery(_Object):
     """Which traces of a project to return, newest first unless ``oldest_first``. ``model`` keeps
-    the traces whose model is exactly that name."""
+    the traces whose model is exactly that name. ``text`` matches, ignoring case, a trace's name
+    and its request and response up to 1,000 characters, or the first 997 of a longer one
+    (``martian.evals.store.text_matches``)."""
 
     project_id: Identifier
     run_id: str | None = None
