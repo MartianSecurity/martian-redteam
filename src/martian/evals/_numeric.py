@@ -21,6 +21,8 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, Inexact, localcontext
 from typing import Any
 
+from martian.evals._digits import ascii_digits
+
 # A number written as text: an optional sign, then a currency symbol or a three-letter currency
 # code, digits with commas only between groups of three, an optional fraction after a point,
 # then an optional % or currency code. Parentheses around the whole of it make it negative.
@@ -188,7 +190,7 @@ def at(document: Any, steps: Sequence[str]) -> list[tuple[str, Any]]:
                 reached.extend((_join(where, str(index)), item) for index, item in enumerate(value))
             elif isinstance(value, dict) and step in value:
                 reached.append((_join(where, step), value[step]))
-            elif isinstance(value, list) and step.isascii() and step.isdigit() and int(step) < len(value):
+            elif isinstance(value, list) and ascii_digits(step) and int(step) < len(value):
                 reached.append((_join(where, step), value[int(step)]))
             else:
                 raise Unreadable(f"the output has no value at {_join(where, step)}")
