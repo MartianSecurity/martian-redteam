@@ -7,12 +7,15 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from martian.evals.manifests import CHANGED, PAUSED, manifest_for
+from martian.evals.model import Case
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import COMMUNITY, ENTERPRISE, create_app, organisation_principal
+from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, ENTERPRISE, create_app, organisation_principal
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
 from tests.evals.write_fixture import AGENT, JUDGE_MODEL, Inert, Served, agent, request_id, serve
@@ -514,6 +517,64 @@ def test_saved_views_belong_to_their_owner_unless_shared(memory: Served):
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 409, params={"revision": 1})
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 204, params={"revision": 2})
     assert memory.call("GET", "/v1/evals/views", 200)["items"] == []
+
+
+def publish_draft(served: Served, name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+    draft = served.call("POST", "/v1/evals/dataset-drafts", 201, json={"name": name})
+    path, revision = f"/v1/evals/dataset-drafts/{draft['id']}", draft["revision"]
+    for record in records:
+        revision = served.call("POST", f"{path}/records", 201, json={"base_revision": revision, "record": record})[
+            "revision"
+        ]
+    checked = served.call("GET", f"{path}/validation", 200)
+    body = {"base_revision": revision, "expected_sha256": checked["sha256"], "rationale": "Pinned release"}
+    return served.call("POST", f"{path}/publish", 202, json=body)
+
+
+def test_a_published_version_runs_only_while_the_store_holds_what_was_published(memory: Served):
+    publish_draft(
+        memory,
+        "pinned",
+        [
+            {"id": "r1", "input": "Refund?", "expected_output": "Yes."},
+            {"id": "r2", "input": "When?", "expected_output": "Soon."},
+        ],
+    )
+    (manifest,) = asyncio.run(memory.records.list_publications(ADMIN, DEFAULT_PROJECT))
+    assert (manifest.state, manifest.name, manifest.case_ids, manifest.draft_id is not None) == (
+        "published",
+        "pinned",
+        ["r1", "r2"],
+        True,
+    )
+    run = memory.launch(dataset_name="pinned")
+    memory.drain()
+    assert memory.call("GET", f"/v1/evals/{run['id']}", 200)["state"] == "completed"
+    # The version is changed in the store after it was published: a run of it never starts.
+    key = next(k for k, (d, _cases) in memory.store._datasets.items() if d.name == "pinned")  # type: ignore[attr-defined]
+    dataset, cases = memory.store._datasets[key]  # type: ignore[attr-defined]
+    edited = cases[0].model_copy(update={"expectations": {"expected_response": "No."}})
+    memory.store._datasets[key] = (dataset, [edited, *cases[1:]])  # type: ignore[attr-defined]
+    again = memory.launch(dataset_name="pinned")
+    memory.drain()
+    failed = memory.call("GET", f"/v1/evals/{again['id']}", 200)
+    assert (failed["state"], failed["error"], failed["items"]) == ("failed", CHANGED, [])
+
+
+def test_new_runs_wait_while_a_dataset_is_being_published(memory: Served):
+    cases = [Case(id="c1", inputs={"message": "hi"})]
+    stale = manifest_for("p-stale", DEFAULT_PROJECT, "old", cases).model_copy(
+        update={"started_at": datetime.now(UTC) - timedelta(minutes=11)}
+    )
+    asyncio.run(memory.records.begin_publication(ADMIN, DEFAULT_PROJECT, stale))
+    memory.launch()  # a publication past its lease no longer holds runs back
+    asyncio.run(
+        memory.records.begin_publication(ADMIN, DEFAULT_PROJECT, manifest_for("p-now", DEFAULT_PROJECT, "new", cases))
+    )
+    refused = memory.call(
+        "POST", "/v1/evals", 409, json={"agent_id": AGENT, "dataset_name": "support-faq", "request_id": request_id()}
+    )
+    assert refused == {"detail": PAUSED}
 
 
 def test_a_draft_is_edited_published_and_run(memory: Served):

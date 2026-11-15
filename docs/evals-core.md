@@ -322,9 +322,20 @@ All paths are under `/v1/evals`. How the core carries them out:
   for published datasets. Every edit names the revision it was made against. Validation reports
   the counts and the `sha256` publishing checks, which is the dataset version's content digest.
 - **Publishing** writes the draft's cases as a dataset version of the default project, named as
-  the draft, and marks the draft published, in one request (`202`, state `published`). A dataset
-  operation is the record of a published draft; none is ever left running, so resuming or aborting
-  one is `409` ("Dataset operation is already finished").
+  the draft, and marks the draft published, in one request (`202`, state `published`). It records
+  the version's manifest first (`martian.evals.manifests`: the digest, and each case's id and
+  digest in order) as `publishing`, writes the version, reads every case back and marks the
+  manifest `published` only when they match (otherwise `409`, and publishing again finishes it).
+  While a publication is `publishing`, launching a run is `409` ("A dataset is being published;
+  new runs are paused until it finishes"); one that has been `publishing` for more than ten
+  minutes no longer holds runs back. A dataset operation is the record of a published draft; none
+  is ever left running, so resuming or aborting one is `409` ("Dataset operation is already
+  finished").
+- **Manifest-pinned versions.** A run reads every case of its dataset version before it calls the
+  target. When Martian published the version and the store no longer holds exactly what its
+  manifest recorded (a case edited in MLflow's own UI, for example), the run fails before any call
+  with "Managed dataset content changed since it was published; publish it again". A version
+  Martian did not publish has no manifest and is read as it is.
 - **Projects** are store projects whose id is derived from the `request_id`; at most 25 besides
   the default one. An archived project takes no more runs, scores, reviews or annotations.
 - **Views** belong to a project and to the person who saved them; a private view is seen only by
@@ -767,8 +778,8 @@ written by one MLflow release reads back the same on the next.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
-page's saved views.
+on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
+page's saved views, and the manifests of the dataset versions it published.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 

@@ -141,6 +141,19 @@ saved_views = Table(
     Column("record", JSON, nullable=False),
 )
 
+dataset_manifests = Table(
+    "martian_dataset_manifests",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("dataset_id", String(ID), nullable=True),
+    Column("state", String(16), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_dataset_manifests_dataset", "space", "project_id", "dataset_id"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -151,4 +164,5 @@ TABLES = (
     dataset_drafts,
     dataset_draft_cases,
     saved_views,
+    dataset_manifests,
 )

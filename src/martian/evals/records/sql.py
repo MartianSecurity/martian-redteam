@@ -36,12 +36,13 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
-from martian.evals.records import SavedView
+from martian.evals.records import DatasetManifest, SavedView
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
     dataset_draft_cases,
     dataset_drafts,
+    dataset_manifests,
     reviews,
     runs,
     saved_views,
@@ -901,3 +902,91 @@ class SqlRecordStore:
 
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
+
+    # --- dataset manifests -------------------------------------------------------------------
+
+    async def begin_publication(
+        self, principal: Principal, project_id: str, manifest: DatasetManifest
+    ) -> DatasetManifest:
+        if manifest.project_id != project_id:
+            raise StoreError("invalid", "the manifest belongs to another project")
+
+        def work(connection: Connection, space: str) -> DatasetManifest:
+            if stored := self._one(connection, dataset_manifests, space, project_id, id=manifest.id):
+                return DatasetManifest.model_validate(stored)
+            saved = manifest.model_copy(
+                update={"state": "publishing", "dataset_id": None, "started_at": manifest.started_at or _now()}
+            )
+            connection.execute(
+                insert(dataset_manifests).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    dataset_id=None,
+                    state=saved.state,
+                    started_at=saved.started_at,
+                    record=_json(saved),
+                )
+            )
+            return saved
+
+        return await self._run(principal, work)
+
+    async def finish_publication(
+        self, principal: Principal, project_id: str, manifest_id: str, dataset_id: str
+    ) -> DatasetManifest:
+        def work(connection: Connection, space: str) -> DatasetManifest:
+            stored = self._one(connection, dataset_manifests, space, project_id, id=manifest_id)
+            if stored is None:
+                raise StoreError("not_found", "publication not found")
+            manifest = DatasetManifest.model_validate(stored)
+            if manifest.state == "published":
+                if manifest.dataset_id != dataset_id:
+                    raise StoreError("conflict", "the publication was already finished as another dataset")
+                return manifest
+            saved = manifest.model_copy(update={"state": "published", "dataset_id": dataset_id, "published_at": _now()})
+            connection.execute(
+                update(dataset_manifests)
+                .where(
+                    dataset_manifests.c.space == space,
+                    dataset_manifests.c.project_id == project_id,
+                    dataset_manifests.c.id == manifest_id,
+                )
+                .values(dataset_id=dataset_id, state=saved.state, record=_json(saved))
+            )
+            return saved
+
+        return await self._run(principal, work)
+
+    async def manifest_of(self, principal: Principal, project_id: str, dataset_id: str) -> DatasetManifest | None:
+        def work(connection: Connection, space: str) -> DatasetManifest | None:
+            # Two drafts with the same name and cases publish the same version: the newest manifest.
+            stored = connection.execute(
+                select(dataset_manifests.c.record)
+                .where(
+                    dataset_manifests.c.space == space,
+                    dataset_manifests.c.project_id == project_id,
+                    dataset_manifests.c.dataset_id == dataset_id,
+                    dataset_manifests.c.state == "published",
+                )
+                .order_by(dataset_manifests.c.started_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            return DatasetManifest.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_publications(self, principal: Principal, project_id: str) -> list[DatasetManifest]:
+        def work(connection: Connection, space: str) -> list[DatasetManifest]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(dataset_manifests.c.record)
+                    .where(dataset_manifests.c.space == space, dataset_manifests.c.project_id == project_id)
+                    .order_by(dataset_manifests.c.started_at.desc(), dataset_manifests.c.id)
+                )
+                .scalars()
+                .all()
+            )
+            return [DatasetManifest.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from martian.evals.manifests import PAUSED, publishing
 from martian.evals.model import Run, RunState, StoreRef, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
@@ -111,6 +112,8 @@ async def request_run(
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
+    if await publishing(records, principal, DEFAULT_PROJECT, _now()):
+        raise HTTPException(409, PAUSED)
     if await _active(store, records, principal):
         raise HTTPException(409, "An eval run is already in progress")
     run = Run(

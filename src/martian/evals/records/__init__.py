@@ -23,6 +23,7 @@ from martian.evals.model import (
     Case,
     CaseResult,
     DatasetDraft,
+    Digest,
     Identifier,
     Page,
     Review,
@@ -54,6 +55,29 @@ class SavedView(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class DatasetManifest(BaseModel):
+    """What publishing a dataset version wrote, kept apart from the store: the version's digest and
+    each case's id and digest, in order. A run reads the version only while the store still holds
+    exactly that (``martian.evals.manifests``). ``state`` is ``publishing`` from the moment publishing
+    starts until the version is written and read back, then ``published``; while a publication is
+    ``publishing``, new runs wait."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    project_id: Identifier
+    name: str = Field(min_length=1, max_length=200)
+    digest: Digest
+    case_ids: list[Identifier]
+    case_digests: list[Digest]
+    state: Literal["publishing", "published"] = "publishing"
+    dataset_id: str | None = None
+    draft_id: str | None = None
+    published_by: str | None = None
+    started_at: datetime | None = None
+    published_at: datetime | None = None
 
 
 @runtime_checkable
@@ -212,6 +236,27 @@ class RecordStore(Protocol):
         """Remove the view while it is at ``expected_revision``."""
         ...
 
+    # Dataset manifests: what publishing wrote, checked when a run reads the dataset.
+    async def begin_publication(
+        self, principal: Principal, project_id: str, manifest: DatasetManifest
+    ) -> DatasetManifest:
+        """Record a publication as ``publishing``. The same id again returns the stored manifest."""
+        ...
+
+    async def finish_publication(
+        self, principal: Principal, project_id: str, manifest_id: str, dataset_id: str
+    ) -> DatasetManifest:
+        """Mark the publication ``published``, as the store's dataset ``dataset_id``."""
+        ...
+
+    async def manifest_of(self, principal: Principal, project_id: str, dataset_id: str) -> DatasetManifest | None:
+        """The published manifest of a store dataset, or ``None`` for one Martian did not publish."""
+        ...
+
+    async def list_publications(self, principal: Principal, project_id: str) -> list[DatasetManifest]:
+        """Every publication of the project, newest first."""
+        ...
+
 
 RECORD_METHODS = frozenset(
     name for name in vars(RecordStore) if not name.startswith("_") and callable(getattr(RecordStore, name))
@@ -219,6 +264,7 @@ RECORD_METHODS = frozenset(
 
 __all__ = [
     "RECORD_METHODS",
+    "DatasetManifest",
     "Event",
     "EventBus",
     "EventsLost",
