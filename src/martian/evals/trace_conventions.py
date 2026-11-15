@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import Span, Trace
 
 Style = Literal["otel_genai", "openinference", "mlflow"]
@@ -271,7 +272,7 @@ def _text(value: Any) -> str | None:
 
 def _count(value: Any) -> int | None:
     found = _decoded(value) if isinstance(value, str) else value
-    if isinstance(found, str) and found.strip().isdigit():
+    if isinstance(found, str) and ascii_digits(found.strip()):
         found = int(found)
     if isinstance(found, bool) or not isinstance(found, int | float):
         return None
@@ -300,7 +301,7 @@ def _unflatten(attributes: Mapping[str, Any], key: str) -> Any:
 def _listed(node: Any) -> Any:
     if not isinstance(node, dict):
         return node
-    if node and all(key.isdigit() for key in node):
+    if node and all(ascii_digits(key) for key in node):
         return [_listed(node[key]) for key in sorted(node, key=int)]
     return {key: _listed(value) for key, value in node.items()}
 

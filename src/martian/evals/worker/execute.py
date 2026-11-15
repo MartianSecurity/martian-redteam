@@ -30,8 +30,14 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   the worker's setup installs under its name (:data:`InstalledScorers`), an installed check by the
   check the setup installs under its name, with no state, and judge scorers through the worker's
   judge, one request per model the job's judges are pinned to. Each judge score records the model
-  and version that produced it. Its scores sit beside the run's own, and each scored value is also
-  kept on the case's trace.
+  and version that produced it, and the judge version's calibration that applied
+  (``martian.evals.calibration``): its newest when the job starts, if it checks the version as the
+  job runs it. Its scores sit beside the run's own, and each scored value is also kept on the
+  case's trace.
+- A judge graded by a panel is in the request of each of its members' models, so each member
+  grades it on its own, and its score is decided by the strict majority of the members that gave
+  a verdict (``martian.evals.panel``): every member's vote is in the score's metadata, and no
+  majority is the score's error.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Each piece of work runs under limits (``RunLimits``): the run's own, ``provenance["limits"]``,
@@ -64,12 +70,15 @@ from typing import TYPE_CHECKING, Any
 
 from martian.config import ConfigError
 from martian.evals import _custom
+from martian.evals.calibration import CALIBRATION_KEY, applied_calibration, latest_calibrations
 from martian.evals.limits import Budget
+from martian.evals.manifests import checked_cases
 from martian.evals.model import (
     Case,
     CaseResult,
     CaseStatus,
     Counts,
+    PanelMember,
     Run,
     RunLimits,
     RunState,
@@ -81,6 +90,8 @@ from martian.evals.model import (
     Trace,
     Value,
 )
+from martian.evals.panel import REASON_LENGTH as PANEL_ERROR_LENGTH
+from martian.evals.panel import Vote, decide, panel_source
 from martian.evals.records import RecordStore
 from martian.evals.runner import TargetCallError
 from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_config, prompt_text, text_of
@@ -106,7 +117,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("martian.evals.worker")
 
-CASE_PAGE = 1000
 MAX_SCORED_RESULTS = 1000
 EXACT_MATCH_SCORER = "exact_match"
 STOPPED = "Stopped before this target request"
@@ -275,23 +285,6 @@ async def _fail_run(records: RecordStore, principal: Principal, run: Run, detail
         )
 
 
-async def active_cases(
-    store: EvalStore, principal: Principal, dataset_id: str, *, limit: int | None
-) -> tuple[list[Case], bool]:
-    """The dataset's active cases in order, at most ``limit``, and whether there were more."""
-    found: list[Case] = []
-    offset = 0
-    while limit is None or len(found) <= limit:
-        page = await store.read_cases(principal, DEFAULT_PROJECT, dataset_id, offset=offset, limit=CASE_PAGE)
-        found.extend(case for case in page.items if is_active(case))
-        offset += len(page.items)
-        if page.next_cursor is None:
-            break
-    if limit is None or len(found) <= limit:
-        return found, False
-    return found[:limit], True
-
-
 async def _run_cases(
     store: EvalStore,
     records: RecordStore,
@@ -323,7 +316,15 @@ async def _run_cases(
     if dataset is None or (run.dataset_digest is not None and dataset.digest != run.dataset_digest):
         await _fail_run(records, principal, run, "Dataset identity changed; submit a new eval run")
         return
-    cases, truncated = await active_cases(store, principal, dataset.id, limit=run.max_cases)
+    # Every case, checked against the version's manifest when Martian published it.
+    try:
+        everything = await checked_cases(store, records, principal, DEFAULT_PROJECT, dataset)
+    except StoreError as error:
+        await _fail_run(records, principal, run, error.detail)
+        return
+    active = [case for case in everything if is_active(case)]
+    limit = run.max_cases
+    cases, truncated = (active[:limit], True) if limit is not None and len(active) > limit else (active, False)
     # The cases a worker that stopped part way already finished: their results are kept, their
     # target is not called again, and they count as they are.
     finished = await finished_cases(records, principal, run, cases)
@@ -726,6 +727,45 @@ def model_source(answer: JudgeResult) -> str:
     return f"{answer.model}@{answer.model_version}" if answer.model_version else answer.model
 
 
+def seats(scorer: ScorerVersion) -> list[tuple[str | None, str | None]]:
+    """The models and endpoints a judge scorer is graded on: each member of its panel, or its own."""
+    return [(member.model, member.endpoint) for member in scorer.panel] or [(scorer.model, scorer.endpoint)]
+
+
+def _vote(member: PanelMember, scorer: ScorerVersion, answer: JudgeResult | str | None) -> Vote:
+    """A panel member's vote on one scorer from the judge's answer on that member's model."""
+    if isinstance(answer, str):
+        return Vote(member.model, None, answer, member.endpoint)
+    if answer is None:
+        return Vote(member.model, None, NO_JUDGE, member.endpoint)
+    version = answer.model_version
+    if scorer.name in answer.verdicts:
+        verdict = answer.verdicts[scorer.name]
+        if type(verdict.value) is not bool:
+            return Vote(member.model, None, "The judge gave no pass/fail verdict", member.endpoint, version)
+        return Vote(member.model, verdict.value, verdict.rationale, member.endpoint, version)
+    reason = answer.errors.get(scorer.name, "")[:JUDGE_ERROR_LENGTH] or NO_JUDGE
+    return Vote(member.model, None, reason, member.endpoint, version)
+
+
+def _panel_score(
+    scorer: ScorerVersion, answers: dict[tuple[str | None, str | None], JudgeResult | str | None]
+) -> tuple[bool | None, str, str, str, dict[str, Any]]:
+    """A panel judge's value, rationale, error, source and metadata from its members' answers,
+    decided by the strict majority of the members that gave a verdict (``martian.evals.panel``)."""
+    decision = decide([_vote(member, scorer, answers.get((member.model, member.endpoint))) for member in scorer.panel])
+    metadata: dict[str, Any] = decision.metadata()
+    versions = {
+        answer.judge_version
+        for member in scorer.panel
+        if isinstance(answer := answers.get((member.model, member.endpoint)), JudgeResult) and answer.judge_version
+    }
+    if len(versions) == 1:
+        metadata[JUDGE_VERSION_KEY] = versions.pop()
+    source = panel_source((member.model, member.endpoint) for member in scorer.panel)
+    return decision.passed, decision.rationale, decision.error[:PANEL_ERROR_LENGTH], source, metadata
+
+
 def _judge_metadata(scorer: ScorerVersion, answer: JudgeResult | None) -> dict[str, Any]:
     """What a judge score records of its model: the model that answered (or the one the judge is
     pinned to, when none did), the version the provider reported, the judge's own version, and
@@ -821,12 +861,22 @@ async def _score_results(
     if moved is None:
         return
     job = moved
-    # One judge request per model the job's judges are pinned to, in the order they first appear.
+    # One judge request per model the job's judges are pinned to, in the order they first appear. A
+    # judge graded by a panel is in the request of each of its members' models.
     by_model: dict[tuple[str | None, str | None], list[ScorerVersion]] = {}
     for scorer in job.scorers:
         if scorer.kind == "llm_judge":
-            by_model.setdefault((scorer.model, scorer.endpoint), []).append(scorer)
+            for seat in seats(scorer):
+                by_model.setdefault(seat, []).append(scorer)
     definition = job_config(job)["definition_digest"]
+    # The calibration each judge version had when the job started, if it checks the version as the
+    # job runs it: on the model the job runs it on, or its panel's members, and as it is defined now.
+    calibrations = await latest_calibrations(records, principal, project)
+    applied = {
+        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s)
+        for s in job.scorers
+        if s.kind == "llm_judge"
+    }
     for result in results:
         if result.case_id in scored:
             continue
@@ -884,8 +934,10 @@ async def _score_results(
                 metadata["martian.suite_id"] = job.suite_id
                 metadata["martian.suite_version"] = job.suite_version
             answer = answers.get((scorer.model, scorer.endpoint))
-            if scorer.kind == "llm_judge":
+            if scorer.kind == "llm_judge" and not scorer.panel:
                 metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
+            if scorer.kind == "llm_judge":
+                metadata[CALIBRATION_KEY] = applied[(scorer.name, scorer.version)]
             if not finished:
                 error = NO_OUTPUT
             elif is_installed(scorer):  # the case's state ended with its run's teardown
@@ -895,6 +947,9 @@ async def _score_results(
                 value, rationale, error = await _custom_score(installed, scorer, result)
             elif scorer.kind != "llm_judge":
                 value, rationale = code_score(scorer.name, output, expected)
+            elif scorer.panel:
+                value, rationale, error, source_id, votes = _panel_score(scorer, answers)
+                metadata |= votes
             elif isinstance(answer, str):
                 error = answer
             elif answer is not None and scorer.name in answer.verdicts:
@@ -954,13 +1009,26 @@ async def take_over(records: RecordStore, work: Work) -> None:
     one whose process died: a run or scoring job still ``running`` becomes ``queued``, so the
     worker taking it now runs it again. It resumes after the cases already finished: a run's cases
     that have a result are not called again, and a scoring job's cases that have its scores are not
-    scored again. The case that was in flight has neither, so it runs again.
+    scored again. The case that was in flight has neither, so it runs again. A re-check keeps no
+    checkpoint, so it starts again from its first item.
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
     A finished or queued record is left alone. A monitor's pass has no record to queue again: the
     next pass goes on from the monitor's watermark and takes over the traces it had taken. Nor
     has a schedule's turn: the next turn looks at the same due slot again."""
     principal, project = work.principal, work.project_id
+    if work.kind == "recheck":
+        recheck = await records.get_recheck(principal, project, work.job_id or "")
+        if recheck is not None and recheck.state == "running":
+            changes = {"state": "queued", "graded": 0, "errors": 0}
+            try:
+                await records.update_recheck(
+                    principal, project, recheck.model_copy(update=changes), expected_state="running"
+                )
+            except StoreError as error:
+                if error.kind != "conflict":
+                    raise
+        return
     if work.kind in ("monitor", "schedule"):
         return
     if work.kind == "run":
@@ -987,8 +1055,8 @@ async def interrupt(records: RecordStore, principal: Principal, run: Run, state:
 async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> None:
     """``worker.submit(work)``, for a route that has just recorded the work ``queued``. If the worker
     refuses it or fails, the record is marked ``failed`` with :data:`NOT_ACCEPTED` and the error is
-    raised again, so a failed submit never leaves a run or scoring job queued, which would block
-    the next launch or scoring request."""
+    raised again, so a failed submit never leaves a run, scoring job or re-check queued, which
+    would block the next launch, scoring request or re-check."""
     try:
         await worker.submit(work)
     except Exception:
@@ -998,11 +1066,23 @@ async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> No
 
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
-    as a run's process that exited early: a run or scoring job still queued or running becomes
-    ``failed``. A finished record is left alone. A monitor, which has no end, keeps ``detail`` as
-    its progress's ``error`` and runs again at its next pass; so does a schedule, at its next turn."""
+    as a run's process that exited early: a run, scoring job or re-check still queued or running
+    becomes ``failed``. A finished record is left alone. A monitor, which has no end, keeps
+    ``detail`` as its progress's ``error`` and runs again at its next pass; so does a schedule, at
+    its next turn."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "recheck":
+        recheck = await records.get_recheck(principal, project, work.job_id or "")
+        if recheck is not None and recheck.state in ("queued", "running"):
+            try:
+                await records.update_recheck(
+                    principal, project, recheck.model_copy(update=changes), expected_state=recheck.state
+                )
+            except StoreError as error:
+                if error.kind != "conflict":
+                    raise
+        return
     if work.kind == "monitor":
         progress = await records.monitor_progress(principal, project, work.monitor_id or "")
         if progress is not None:

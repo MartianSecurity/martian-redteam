@@ -1,7 +1,7 @@
-"""The latest audit of each saved suite version.
+"""Judge calibrations.
 
-Revision ID: 0008
-Revises: 0007
+Revision ID: 0010
+Revises: 0009
 """
 
 from __future__ import annotations
@@ -9,12 +9,12 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0008"
-down_revision = "0007"
+revision = "0010"
+down_revision = "0009"
 branch_labels = None
 depends_on = None
 
-TABLE = "martian_suite_audits"
+TABLE = "martian_judge_calibrations"
 
 
 def upgrade() -> None:
@@ -22,11 +22,15 @@ def upgrade() -> None:
         TABLE,
         sa.Column("space", sa.String(80), nullable=False),
         sa.Column("project_id", sa.String(200), nullable=False),
-        sa.Column("suite_id", sa.String(200), nullable=False),
-        sa.Column("suite_version", sa.Integer, nullable=False),
+        sa.Column("id", sa.String(200), nullable=False),
+        sa.Column("judge", sa.String(200), nullable=False),
+        sa.Column("version", sa.String(40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("record", sa.JSON, nullable=False),
-        sa.PrimaryKeyConstraint("space", "project_id", "suite_id", "suite_version", name="pk_martian_suite_audits"),
+        sa.PrimaryKeyConstraint("space", "project_id", "id", name="pk_martian_judge_calibrations"),
+    )
+    op.create_index(
+        "ix_martian_judge_calibrations_judge", TABLE, ["space", "project_id", "judge", "version", "created_at"]
     )
     if op.get_bind().dialect.name == "postgresql":
         # As for the tables of 0001: row-level security filters on the transaction's space again.

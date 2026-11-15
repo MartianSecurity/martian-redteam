@@ -239,7 +239,7 @@ class ProcessWorker:
         try:
             process, request = await self._start(work, tied=True)
         except Exception:  # noqa: BLE001 - work that cannot start must not wait in the queue
-            log.exception("The process for %s work on run %s could not start", work.kind, work.run_id)
+            log.exception("The process for %s work on %s could not start", work.kind, work.run_id or work.job_id)
             await fail_unfinished(self._records, work, NOT_STARTED)
             return
         assert process.stdin is not None
@@ -301,7 +301,8 @@ class ProcessWorker:
 
     async def _check_exit(self, work: Work, process: asyncio.subprocess.Process) -> None:
         if process.returncode != 0:
-            log.error("The process for %s work on run %s exited with %s", work.kind, work.run_id, process.returncode)
+            named = work.run_id or work.job_id  # a re-check names no run
+            log.error("The process for %s work on %s exited with %s", work.kind, named, process.returncode)
             await fail_unfinished(self._records, work, ENDED_EARLY)
 
 

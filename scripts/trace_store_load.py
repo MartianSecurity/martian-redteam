@@ -13,7 +13,7 @@ Postgres schema of their own that is dropped at the end unless ``--keep-schema``
 
 - ``growth``: write traces with ``--writers`` concurrent writers until the project holds each of
   ``--sizes`` traces. After each size, time the searches the console makes (``--searches`` times
-  each) and measure the database.
+  each), and MLflow's own first page and full-text filter beside them, and measure the database.
 - ``rate``: offer traces at each of ``--rates`` traces a second for ``--rate-seconds``, with at
   most ``--in-flight`` writes waiting or running; a trace offered while that many are is shed
   rather than queued. Latency counts from when a trace was due, so it includes waiting.
@@ -72,6 +72,7 @@ SEARCHES = (
     "window",
     "text",
     "text_all",
+    "mlflow_text",
     "sessions",
     "get",
 )
@@ -610,11 +611,28 @@ class Load:
             page, _ = store._store.search_traces(locations=[experiment.experiment_id], max_results=50)
             return len(page)
 
+        def mlflow_text() -> int:
+            # MLflow's own full-text filter for text one trace holds, newest 50 first: the database
+            # looks for it in the content of every span of the project, where the whole request and
+            # response are, without an index. A measurement only, like mlflow_page.
+            experiment = store._experiment(PROJECT)
+            page, _ = store._store.search_traces(
+                locations=[experiment.experiment_id],
+                filter_string=f"trace.text ILIKE '%needle-{some} %'",
+                max_results=50,
+                order_by=["timestamp_ms DESC"],
+            )
+            return len(page)
+
         async def native() -> int:
             return int(await store._call(principal, mlflow_page))
 
+        async def native_text() -> int:
+            return int(await store._call(principal, mlflow_text))
+
         found["mlflow_page"] = await self._time(native)
         found["text_all"] = await self._time(text_all)
+        found["mlflow_text"] = await self._time(native_text)
         found["sessions"] = await self._time(sessions)
         found["get"] = await self._time(get)
         return {name: found[name] for name in SEARCHES}

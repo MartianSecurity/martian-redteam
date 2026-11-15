@@ -24,7 +24,9 @@ from martian.evals.model import (
 )
 from martian.evals.records import (
     Alert,
+    CalibrationRecheck,
     EventsLost,
+    JudgeCalibration,
     Monitor,
     MonitoredTrace,
     MonitorProgress,
@@ -114,6 +116,16 @@ class RecordContract:
         assert [r.id for r in rest.items] == ["r1"] and rest.next_cursor is None
         assert [r.id for r in (await records.list_runs(ORG_A, "p1", states=["running"])).items] == ["r3", "r1"]
         assert await records.get_run(ORG_A, "p1", "r9") is None
+
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; 19 nines is
+    # past the 64-bit OFFSET SQL takes.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 19, id="19-nines")])
+    async def test_a_run_cursor_the_store_did_not_return_is_refused(self, records: RecordStore, cursor: str) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        with pytest.raises(StoreError) as caught:
+            await records.list_runs(ORG_A, "p1", cursor=cursor)
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
 
     async def test_a_run_moves_on_only_from_the_state_it_was_expected_in(self, records: RecordStore) -> None:
         started = await records.create_run(ORG_A, run("r1"))
@@ -350,6 +362,67 @@ class RecordContract:
         assert await records.get_view(ORG_A, "p1", "v1") is None
         await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
 
+    async def test_every_calibration_is_kept_and_listed_newest_first(self, records: RecordStore) -> None:
+        def calibration(id: str, judge: str, minutes: int) -> JudgeCalibration:
+            return JudgeCalibration(
+                id=id,
+                project_id="p1",
+                judge=judge,
+                version="2",
+                model="openai:/judge",
+                labelled=30,
+                report={"status": "measured", "agreement": 0.9},
+                created_at=T0 + timedelta(minutes=minutes),
+            )
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 0))
+            assert await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("calibration", "k1")
+        finally:
+            listener.close()
+        await records.save_calibration(ORG_A, "p1", calibration("k2", "tone", 1))
+        await records.save_calibration(ORG_A, "p1", calibration("k3", "brevity", 2))
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1")] == ["k3", "k2", "k1"]
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1", judge="tone")] == ["k2", "k1"]
+        assert await records.get_calibration(ORG_A, "p1", "k1") == first
+        assert first.report == {"status": "measured", "agreement": 0.9}
+        await refused("invalid", records.save_calibration(ORG_A, "p2", calibration("k4", "tone", 3)))
+        assert await records.list_calibrations(ORG_B, "p1") == []
+        assert await records.get_calibration(ORG_B, "p1", "k1") is None
+        assert await records.list_calibrations(ORG_A, "p2") == []
+
+    async def test_a_recheck_is_created_once_moved_on_from_the_state_it_was_in_and_listed(
+        self, records: RecordStore
+    ) -> None:
+        def recheck(id: str, judge: str, minutes: int) -> CalibrationRecheck:
+            return CalibrationRecheck(id=id, project_id="p1", judge=judge, version="2", calibration_id="k1",
+                                      scorer=JUDGE, definition="d", state="queued", total=30,
+                                      created_at=T0 + timedelta(minutes=minutes))  # fmt: skip
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 0))
+            assert await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("recheck", "q1")
+        finally:
+            listener.close()
+        running = await records.update_recheck(
+            ORG_A, "p1", first.model_copy(update={"state": "running"}), expected_state="queued"
+        )
+        assert (running.state, running.created_at) == ("running", first.created_at)
+        await refused("conflict", records.update_recheck(ORG_A, "p1", first, expected_state="queued"))
+        await refused("not_found", records.update_recheck(ORG_A, "p1", recheck("q9", "tone", 0)))
+        await records.create_recheck(ORG_A, "p1", recheck("q2", "brevity", 1))
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1")] == ["q2", "q1"]
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1", judge="tone")] == ["q1"]
+        assert await records.get_recheck(ORG_A, "p1", "q1") == running
+        await refused("invalid", records.create_recheck(ORG_A, "p2", recheck("q3", "tone", 2)))
+        assert await records.list_rechecks(ORG_B, "p1") == [] and await records.get_recheck(ORG_B, "p1", "q1") is None
+
     async def test_organisations_and_the_local_user_never_see_each_other(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
         await records.put_results(ORG_A, "p1", [CaseResult(run_id="r1", case_id="c1", status="passed")])
@@ -408,6 +481,8 @@ class RecordContract:
         assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-2", pass_id="third")
         page = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1)
         assert [t.trace_id for t in page.items] == ["tr-2"] and page.next_cursor
+        # A cursor of other digits than 0-9, such as ``²``, which ``int()`` refuses, is no cursor.
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor="²")).items == page.items
         rest = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor=page.next_cursor)
         [scored] = rest.items
         assert (scored.state, scored.scores, scored.created_at is not None) == ("scored", [score], True)
@@ -489,6 +564,7 @@ class RecordContract:
         assert await records.threshold_status(ORG_A, "p1", "t1") == breached
         [stored] = (await records.list_alerts(ORG_A, "p1", "t1")).items
         assert (stored.id, stored.state, stored.created_at is not None) == ("a1", "pending", True)
+        assert (await records.list_alerts(ORG_A, "p1", "t1", cursor="²")).items == [stored]
         assert stored.next_attempt_at is not None
 
         # A due alert is taken by one delivery until it is held no longer, then recorded.
