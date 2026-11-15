@@ -9,8 +9,8 @@ On Postgres row-level security applies to the tables' owner, which runs the migr
 organisation is set while they run, so the table stops forcing it while every organisation's rows
 are rewritten, in the same transaction.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0012
+Revises: 0011
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0010"
-down_revision = "0009"
+revision = "0012"
+down_revision = "0011"
 branch_labels = None
 depends_on = None
 

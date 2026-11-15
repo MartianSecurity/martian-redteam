@@ -112,14 +112,17 @@ async def with_models(
     settings: JudgeSettings | None, principal: Principal, scorers: list[ScorerVersion]
 ) -> list[ScorerVersion]:
     """The scorers with each judge that names no model pinned to the default judge model. With no
-    default either, the judge stays without one, and the worker's judge uses its own."""
-    if not any(s.kind == "llm_judge" and s.model is None for s in scorers) or settings is None:
+    default either, the judge stays without one, and the worker's judge uses its own. A judge
+    graded by a panel names its models in the panel, so the default never applies to it."""
+
+    def unpinned(scorer: ScorerVersion) -> bool:
+        return scorer.kind == "llm_judge" and scorer.model is None and not scorer.panel
+
+    if not any(unpinned(s) for s in scorers) or settings is None:
         return scorers
     default = await settings.default_model(principal)
     return [
-        s.model_copy(update={"model": default.model, "endpoint": default.endpoint})
-        if s.kind == "llm_judge" and s.model is None
-        else s
+        s.model_copy(update={"model": default.model, "endpoint": default.endpoint}) if unpinned(s) else s
         for s in scorers
     ]
 

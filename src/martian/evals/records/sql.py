@@ -58,11 +58,14 @@ from martian.evals.model import (
 from martian.evals.records import (
     THRESHOLD_WINDOW_BOUND,
     Alert,
+    CalibrationRecheck,
     DatasetManifest,
     Delivery,
+    JudgeCalibration,
     Monitor,
     MonitoredTrace,
     MonitorProgress,
+    RecheckState,
     SavedView,
     Schedule,
     ScheduledRun,
@@ -72,11 +75,13 @@ from martian.evals.records import (
 )
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
+    calibration_rechecks,
     case_results,
     dataset_draft_cases,
     dataset_drafts,
     dataset_manifests,
     deliveries,
+    judge_calibrations,
     monitored_traces,
     monitors,
     reviews,
@@ -1009,6 +1014,139 @@ class SqlRecordStore:
 
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
+
+    # --- judge calibrations --------------------------------------------------------------------
+
+    async def save_calibration(
+        self, principal: Principal, project_id: str, calibration: JudgeCalibration
+    ) -> JudgeCalibration:
+        if calibration.project_id != project_id:
+            raise StoreError("invalid", "the calibration belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[JudgeCalibration, bool]:
+            if stored := self._one(connection, judge_calibrations, space, project_id, id=calibration.id):
+                return JudgeCalibration.model_validate(stored), False
+            saved = calibration.model_copy(update={"created_at": calibration.created_at or _now()})
+            connection.execute(
+                insert(judge_calibrations).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    judge=saved.judge,
+                    version=saved.version,
+                    created_at=saved.created_at,
+                    record=_json(saved),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "calibration", project_id, saved.id)
+        return saved
+
+    async def get_calibration(
+        self, principal: Principal, project_id: str, calibration_id: str
+    ) -> JudgeCalibration | None:
+        def work(connection: Connection, space: str) -> JudgeCalibration | None:
+            stored = self._one(connection, judge_calibrations, space, project_id, id=calibration_id)
+            return JudgeCalibration.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_calibrations(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[JudgeCalibration]:
+        def work(connection: Connection, space: str) -> list[JudgeCalibration]:
+            query = select(judge_calibrations.c.record).where(
+                judge_calibrations.c.space == space, judge_calibrations.c.project_id == project_id
+            )
+            if judge is not None:
+                query = query.where(judge_calibrations.c.judge == judge)
+            order = (judge_calibrations.c.created_at.desc(), judge_calibrations.c.id.desc())
+            rows: Sequence[Any] = connection.execute(query.order_by(*order)).scalars().all()
+            return [JudgeCalibration.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- calibration re-checks -----------------------------------------------------------------
+
+    async def create_recheck(
+        self, principal: Principal, project_id: str, recheck: CalibrationRecheck
+    ) -> CalibrationRecheck:
+        if recheck.project_id != project_id:
+            raise StoreError("invalid", "the re-check belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[CalibrationRecheck, bool]:
+            if stored := self._one(connection, calibration_rechecks, space, project_id, id=recheck.id):
+                return CalibrationRecheck.model_validate(stored), False
+            saved = recheck.model_copy(update={"created_at": recheck.created_at or _now()})
+            connection.execute(
+                insert(calibration_rechecks).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    judge=saved.judge,
+                    version=saved.version,
+                    state=saved.state,
+                    created_at=saved.created_at,
+                    record=_json(saved),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "recheck", project_id, saved.id)
+        return saved
+
+    async def get_recheck(self, principal: Principal, project_id: str, recheck_id: str) -> CalibrationRecheck | None:
+        def work(connection: Connection, space: str) -> CalibrationRecheck | None:
+            stored = self._one(connection, calibration_rechecks, space, project_id, id=recheck_id)
+            return CalibrationRecheck.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def update_recheck(
+        self,
+        principal: Principal,
+        project_id: str,
+        recheck: CalibrationRecheck,
+        *,
+        expected_state: RecheckState | None = None,
+    ) -> CalibrationRecheck:
+        def work(connection: Connection, space: str) -> CalibrationRecheck:
+            stored = self._one(connection, calibration_rechecks, space, project_id, id=recheck.id)
+            if stored is None:
+                raise StoreError("not_found", "re-check not found")
+            saved = recheck.model_copy(update={"created_at": CalibrationRecheck.model_validate(stored).created_at})
+            table = calibration_rechecks
+            statement = update(table).where(
+                table.c.space == space, table.c.project_id == project_id, table.c.id == recheck.id
+            )
+            if expected_state is not None:
+                statement = statement.where(table.c.state == expected_state)
+            if connection.execute(statement.values(state=saved.state, record=_json(saved))).rowcount == 0:
+                raise StoreError("conflict", "the re-check is no longer in the expected state")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "recheck", project_id, saved.id)
+        return saved
+
+    async def list_rechecks(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[CalibrationRecheck]:
+        def work(connection: Connection, space: str) -> list[CalibrationRecheck]:
+            table = calibration_rechecks
+            query = select(table.c.record).where(table.c.space == space, table.c.project_id == project_id)
+            if judge is not None:
+                query = query.where(table.c.judge == judge)
+            order = (table.c.created_at.desc(), table.c.id.desc())
+            rows: Sequence[Any] = connection.execute(query.order_by(*order)).scalars().all()
+            return [CalibrationRecheck.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
 
     # --- dataset manifests -------------------------------------------------------------------
 

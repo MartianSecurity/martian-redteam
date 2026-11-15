@@ -75,10 +75,14 @@ push and keeps one comment with the result, also without a Martian account. See
   ([in a container](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  a panel of several judge models decided by a strict majority (`judge_panel`),
+  conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`),
   twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
   their order, turn by turn, and the call's latency and cost, custom checks written as Python
-  functions (unsandboxed: they run with the caller's privileges), pinned datasets, Backend-scored
+  functions (unsandboxed: they run with the caller's privileges), each judge version's agreement
+  with human labels beside people's agreement with each other, and its saved calibration,
+  re-checked on request after its model or rubric changes, pinned datasets, Backend-scored
   regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
