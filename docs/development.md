@@ -56,6 +56,8 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
 | `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
 | `test` | `uv sync --locked`, pytest with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `evals-core` | The evals core's tests, with the stores on Postgres too | 3.12 |
+| `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
 | `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
 | `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
@@ -105,6 +107,36 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
+
+## MLflow upgrades
+
+`mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
+test module that runs MLflow itself: the store binding (`test_store_mlflow.py`), the judge
+transport and the judges built on it, the private-import guard (`test_mlflow_private.py`), the
+pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
+the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
+the store giving MLflow only ids of MLflow's own form, and the upgrade path.
+`scripts/mlflow_compat.py` lists the modules and runs them on any release:
+
+```bash
+python3 scripts/mlflow_compat.py pinned next        # the pin, then the newest release on PyPI
+python3 scripts/mlflow_compat.py pinned 3.19.0rc0   # or any exact version
+```
+
+Each release gets its own environment under `.venv-mlflow/`, built from `uv.lock` with only
+`mlflow-skinny` replaced, so the project's `.venv` is untouched. The first release writes a store
+(SQLite, and Postgres when `MARTIAN_TEST_POSTGRES_URL` is set); each later one must open it,
+which migrates MLflow's schema, and read back the same content. The `MLflow compatibility` CI job
+runs the pinned release, which is required, then the newest release on PyPI, which is reported
+but does not fail CI, and carries the store from one step to the other. While the pin is the
+newest release, the second step has nothing to test and says so. A Dependabot pull request that
+moves the pin runs the required step on the new version; the upgrade from the old pin is the one
+the second step checked on `main` before.
+
+To move the pin, run the suite on the candidate, change `mlflow-skinny==` in `pyproject.toml`, run
+`uv lock`, and update the version in [SDK and CI](sdk-and-ci.md) and
+[release preparation](releasing.md). The hosted MLflow server's version is set separately in
+MorningHQ/martian-evals.
 
 ## Adding a vulnerability
 
