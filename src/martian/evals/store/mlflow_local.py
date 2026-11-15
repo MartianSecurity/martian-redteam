@@ -548,7 +548,8 @@ class MlflowStore:
             )
             self._store.start_trace(info)
             if trace.spans:
-                self._store.log_spans(experiment.experiment_id, [_mlflow_span(mlflow_id, s) for s in trace.spans])
+                spans = [_mlflow_span(mlflow_id, s, info.request_time) for s in trace.spans]
+                self._store.log_spans(experiment.experiment_id, spans)
 
         await self._call(principal, work)
         for score in trace.scores:
@@ -1004,7 +1005,7 @@ def _case(record: Any) -> tuple[int, Case]:
     )
 
 
-def _mlflow_span(trace_id: str, span: Span) -> MlflowSpan:
+def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int) -> MlflowSpan:
     def span_id(value: str) -> str:
         return value if _MLFLOW_SPAN_ID.match(value) else _hex(value, 16)
 
@@ -1022,7 +1023,8 @@ def _mlflow_span(trace_id: str, span: Span) -> MlflowSpan:
         **{key: json.dumps(value, default=str) for key, value in span.attributes.items()},
     }
     code = {"ok": "STATUS_CODE_OK", "error": "STATUS_CODE_ERROR"}.get(span.status, "STATUS_CODE_UNSET")
-    start = int((span.start_ms or 0) * 1_000_000)
+    # MLflow starts a trace at its earliest span, so a span with no start time starts with its trace.
+    start = int((trace_start_ms if span.start_ms is None else span.start_ms) * 1_000_000)
     return MlflowSpan.from_dict(
         {
             "trace_id": trace_id,

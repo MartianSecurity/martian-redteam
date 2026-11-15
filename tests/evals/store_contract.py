@@ -236,6 +236,22 @@ class StoreContract:
         await refused("not_found", store.link_traces(ORG_A, "p1", "missing", ["t1"]))
         await refused("not_found", store.set_trace_tag(ORG_A, "p1", "missing", "k", "v"))
 
+    async def test_a_span_with_no_start_time_leaves_its_trace_at_the_time_it_was_given(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        # As an imported Inspect sample that failed before the model answered: its messages have no times.
+        start = T0.timestamp() * 1000
+        spans = [
+            Span(id="sample", name="task", kind="AGENT", status="error", start_ms=start, end_ms=start + 2000),
+            Span(id="unanswered", parent_id="sample", name="messages", kind="UNKNOWN", status="error"),
+        ]
+        await store.record_trace(ORG_A, trace("t1", state="error", latency_ms=2000.0, spans=spans))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None
+        assert (read.request_time, read.latency_ms, read.spans) == (T0, 2000.0, spans)
+        page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", since=T0))
+        assert [t.id for t in page.items] == ["t1"]
+
     async def test_scores_are_kept_with_their_trace(self, store: EvalStore, project: Project) -> None:
         await store.record_trace(ORG_A, trace("t1"))
         judged = await store.log_score(
