@@ -46,10 +46,11 @@ from martian.evals.server.entitlements import PAID
 from martian.evals.server.launch import admit_run
 from martian.evals.store import EvalStore, MemoryStore
 from martian.evals.worker import InProcessWorker, QueueWorker, ScheduleServices, TargetReply, Work, Worker
-from martian.evals.worker.model_watch import Observation, due_change, observe
+from martian.evals.worker.model_watch import Observation, due_change, observe, read_traces
 from martian.evals.worker.schedule import SCHEDULE_KEY, execute_schedule, next_due, scheduled_run_id
 from martian.evals.worker.scorers import builtin_scorer
 from tests.evals import test_records
+from tests.evals.store_contract import EmptyFirstPages
 from tests.evals.write_fixture import judge
 
 needs_postgres = test_records.needs_postgres
@@ -591,6 +592,32 @@ async def test_a_watching_schedule_is_due_every_watch_interval_and_at_once_with_
     assert next_due(watching_one, behind, T0, watch_seconds=60) == T0
     paused = watching_one.model_copy(update={"state": "paused"})
     assert next_due(paused, None, T0, watch_seconds=60) == midnight
+
+
+async def test_a_watch_starts_from_the_latest_model_past_a_search_page_with_no_traces() -> None:
+    # A binding may answer a page of the trace search with no traces and a next_cursor; the watch
+    # reads on to the traces before it started.
+    store = EmptyFirstPages()
+    await store.create_project(SINGLE_USER, Project(id=DEFAULT_PROJECT, name="Default"))
+    await live(store, -600, OLD)
+    schedule = Schedule(
+        id="sc1",
+        project_id=DEFAULT_PROJECT,
+        name="Nightly",
+        every_seconds=86400,
+        on_model_change=ModelWatch(source="traces"),
+        suite_id="suite-1",
+        suite_version=1,
+        scorers=[builtin_scorer("contains_expected")],
+        target=Target(kind="agent", agent_id=AGENT),
+        dataset_name="regression",
+        dataset_id="d1",
+        max_cases=10,
+        active_since=T0,
+        created_at=T0,
+    )
+    watch = await read_traces(store, SINGLE_USER, schedule, ModelWatchProgress(), T0 + timedelta(seconds=60))
+    assert (watch.model, watch.caught_up) == (OLD, True)
 
 
 # --- through the routes and the durable queue ----------------------------------------------------
