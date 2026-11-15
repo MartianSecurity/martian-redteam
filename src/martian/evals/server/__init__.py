@@ -27,8 +27,9 @@ the capability it needs with ``require_capability(name)``. Every route is in the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
 ``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
-``POST /v1/traces``, which records an application's spans as traces through the store, and
-``monitors`` the monitors that score a project's live traces.
+``POST /v1/traces``, which records an application's spans as traces through the store,
+``monitors`` the monitors that score a project's live traces, and ``thresholds`` the thresholds on
+their scores, which send alerts.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from martian.evals.server import (
     runs,
     scoring,
     suites,
+    thresholds,
     traces,
     views,
 )
@@ -180,6 +182,7 @@ def create_app(
         launch.router,
         scoring.router,
         monitors.router,
+        thresholds.router,
         reviews.router,
         reviews.explorer,
         suites.router,

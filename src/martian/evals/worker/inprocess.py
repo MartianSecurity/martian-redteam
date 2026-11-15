@@ -19,7 +19,9 @@ any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds 
 ``limits`` are the installation's limits for a run that has none of its own
 (:class:`~martian.evals.model.RunLimits`). A monitor's work is one pass over its project's new
 traces (:mod:`martian.evals.worker.monitor`), which reads a trace ``monitor_settle_seconds`` after
-its request time.
+its request time, then evaluates the thresholds on the monitor's scores and delivers their
+alerts with ``alerts``, an installation's :class:`~martian.evals.alerts.AlertSettings`, which send
+nothing unless given.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from martian.evals.alerts import AlertSender, AlertSettings
 from martian.evals.model import Run, RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
@@ -56,6 +59,7 @@ class InProcessWorker:
         executor: AgentExecutor | None = None,
         limits: RunLimits | None = None,
         monitor_settle_seconds: float = SETTLE_SECONDS,
+        alerts: AlertSettings | None = None,
     ) -> None:
         if monitor_settle_seconds < 0:
             raise ValueError("monitor_settle_seconds is 0 or more")
@@ -72,11 +76,17 @@ class InProcessWorker:
         self._executor = executor
         self._limits = limits
         self._settle = monitor_settle_seconds
+        self._alerts = AlertSender(alerts)
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
     def judges(self) -> bool:
         return self._judge is not None
+
+    @property
+    def alert_channels(self) -> frozenset[str]:
+        """The channels this worker sends thresholds' alerts on (``SendsAlerts``)."""
+        return frozenset(self._alerts.channels)
 
     def _check_organisation(self, principal: Principal) -> None:
         if principal.organisation_id != self._organisation:
@@ -132,4 +142,6 @@ class InProcessWorker:
         elif work.kind == "scoring":
             await execute_scoring(self._store, self._records, work, judge=self._judge, limits=self._limits)
         else:
-            await execute_monitor(self._store, self._records, work, judge=self._judge, settle_seconds=self._settle)
+            await execute_monitor(
+                self._store, self._records, work, judge=self._judge, settle_seconds=self._settle, alerts=self._alerts
+            )
