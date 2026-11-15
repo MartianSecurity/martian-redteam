@@ -581,6 +581,16 @@ def import_martian(
         typer.echo(f"Import stopped: {error.detail}. Import into a fresh data folder again.", err=True)
         raise typer.Exit(code=2) from None
     typer.echo(f"Imported into {home}: {_export_counts(summary.manifest['files'])}.")
+    if summary.paused:
+        typer.echo(
+            f"Monitors and schedules come back paused (active in the export: {len(summary.paused)}): "
+            "resume each to start it again."
+        )
+    if summary.needs_secret:
+        typer.echo(
+            f"Webhook secrets are never exported (thresholds with a webhook: {len(summary.needs_secret)}): give each "
+            "its secret again with POST /v1/evals/thresholds/{id}/secret before its alerts are signed."
+        )
     ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
     typer.echo(f"Open them in the local Evals UI: {ui}")
 
