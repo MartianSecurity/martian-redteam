@@ -8,6 +8,8 @@ unless the caller names another:
 - ``artifacts/``: that store's run artifacts.
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
   runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
+- ``settings.json``: the local settings, :class:`~martian.evals.judge_settings.FileJudgeSettings`:
+  the default judge model, which an organisation sets on the server. Written when it is first set.
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
@@ -39,6 +41,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
@@ -73,6 +76,9 @@ ACCESS_TOKEN = "local"
 """What the session call issues. Nothing checks it: the local edition has one user and no sign-in."""
 
 SESSION_ID = "local"
+
+SETTINGS_FILE = "settings.json"
+"""The data folder's local settings: the default judge model."""
 
 
 class LocalEditionError(Exception):
@@ -174,7 +180,12 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS)
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
-    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER)
+    app = create_app(
+        store=store,
+        records=records,
+        principal=lambda: SINGLE_USER,
+        judge_settings=FileJudgeSettings(home / SETTINGS_FILE),
+    )
     app.include_router(session_router)
     app.mount("/", StaticFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))

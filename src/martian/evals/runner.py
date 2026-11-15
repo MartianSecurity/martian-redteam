@@ -37,9 +37,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals import _numeric, _policy
+from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 
-JUDGES = ("rubric", "guidelines", "conditions")
+# LLM judges graded by criteria the suite or the case gives, under the judge's own type name.
+CRITERIA_JUDGES = ("rubric", "guidelines", "conditions")
+# LLM judges of the case's documents (inputs.context) that take no criteria.
+GROUNDING_JUDGES = ("groundedness", "context_relevance", "context_sufficiency")
+JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES
 CHECKS = (
     "contains",
     "not_contains",
@@ -166,6 +171,8 @@ class TargetRef(_Model):
 class JudgeConfig(_Model):
     model: str
     inference_params: dict[str, float | int] = Field(default_factory=dict)
+    # Added to every judge request; ${NAME} in a value is read from the environment.
+    headers: dict[str, str] = Field(default_factory=dict)
     # Server errors and connection failures are retried this many times.
     max_retries: int = Field(default=5, ge=0, le=10)
     # Rate limits are retried for up to this many seconds, as long as the provider asks.
@@ -177,6 +184,9 @@ class CheckSpec(_Model):
         "rubric",
         "guidelines",
         "conditions",
+        "groundedness",
+        "context_relevance",
+        "context_sufficiency",
         "contains",
         "not_contains",
         "contains_any",
@@ -330,7 +340,7 @@ class Suite(_Model):
             raise ValueError("check names must be unique; give repeated check types a name")
         kinds = [check.type for check in self.checks if check.type in JUDGES]
         if len(set(kinds)) != len(kinds):
-            raise ValueError("use at most one check of each judge type (rubric, guidelines, conditions)")
+            raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
         calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
@@ -433,20 +443,43 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     return cases
 
 
-def _from_environment(text: str) -> str:
-    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
+def _expand(text: str, setting: str, value_of: Callable[[str], str | None], source: str) -> str:
+    """Replace each ${NAME} in ``text`` with ``value_of(NAME)``. A name without a value is a
+    ``ConfigError`` that names the setting and ``source``, never a value."""
 
     def value(match: re.Match[str]) -> str:
-        found = os.environ.get(match[1])
+        found = value_of(match[1])
         if not found:
-            raise ConfigError(f"the target needs the environment variable {match[1]}")
+            raise ConfigError(f"{setting} needs {source} {match[1]}")
         return found
 
     return _ENV_REFERENCE.sub(value, text)
 
 
-def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
-    """One case's request body. Case text is inserted as data and never expanded itself."""
+def _from_environment(text: str, setting: str) -> str:
+    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
+    return _expand(text, setting, os.environ.get, "the environment variable")
+
+
+def _status_reason(response: httpx.Response) -> str:
+    """Why a target answered with an error status, naming the setting to check. The response
+    text is read only to tell an unknown model from a wrong address; it is never repeated."""
+    status = response.status_code
+    reason = f"the target returned HTTP {status}"
+    if status in (400, 403, 404, 422) and names_unknown_model(response.text[:2000]):
+        return f"{reason}; check the model named in target.body"
+    if status in (401, 403):
+        return f"{reason}; check the credentials in target.headers"
+    if status in (404, 405):
+        return f"{reason}; check target.url"
+    if status in (400, 422):
+        return f"{reason}; check target.body"
+    return reason
+
+
+def _case_values(inputs: dict[str, Any], input_key: str) -> Callable[[str], Any]:
+    """What each body placeholder of one case stands for: ``{{input}}`` is the input named
+    ``input_key``, ``{{inputs.NAME}}`` the input named NAME, and ``{{uuid}}`` a new UUID."""
 
     def lookup(name: str) -> Any:
         if name == "uuid":
@@ -456,10 +489,16 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
             raise TargetCallError(f"the case has no input named {key!r}")
         return inputs[key]
 
+    return lookup
+
+
+def _fill(template: Any, lookup: Callable[[str], Any]) -> Any:
+    """One case's request body, each placeholder replaced by ``lookup(name)``. Case text is
+    inserted as data and never expanded itself."""
     if isinstance(template, dict):
-        return {key: _fill(item, inputs, input_key) for key, item in template.items()}
+        return {key: _fill(item, lookup) for key, item in template.items()}
     if isinstance(template, list):
-        return [_fill(item, inputs, input_key) for item in template]
+        return [_fill(item, lookup) for item in template]
     if not isinstance(template, str):
         return template
     whole = _PLACEHOLDER.fullmatch(template)
@@ -470,46 +509,59 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
     )
 
 
+def _unreachable(error: httpx.HTTPError) -> TargetCallError:
+    return TargetCallError(f"the target could not be reached: {type(error).__name__}; check target.url")
+
+
+def _reply(response: httpx.Response, steps: list[str]) -> Any:
+    """The output in a target's response: its text, or the value at ``response_path`` (``steps``).
+    An error status or a missing value is a ``TargetCallError`` naming the setting to check."""
+    if not response.is_success:
+        raise TargetCallError(_status_reason(response))
+    if not steps:
+        return response.text
+    try:
+        reply = response.json()
+    except ValueError:
+        raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
+    for step in steps:
+        if isinstance(reply, dict) and step in reply:
+            reply = reply[step]
+        elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
+            reply = reply[int(step)]
+        else:
+            raise TargetCallError("the target's response has no value at response_path")
+    if reply is None:
+        raise TargetCallError("the target's response has no value at response_path")
+    return reply
+
+
 def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
 
     Errors name what went wrong but never the address, the headers or the response body. The
     returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
-    a case's call failed.
+    a case's call failed. The evals core's worker calls an HTTP target with the same pieces
+    (:mod:`martian.evals.worker.targets`).
     """
-    url = _from_environment(reference.url or "")
+    url = _from_environment(reference.url or "", "target.url")
     try:
         _check_url(url)
     except ValueError as error:
         raise ConfigError(str(error)) from None
-    headers = {name: _from_environment(value) for name, value in reference.headers.items()}
+    headers = {name: _from_environment(value, f"target.headers.{name}") for name, value in reference.headers.items()}
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
     def send(inputs: dict[str, Any]) -> Any:
-        body = _fill(reference.body, inputs, input_key)
+        body = _fill(reference.body, _case_values(inputs, input_key))
         try:
             with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body)
+        except httpx.ReadTimeout:
+            raise TargetCallError("the target did not answer within target.timeout_seconds") from None
         except httpx.HTTPError as error:
-            raise TargetCallError(f"the target could not be reached: {type(error).__name__}") from None
-        if not response.is_success:
-            raise TargetCallError(f"the target returned HTTP {response.status_code}")
-        if not steps:
-            return response.text
-        try:
-            reply = response.json()
-        except ValueError:
-            raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
-        for step in steps:
-            if isinstance(reply, dict) and step in reply:
-                reply = reply[step]
-            elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
-                reply = reply[int(step)]
-            else:
-                raise TargetCallError("the target's response has no value at response_path")
-        if reply is None:
-            raise TargetCallError("the target's response has no value at response_path")
-        return reply
+            raise _unreachable(error) from None
+        return _reply(response, steps)
 
     # Why each failed call failed, by the inputs it was given: the evaluator reports only that
     # a call failed. Two cases with identical inputs send identical requests, so sharing is safe.
@@ -557,17 +609,25 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
-    from martian.evals import judges
+    from martian.evals import grounding, judges
 
     built = []
+    judge_headers = {
+        name: _from_environment(value, f"judge.headers.{name}")
+        for name, value in (suite.judge.headers if suite.judge else {}).items()
+    }
+    factories: dict[str, Callable[..., Any]] = {
+        "rubric": judges.response_rubric,
+        "guidelines": judges.response_guidelines,
+        "conditions": judges.response_conditions,
+        "groundedness": grounding.groundedness,
+        "context_relevance": grounding.context_relevance,
+        "context_sufficiency": grounding.context_sufficiency,
+    }
     for check in suite.checks:
         if check.type in JUDGES:
             assert suite.judge is not None
-            factory = {
-                "rubric": judges.response_rubric,
-                "guidelines": judges.response_guidelines,
-                "conditions": judges.response_conditions,
-            }[check.type]
+            factory = factories[check.type]
             built.append(
                 factory(
                     model=suite.judge.model,
@@ -576,6 +636,7 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     inference_params=dict(suite.judge.inference_params) or None,
                     max_retries=suite.judge.max_retries,
                     rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
+                    headers=judge_headers,
                 )
             )
         else:
@@ -686,9 +747,11 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
     and its parameters, the target, and the SDK version that holds the judge prompts.
 
     Settings that change how a run is carried out but not what it grades (concurrency, batch size,
-    output folder, retries and the rate-limit wait, timeout, MLflow location) are left out, so
-    changing them keeps earlier results. A function target counts by the contents of its file;
-    modules that file imports and the service behind a URL target cannot be seen from here.
+    output folder, retries and the rate-limit wait, timeout, the judge's headers, MLflow location)
+    are left out, so changing them keeps earlier results. The judge's headers, like its key and
+    address in the environment, say how its endpoint is reached. A function target counts by the
+    contents of its file; modules that file imports and the service behind a URL target cannot be
+    seen from here.
     """
     target: dict[str, Any] | None = None
     if suite.target is not None:
@@ -701,7 +764,7 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
         {
             "sdk": __version__,
             "checks": [check.model_dump(mode="json") for check in suite.checks],
-            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds"})
+            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds", "headers"})
             if suite.judge
             else None,
             "input_key": suite.input_key,
@@ -815,9 +878,16 @@ def _summary(
         for label in labels
     }
     target_errors: dict[str, int] = {}
+    # Why checks gave no verdict, such as a judge setting to fix; a target failure is counted above.
+    check_errors: dict[str, dict[str, int]] = {}
     for record in records:
         if record.get("error"):
             target_errors[str(record["error"])] = target_errors.get(str(record["error"]), 0) + 1
+            continue
+        for label, check in record["checks"].items():
+            if check.get("passed") is None and check.get("error"):
+                reasons = check_errors.setdefault(label, {})
+                reasons[str(check["error"])] = reasons.get(str(check["error"]), 0) + 1
     return {
         "cases": len(records),
         "passed": sum(r["passed"] is True for r in records),
@@ -826,6 +896,7 @@ def _summary(
         "checks": per_check,
         **({} if false_refusals is None else {"false_refusals": false_refusals}),
         "target_errors": target_errors,
+        "check_errors": check_errors,
         "invalidated": invalidated,
         "seconds_this_run": round(seconds, 1),
     }

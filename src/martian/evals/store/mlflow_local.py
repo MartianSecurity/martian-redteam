@@ -25,7 +25,10 @@ How the shared model sits in MLflow:
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
 - A review question is a label schema; a review queue is an MLflow review queue named by the
   queue id, with its definition in an experiment tag.
-- Run artifacts are files under the run's artifact folder. The artifact root must be local.
+- Run artifacts are files in the run's artifact folder,
+  ``<artifact root>/<MLflow run id>/artifacts``. The artifact root must be local, and on Postgres
+  at most :data:`LONGEST_ARTIFACT_ROOT` characters long, so that folder fits MLflow's
+  ``runs.artifact_uri``.
 
 Text search over traces is applied in this process after MLflow's own filters, so a search reads
 every trace those filters match. A search for a run's traces is two MLflow searches, one on the
@@ -64,6 +67,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.genai.label_schemas import InputCategorical, InputNumeric, InputPassFail, InputText, LabelSchemaType
 
 from martian.evals._mlflow import (
+    RUN_ARTIFACT_URI_LENGTH,
     ServerWorkspaceContext,
     SpansLocation,
     TraceTagKey,
@@ -109,6 +113,10 @@ USER_KEY = "mlflow.trace.user"
 """The trace metadata key MLflow tracing records the application's user in (``TraceMetadataKey.TRACE_USER``)."""
 SOURCE_RUN_KEY = "mlflow.sourceRun"
 """The trace metadata key MLflow tracing records the active MLflow run in (``TraceMetadataKey.SOURCE_RUN``)."""
+LONGEST_ARTIFACT_ROOT = RUN_ARTIFACT_URI_LENGTH - len(f"/{'0' * 32}/artifacts")
+"""The longest artifact root the store takes on Postgres, 157 characters: a run's artifact folder,
+the root and ``/<MLflow run id>/artifacts``, must fit in MLflow's ``runs.artifact_uri``. SQLite does
+not enforce the column's length, so it takes any root."""
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -166,12 +174,21 @@ class MlflowStore:
 
     ``database_url`` is a SQLAlchemy URL: ``sqlite:///path/mlflow.db`` or
     ``postgresql+psycopg://user:password@host/db`` (install ``martian-sdk[postgres]``). On Postgres,
-    MLflow's tables are created in ``schema``. ``artifact_root`` is a local folder.
+    MLflow's tables are created in ``schema``. ``artifact_root`` is a local folder; on Postgres a
+    root longer than :data:`LONGEST_ARTIFACT_ROOT` is refused with ``ValueError`` before anything
+    is written.
     """
 
     def __init__(self, database_url: str, artifact_root: str | Path, *, schema: str = "mlflow") -> None:
         check_schema(schema)
         self._artifact_root = Path(artifact_root).resolve()
+        if is_postgres(database_url) and len(str(self._artifact_root)) > LONGEST_ARTIFACT_ROOT:
+            raise ValueError(
+                f"artifact_root is {len(str(self._artifact_root))} characters, and on Postgres it can be at most "
+                f"{LONGEST_ARTIFACT_ROOT} characters: MLflow keeps a run's artifact folder, the root and "
+                f"/<run id>/artifacts, in runs.artifact_uri, which holds {RUN_ARTIFACT_URI_LENGTH}. "
+                f"Choose a shorter folder than {self._artifact_root}"
+            )
         self._artifact_root.mkdir(parents=True, exist_ok=True)
         url = database_url
         if is_postgres(database_url):

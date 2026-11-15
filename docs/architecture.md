@@ -106,6 +106,11 @@ for up to `rate_limit_wait_seconds` as the provider's `Retry-After` asks, or a s
 or connection failure, up to `max_retries` times with backoff.
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.
+The grounding judges (`groundedness`, `context_relevance`, `context_sufficiency`,
+`martian.evals.grounding`) reuse that transport and option checking with one call each and a
+flat verdict of strings. Their quotes are copied by the model and must be passages of a named
+text (the documents, the response, the request or the expected response) up to whitespace;
+a quote that is not, a missing quote or `uncertain` is a scorer error, never repaired.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
@@ -132,7 +137,7 @@ next to each one creates it.
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
 | `src/martian/evals/run_record.py` | `martian evals run` recording each suite-file run through the store and the record store, so `martian ui` shows it ([command-line runs](evals-core.md#command-line-runs)) | Exists |
 | `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; a release builds it from the wheel it publishes and pushes it to GitHub Container Registry ([releasing](releasing.md#the-local-editions-image)) |
-| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; a durable queue is MorningHQ/martian-notes#139 |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; HTTP targets called by the worker itself, with credentials from its own process, and registered agents through a martian-agents executor interface; a durable queue is MorningHQ/martian-notes#139 |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MorningHQ/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
 
 ## CI and scoring

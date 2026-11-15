@@ -81,44 +81,60 @@ target:
   agents that keep a conversation per session. A value that is only a placeholder keeps its
   type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
-  the environment when the suite loads; a missing variable stops the run before any case. The
-  values are not written to the results. They are not expanded in `body`.
+  the environment when the suite loads; a missing variable stops the run before any case, with
+  an error naming the setting that needs it, such as `target.headers.Authorization needs the
+  environment variable AGENT_API_KEY`. The values are not written to the results. They are not
+  expanded in `body`.
 - **Case text is sent as data.** `${...}` or `{{...}}` inside a case's input reaches the agent
   unchanged.
 - **Failures are errors, not passes.** A status outside 2xx, a timeout, an unreachable address
   or a response with no value at `response_path` gives that case no verdict and the run exits
   `2`. There is no retry, redirects are not followed and proxy settings from the environment
   are not used.
-- **A failed call says why.** The case's `error` in `results.jsonl` holds the reason, such as
-  `the target returned HTTP 401` or `the target could not be reached: ConnectError`, and the
-  command prints how many cases failed for each reason. The reason is the SDK's own wording:
-  it never includes the address, a header or the response body. A function target reports
-  only `the target call failed`, because its exception comes from your code.
+- **A failed call says why, and which setting to check.** The case's `error` in
+  `results.jsonl` holds the reason, and the command prints how many cases failed for each
+  reason. The reason is the SDK's own wording: it never includes the address, a header or the
+  response body. A function target reports only `the target call failed`, because its
+  exception comes from your code.
+
+  | Reason | Usual cause |
+  | --- | --- |
+  | `the target could not be reached: ConnectError; check target.url` | Wrong host or port, or the server is down |
+  | `the target did not answer within target.timeout_seconds` | A slow model or agent |
+  | `the target returned HTTP 401; check the credentials in target.headers` (also 403) | A wrong or missing key |
+  | `the target returned HTTP 404; check target.url` (also 405) | A wrong path |
+  | `the target returned HTTP 404; check the model named in target.body` (also 400, 403) | The endpoint says it does not know the model in the body, or the key may not use it |
+  | `the target returned HTTP 400; check target.body` (also 422) | The endpoint refused the body |
+  | `the target's response has no value at response_path` | A reply in another shape |
+  | `the target returned HTTP 500` (any other status) | A fault on the target's side |
 
 A URL target cannot be combined with `file` or `function`. Use a function target when the
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
 secret in the body.
 
-**Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
-every other type is one of the twenty-four [deterministic checks](#deterministic-checks), each with
-its options and an example, five of them the [policy checks](#policy-checks) for prohibited
-phrases, personal data, secrets, planted instructions and refusals. Criteria written in the suite file apply to every case that does
-not carry its own in `expectations`. Use at most one check of each judge type, and give repeated
-check types a `name`.
+**Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
+graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
+[grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
+`inputs.context` and take no options; every other type is one of the twenty-four
+[deterministic checks](#deterministic-checks), each with its options and an example, five of them
+the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
+instructions and refusals. Criteria written in the suite file apply to every case that does not
+carry its own in `expectations`. Use at most one check of each judge type, and give repeated check
+types a `name`.
 
 **Results.** The output folder receives:
 
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error, and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`), and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table, with the false-refusal rate under it for a
-suite with a policy check, and exits `0` when every case passed, `1` when a case failed, and `2`
-when a case has no verdict or the suite file is invalid.
+suite with a policy check, and the reasons cases had no verdict, and exits `0` when every case
+passed, `1` when a case failed, and `2` when a case has no verdict or the suite file is invalid.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
 run that is stopped can be started again: finished cases are skipped, and cases that errored are
@@ -135,7 +151,8 @@ and their criteria, the judge model and its `inference_params`, the target, the 
 inputs, expectations and stored output, and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
-`judge.rate_limit_wait_seconds`, `timeout_seconds` or the MLflow location keeps earlier results. The SDK cannot see changes in
+`judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
+in the environment, or the MLflow location keeps earlier results. The SDK cannot see changes in
 modules the target file imports, or in the service behind a URL target: use `--fresh` after
 those.
 
@@ -182,19 +199,79 @@ comes from that provider's usual environment variable. Nothing is read from a `.
 | Provider | `judge.model` | Environment |
 | --- | --- | --- |
 | OpenAI | `openai:/<model>` | `OPENAI_API_KEY` |
-| Any OpenAI-compatible endpoint | `openai:/<model>` | `OPENAI_API_KEY` and `OPENAI_API_BASE` (the endpoint's `/v1` URL) |
+| Any [OpenAI-compatible endpoint](#openai-compatible-endpoints) | `openai:/<model>` | `OPENAI_API_KEY` and `OPENAI_API_BASE` (the endpoint's base address, usually ending in `/v1`) |
 | Amazon Bedrock, through its OpenAI-compatible endpoint | `openai:/<bedrock model id>` | `OPENAI_API_KEY` set to a Bedrock API key, `OPENAI_API_BASE` set to the regional endpoint |
 
 Other providers MLflow can route to use the same URI form with their own environment
 variables. The judge needs a provider that returns a direct chat completion. Set
 `judge.inference_params: {temperature: 0}` if your provider supports it; omitted parameters
-use the provider's defaults. Rate limits are retried for up to `judge.rate_limit_wait_seconds`
-(default 300, at most 3600), waiting as long as the provider's `Retry-After` asks. Server errors
-and connection failures are retried `judge.max_retries` times (default 5). A case whose judge
-call still fails is an error in the results, and the rest of the run carries on.
+use the provider's defaults. `judge.headers` adds headers to every judge request. Rate limits
+are retried for up to `judge.rate_limit_wait_seconds` (default 300, at most 3600), waiting as
+long as the provider's `Retry-After` asks. Server errors and connection failures are retried
+`judge.max_retries` times (default 5). A case whose judge call still fails is an error in the
+results, with a message naming the setting to check, and the rest of the run carries on.
 
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
+
+### OpenAI-compatible endpoints
+
+A gateway such as LiteLLM, or a self-hosted server such as vLLM or Ollama, that serves the
+OpenAI chat completions API can be both the judge and the model under test.
+[`examples/evals/openai-compatible`](../examples/evals/openai-compatible/evals.yaml) uses one
+endpoint for both:
+
+```bash
+export OPENAI_API_BASE=http://localhost:4000/v1   # the endpoint's base address, no trailing /
+export OPENAI_API_KEY=...                         # its key
+martian evals run examples/evals/openai-compatible/evals.yaml
+```
+
+Replace `your-model` in the file, in `target.body` and `judge.model`, with a model the endpoint
+serves. Each case makes one target call and one judge call, or two judge calls when the
+endpoint declines structured output.
+
+| Setting | Used by | Meaning |
+| --- | --- | --- |
+| `OPENAI_API_BASE` | Judge | The endpoint's base address, usually ending in `/v1`. The judge posts to `<base>/chat/completions`. When it is unset, MLflow reads `OPENAI_BASE_URL`, and with neither the judge calls OpenAI. One address serves every judge in the process |
+| `OPENAI_API_KEY` | Judge | Sent as `Authorization: Bearer <key>`. MLflow's `openai` provider requires it, so give any value to an endpoint that takes no key |
+| `judge.model` | Judge | `openai:/<model>`: the name after `openai:/` is the `model` the endpoint receives |
+| `judge.headers` | Judge | Headers added to every judge request after the provider's own, so one named `Authorization` replaces the key's; for a gateway that takes its key, tenant or route in another header. `${NAME}` in a value is read from the environment, and a missing variable stops the run before any case. The values are never written to the results or the judge metadata. Changing them keeps earlier results, as changing the key or address does. In Python it is `headers=` on `response_guidelines`, `response_conditions` and `response_rubric` |
+| `target.url`, `target.headers`, `target.body`, `target.response_path` | Model under test | A [URL target](#run-a-suite-file-locally) that posts a chat completion: `url: "${OPENAI_API_BASE}/chat/completions"`, `Authorization: "Bearer ${OPENAI_API_KEY}"` in `headers`, the `model` and `messages` in `body`, and `response_path: choices.0.message.content` |
+
+**Structured output.** Each judge stage first asks for structured output: `response_format`
+with the judgment's JSON schema (`type: json_schema`, `strict: true`). When the endpoint
+declines it with HTTP 400 and an error naming `response_format`, `json_schema` or structured
+output, the stage sends the same request once more without `response_format`. The prompt
+already describes the JSON, and the reply is held to the same strict schema; one enclosing
+` ```json ` fence is accepted. `martian.judge.response_format` in the feedback metadata records
+`json_schema`, or `none` when the stage asked again without it. That is the only fallback: any
+other refusal of `response_format` is an error, a reply that does not match the schema is never
+asked for again, and there is no setting that turns structured output off.
+
+**Failure messages.** A judge failure says which setting to check. In a suite file run,
+`summary.json` counts them per check under `check_errors` and the command prints them; in
+pytest they are the scorer's error. Each starts `Judge draft failed` or `Judge review failed`.
+Suite file settings are named `judge.<name>`; in Python they are the judge's argument of the
+same name. The endpoint's own error text is read to choose the message and is never repeated.
+
+| Code | Message | When |
+| --- | --- | --- |
+| `judge_provider_config` | `Check judge.model: a model URI such as openai:/<model>.` | The URI cannot be read, or its provider does not return a direct chat completion |
+| `judge_provider_key` | `Set OPENAI_API_KEY.` | No key for the `openai` provider |
+| `judge_provider_unreachable` | `The endpoint could not be reached. Check OPENAI_API_BASE.` | Wrong host or port, after `judge.max_retries` retries. A read timeout names `MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS` too |
+| `judge_provider_address` | `The address has no chat completions route. Check OPENAI_API_BASE: ...` | HTTP 404 or 405, an address that is not `http` or `https`, or a reply that is not a chat completion |
+| `judge_provider_auth` | `The endpoint refused the credentials. Check OPENAI_API_KEY and judge.headers.` | HTTP 401 or 403 |
+| `judge_provider_model` | `The endpoint does not serve this model, or OPENAI_API_KEY may not use it. Check judge.model.` | HTTP 400, 403, 404 or 422 whose error says the model is unknown or not allowed |
+| `judge_provider_structured_output` | `The endpoint refused structured output (response_format), ... Use a judge.model on an endpoint that supports it.` | A refusal of `response_format` other than HTTP 400, such as 422 |
+| `judge_provider_rejected` | `The endpoint rejected the request. Check judge.inference_params.` | Any other HTTP 400 or 422 |
+| `judge_provider_throttled` | `Check the provider quota, or raise judge.rate_limit_wait_seconds.` | Rate limits beyond the wait |
+| `judge_provider_error` | `The endpoint failed without a judgment; ...` | Server errors after `judge.max_retries` retries |
+| `judge_invalid_schema` | `... The endpoint may ignore structured output (response_format): check judge.model.` | A reply that is not the judgment's JSON. After a declined `response_format` the message says so |
+| `judge_invalid_response` | `Judge draft returned no text` | An empty reply. A reply cut off at its length limit names `judge.inference_params.max_tokens` here and for `judge_invalid_schema` |
+
+The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
+providers they name the provider's key and address without a variable.
 
 ## Use
 
@@ -729,16 +806,20 @@ override. Evidence validation cannot establish that a model's interpretation is
 correct; calibrate on known passing and violating examples for your actual policy.
 
 Choose an explicit provider/model URI for a direct chat completion. Routing and
-credentials follow the pinned MLflow provider configuration. Optional inference
+credentials follow the pinned MLflow provider configuration; `headers={...}` adds
+headers to every request, as MLflow's `extra_headers` does, and is never recorded.
+Optional inference
 parameters are `temperature`, `top_p`, `max_tokens` and `seed`, subject to provider
 support. Omitted parameters use provider defaults. Even temperature zero can yield
 different judgments. Each stage rejects returned tool calls and validates the
 entire JSON object before extracting its checks. An explicit provider rejection
 of JSON Schema permits one request without that format for the stage. Both
-formats use the same strict validation.
+formats use the same strict validation
+([structured output](#openai-compatible-endpoints)).
 
-Provider errors fail the gate with a short error code and the affected stage
-(draft or review). Share that code and the SDK version when reporting failures.
+Provider errors fail the gate with a short error code, the affected stage
+(draft or review) and the [setting to check](#openai-compatible-endpoints).
+Share that code and the SDK version when reporting failures.
 The scorer keeps raw provider error text out of the MLflow error assessment and
 prevents the evaluator from replaying a failed stage.
 
@@ -757,10 +838,13 @@ A provider reply that carries no judgment is retried inside the stage:
 `martian.judge.provider_retries` in the feedback metadata records how many retries were
 needed. A reply that was received is final, valid or not, and a request the provider rejected
 (400, 401, 403) is not retried. When the retries run out, the scorer errors with
-`judge_provider_throttled` or `judge_provider_error` and the gate fails closed.
+`judge_provider_throttled`, `judge_provider_unreachable` or `judge_provider_error` and the gate
+fails closed.
 
 Feedback metadata includes prompt version/hash, guidelines hash, model, requested
 inference parameters, validated checks, and token usage when reported by the adapter.
+`martian.judge.model_version` is the model the provider says answered, from the `model` field
+of its reply (`gpt-4o-mini-2024-07-18` for `openai:/gpt-4o-mini`), when it names one.
 `martian.judge.citation_format` is `response-segments-v1`;
 `martian.judge.citations` contains each cited guideline index, segment IDs and
 the enclosing `start`/`end` offsets in the original response. Offsets count Python
@@ -867,6 +951,88 @@ identifies the first stage. Input/output token totals include both stages when
 both report usage. Review costs two model calls and can increase latency, so
 compare correctness, errors and cost on frozen examples with separate development
 and validation sets before adopting a change.
+
+### Grounding and retrieval judges
+
+Three judges grade an answer against the documents a case supplies, and the documents against the
+request. The documents are the case's `inputs.context`: one string, or a list of strings, one per
+document. Each judge is a suite-file `type` and a function of the same name in `martian.evals`.
+
+| Type | Reads | Passes when | A pass quotes | A fail quotes |
+| --- | --- | --- | --- | --- |
+| `groundedness` | Request, documents, response | Every factual claim in the response is stated in the documents or follows directly from them | `passage`: the support, from the documents; `claim`: the response's main claim, if it makes one | `claim`: the unsupported claim, from the response; `passage`: what the documents say about it, if anything |
+| `context_relevance` | Request, documents | At least one document bears on what the request asks | `quote`: the most relevant passage | `quote`: the part of the request no document addresses |
+| `context_sufficiency` | Request, documents, `expectations.expected_response` if given | The documents hold every fact the answer needs, and every fact of the expected response | `passage`: the passages that give the answer | `missing`: what the documents lack, from the expected response, else the request; `passage`: the closest passage, if any |
+
+```python
+from martian.evals import assert_checks, context_relevance, context_sufficiency, evaluate, groundedness
+
+model = "openai:/YOUR_JUDGE_MODEL"
+result = evaluate(
+    data=[{
+        "inputs": {"message": "When does the shop close?", "context": ["The shop closes at 6 pm on weekdays."]},
+        "outputs": "It closes at 6 pm on weekdays.",
+        "expectations": {"expected_response": "At 6 pm on weekdays."},
+    }],
+    scorers=[groundedness(model=model), context_relevance(model=model), context_sufficiency(model=model)],
+)
+assert_checks(result)
+```
+
+In a suite file, list them under `checks` (`- type: groundedness`) with a `judge`, and give each
+data line its documents: `{"input": ...}` cannot hold them, so use
+`{"inputs": {"message": "...", "context": ["..."]}, "output": "..."}`. A function target is
+called with `context` as a keyword argument beside `message`. The judges read only the documents
+the case carries, not documents a target retrieves while it runs, so for a retrieval eval store
+the retrieved documents with each case. `context_relevance` and `context_sufficiency` grade the
+documents, not the response. `input_key` and `context_key` select other input fields in Python.
+
+**The quotes are checked.** A verdict is one flat JSON object of strings (a reason, the quotes,
+and `pass`, `fail` or `uncertain`), because some models, GLM 5 among them, break nested JSON in
+structured output. The SDK then finds each quote in the text it must come from, letting only runs
+of whitespace differ: no case folding, paraphrase or ellipsis. A quote may join whole sentences
+from different documents, and each sentence must then be a passage on its own. The rationale gives
+each passage as its source has it, and `martian.judge.evidence` its field, source, document number
+and code-point offsets. When a quote is not a passage of its text, a quote the verdict needs is
+empty, or the verdict is `uncertain`, the judge raises (`judge_invalid_quote`,
+`judge_missing_quote`, `judge_uncertain`): the case has no verdict, and `assert_checks` and
+`martian evals run` count it as an error, so the gate fails closed. The SDK never repairs a quote,
+matches it loosely or asks the model again. The check proves the quoted text is really there, not
+that it is the right passage.
+
+Each judge makes one model call through the same transport as the judges above: provider routing,
+`headers`, the retries of replies that carry no judgment, and the failure codes are the same.
+Missing or empty documents, a missing or empty request, an empty response (for `groundedness`)
+and an `expected_response` that is not text are errors before any model call. Feedback metadata
+records `martian.judge.version` (`groundedness-v1`, `context-relevance-v1` or
+`context-sufficiency-v1`), `verdict`, `evidence`, `documents_sha256`, `prompt_sha256` and
+`model_calls`; `include_judge_prompt=True` also keeps the rendered prompt.
+
+**Measured error rates.** Each judge was scored once against a hand-written labelled set,
+[`tests/evals/benchmarks/grounding_judges.jsonl`](../tests/evals/benchmarks/grounding_judges.jsonl)
+(invented texts, half of each judge's cases labelled pass), by
+[`scripts/benchmark_grounding_judges.py`](../scripts/benchmark_grounding_judges.py), with GLM 5
+(`zai.glm-5` on Amazon Bedrock, us-west-2, through a LiteLLM proxy as `openai:/glm-5`) at
+temperature 0, on 15 November 2026. A false pass is a case labelled fail that the judge passed, out
+of the cases labelled fail; a false fail is a case labelled pass that it failed, out of the cases
+labelled pass. An error is a case it gave no verdict.
+
+| Judge | Cases (pass / fail) | False pass | False fail | Errors | Mean latency |
+| --- | --- | --- | --- | --- | --- |
+| `groundedness` | 26 (13 / 13) | 0 of 13 | 0 of 13 | 1 of 26 (`judge_invalid_quote`) | 2.2 s |
+| `context_relevance` | 24 (12 / 12) | 0 of 12 | 0 of 12 | 0 | 1.8 s |
+| `context_sufficiency` | 24 (12 / 12) | 0 of 12 | 0 of 12 | 0 | 1.5 s |
+
+These are small samples: with 12 or 13 cases a side, observing no error still allows a true rate
+of up to about 25% (the 95% upper bound). One run per judge measures no run-to-run variation, and
+the results are in-sample: the groundedness and sufficiency prompts were revised once on this
+set. Their first form asked for one quote, and 8 of 26 and 12 of 24 quotes were refused, because
+the model quoted the documents where the response or the request was asked for, or joined two
+documents; every verdict it gave was right. The one groundedness error above is a pass whose
+`claim` was copied from the documents instead of the response, which in a gate is a failed case.
+A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, by judge.
+Calibrate on your own documents and model before relying on these rates; a change to a judge's
+prompt or schema needs the benchmark run again.
 
 ### Session enforcement
 

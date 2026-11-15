@@ -6,10 +6,13 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 - A run reads the active cases of its published dataset (the default project's dataset version it
   was admitted with) up to its case limit, calls the target once per case with no retry, and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped.
+  with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
+  call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
+  the setting to check, anything else with its type.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
-  scorers: code scorers here, judge scorers through the worker's judge. Its scores sit beside the
-  run's own, and each scored value is also kept on the case's trace.
+  scorers: code scorers here, judge scorers through the worker's judge, one request per model the
+  job's judges are pinned to. Each judge score records the model and version that produced it.
+  Its scores sit beside the run's own, and each scored value is also kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Every move from one state to the next names the state it expects, so two workers never both take
@@ -34,17 +37,19 @@ from martian.evals.model import (
     Run,
     RunState,
     Score,
+    ScorerVersion,
     ScoringJob,
     Span,
     StoreRef,
     Trace,
 )
 from martian.evals.records import RecordStore
+from martian.evals.runner import TargetCallError
 from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_config, prompt_text, text_of
 from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
-from martian.evals.worker import Judge, JudgeRequest, JudgeResult, TargetCall, Work
+from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
 
 if TYPE_CHECKING:
@@ -59,6 +64,11 @@ STOPPED = "Stopped before this target request"
 UNUSABLE = "item is missing a usable prompt or expected output"
 NO_OUTPUT = "No successful saved target output"
 NO_JUDGE = "Judge unavailable; no automatic model retry"
+JUDGE_MODEL_KEY = "martian.judge.model"
+JUDGE_MODEL_VERSION_KEY = "martian.judge.model_version"
+JUDGE_ENDPOINT_KEY = "martian.judge.endpoint"
+JUDGE_VERSION_KEY = "martian.judge.version"
+JUDGE_ERROR_LENGTH = 500
 
 
 def _now() -> datetime:
@@ -248,6 +258,8 @@ async def _run_case(
         output = await asyncio.wait_for(call(case), timeout=timeout_seconds)
     except TimeoutError:
         error = "item timed out"
+    except TargetCallError as failure:  # the target's own words, which name the setting to check
+        error = str(failure)[:1800]
     except Exception as failure:  # noqa: BLE001 - any target failure is the case's error
         error = f"{type(failure).__name__}: {failure}"[:1800]
     latency = round((perf_counter() - clock) * 1000, 3)
@@ -395,6 +407,44 @@ async def _advance_job(
     return await _move_job(records, principal, project, current, changes, "running")
 
 
+def model_source(answer: JudgeResult) -> str:
+    """A judge score's ``source_id``: the model that produced it, with its version when reported."""
+    return f"{answer.model}@{answer.model_version}" if answer.model_version else answer.model
+
+
+def _judge_metadata(scorer: ScorerVersion, answer: JudgeResult | None) -> dict[str, Any]:
+    """What a judge score records of its model: the model that answered (or the one the judge is
+    pinned to, when none did), the version the provider reported, the judge's own version, and
+    the endpoint it was asked at."""
+    found: dict[str, Any] = {}
+    if model := answer.model if answer is not None else scorer.model:
+        found[JUDGE_MODEL_KEY] = model
+    if answer is not None and answer.model_version:
+        found[JUDGE_MODEL_VERSION_KEY] = answer.model_version
+    if answer is not None and answer.judge_version:
+        found[JUDGE_VERSION_KEY] = answer.judge_version
+    if scorer.endpoint:
+        found[JUDGE_ENDPOINT_KEY] = scorer.endpoint
+    return found
+
+
+async def _judged(judge: Judge, request: JudgeRequest, what: str) -> JudgeResult | str | None:
+    """The judge's answer to one request, an error for each of its scores when the judge refused
+    or failed with a message it can show (``JudgeError``) or answered from another model than the
+    request names, or None when the judge failed otherwise."""
+    try:
+        answer = await judge(request)
+    except JudgeError as error:
+        log.warning("Judge gave no verdict for %s: %s", what, error)
+        return str(error)[:JUDGE_ERROR_LENGTH] or NO_JUDGE
+    except Exception:  # noqa: BLE001 - a judge failure is each judge score's error
+        log.exception("Judge failed for %s", what)
+        return None
+    if request.model is not None and answer.model != request.model:
+        return f"The judge answered with {answer.model}, not {request.model}, the model this judge is pinned to"
+    return answer
+
+
 def job_outcome(succeeded: int, errors: int) -> RunState:
     if succeeded and not errors:
         return "completed"
@@ -421,7 +471,11 @@ async def _score_results(
     if moved is None:
         return
     job = moved
-    judged = tuple(scorer for scorer in job.scorers if scorer.kind == "llm_judge")
+    # One judge request per model the job's judges are pinned to, in the order they first appear.
+    by_model: dict[tuple[str | None, str | None], list[ScorerVersion]] = {}
+    for scorer in job.scorers:
+        if scorer.kind == "llm_judge":
+            by_model.setdefault((scorer.model, scorer.endpoint), []).append(scorer)
     definition = job_config(job)["definition_digest"]
     succeeded = errors = 0
     for result in results:
@@ -444,38 +498,48 @@ async def _score_results(
             return
         finished = result.status in ("passed", "failed")
         output, expected = text_of(result.output), expected_text(result.expectations)
-        verdicts: JudgeResult | None = None
-        if judged and finished and judge is not None:
-            try:
-                verdicts = await judge(
+        answers: dict[tuple[str | None, str | None], JudgeResult | str | None] = {}
+        if finished and judge is not None:
+            for (model, endpoint), scorers in by_model.items():
+                answers[(model, endpoint)] = await _judged(
+                    judge,
                     JudgeRequest(
                         principal=principal,
                         prompt=prompt_text(result.inputs),
                         expected=expected,
                         output=output,
-                        scorers=judged,
-                    )
+                        scorers=tuple(scorers),
+                        model=model,
+                        endpoint=endpoint,
+                        job_id=job.id,
+                    ),
+                    f"case {result.case_id} of run {run.id}",
                 )
-            except Exception:  # noqa: BLE001 - a judge failure is each judge score's error
-                log.exception("Judge failed for case %s of run %s", result.case_id, run.id)
         scores = []
         for scorer in job.scorers:
             value: Any = None
             rationale = error = ""
             source_id = scorer_source(scorer)
-            if not finished:
-                error = NO_OUTPUT
-            elif scorer.kind != "llm_judge":
-                value, rationale = code_score(scorer.name, output, expected)
-            elif verdicts is not None and scorer.name in verdicts.verdicts:
-                verdict = verdicts.verdicts[scorer.name]
-                value, rationale, source_id = verdict.value, verdict.rationale, verdicts.model
-            else:
-                error = NO_JUDGE
             metadata: dict[str, Any] = {"martian.definition_digest": definition, "martian.job_id": job.id}
             if job.suite_id is not None:
                 metadata["martian.suite_id"] = job.suite_id
                 metadata["martian.suite_version"] = job.suite_version
+            answer = answers.get((scorer.model, scorer.endpoint))
+            if scorer.kind == "llm_judge":
+                metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
+            if not finished:
+                error = NO_OUTPUT
+            elif scorer.kind != "llm_judge":
+                value, rationale = code_score(scorer.name, output, expected)
+            elif isinstance(answer, str):
+                error = answer
+            elif answer is not None and scorer.name in answer.verdicts:
+                verdict = answer.verdicts[scorer.name]
+                value, rationale, source_id = verdict.value, verdict.rationale, model_source(answer)
+            elif answer is not None and scorer.name in answer.errors:
+                error = answer.errors[scorer.name][:JUDGE_ERROR_LENGTH] or NO_JUDGE
+            else:
+                error = NO_JUDGE
             score = Score(
                 run_id=run.id,
                 case_id=result.case_id,
