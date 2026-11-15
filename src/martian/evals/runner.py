@@ -1052,23 +1052,31 @@ def run_suite(
     progress: Callable[[str], None] | None = None,
     home: str | Path | None = None,
     repeats: int | None = None,
+    baseline: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run the suite and return its summary. Writes results.jsonl, summary.json and junit.xml, and
-    records the run, its case results, scores and traces in the local edition's data folder
-    (``home``, else ``MARTIAN_EVALS_HOME``, else ``~/.martian/evals``), where ``martian ui``
-    shows it (:mod:`martian.evals.run_record`). The returned summary also names that run, under
-    ``run``; summary.json does not.
+    """Run the suite and return its summary. Writes results.jsonl, summary.json, junit.xml and
+    verdicts.json, and records the run, its case results, scores and traces in the local edition's
+    data folder (``home``, else ``MARTIAN_EVALS_HOME``, else ``~/.martian/evals``), where
+    ``martian ui`` shows it (:mod:`martian.evals.run_record`). The returned summary also names that
+    run, under ``run``; summary.json does not.
 
     The suite is read through the shared model (:func:`martian.evals.suite_file.load_suite_file`),
     so a field the model has no place for is refused with the field named, never ignored.
     ``repeats`` replaces the suite file's ``repeats``: each case runs that many times, and each
     check's attempts combine by its rule (:mod:`martian.evals.repeats`).
+
+    ``baseline`` names an earlier run's output folder. Its verdicts.json is read before any case
+    runs, the run is compared with it case by case (:mod:`martian.evals.baseline`), and the
+    comparison is written to comparison.json and returned under ``comparison``. Without one, a
+    comparison.json left by an earlier run in the output folder is removed.
     """
+    from martian.evals import baseline as baselines
     from martian.evals.local import data_folder
     from martian.evals.model import suite_digest
     from martian.evals.run_record import GradedCase, RunRecorder
     from martian.evals.suite_file import load_suite_file
 
+    earlier = baselines.load(baseline) if baseline is not None else None
     model, model_cases = load_suite_file(path)
     suite, base = load_suite(path)
     if repeats is not None:
@@ -1279,5 +1287,44 @@ def run_suite(
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem, summary=summary)
+        found = _verdicts(suite, ordered, cases, repeat_plan if repeated else None)
+        (folder / baselines.VERDICTS).write_text(json.dumps(found, indent=2) + "\n", encoding="utf-8")
+        comparison = None
+        if earlier is not None:
+            comparison = baselines.compare(earlier, found, source=str(baseline))
+            text = json.dumps(comparison, indent=2) + "\n"
+            (folder / baselines.COMPARISON).write_text(text, encoding="utf-8")
+        else:
+            (folder / baselines.COMPARISON).unlink(missing_ok=True)
         recorder.finish()
-    return {**summary, "run": recorder.reference()}
+    return {**summary, "run": recorder.reference(), **({"comparison": comparison} if comparison else {})}
+
+
+def _verdicts(
+    suite: Suite, records: list[dict[str, Any]], cases: list[dict[str, Any]], repeats: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The run's verdicts file (:func:`martian.evals.baseline.verdicts`). A check's definition counts
+    its judge for an LLM judge and, with repeats, the rule its attempts combine by."""
+    from martian.evals import baseline as baselines
+
+    judge = (
+        suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds", "headers"})
+        if suite.judge
+        else None
+    )
+    checks = {
+        check.label: baselines.digest(
+            {
+                "check": check.model_dump(mode="json", exclude={"combine"}),
+                "judge": judge if check.type in JUDGES else None,
+                "combine": repeats["checks"][check.label]["combine"] if repeats else None,
+            }
+        )
+        for check in suite.checks
+    }
+    # With repeats a check's reason is how its attempts went under its rule, the SDK's own words.
+    plain = {check.label for check in suite.checks if repeats or check.type in baselines.PLAIN_REASONS}
+    digests = {case["id"]: baselines.case_digest(case["inputs"], case["expectations"]) for case in cases}
+    return baselines.verdicts(
+        records, digests, checks=checks, plain=plain, attempts=repeats["attempts"] if repeats else 1
+    )

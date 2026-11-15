@@ -58,6 +58,13 @@ cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
 
+`verdicts.json`, which every run also writes, holds no input, reply or judge reason: each case's
+id, verdicts, the SDK's wording of a target failure, a SHA-256 digest of its inputs and
+expectations, and the reasons of the deterministic checks that report counts, sizes or names. It
+is what a later run compares with (`--baseline`). With `baseline-branch`, the
+[evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps the baseline branch's
+copy in the repository's Actions cache, which pull requests, including those from forks, can read.
+
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
