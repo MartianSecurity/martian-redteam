@@ -2022,7 +2022,9 @@ attempts; and cancels a running command's run from the local edition's cancel ro
 `tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
 conversation verdicts, the turns route, each turn's trace and the session its turns share.
 `tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
-the simulator model, and for personas built from transcripts and from the data folder's sessions.
+the simulator model, and for personas built from transcripts and from the data folder's sessions;
+`tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
+[fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
 
 ## Imported Inspect logs
 
@@ -2338,7 +2340,6 @@ an export holds, resuming, and what the receiving store assigns are in
 | LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
-| How close simulated users come to real ones | MorningHQ/martian-notes#194 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

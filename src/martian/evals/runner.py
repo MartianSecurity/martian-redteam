@@ -1320,8 +1320,10 @@ def _summary(
     cases' counts and their turns' counts, over attempts with repeats, each check's ``scope``, and
     a turn check's own ``turns`` counts. A check's counts leave out the conversations it grades
     nothing in, and a check that gave a turn no verdict is counted under that turn's reason.
-    ``simulator`` (the simulator's model and version, given when the run has simulated users) adds
-    ``simulator``: that model, its version and how many cases' users it played; the goal verdict
+    ``simulator`` (the simulator's setup, given when the run has simulated users: its model,
+    inference parameters and version, and the data file its personas came from) adds ``simulator``:
+    that setup, and the simulated cases' own counts and pass rate, so a reader sees how many of the
+    run's verdicts a simulated user stands behind; the goal verdict
     (:data:`martian.evals.simulation.GOAL`) is then among ``labels``, a conversation check."""
     repeated = repeats is not None
     units = [attempt for r in records for attempt in r["attempts"]] if repeated else records
@@ -1382,7 +1384,13 @@ def _summary(
             "turns": {"total": len(turns), **_counts([turn["passed"] for turn in turns])},
         }
     if simulator is not None:
-        summary["simulator"] = {**simulator, "cases": sum(r.get("simulated") is True for r in records)}
+        played = [(str(r["id"]), r["passed"]) for r in records if r.get("simulated") is True]
+        summary["simulator"] = {
+            **simulator,
+            "cases": len(played),
+            **_counts([passed for _, passed in played]),
+            **_pass_rate(played, groups),
+        }
     return summary | {
         "checks": per_check,
         **({} if false_refusals is None else {"false_refusals": false_refusals}),
@@ -2096,7 +2104,16 @@ def run_suite(
             repeat_plan if repeated else None,
             refusals,
             scopes if talking else None,
-            None if simulator is None else {"model": simulator.model, "version": SIMULATOR_VERSION},
+            None
+            if simulator is None
+            else {
+                "model": simulator.model,
+                "parameters": dict(simulator.params),
+                "version": SIMULATOR_VERSION,
+                # The persona source: the data file the simulated users came from, by the
+                # dataset's digest the run's provenance has.
+                "personas": {"data": model.dataset_location, "digest": model.dataset_digest},
+            },
             not_run=len(not_run),
             stopped=stopped,
         )

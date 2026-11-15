@@ -206,7 +206,18 @@ def test_a_simulated_user_reaches_or_fails_its_goal_and_is_recorded_turn_by_turn
     assert all(field.get("type") in ("string", "boolean") for field in schema["properties"].values())
 
     # The run says which simulator played the users, and the goal is counted as a conversation check.
-    assert summary["simulator"] == {"model": f"openai:/{MODEL}", "version": "simulated-user-v1", "cases": 2}
+    assert summary["simulator"] | {"confidence_95": None} == {
+        "model": f"openai:/{MODEL}",
+        "parameters": {"temperature": 0.7},
+        "version": "simulated-user-v1",
+        "personas": {"data": "cases.jsonl", "digest": load_suite_file(tmp_path / "evals.yaml")[0].dataset_digest},
+        "cases": 2,
+        "passed": 1,
+        "failed": 1,
+        "errors": 0,
+        "pass_rate": 0.5,
+        "confidence_95": None,
+    }
     assert summary["checks"][GOAL] | {"pass_rate": None, "confidence_95": None} == {
         "passed": 1,
         "failed": 1,
