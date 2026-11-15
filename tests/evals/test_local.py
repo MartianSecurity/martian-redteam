@@ -23,7 +23,8 @@ LOCAL = "http://127.0.0.1:7600"
 
 SESSION = {
     "kind": "single_user",
-    "user": {"id": "local", "email": None, "display_name": None},
+    # The local user `local`, as the API names it: a UUID derived from it.
+    "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": None, "display_name": None},
     "organisation": None,
     "role": "owner",
     "platform_admin": False,

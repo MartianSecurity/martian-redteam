@@ -124,7 +124,7 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3
 {
   "principal": {
     "kind": "single_user",
-    "user": {"id": "local", "email": null, "display_name": null},
+    "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": null, "display_name": null},
     "organisation": null,
     "role": "owner",
     "platform_admin": false
@@ -145,9 +145,11 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3
 ```
 
 - `principal.kind` is `single_user` or `organisation`; `organisation` is `null` for the single
-  local user. `email`, `display_name` and the organisation's `name` are whatever the edition's
-  principal carries (`organisation_principal(..., email=, display_name=, organisation_name=)`),
-  and `null` when it carries none. `platform_admin` is the server operator's flag, always `false`
+  local user. `user.id` is the principal's id as the API names a person (**Users** under
+  [read routes](#read-routes)); the local user `local` is the UUID above. `email`,
+  `display_name` and the organisation's `name` are whatever the edition's principal carries
+  (`organisation_principal(..., email=, display_name=, organisation_name=)`), and `null` when it
+  carries none. `platform_admin` is the server operator's flag, always `false`
   in the local edition.
 - `edition.key` is `community`, `enterprise` or `on_premises`; `edition.name` is its display name.
 - `entitlements.features` lists the feature keys the edition includes, sorted; `limits` is empty
@@ -197,6 +199,18 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `id` one derived from its run, case, scorer and scoring job (`result_id`, `score_id`). A run is
   found by id in the default project, then in each of the store's projects. The run routes match
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
+- **Users.** The API names a person by a UUID (`projection.user_out`): their id when it is one, as
+  the server's users' ids are, else a UUID derived from it. The local user, whose id is `local`,
+  is `bf0808be-f788-5dd7-8fc2-2d28ed350045`. Every user id a response carries is in this form:
+  the bootstrap's and the session call's `user.id`, the workbench's `members`, a review's
+  `actor_id` and `assignee_id`, a queue's `assignee_id`, a saved view's `owner_id`, a suite
+  version's `actor_id`, a draft's `created_by` and `updated_by`, and the `source_id` of a human
+  score the core writes (a review's answer and a trace annotation, in the store too). A request's
+  `assignee_id`, a UUID in the contract, is compared with the principal in it, so the id the UI
+  is given for its user is one the review and queue routes accept. The record store keeps the
+  principal's own id. A human score written by something else, such as an application's MLflow
+  feedback, keeps the source id it was written with, and a trace's `user_id` is the traced
+  application's user, not a person of the server.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
   (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
@@ -213,9 +227,9 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
   jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
   (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
-- **Members and queues.** The workbench's `members` is the requesting principal only: the core
-  knows no organisation membership. Its `queues` are the run's review queues, newest first, at most
-  100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
+- **Members and queues.** The workbench's `members` is the requesting principal only, under the
+  id the bootstrap gives: the core knows no organisation membership. Its `queues` are the run's
+  review queues, newest first, at most 100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
   finds a run's queues through its reviews: creating a queue adds a pending review per case and
   question.
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
@@ -300,8 +314,7 @@ All paths are under `/v1/evals`. How the core carries them out:
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. Only a role
   with `assignReviews` gives another person's work to someone; the core knows no membership, so
-  an assignee is any user id. Where the contract takes a user as a UUID and the user id is not one
-  (the local user is `local`), the core sends a UUID derived from it (`projection.user_uuid`).
+  an assignee is any user, named as **Users** above says.
 - **Review queues and questions.** A queue lives in the store with one item per case's trace, so
   only results with a trace can be queued. Creating it adds a pending review per case and question;
   each answer marks the case's item completed once every question of the queue is answered, and
@@ -336,8 +349,11 @@ gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overv
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
 deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
-operation of the contract but the ones above. `tests/evals/test_worker.py`,
-`test_worker_process.py` and `test_worker_targets.py` cover the worker.
+operation of the contract but the ones above. `tests/evals/test_user_ids.py` saves a review from
+`martian ui`'s application with the UI's default reviewer, the session's user, and checks that
+every route that takes or names a user uses the bootstrap's id, for the local user and for a user
+whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py` and
+`test_worker_targets.py` cover the worker.
 
 ## The worker
 
@@ -859,7 +875,7 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
     "access_token": "local",
     "session": {
       "kind": "single_user",
-      "user": {"id": "local", "email": null, "display_name": null},
+      "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": null, "display_name": null},
       "organisation": null,
       "role": "owner",
       "platform_admin": false,
@@ -1236,7 +1252,8 @@ cannot be opened.
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_write_routes.py`, `test_write_contract.py`, `test_worker.py`, `test_worker_process.py`,
-`test_worker_targets.py`, `test_worker_judges.py` and the store and record tests run the core
+`test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
+`test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py` and the store and
+record tests run the core
 without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

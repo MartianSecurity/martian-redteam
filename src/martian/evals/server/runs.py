@@ -40,6 +40,7 @@ from martian.evals.server.projection import (
     run_detail,
     run_out,
     trace_view,
+    user_out,
 )
 from martian.evals.server.quality import calibration, compare_assessments, compare_runs, scorecard
 from martian.evals.server.schemas import EvalRunDetailOut, EvalRunOut
@@ -338,7 +339,7 @@ async def workbench(
         # The core knows only the principal of the request, not the organisation's other members.
         "members": [
             {
-                "id": principal.user_id,
+                "id": user_out(principal.user_id),
                 "name": principal.display_name or principal.email or principal.user_id,
                 "role": highest_role(principal.roles),
             }
