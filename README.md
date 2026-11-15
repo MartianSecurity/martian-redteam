@@ -47,6 +47,10 @@ push and keeps one comment with the result, also without a Martian account. See
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
   [imported Inspect logs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
+- `martian evals import mlflow`: an MLflow tracking store (SQLite or Postgres) copied into
+  `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
+  version check; see
+  [copied MLflow stores](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service; see
   [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).

@@ -131,6 +131,8 @@ martian evals run evals.yaml
 martian ui
 # Inspect AI logs as runs in that UI (see the evals core guide):
 martian evals import inspect logs/*.eval
+# An MLflow tracking store copied into that UI, after a schema version check:
+martian evals import mlflow ./mlflow.db
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

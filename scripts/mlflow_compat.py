@@ -28,11 +28,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # Every test module that runs MLflow itself: the store binding, the judge transport and the judges
-# built on it, the private-import guard, and the pytest kit and suite runner end to end.
+# built on it, the private-import guard, the pytest kit and suite runner end to end, and the copy
+# of an MLflow tracking store that the release under test writes.
 SUITE = (
     "tests/evals/test_mlflow_compat.py",
     "tests/evals/test_mlflow_private.py",
     "tests/evals/test_store_mlflow.py",
+    "tests/evals/test_mlflow_import.py",
     "tests/evals/test_judge_provider_boundary.py",
     "tests/evals/test_response_guidelines.py",
     "tests/evals/test_response_conditions.py",

@@ -193,6 +193,40 @@ times, model and token use (`mlflow.chat.tokenUsage`). Text a log keeps once in 
 Inspect's per-epoch reductions (`reductions`), the sample's store, sandbox and the events other
 than model, tool and span events are not imported; the log the run names keeps them.
 
+## MLflow tracking stores
+
+`martian evals import mlflow` copies an MLflow tracking store, read through MLflow's own SQL
+store at the schema revision the pinned `mlflow-skinny` writes, into an organisation
+([copied MLflow stores](evals-core.md#copied-mlflow-stores)). `martian.evals.mlflow_import` does
+the mapping. Every id is derived from MLflow's, so a second copy of the same store finds what the
+first wrote.
+
+| MLflow | Model |
+| --- | --- |
+| The `Default` experiment (id `0`) | The default project |
+| Any other active experiment | A `Project`: `id` a UUID derived from the experiment's id and creation time, `name` the experiment's (120 characters at most), `description` its `mlflow.note.content` tag |
+| A deleted experiment, run or overridden assessment | Not copied, and reported |
+| A trace | A `Trace` in its experiment's project, under MLflow's trace id (`tr-` and 32 hex digits; another form gets a `tr-` id derived from it). Name, state, time, latency, request and response previews, session (`mlflow.trace.session`), user, token use and cost are MLflow's. Tags and metadata keep everything but MLflow's own `mlflow.*` keys; metadata adds `mlflow_source.trace_id` and `mlflow_source.experiment_id` |
+| A trace's spans | `Span`s with MLflow's span ids, parents, types, times, status, inputs, outputs and attributes, read from the tracking store's tables, or, for traces older releases wrote, from the `traces.json` among the trace's artifacts when it is a file on this machine. A trace whose spans cannot be found is copied without them, and reported |
+| A person's (`HUMAN`) feedback | A `Score` of source `human`, `source_id` the person, `metadata["martian.annotation"]` `feedback`: an annotation, as the UI records one |
+| An expectation | A `Score` with the expected value, no verdict, `metadata["martian.annotation"]` `expectation` |
+| A judge's (`LLM_JUDGE`) or code's (`CODE`) feedback | A `Score` of source `llm_judge` or `code`, `source_id` MLflow's (the judge's model or the scorer's name) |
+| Feedback value | `Score.value`: a boolean, number or text as it is; a dict or list as its JSON text; a number that is not finite as no value, with an error. `passed` is a boolean's own, `yes` and `no` (MLflow judges' answers) pass and fail; numbers and other text have no verdict. The feedback's error message is `Score.error` |
+| `rationale`, `create_time_ms`, `assessment_id`, `span_id`, `metadata`, `overrides` | `Score.rationale` and `created_at`; `metadata["mlflow_source.assessment_id"]`, `["mlflow_source.created_at"]`, `["mlflow_source.span_id"]`, `["mlflow_source.metadata"]`, `["mlflow_source.overrides"]`. The copied score's MLflow assessment is new, so its own creation time is the copy's |
+| An evaluation dataset | A `DatasetVersion` in the default project, where the core keeps the organisation's datasets, under the dataset's name (a second dataset of the same name with other content is its next version) |
+| A dataset record | A `Case`: `id` the record's id (`dr-...`), `inputs`, `expectations`, `outputs` (an empty one is none), `tags` but MLflow's own, and `metadata["mlflow_source.source"]` the record's source. A record without inputs is not copied, and reported |
+| An active run with traces, `FINISHED`, `FAILED` or `KILLED` | A `Run` of source `local` with a `stored` target and state `completed`, `failed` or `cancelled`. `id` MLflow's run id as the UUID it is; `code` `mlflow-` and the run's name; `dataset_name` its first dataset input; times MLflow's. A run still `RUNNING` or `SCHEDULED`, and a run without traces (only parameters and metrics), are not copied, and reported |
+| The run's traces (linked to it, or recorded in it: `mlflow.sourceRun`) | One `CaseResult` each, holding the trace. Its `case_id` is the id of the record with the same inputs when the run evaluated an evaluation dataset of the store, else `case-` and 12 hex digits of the inputs' digest, so runs over the same inputs pair; `inputs` and `output` the root span's; `expectations` the trace's expectations; `latency_ms` and `finished_at` the trace's. A trace that is a case of two runs belongs to the earlier one; the later one's case has no trace |
+| The case's scores | The trace's judge and code feedback that MLflow records as made in that run (`mlflow.assessment.sourceRunId`), or that names no run. The case's status follows them as for Inspect logs: `error` when the trace failed, `failed` when a score fails, `error` when one has an error, `passed` when one passes, else `skipped` |
+| `Run.scorers` | A `ScorerVersion` per score name, `kind` the score's source, `type` `mlflow`, `model` the judge's |
+| `Run.dataset_digest` | The digest of the cases' ids, inputs and expectations, so two runs over the same dataset compare |
+| `Run.truncated` | Fewer cases than the evaluated dataset's records |
+| The run's experiment, id, name, status, user, `mlflow.runType`, metrics, parameters, its own tags and its dataset inputs | `Run.provenance["mlflow"]`, with the store's URL (without a password) and its schema revision |
+
+Registered scorers, labeling schemas, review queues, logged models, registered models and prompts,
+run artifacts, and trace and run tags in MLflow's `mlflow.*` namespace have no place in the model
+and are not copied; the report counts the first five.
+
 ## The server's evals tables
 
 | Table | Model |
@@ -219,6 +253,7 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 
 The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
 suite file is their written form ([above](#the-sdk-suite-file)). Inspect AI logs are imported
-into them ([above](#inspect-ai-logs)). The evals core serves them
+into them ([above](#inspect-ai-logs)), and MLflow tracking stores copied into them
+([above](#mlflow-tracking-stores)). The evals core serves them
 (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).

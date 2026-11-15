@@ -434,6 +434,8 @@ What builds on it:
   in the UI: [command-line runs](#command-line-runs).
 - `martian evals import inspect` records Inspect AI logs there as runs:
   [imported Inspect logs](#imported-inspect-logs).
+- `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
+  check: [copied MLflow stores](#copied-mlflow-stores).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
@@ -651,7 +653,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs
   into the same folder ([command-line runs](#command-line-runs)), `martian evals import inspect`
-  writes Inspect AI logs there as runs ([imported Inspect logs](#imported-inspect-logs)), and an
+  writes Inspect AI logs there as runs ([imported Inspect logs](#imported-inspect-logs)),
+  `martian evals import mlflow` copies an MLflow tracking store there
+  ([copied MLflow stores](#copied-mlflow-stores)), and an
   application can record its traces there with MLflow tracing
   ([below](#traces-from-an-application)). What another process writes while the UI is open
   shows when a page reads again, since the UI gets no live event from it.
@@ -893,6 +897,110 @@ format; `fixture_task.py` there wrote them) and reads them back through the loca
 routes: every score against the log, Inspect's metrics recomputed from them, the run and its
 trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
 inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+
+## Copied MLflow stores
+
+`martian evals import mlflow` copies what a team kept in MLflow into the local edition's data
+folder (`martian.evals.mlflow_import`), so `martian ui` shows it: each experiment as a project,
+its traces with their spans, sessions and users, the evaluation datasets, every assessment, and
+each evaluation run with its cases, which Compare pairs case by case.
+
+```bash
+martian evals import mlflow ./mlflow.db                          # a SQLite tracking store
+martian evals import mlflow 'postgresql://user:password@host/mlflow' --data-dir ./evals-data
+martian evals import mlflow ./mlflow.db --experiment support-bot --dry-run
+```
+
+| Option | What it does |
+| --- | --- |
+| The source | The tracking store: its SQLite database file (`mlflow.db`), or a `sqlite:///` or `postgresql://` URL (read with psycopg; install `martian-sdk[postgres]`). The traces' artifact folder is wherever the store names it |
+| `--data-dir` | The data folder, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui` |
+| `--experiment` | Copy only this experiment, by name or id; repeat for more. Default: every active experiment |
+| `--dry-run` | Check and read the store and report what would be copied, writing nothing |
+
+The version check comes first, before anything else is read. MLflow keeps its schema revision in
+the store's `alembic_version` table, and `mlflow-skinny` 3.18.0 reads one revision, the head of its
+own migrations (`schema_head()` in `martian.evals._mlflow`):
+
+- The same revision: the store is read.
+- An older revision, one an older MLflow wrote: refused. Reading it would mean migrating it, and the
+  import never changes the store it reads, because an older MLflow cannot open a migrated store
+  (a store 3.18.0 opened, 3.16.1 can no longer open). The message says how to copy it anyway: copy
+  the database, upgrade the copy with `mlflow db upgrade <the copy's URL>` on mlflow-skinny 3.18.0,
+  and import the copy.
+- A revision 3.18.0 does not know, which a newer MLflow wrote: refused. A martian-sdk release whose
+  MLflow knows the revision imports it.
+- A database with no schema revision, more than one, or without every table its revision has; a
+  store with experiments in MLflow workspaces other than `default`; a folder (MLflow's file
+  store); an MLflow server's URL: refused.
+
+A refused store stops the command with exit code `2` before the data folder is opened, so nothing
+is written. The store is read over a connection that cannot write: SQLite opened read-only with
+`query_only` on, Postgres with every transaction read-only. Every object is read and mapped before
+anything is written.
+
+**Copy, not attach.** The issue asked to attach to or copy from a store; the import copies.
+Attaching, the core's store reading the team's database in place, would not work as it is and
+would put the team's store at risk:
+
+- The in-process binding expects its own layout: a workspace per organisation, projects as
+  tagged experiments, runs as MLflow runs holding `martian/run.json`, datasets tagged
+  `martian.dataset.*`. MLflow's own experiments, runs and datasets are none of these.
+- Runs, case results and the scores the core gates on live in the record store, not in MLflow, so
+  an attached store would still need its runs copied.
+- Opening the database with the SDK's MLflow migrates an older one in place, after which the
+  team's MLflow cannot open it, and refuses a newer one. Writes from the UI (annotations, reviews,
+  scoring) would land in the team's database.
+- The core's ids differ from MLflow's: runs and projects are UUIDs.
+
+A copy reads the store once, at one schema revision, never writes it, and puts everything in the
+core's own forms, so the data folder is an ordinary one: it keeps working when the team upgrades or
+retires its MLflow. Copying the same store again copies only what is new: ids are derived from
+MLflow's (the trace id, the run id as a UUID, the record id, a project id from the experiment's id
+and creation time), and what an earlier copy wrote is left as it is and reported as there already.
+Read-only attach is feasible later as a separate read-only store binding over a store at the
+pinned revision, mapping as the copy does on every read, but it would have to derive runs and
+case results on each read, refuse every write route, and stop working whenever the team moves its
+MLflow to another revision.
+
+What maps where ([the eval model](eval-model.md#mlflow-tracking-stores) lists every field):
+
+| MLflow | What the copy writes |
+| --- | --- |
+| Experiment | A project with the experiment's name; MLflow's `Default` experiment is the default project. The organisation's limit of 25 projects besides the default one is checked before anything is written |
+| Trace | A trace in the experiment's project, under MLflow's trace id, with its spans, session, user, tags and metadata |
+| Assessment | A score on its trace. A person's feedback and every expectation are annotations, as the UI records them; a judge's or code's feedback is a score. Values are kept, a dict or list as its JSON text; `yes` and `no` are verdicts |
+| Evaluation dataset | A dataset version in the default project, a case per record under the record's id |
+| Run with traces | A run with MLflow's run id as a UUID and code `mlflow-<run name>`: a case per trace, the case's id the record with the same inputs, its scores the run's judge and code feedback. Its MLflow metrics, parameters and dataset are in its provenance |
+
+The command prints what each experiment, run and dataset became, the counts written and the counts
+there already, and what was not copied and why: deleted experiments and runs, runs without traces
+(parameters and metrics only) or still running, assessments a later one overrides, records without
+inputs, traces whose spans are in an artifact store that is not a file on this machine, and the
+registered scorers, labeling schemas, review queues, logged models and registered models or
+prompts the core has no place for.
+
+- `copy_mlflow_store(plan, store, records, principal)` copies into any organisation's store and
+  record store; the command copies into the local edition's, as `SINGLE_USER`.
+- A run is `running` while its cases are written; a copy that stops early leaves it `failed`, or
+  `cancelled` when interrupted, and a later copy leaves it so.
+- The hosted MLflow server's REST API is not read; copy from the database the server keeps (its
+  `--backend-store-uri`). Neither is MLflow's file store.
+- A copied assessment is a new assessment in the data folder's store, dated by the copy; its
+  MLflow creation time is `metadata["mlflow_source.created_at"]`, and a run's scores in the
+  record store keep it as `created_at`.
+
+`tests/evals/test_mlflow_import.py` has mlflow-skinny write a real tracking store
+(`tests/fixtures/mlflow/write_store.py`: traces in two sessions, a person's feedback, an
+expectation, a judge's feedback, a corrected assessment, an evaluation dataset, two
+`mlflow.genai.evaluate` runs, a run without traces and a deleted experiment), copies it and reads
+it back through the local edition's routes: projects, traces, sessions, spans, annotations, the
+dataset, both runs with their cases and scores, their provenance and Compare. It checks the
+source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
+artifact file are read from there, that an older, unknown or missing schema revision, a missing
+table, workspaces and files that are not stores are refused with nothing written, the project
+limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
+Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
 
 ## Not built yet
 
