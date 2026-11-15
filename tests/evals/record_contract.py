@@ -62,6 +62,16 @@ class RecordContract:
         assert [r.id for r in (await records.list_runs(ORG_A, "p1", states=["running"])).items] == ["r3", "r1"]
         assert await records.get_run(ORG_A, "p1", "r9") is None
 
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; 19 nines is
+    # past the 64-bit OFFSET SQL takes.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 19, id="19-nines")])
+    async def test_a_run_cursor_the_store_did_not_return_is_refused(self, records: RecordStore, cursor: str) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        with pytest.raises(StoreError) as caught:
+            await records.list_runs(ORG_A, "p1", cursor=cursor)
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+
     async def test_a_run_moves_on_only_from_the_state_it_was_expected_in(self, records: RecordStore) -> None:
         started = await records.create_run(ORG_A, run("r1"))
         done = started.model_copy(update={"state": "completed", "counts": Counts(cases=2, passed=2)})

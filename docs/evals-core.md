@@ -230,10 +230,11 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   time and orders by time. The core applies the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
   most 1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another,
-  it is `409`. A session search is the store's `search_sessions`; with a latency or assessment
-  filter or a latency order, the core reads the first 1,000 traces the store's filters match,
-  applies the rest and groups them the same way. A session search with a cursor is `422`, as on
-  the server.
+  it is `409`. One whose store page is not a `next_cursor` that store returned, such as `²` or
+  `١`, is `422` ("cursor is not a next_cursor this store returned"). A session search is the
+  store's `search_sessions`; with a latency or assessment filter or a latency order, the core
+  reads the first 1,000 traces the store's filters match, applies the rest and groups them the
+  same way. A session search with a cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
@@ -278,7 +279,9 @@ All paths are under `/v1/evals`. How the core carries them out:
   scoring request records a `queued` scoring job and submits it. Both answer `202` at once.
 - **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
   target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
-  id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One
+  id the worker does not know is `404` ("Agent not found"). An HTTP target the worker has but
+  refuses, such as an entry of its `targets` that is not `kind: http`, is `422` with the reason
+  and `check targets['ID']`, and no run is recorded. A dataset not published is `422`. One
   run at a time per organisation (`409` "An eval run is already in progress"). Run codes count up
   from `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with
   no usable prompt or expected text, calls the target once per case with no retry, grades each
@@ -290,8 +293,11 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **Scoring.** The scorers are the built-in ones by name (`exact_match`, `contains_expected`,
   `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
   registered judges pinned by name and version, or a saved suite version's scorers and policies
-  (`suite_version_id`). Judge scorers need a worker with a judge (`Worker.judges`); without one
-  they are refused (`422`) and `GET /scorers` shows them unavailable. Each judge scorer is pinned
+  (`suite_version_id`). A registered judge's version is the digits 0-9 its store wrote; one in
+  other digits, such as `²` or `١`, is unsupported: `GET /judges` counts it in `unsupported`, a
+  new version of that judge is `409`, and the Agents judge does not grade it. Judge scorers need
+  a worker with a judge (`Worker.judges`); without one they are refused (`422`) and
+  `GET /scorers` shows them unavailable. Each judge scorer is pinned
   to its model when the job is admitted: the judge's own, or the default judge model when it
   names none, built-in judges included. A job keeps that model when the default changes later,
   and two jobs on different models do not compare as scored alike. One active scoring job per
@@ -351,7 +357,7 @@ then calls `Worker.submit(Work(...))`:
 | --- | --- |
 | `Work` | `kind` (`run` or `scoring`), the `principal`, `project_id`, `run_id`, and `job_id` for scoring |
 | `Worker.judges` | Whether the worker can run model judges |
-| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
+| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`, or `TargetRefused` (a `ValueError` in `martian.evals.worker.targets`, which the launch answers `422`) for a target it has but refuses; never calls the target |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
 
 `execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
@@ -430,7 +436,8 @@ may be a live view of targets the user defines.
 
 `tests/evals/test_worker_targets.py` launches runs through the launch route against a small HTTP
 server on loopback: once per case with the worker's credential, a non-2xx response, a timeout, a
-missing credential and an unreachable endpoint, each with no retry. It runs one in its own process
+missing credential and an unreachable endpoint, each with no retry, and a target the worker
+refuses, which records no run. It runs one in its own process
 with `ProcessWorker` and no martian-agents at all, and runs a registered agent through a fake
 martian-agents executor, in process and in a process of its own, without the HTTP path. The key
 and the leases appear in no record.
@@ -641,7 +648,9 @@ endpoint, and keeps the local edition's default in its data folder.
   Every method takes the request's principal first, and a binding keeps each organisation's
   objects apart; the single local user has a space of its own. A refused request raises
   `StoreError` with `kind` `not_found`, `conflict` or `invalid`. Another organisation's object
-  is `not_found`, the same as a missing one.
+  is `not_found`, the same as a missing one. `MemoryStore`, `MlflowStore` and the record store
+  page by offset: a `cursor` is a `next_cursor` they returned, at most 18 of the digits 0-9, and
+  any other, such as `²`, `١` or `page-2`, is `invalid` (`martian.evals.store.cursor_offset`).
 - `MemoryStore` is the reference implementation, in memory.
 - `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
   store in the same process, with no MLflow server: SQLite for the local edition, Postgres for

@@ -30,7 +30,7 @@ from martian.evals.model import (
     digest,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import StoreError, StoreStatus, check_session_search, cursor_offset
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -52,7 +52,7 @@ def _new_id(prefix: str) -> str:
 
 
 def _page[T](items: list[T], cursor: str | None, limit: int) -> Page[T]:
-    start = int(cursor) if cursor and cursor.isdigit() else 0
+    start = cursor_offset(cursor)
     chunk = items[start : start + limit]
     return Page[T](items=chunk, next_cursor=str(start + limit) if start + limit < len(items) else None)
 

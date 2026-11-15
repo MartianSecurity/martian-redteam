@@ -39,6 +39,7 @@ from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
 from martian.evals.worker import Work
 from martian.evals.worker.scorers import builtin_scorer
+from martian.evals.worker.targets import TargetRefused
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
@@ -93,7 +94,10 @@ async def request_run(
         return run_out(existing)
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    pin = await worker.check_target(principal, target)
+    try:
+        pin = await worker.check_target(principal, target)
+    except TargetRefused as error:
+        raise HTTPException(422, str(error)) from None
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")

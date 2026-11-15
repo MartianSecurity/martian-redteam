@@ -3,6 +3,8 @@ the record store, as the server's routes serve them from its tables and MLflow. 
 MemoryStore and on the in-process MLflow binding."""
 
 import asyncio
+import base64
+import json
 import uuid
 from datetime import timedelta
 
@@ -269,6 +271,16 @@ def test_a_cursor_belongs_to_its_query(served):
     refused = client.post("/v1/evals/traces/search", json={"limit": 2, "q": "faq", "cursor": cursor})
     assert refused.status_code == 409 and "refresh the search" in refused.json()["detail"]
     assert client.post("/v1/evals/traces/search", json={"cursor": "not a cursor"}).status_code == 409
+
+
+@pytest.mark.parametrize("page", ["²", "١"])
+def test_a_cursor_naming_a_store_page_in_other_digits_is_refused(served, page):
+    # The cursor's scope is a digest anyone can compute, so its store page is the caller's to set.
+    client, _ = served
+    position = json.loads(base64.urlsafe_b64decode(search(client, limit=2)["next_cursor"]))
+    forged = base64.urlsafe_b64encode(json.dumps({**position, "page": page}).encode()).decode()
+    refused = client.post("/v1/evals/traces/search", json={"limit": 2, "cursor": forged})
+    assert (refused.status_code, refused.json()) == (422, {"detail": "cursor is not a next_cursor this store returned"})
 
 
 def test_trace_search_in_a_project_that_does_not_exist(served, tmp_path):

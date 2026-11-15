@@ -49,6 +49,11 @@ ends a slow call first, as ``item timed out``."""
 NOT_FOUND = "Agent not found"
 
 
+class TargetRefused(ValueError):
+    """A target the worker has but will not call, such as one in ``targets`` that is not an HTTP
+    target. The message names the worker's setting and never repeats a value of it."""
+
+
 def http_target(target: Target) -> Target:
     """``target``, which must be an HTTP target."""
     if target.kind != "http":
@@ -113,12 +118,16 @@ async def target_pin(
     executor: AgentExecutor | None,
 ) -> dict[str, Any]:
     """What pins a run of ``target``: an HTTP target's :func:`http_pin`, a function's id, or the
-    executor's pin of a registered agent. An id the worker does not know is ``not_found``."""
+    executor's pin of a registered agent. An id the worker does not know is ``not_found``; an HTTP
+    target it refuses is :class:`TargetRefused`, naming ``targets[ID]``."""
     agent_id = target.agent_id if target.kind == "agent" else None
     if agent_id is None:
         raise StoreError("not_found", NOT_FOUND)
     if agent_id in http:
-        return http_pin(agent_id, http[agent_id])
+        try:
+            return http_pin(agent_id, http[agent_id])
+        except ValueError as error:
+            raise TargetRefused(f"{error}; check targets[{agent_id!r}]") from None
     if agent_id in calls:
         return {"kind": "agent", "agent_id": agent_id}
     if executor is not None:
@@ -154,4 +163,12 @@ def target_call(
     return call
 
 
-__all__ = ["CLIENT_SLACK_SECONDS", "http_call", "http_pin", "http_target", "target_call", "target_pin"]
+__all__ = [
+    "CLIENT_SLACK_SECONDS",
+    "TargetRefused",
+    "http_call",
+    "http_pin",
+    "http_target",
+    "target_call",
+    "target_pin",
+]
