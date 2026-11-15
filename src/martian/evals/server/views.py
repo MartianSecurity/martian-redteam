@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from martian.evals.records import RecordStore, SavedView
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, allows, require_capability
 from martian.evals.server.principal import Principal
-from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key
+from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, user_out
 from martian.evals.server.runs import project_keys
 from martian.evals.server.write_schemas import SavedViewRequest
 from martian.evals.store import EvalStore
@@ -35,7 +35,7 @@ def view_out(view: SavedView) -> dict[str, Any]:
     return {
         "id": view.id,
         "name": view.name,
-        "owner_id": view.owner,
+        "owner_id": user_out(view.owner),
         "visibility": view.visibility,
         "revision": view.revision,
         **view.definition,
