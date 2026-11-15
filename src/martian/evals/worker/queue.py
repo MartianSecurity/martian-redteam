@@ -1,5 +1,5 @@
 """The durable queue: a worker whose ``submit`` puts the work in the record store's database, and the
-worker process that takes it from there (MorningHQ/martian-notes#139).
+worker process that takes it from there (MartianSecurity/martian-notes#139).
 
 :class:`QueueWorker` is a :class:`~martian.evals.worker.Worker` like the others, so the routes do
 not change. ``submit`` puts the work in the queue (:class:`~martian.evals.records.queue.SqlWorkQueue`,
@@ -10,7 +10,7 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
 
 - **Several at once, shared fairly.** A worker with free places takes the next piece at once, and
   each claim takes the oldest piece of the organisation with the fewest pieces running, across
-  every worker of the queue (MorningHQ/martian-notes#145). So one organisation that queues many
+  every worker of the queue (MartianSecurity/martian-notes#145). So one organisation that queues many
   runs holds back another's only until a place frees, never until its own queue is empty. How
   many of an organisation's runs and scoring jobs may be in progress at all is the edition's
   limit, checked when the work is admitted (:mod:`martian.evals.server.admission`).

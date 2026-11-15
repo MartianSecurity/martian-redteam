@@ -219,7 +219,7 @@ the second step checked on `main` before.
 To move the pin, run the suite on the candidate, change `mlflow-skinny==` in `pyproject.toml`, run
 `uv lock`, and update the version in [SDK and CI](sdk-and-ci.md) and
 [release preparation](releasing.md). The hosted MLflow server's version is set separately in
-MorningHQ/martian-evals.
+MartianSecurity/martian-evals.
 
 ## Adding a vulnerability
 
@@ -265,6 +265,6 @@ now covers both SDK modules; no eval typing exemption remains.
 
 | Repo | Role |
 | --- | --- |
-| [MorningHQ/martian-redteam](https://github.com/MorningHQ/martian-redteam) | This SDK |
-| [MorningHQ/martian-agents](https://github.com/MorningHQ/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
+| [MartianSecurity/martian-redteam](https://github.com/MartianSecurity/martian-redteam) | This SDK |
+| [MartianSecurity/martian-agents](https://github.com/MartianSecurity/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
 | confident-ai/deepteam (local checkout only) | Taxonomy reference, not a publishable fork |

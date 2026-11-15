@@ -1,4 +1,4 @@
-"""When a schedule's runs are due: its slots, in UTC (MorningHQ/martian-notes#197).
+"""When a schedule's runs are due: its slots, in UTC (MartianSecurity/martian-notes#197).
 
 A schedule is due either every so many seconds or on a cron expression, never both:
 

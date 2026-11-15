@@ -1,5 +1,5 @@
 """Scheduled regression runs: a saved suite run against a target unattended
-(MorningHQ/martian-notes#197).
+(MartianSecurity/martian-notes#197).
 
 A schedule is created through its routes, which need the ``monitoring`` entitlement, and the
 durable queue's worker takes a turn at each of its slots, every so many seconds or on a cron
@@ -7,7 +7,7 @@ expression in UTC, admitting the slot's run as a launch is admitted. A run that 
 is recorded as skipped with the reason; slots missed while no worker ran are run once; each
 schedule keeps its history, with each run's state, pass rate, suite scorecard and the paired
 comparison with its previous completed run; and each scored run's gate result feeds the thresholds
-on the schedule's gate results (MorningHQ/martian-notes#198), which breach and recover. A fake
+on the schedule's gate results (MartianSecurity/martian-notes#198), which breach and recover. A fake
 target and a fake judge stand in for the agent and the model; nothing calls a model or a network
 target.
 """

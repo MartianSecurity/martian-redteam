@@ -18,9 +18,9 @@ on:
 
 jobs:
   red-team:
-    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@v0.1.1 # or a full commit SHA
+    uses: MartianSecurity/martian-redteam/.github/workflows/red-team.yml@v0.1.1 # or a full commit SHA
     # Dogfood only, never in production:
-    # uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@main
+    # uses: MartianSecurity/martian-redteam/.github/workflows/red-team.yml@main
     with:
       config: examples/config.yaml
       # sdk-ref: v0.1.1  # only to install a different SDK ref than the workflow pin

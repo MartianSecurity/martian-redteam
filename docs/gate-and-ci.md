@@ -61,7 +61,7 @@ provider/key setup; it is executed locally and can have side effects.
 The [evals action](../.github/actions/evals/action.yml) runs one
 [suite file](evals.md#run-a-suite-file-locally) with `martian evals run` and
 reports it on the pull request. Reference it as
-`MorningHQ/martian-redteam/.github/actions/evals@<tag or full SHA>` after
+`MartianSecurity/martian-redteam/.github/actions/evals@<tag or full SHA>` after
 `actions/checkout`. [examples/github-action](../examples/github-action/) holds
 a [workflow](../examples/github-action/workflow.yml), a passing and a failing
 suite, and the two comments they produce

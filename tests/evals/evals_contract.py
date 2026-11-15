@@ -1,7 +1,7 @@
 """The server's frozen evals API contract, for testing the core against it.
 
 ``contracts/evals-api-v3.json`` is an unchanged copy of ``contracts/evals-api.json`` in
-MorningHQ/MartianBackend at version 3 (``info.version``), generated there by
+MartianSecurity/MartianBackend at version 3 (``info.version``), generated there by
 ``scripts/evals-contract.py`` from the server's routes. When the server raises the version, copy
 the file again under the new version's name and update ``VERSION``.
 """

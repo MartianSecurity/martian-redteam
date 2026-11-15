@@ -1,5 +1,5 @@
-"""The durable queue and its worker (MorningHQ/martian-notes#139), and resuming work it takes again
-(MorningHQ/martian-notes#141).
+"""The durable queue and its worker (MartianSecurity/martian-notes#139), and resuming work it takes again
+(MartianSecurity/martian-notes#141).
 
 The queue holds run launches and scoring jobs in the record store's database, on SQLite and on
 Postgres: each piece once, held by one worker at a time, and taken again once the lease of a

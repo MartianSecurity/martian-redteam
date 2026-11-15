@@ -1,11 +1,11 @@
 """Thresholds on a monitor's scores and the alerts their breaches and recoveries send
-(MorningHQ/martian-notes#198). The core's own routes; the server's frozen contract has none.
+(MartianSecurity/martian-notes#198). The core's own routes; the server's frozen contract has none.
 
 A threshold names its source, a measure (``pass_rate`` of boolean scores or ``mean`` of numeric
 ones) that is healthy ``at_least`` or ``at_most`` a value, a window, and the fewest scores it is
 judged on. Its source is a monitor and one of its scorers (``kind="monitor"``), which the worker
 evaluates after each of the monitor's passes, or a schedule's gate results (``kind="gate"``,
-MorningHQ/martian-notes#197), measured by their ``pass_rate`` and evaluated after each of the
+MartianSecurity/martian-notes#197), measured by their ``pass_rate`` and evaluated after each of the
 schedule's runs is scored. Each evaluation is on the 95% interval of the window's scores
 (:mod:`martian.evals.thresholds`) and sends one alert per breach and one per recovery to its
 webhook, its email recipients, or both (:mod:`martian.evals.alerts`).
