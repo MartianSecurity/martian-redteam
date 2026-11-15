@@ -23,6 +23,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
+| `scripts/sbom.py`, `scripts/licence-policy.json` | The release's CycloneDX bills of materials for the wheel and the image, and the licence check against the allowed list ([releasing](releasing.md#bills-of-materials-and-the-licence-check)) |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
@@ -65,7 +66,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `test` | `uv sync --locked`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `evals-core` | The evals core's tests with `-n auto`, with the stores on Postgres too | 3.12 |
 | `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
-| `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), throwaway venv install, `validate examples/config.yaml` | 3.12 |
+| `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), `scripts/sbom.py wheel` (the wheel's bill of materials and the licence check), throwaway venv install, `validate examples/config.yaml` | 3.12 |
 | `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
 
@@ -112,6 +113,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
+- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.

@@ -27,7 +27,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 ## SDK release
 
 - [Architecture](architecture.md): execution, scoring and trust boundaries
-- [Release preparation](releasing.md): distributions, clean installs, the local edition's image and publishing
+- [Release preparation](releasing.md): distributions, clean installs, the local edition's image, bills of materials and the licence check, and publishing
 - [Validation](validation.md): reproducible package checks and running-service release gates
 
 ## Repository
