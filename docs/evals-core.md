@@ -2471,7 +2471,7 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 ## Data export
 
 `martian evals export <folder>` exports everything the local edition's store and record store
-hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
+hold (not the worker's queue, the outbox, the local targets and their keys, or `settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
