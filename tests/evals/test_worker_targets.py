@@ -280,10 +280,10 @@ def test_registered_agents_run_through_martian_agents_and_never_over_direct_http
     assert (unknown.status_code, unknown.json()["detail"]) == (404, "Agent not found")
 
 
-async def test_a_worker_calls_a_target_itself_only_when_it_is_an_http_target(records, tmp_path):
-    function = Target(kind="function", file="agent.py", function="target")
-    with pytest.raises(ValueError, match="only when it is an http target"):
-        InProcessWorker(MemoryStore(), records, targets={HTTP_TARGET: function})
+async def test_a_worker_calls_a_target_itself_only_when_it_is_an_http_or_a_function_target(records, tmp_path):
+    stored = Target(kind="stored")
+    with pytest.raises(ValueError, match="only when it is an http or a function target"):
+        InProcessWorker(MemoryStore(), records, targets={HTTP_TARGET: stored})
     with pytest.raises(ValueError, match="both an agent and an http target"):
         ProcessWorker(http_services, records, agents=[HTTP_TARGET], targets={HTTP_TARGET: http_target("http://x")})
     worker = ProcessWorker(

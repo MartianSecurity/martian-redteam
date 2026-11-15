@@ -512,8 +512,9 @@ the provider reported, or `None`). A scoring job
 sends one request per model its judges are pinned to ([judge models](#judge-models)); the judge is
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
-- `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None)` runs each piece of
+- `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_target},
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None,
+  private_paths=())` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -538,17 +539,37 @@ of these (`martian.evals.worker.targets`):
 
 | Target | Given as | Called |
 | --- | --- | --- |
-| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process, on an event loop of a thread of its own |
+| A function target | The shared model's `Target(kind="function")` in `targets`: a function in a Python file, by its path and name | In a process of its own for each run, with the case's inputs as keyword arguments, which cannot reach the worker's private paths on Linux |
+| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process, on an event loop of a thread of its own. Nothing isolates it: for tests and code the installation trusts with its stores |
 | An HTTP target | The shared model's `Target(kind="http")` in `targets` | By the worker itself, with no martian-agents service |
 | A registered agent | An id the worker's `AgentExecutor` admits | Through martian-agents, with leased credentials |
 
 The worker asks the executor only for ids it does not know itself; without an executor it calls
 no registered agent, so an install with no martian-agents service runs functions and HTTP targets.
 
+- **A target is given the case's id and inputs only.** A `TargetCall` and the executor receive a
+  `Case` with nothing else (`sent_case`): no expectations, stored output, tags or metadata. A
+  function target receives the inputs as keyword arguments, and an HTTP target's body placeholders
+  name inputs only; one that names anything else, such as `{{expectations.answer}}`, is refused
+  with a `ValueError` naming `targets['ID'].body` each time a check or a run names the target.
+- **A function target runs where it cannot reach the grader.** The run starts its process before
+  the first case, outside that case's time limit, and ends it after the last; a target it cannot
+  import fails the run with the reason. The process is `martian.evals.isolation.TargetProcess`,
+  as for a suite file's function target: it holds no memory of the work's process, its
+  environment has no `MARTIAN_*` variables or MLflow location variables, and on Linux with
+  Landlock it cannot read, change or create the worker's private paths (`private_paths` of
+  `InProcessWorker`, `WorkerServices.private_paths` from a `ProcessWorker`'s setup), which name the
+  stores' files: the local edition's data folder, say. The reply comes back as JSON, and a target
+  that raised is the case's error `the target raised <its type>`. A function target is pinned by
+  a digest of it as written and of its file's contents, and a `ProcessWorker` sends it to each
+  run's process as written, as it does an HTTP target. What each target can reach is in
+  [the target and the grader](security-and-data.md#the-target-and-the-grader).
+
 - **Every call has a time limit**, the worker's `target_timeout_seconds` (`WorkerServices` in a run's
   process), whatever the target: a call that outlasts it is the case's error, `item timed out`, and
   the run goes on. An HTTP target's client and a registered agent's executor end their own calls.
-  A function is the installation's own code, which may block its event loop, ignore being
+  A function target's process runs each call on a thread of its own and ends with the run. A
+  `TargetCall` is the installation's own code, which may block its event loop, ignore being
   cancelled or never return, so it runs on an event loop of a thread of its own
   (`FunctionTargets` in `martian.evals.worker.targets`), which the worker's loop waits for with the
   deadline. One loop serves every call, so what a function keeps between calls, such as an HTTP
@@ -556,8 +577,9 @@ no registered agent, so an install with no martian-agents service runs functions
   after it was cancelled (`GRACE_SECONDS`) keeps its thread, and the next call gets a new one. The
   thread ends with the process, and each run's process ends with its run
   ([one process per run](#one-process-per-run)). A thread was chosen over a process per call
-  because a function shares the run's process, its MLflow state and its setup's objects; a process
-  could not call it.
+  because a `TargetCall` shares the run's process, its MLflow state and its setup's objects; a
+  process could not call it. A function target that must not reach the stores is a
+  `Target(kind="function")` instead.
 - **HTTP targets** follow a suite file's URL target, with the same code: the worker POSTs `body`
   to `url` once per case, with no retry, no redirect and no proxy from the environment.
   `{{input}}` in the body is the case's prompt (the text a registered agent is sent),
@@ -683,10 +705,11 @@ The new process:
    function, named by its import path so that the new process can import it, and returns
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
    timeout, the HTTP targets' `credentials`, the registered agents' `executor`, the custom
-   Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)) and the `limits` of a
-   run that has none of its own. `options` must be JSON;
-4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
-   organisation, and exits.
+   Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)), the `limits` of a
+   run that has none of its own, and the `private_paths` a function target cannot reach
+   ([targets](#targets)). `options` must be JSON;
+4. runs the work, and the HTTP or function target it arrived with, with an `InProcessWorker` for
+   the work's organisation, and exits.
 
 Whatever the setup or the work selects in MLflow inside that process, such as a tracking URI, an
 experiment or a judge's traces, stays with that organisation. `agents` are the ids of the

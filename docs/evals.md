@@ -42,11 +42,12 @@ concurrency: 4
 output: results
 ```
 
-Nothing in this command contacts the Martian platform. A function target runs in your process,
-a URL target is called from it, the judge calls the model you name with credentials from your
-environment, MLflow's evaluation harness writes to a local store in the output folder, and the
-run is recorded in the data folder of the
-[local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
+Nothing in this command contacts the Martian platform. A function target runs in a process of
+its own, which the command starts and ends and which cannot reach how it is graded (**The target
+never sees how it is graded**, below), a URL target is called from the command's process, the
+judge calls the model you name with credentials from your environment, MLflow's evaluation
+harness writes to a local store in the output folder, and the run is recorded in the data folder
+of the [local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
 [`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
@@ -82,7 +83,10 @@ target:
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
   agents that keep a conversation per session. A value that is only a placeholder keeps its
-  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
+  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`. Any other
+  placeholder is refused when the suite loads; one that names the case's expectations or outputs,
+  such as `{{expectations.answer}}` or `{{expected_response}}`, is refused with an error saying
+  they are never sent to the target.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -98,7 +102,9 @@ target:
   `results.jsonl` holds the reason, and the command prints how many cases failed for each
   reason. The reason is the SDK's own wording: it never includes the address, a header or the
   response body. A function target reports only `the target call failed`, because its
-  exception comes from your code, or `the target did not answer within target.timeout_seconds`.
+  exception comes from your code, `the target did not answer within target.timeout_seconds`,
+  `the target returned <type>, which is not JSON; return text, a number, a list or a dict`, or
+  `the target's process ended before it answered`.
 
   | Reason | Usual cause |
   | --- | --- |
@@ -114,6 +120,43 @@ target:
 A URL target cannot be combined with `file` or `function`. Use a function target when the
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
 secret in the body.
+
+**The target never sees how it is graded.** An agent under test may look for its answers, or
+change its results, if it can reach them. So a target is given each case's inputs and nothing
+else: a function target as keyword arguments, a URL target in the body its placeholders fill. The
+expectations, the checks and their criteria, a `python` check's code, the results and the stores
+stay in the command's process and files. A function target runs in a process of its own, started
+with the run (`python -P`), which imports the target there and never in the command's process:
+
+- **Its memory holds no run.** The command sends it only inputs, and reads back only its reply.
+- **On Linux, the run's files are hidden from it**, with Landlock (kernel 5.13 or later, enabled by
+  default on current distributions), before it imports the target, and from every process it
+  starts: the suite file, the data file, each `python` check's file and the `__pycache__` folder
+  beside it, the output folder with `results.jsonl` and `mlflow.db`, a local SQLite or file
+  `mlflow.tracking_uri`, and the local Evals UI's data folder. It cannot read, change, create,
+  rename or remove them, cannot create or remove anything directly in the folders that hold them,
+  such as the suite file's own folder, and cannot read the command's memory. It can list the names
+  in those folders, read the other files there, such as its own modules, and use any other file
+  and the network as your user can. On macOS and Windows, or a kernel without Landlock, the files
+  are not hidden: the command prints why, and `target_isolation` in `summary.json` records it.
+- **Its environment has no `MARTIAN_*` variables** and none of MLflow's tracking, experiment,
+  registry, run or workspace variables, so it is not told where the run or its stores are.
+  `TMPDIR` is a folder of its own, removed with the process, and `MLFLOW_TRACKING_URI` names a
+  store in that folder, so the target's own MLflow calls stay there. Every other variable, such as
+  your agent's model key, is as the command has it.
+- **It runs as before otherwise**: in the command's working folder with the command's import path,
+  each call on a thread of its own, with module-level state shared by the run's calls. When its
+  module imports MLflow or a library MLflow's autologging traces, such as the OpenAI or Anthropic
+  client, its spans and the autologged ones are added to each case's trace, so tool-call and cost
+  checks read them as before. A library it imports only inside the function is not traced.
+
+What it costs: the reply crosses from the target's process as JSON, so a function target returns
+text, a number, a list or a dict; the process takes about half a second to start, and a few
+seconds more when it loads MLflow for a target's spans, before the run's first call; and a target
+that writes files beside itself must write them in a subfolder or the temporary folder. A target whose own file is inside one of the hidden paths,
+such as the output folder, is refused before any case. What each kind of target can reach, in
+`martian evals run`, the pytest gate and the evals core's worker, is in
+[the target and the grader](security-and-data.md#the-target-and-the-grader).
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
 graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
@@ -133,7 +176,7 @@ give repeated check types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; and for a function target, `target_isolation`: whether the run's files were hidden from it (`files_hidden`) and, when not, why (`reason`); `null` for a URL target or stored outputs. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -167,10 +210,11 @@ limits:
 ```
 
 - **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
-  within target.timeout_seconds`, and the run goes on. A function target runs on a thread of its
-  own, so a function that hangs cannot hold up the run; Python cannot stop a thread, so the
-  function keeps running in the background until it returns or the command ends. A URL target's
-  call ends there too, even when the server sends its reply a little at a time.
+  within target.timeout_seconds`, and the run goes on. A function target's process runs each call
+  on a thread of its own, so a function that hangs cannot hold up the run; Python cannot stop a
+  thread, so the function keeps running in that process until it returns or the run ends, which
+  ends the process. A URL target's call ends there too, even when the server sends its reply a
+  little at a time. The limit starts once the target's process has imported the target.
 - **A run that reaches a limit stops.** It calls no more targets, the cases in flight finish, and
   the cases it finished are kept in `results.jsonl` and the local Evals UI. The others have no
   result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
@@ -1753,6 +1797,11 @@ controller, which uploads once, so one session is recorded. Skips and worker err
 on the controller.
 
 ## Trust and limits
+
+The gate calls `predict_fn` in the test's own process, where the dataset's expected values are
+too: unlike a suite file's function target, nothing keeps the agent from them
+([the target and the grader](security-and-data.md#the-target-and-the-grader)). Use a suite file
+when the agent under test must not reach its answers.
 
 The verdict is `client_executed_server_scored`. Backend holds `expected`, re-scores the uploaded
 outputs and never accepts a client verdict, but it cannot prove the agent was really called or that

@@ -4,7 +4,8 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 (MorningHQ/MartianBackend) onto the store and the record store:
 
 - A run reads the active cases of its published dataset (the default project's dataset version it
-  was admitted with) up to its case limit, calls the target once per case with no retry, and
+  was admitted with) up to its case limit, calls the target once per case with no retry, giving it
+  the case's id and inputs and nothing else (:func:`~martian.evals.worker.targets.sent_case`), and
   grades each output by exact match. Each case that called the target gets a trace in the store,
   with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
@@ -47,6 +48,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+from martian.config import ConfigError
 from martian.evals import _custom
 from martian.evals.limits import Budget
 from martian.evals.model import (
@@ -73,7 +75,7 @@ from martian.evals.store import EvalStore, StoreError
 # The package defines these before it imports this module.
 from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work, Worker
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
-from martian.evals.worker.targets import changed_target
+from martian.evals.worker.targets import FunctionProcessCall, changed_target, sent_case
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -169,11 +171,16 @@ async def execute_run(
         )
     except StoreError:
         return  # another worker took it, or it was cancelled meanwhile
+    call: TargetCall | None = None
     try:
-        await _run_cases(store, records, principal, run, call_for(run), pin_for, timeout_seconds, limits)
+        call = call_for(run)
+        await _run_cases(store, records, principal, run, call, pin_for, timeout_seconds, limits)
     except Exception as error:  # noqa: BLE001 - a run never stays running after its worker fails
         log.exception("Eval run %s failed", run.id)
         await _fail_run(records, principal, run, _detail(error, "runner crashed"))
+    finally:
+        if isinstance(call, FunctionProcessCall):  # its process ends with the run
+            await asyncio.to_thread(call.close)
 
 
 async def _move_run(
@@ -238,6 +245,12 @@ async def _run_cases(
     if (changed := changed_target(run, await pin_for(run))) is not None:
         await _fail_run(records, principal, run, changed)
         return
+    if isinstance(call, FunctionProcessCall):  # its process, started before the first case's time runs
+        try:
+            await call.ready()
+        except ConfigError as error:
+            await _fail_run(records, principal, run, str(error))
+            return
     limits = run_limits(run, default_limits)
     budget = Budget(limits)
     dataset_id = run.store.dataset_id
@@ -349,7 +362,7 @@ async def _run_case(
     output: Any = None
     error = ""
     try:
-        output = await asyncio.wait_for(call(case), timeout=timeout_seconds)
+        output = await asyncio.wait_for(call(sent_case(case)), timeout=timeout_seconds)
     except TimeoutError:
         error = "item timed out"
     except TargetCallError as failure:  # the target's own words, which name the setting to check
