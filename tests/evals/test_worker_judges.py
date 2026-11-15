@@ -17,11 +17,12 @@ import pytest
 
 from martian.evals import response_rubric
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION
+from martian.evals.model import ScorerVersion
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER
 from martian.evals.store import MemoryStore
 from martian.evals.worker import AgentsConnection, JudgeRequest, agents_judge, sdk_judge
-from martian.evals.worker.judges import NO_MODEL, RUBRICS
+from martian.evals.worker.judges import NO_MODEL, REGISTERED, RUBRICS
 from martian.evals.worker.scorers import builtin_scorer
 from tests.evals.write_fixture import Served, request_id, serve
 
@@ -340,6 +341,21 @@ def judge_request(**changes: Any) -> JudgeRequest:
         "job_id": "job-1",
     }
     return JudgeRequest(**(fields | changes))
+
+
+@pytest.mark.parametrize("version", ["²", "١"])
+def test_agents_judge_refuses_a_judge_version_in_other_digits_without_calling_agents(agents, version):
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1.
+    tone = ScorerVersion(
+        name="tone",
+        kind="llm_judge",
+        type=REGISTERED,
+        version=version,
+        criteria={"operation_id": "op-1", "name": "tone", "instructions": "Is {{ outputs }} tone?"},
+    )
+    found = asyncio.run(agents_judge(agents.origin, connection)(judge_request(scorers=(tone,))))
+    assert found.errors == {"tone": f"The Agents judge does not grade judges of type {REGISTERED}"}
+    assert agents.requests == []
 
 
 def test_agents_judge_refuses_a_judge_pinned_to_a_model_without_calling_agents(agents):

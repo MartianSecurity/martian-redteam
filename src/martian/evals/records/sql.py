@@ -49,7 +49,7 @@ from martian.evals.records.tables import (
     suites,
 )
 from martian.evals.records.tables import scores as score_rows
-from martian.evals.store import StoreError
+from martian.evals.store import StoreError, cursor_offset
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -195,7 +195,7 @@ class SqlRecordStore:
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[Run]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = cursor_offset(cursor)
         _bounds(offset, limit, 500)
 
         def work(connection: Connection, space: str) -> Page[Run]:

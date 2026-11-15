@@ -10,9 +10,11 @@ import uuid
 from typing import Any
 
 import pytest
+from fastapi import HTTPException, Request
 
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import COMMUNITY, ENTERPRISE, create_app, organisation_principal
+from martian.evals.server.drafts import MAX_UPLOAD_BYTES, _limit_body
 from martian.evals.server.projection import user_out
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
@@ -350,6 +352,21 @@ def test_judges_are_registered_in_versions_and_scored_by_the_workers_judge(memor
     assert {(a["name"], a["source_id"]) for a in work["assessments"] if not a["error"]} == {("tone", JUDGE_MODEL)}
 
 
+@pytest.mark.parametrize("version", ["²", "١"])
+def test_a_stored_judge_version_in_other_digits_is_unsupported(memory: Served, version):
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1.
+    body = {"request_id": request_id(), "name": "tone", "instructions": "Is the reply in {{ outputs }} polite?"}
+    memory.call("POST", "/v1/evals/judges", 201, json=body)
+    assert isinstance(memory.store, MemoryStore)
+    (versions,) = memory.store._scorers.values()
+    versions[0] = versions[0].model_copy(update={"version": version})
+    listed = memory.call("GET", "/v1/evals/judges", 200, params={"name": "tone"})
+    assert (listed["items"], listed["unsupported"]) == ([], 1)
+    again = {**body, "request_id": request_id(), "expected_version": 1}
+    refused = memory.call("POST", "/v1/evals/judges", 409, json=again)
+    assert refused["detail"] == "Judge changed or has unsupported versions; reload before registering"
+
+
 # --- reviews, queues, questions and annotations ------------------------------------------------
 
 
@@ -515,6 +532,15 @@ def test_saved_views_belong_to_their_owner_unless_shared(memory: Served):
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 409, params={"revision": 1})
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 204, params={"revision": 2})
     assert memory.call("GET", "/v1/evals/views", 200)["items"] == []
+
+
+async def test_an_upload_length_that_is_not_the_digits_0_to_9_is_left_to_the_upload_check():
+    # A header is Latin-1, so ², which isdigit() accepts and int() refuses, can arrive as a length.
+    assert await _limit_body(Request({"type": "http", "headers": [(b"content-length", b"\xb2")]})) is None
+    oversized = Request({"type": "http", "headers": [(b"content-length", str(MAX_UPLOAD_BYTES * 2 + 1).encode())]})
+    with pytest.raises(HTTPException) as refused:
+        await _limit_body(oversized)
+    assert refused.value.status_code == 413
 
 
 def test_a_draft_is_edited_published_and_run(memory: Served):

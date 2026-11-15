@@ -102,7 +102,7 @@ from martian.evals.model import (
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import StoreError, StoreStatus, check_session_search, cursor_offset
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -625,7 +625,7 @@ class MlflowStore:
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         def work() -> Page[Trace]:
             found = self._matching(query)
-            start = int(query.cursor) if query.cursor and query.cursor.isdigit() else 0
+            start = cursor_offset(query.cursor)
             chunk = found[start : start + query.limit]
             more = start + query.limit < len(found)
             return Page[Trace](items=chunk, next_cursor=str(start + query.limit) if more else None)
