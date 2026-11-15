@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -131,6 +132,7 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    query_keeps,
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
@@ -689,6 +691,16 @@ class MlflowStore:
             filters.append(f"trace.timestamp_ms >= {_ms_at_or_after(query.since)}")
         if query.until is not None:
             filters.append(f"trace.timestamp_ms < {_ms_at_or_after(query.until)}")
+        if query.min_latency_ms is not None:
+            # MLflow keeps a latency in whole milliseconds, so this keeps exactly the traces at or
+            # over it. Its column is 64-bit; above that, it keeps only a trace at the top, which
+            # the check in this process then leaves out.
+            filters.append(f"trace.execution_time_ms >= {min(math.ceil(query.min_latency_ms), 2**63 - 1)}")
+        if query.verdicts:
+            # Checked in this process (``query_keeps``): MLflow's feedback filter counts only the
+            # assessments no later one overrides, and adds the other traces of a session that has a
+            # session assessment.
+            whole = False
         if query.run_id is None or not _SAFE_FILTER_VALUE.match(query.run_id):
             return [_Search(" AND ".join(filters) or None, whole=whole and query.run_id is None)]
         # A run's traces are the ones tagged with it and the untagged ones MLflow tracing recorded
@@ -710,11 +722,21 @@ class MlflowStore:
         searches = self._searches(experiment_id, query)
         for search, offset in zip(searches, _cursor_offsets(query.cursor, len(searches)), strict=True):
             search.offset = offset
-        # MLflow breaks a tie in time by its trace id, ascending, either way.
+        # MLflow breaks a tie in time by its trace id, ascending, either way. Ordered by latency, it
+        # puts the traces without one last, either way.
         order_by = ["timestamp_ms ASC" if query.oldest_first else "timestamp_ms DESC"]
+        if query.slowest_first is not None:
+            order_by.insert(0, "execution_time_ms DESC" if query.slowest_first else "execution_time_ms ASC")
 
-        def key(info: TraceInfo) -> tuple[int, str]:
-            return (info.request_time if query.oldest_first else -info.request_time, info.trace_id)
+        def key(info: TraceInfo) -> tuple[bool, int, int, str]:
+            latency = info.execution_duration
+            by_latency = 0 if latency is None or query.slowest_first is None else latency
+            return (
+                latency is None and query.slowest_first is not None,
+                -by_latency if query.slowest_first else by_latency,
+                info.request_time if query.oldest_first else -info.request_time,
+                info.trace_id,
+            )
 
         found: list[Trace] = []
         runs: dict[str, str] = {}
@@ -741,7 +763,7 @@ class MlflowStore:
             trace = _trace(search.rows.popleft(), query.project_id, runs=runs)
             search.offset += 1
             read += 1
-            if _matches(trace, query):
+            if _matches(trace, query) and query_keeps(trace, query):
                 found.append(trace)
         more = any(search.rows or not search.done for search in searches)
         return found, ".".join(str(search.offset) for search in searches) if more else None

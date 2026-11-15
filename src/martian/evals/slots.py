@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
+from martian.evals._digits import ascii_digits
+
 MIN_INTERVAL_SECONDS = 60
 """The shortest interval a new schedule may have, the same as cron's minute."""
 SEARCH_YEARS = 9
@@ -107,7 +109,7 @@ def _field(text: str, name: str, low: int, high: int) -> frozenset[int]:
     values: set[int] = set()
     for item in text.split(","):
         part, _, step_text = item.partition("/")
-        if step_text and not step_text.isdigit():
+        if step_text and not ascii_digits(step_text):
             raise ValueError(f"the {name} field's step {step_text!r} is not a number")
         step = int(step_text) if step_text else 1
         if step < 1:
@@ -116,10 +118,10 @@ def _field(text: str, name: str, low: int, high: int) -> frozenset[int]:
             first, last = low, high
         elif "-" in part:
             first_text, _, last_text = part.partition("-")
-            if not (first_text.isdigit() and last_text.isdigit()):
+            if not (ascii_digits(first_text) and ascii_digits(last_text)):
                 raise ValueError(f"the {name} field's range {part!r} is not two numbers")
             first, last = int(first_text), int(last_text)
-        elif part.isdigit():
+        elif ascii_digits(part):
             if step_text:
                 raise ValueError(f"the {name} field takes a step after * or a range, not after {part!r}")
             first = last = int(part)

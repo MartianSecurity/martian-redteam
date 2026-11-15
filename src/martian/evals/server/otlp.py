@@ -54,6 +54,7 @@ from opentelemetry.proto.common.v1.common_pb2 import AnyValue
 from opentelemetry.proto.trace.v1.trace_pb2 import Span as OtlpSpan
 from opentelemetry.proto.trace.v1.trace_pb2 import Status as OtlpStatus
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import Span, Trace, TraceState
 from martian.evals.server.capabilities import WRITERS, highest_role
 from martian.evals.server.dependencies import PrincipalDep, StoreDep
@@ -120,7 +121,7 @@ router = APIRouter(tags=["OpenTelemetry"], route_class=OtlpRoute)
 async def _body(request: Request) -> bytes:
     """The request's body, decompressed, refused past :data:`MAX_BODY_BYTES`."""
     declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    if ascii_digits(declared) and int(declared) > MAX_BODY_BYTES:
         raise HTTPException(413, f"The body is larger than {MAX_BODY_BYTES} bytes")
     chunks, size = [], 0
     async for chunk in request.stream():

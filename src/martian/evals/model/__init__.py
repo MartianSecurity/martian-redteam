@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
@@ -711,10 +711,16 @@ class Trace(_Object):
 
 
 class TraceQuery(_Object):
-    """Which traces of a project to return, newest first unless ``oldest_first``. ``model`` keeps
-    the traces whose model is exactly that name. ``text`` matches, ignoring case, a trace's name
-    and its request and response up to 1,000 characters, or the first 997 of a longer one
-    (``martian.evals.store.text_matches``)."""
+    """Which traces of a project to return, newest first unless ``oldest_first``.
+
+    ``model`` keeps the traces whose model is exactly that name. ``text`` matches, ignoring case, a
+    trace's name and its request and response up to 1,000 characters, or the first 997 of a longer
+    one (``martian.evals.store.text_matches``). ``min_latency_ms`` keeps traces whose latency is at
+    least that (a trace with no latency is left out), and ``verdicts`` keeps traces with a verdict
+    of each named scorer equal to its boolean: a feedback score, never an expectation
+    (:func:`is_expectation`). ``slowest_first`` orders by latency instead of time, slowest first or,
+    when ``False``, fastest first, with the traces that have no latency last. A store applies every
+    filter and the order before it pages, so a page is the query's, whatever the project's size."""
 
     project_id: Identifier
     run_id: str | None = None
@@ -727,9 +733,41 @@ class TraceQuery(_Object):
     tags: dict[str, str] = Field(default_factory=dict)
     since: datetime | None = None
     until: datetime | None = None
+    min_latency_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    verdicts: dict[str, bool] = Field(default_factory=dict)
     oldest_first: bool = False
+    slowest_first: bool | None = None
     limit: int = Field(default=50, ge=1, le=500)
     cursor: str | None = None
+
+
+def is_expectation(score: Score) -> bool:
+    """Whether a score is a person's expectation on a trace rather than a verdict. The core records
+    an expectation annotation as a score whose metadata has ``martian.annotation: expectation``, and
+    a store binding reads MLflow's expectation assessments the same way."""
+    return score.metadata.get("martian.annotation") == "expectation"
+
+
+def query_keeps(trace: Trace, query: TraceQuery) -> bool:
+    """Whether a trace, with its scores, passes the query's latency and verdict filters."""
+    if query.min_latency_ms is not None and (trace.latency_ms is None or trace.latency_ms < query.min_latency_ms):
+        return False
+    return all(
+        any(s.scorer == name and not is_expectation(s) and s.value is wanted for s in trace.scores)
+        for name, wanted in query.verdicts.items()
+    )
+
+
+def query_order(traces: list[Trace], query: TraceQuery) -> list[Trace]:
+    """Traces in the query's order: by request time, then by latency when ``slowest_first`` is set."""
+    epoch = datetime.min.replace(tzinfo=UTC)
+    found = sorted(traces, key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
+    if query.slowest_first is None:
+        return found
+    timed = sorted(
+        (t for t in found if t.latency_ms is not None), key=lambda t: t.latency_ms or 0.0, reverse=query.slowest_first
+    )
+    return timed + [t for t in found if t.latency_ms is None]
 
 
 class Page[T](BaseModel):
@@ -982,6 +1020,9 @@ __all__ = [
     "case_status",
     "digest",
     "from_results_record",
+    "is_expectation",
+    "query_keeps",
+    "query_order",
     "sessions_from_traces",
     "suite_digest",
 ]

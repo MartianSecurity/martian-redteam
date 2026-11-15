@@ -29,15 +29,18 @@ model, and on its operator's own model when the request names none. It names mod
 ``provider/model`` where the core names them ``provider:/model``, so the request's model is
 sent and the model Agents reports is recorded in each form. A request pinned to an endpoint is
 refused, since Agents calls its models itself.
+The route checks a static authorization of the target, or a target lease the worker's connection
+sends with the saved item it admits (``action_id``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -45,6 +48,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import ValidationError
 
+from martian.evals._digits import ascii_digits
 from martian.evals._judge_transport import DEFAULT_RATE_LIMIT_WAIT_SECONDS, MODEL_VERSION_KEY
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION, _response_judge
 from martian.evals.limits import reported_tokens
@@ -209,13 +213,19 @@ def sdk_judge(
 
 @dataclass(frozen=True)
 class AgentsConnection:
-    """How the worker reaches martian-agents' judge for one organisation: the approved HTTP target
-    and authorization the judge route checks, and the headers that authenticate the worker (an
-    ``X-API-Key``, or a bearer token)."""
+    """How the worker reaches martian-agents' judge for one request: the approved HTTP target and
+    authorization the judge route checks, and the headers that authenticate the worker (an
+    ``X-API-Key``, or a bearer token).
+
+    ``action_id`` is the saved item a target lease admits the call for. A worker whose judge calls
+    carry a lease (the ``X-Martian-Target-Lease`` header, as the Martian server sends it) sets it,
+    and the request sends it as ``action_id``; with the route's static authorization it is None and
+    the request leaves it out."""
 
     target_id: str
     authorization_ref: str
     headers: Mapping[str, str] = field(default_factory=dict)
+    action_id: str | None = None
 
 
 AGENTS_JUDGE_BUILTINS = ("correctness", "safety", "policy")
@@ -260,7 +270,7 @@ def _definition(scorer: ScorerVersion) -> dict[str, Any]:
     """A registered judge as Agents takes it, or :class:`_Ungradable`."""
     criteria = scorer.criteria
     operation = criteria.get("operation_id")
-    if scorer.type != REGISTERED or not scorer.version.isdigit() or not isinstance(operation, str) or not operation:
+    if scorer.type != REGISTERED or not ascii_digits(scorer.version) or not isinstance(operation, str) or not operation:
         raise _Ungradable(f"The Agents judge does not grade judges of type {scorer.type}")
     definition = {
         name: criteria[name]
@@ -292,14 +302,16 @@ def _accepts(definition: Mapping[str, Any] | None, value: Any) -> bool:
 
 def agents_judge(
     base_url: str,
-    connection: Callable[[Principal], AgentsConnection],
+    connection: Callable[[Principal], AgentsConnection | Awaitable[AgentsConnection]],
     *,
     timeout_seconds: float = 75.0,
 ) -> Judge:
     """martian-agents as the worker's judge. ``base_url`` is Agents' address; ``connection`` gives
-    the target, authorization and headers for a request's principal. One call per request, never
-    retried; Agents bounds its own model call. The request's model, when it names one, is sent as
-    Agents names it, and Agents refuses one its operator has not allowed."""
+    the target, authorization, headers and admitted item for a request's principal, and is asked
+    once for each request, just before it is sent, so it may admit each call on its own; it may be
+    a coroutine function. One call per request, never retried; Agents bounds its own model call.
+    The request's model, when it names one, is sent as Agents names it, and Agents refuses one its
+    operator has not allowed."""
     origin = base_url.rstrip("/")
 
     async def judge(request: JudgeRequest) -> JudgeResult:
@@ -326,7 +338,8 @@ def agents_judge(
                 errors[scorer.name] = str(reason)
         if not builtins and not definitions:
             return JudgeResult(model="", errors=errors)
-        found = connection(request.principal)
+        answer = connection(request.principal)
+        found = await answer if inspect.isawaitable(answer) else answer
         body: dict[str, Any] = {
             "authorization_ref": found.authorization_ref,
             "campaign_id": request.job_id,
@@ -338,6 +351,8 @@ def agents_judge(
         }
         if definitions:
             body["definitions"] = definitions
+        if found.action_id is not None:
+            body["action_id"] = found.action_id
         if request.model is not None:
             body["model"] = _agents_model(request.model)
         path = f"/v1/martian/targets/{quote(found.target_id, safe='')}/judge"
