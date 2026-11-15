@@ -238,6 +238,7 @@ async def queued_run(store: EvalStore, records: SqlRecordStore) -> tuple[Run, Wo
             dataset_digest=dataset.digest,
             target=Target(kind="agent", agent_id=AGENT),
             max_cases=100,
+            provenance={"target": {"kind": "agent", "agent_id": AGENT}},  # the pin of the worker's function
             store=StoreRef(dataset_id=dataset.id),
         ),
     )

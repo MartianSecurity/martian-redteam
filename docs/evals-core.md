@@ -436,13 +436,15 @@ then calls `Worker.submit(Work(...))`:
 | --- | --- |
 | `Work` | `kind` (`run` or `scoring`), the `principal`, `project_id`, `run_id`, and `job_id` for scoring |
 | `Worker.judges` | Whether the worker can run model judges |
-| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
+| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
 | `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
 | `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
 | `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `QueueWorker` and `LocalWorker` can ([the durable queue](#the-durable-queue)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
 
-`execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
+`execute_run` and `execute_scoring` are the work itself, for any worker to call. `execute_run`
+takes the worker's `call_for(run)`, the call for the run's target, and `pin_for(run)`, the
+target's pin as the worker has it now, which must still be the run's before any call. They read the
 record before each case, so a cancel request reaches a worker in another process too, and move
 each record on only from the state it expects, so two workers never both take the same work. Work
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
@@ -533,8 +535,10 @@ no registered agent, so an install with no martian-agents service runs functions
   timeout_seconds=...)`, which calls the agent once. On the Martian server, admission pins the
   agent's approved connection and each call carries a short-lived target lease that martian-agents
   exchanges for the credential (`app/evals_targets.py` in MorningHQ/MartianBackend), so the worker
-  never holds it. The server implements the executor when it mounts the core
-  (MorningHQ/martian-notes#102).
+  never holds it. The worker asks `check` again before each start of a run ([the same
+  target](#the-same-target-on-every-start)), so an executor's pin stays the same for as long as
+  the agent does, and holds nothing, such as a lease or a time, that changes while the agent does
+  not. The server implements the executor when it mounts the core (MorningHQ/martian-notes#102).
 
 `ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
 gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
@@ -550,6 +554,48 @@ with `ProcessWorker` and no martian-agents at all, and runs a registered agent t
 martian-agents executor, in process and in a process of its own, without the HTTP path. The key
 and the leases appear in no record. A run whose worker also has a target it would refuse, under
 another id, completes, with `ProcessWorker` and under the queue: only the run's own target is read.
+
+#### The same target on every start
+
+A run calls only the target it was admitted with, so one run never mixes two systems. Before a run
+calls its target, on its first start and on every resume (taken over from the queue after its
+worker stopped, or queued again by `resume_run` after a limit), the worker pins the target as it
+has it now, in the process that will call it, as `check_target` pinned it when the run was
+admitted (`target_pin`), and compares that pin with the run's `provenance.target` (`changed_target`
+in `martian.evals.worker.targets`). Every field of the new pin must have the value the run was
+pinned with; a field only admission adds, such as a local target's `name`, is not compared. When
+one differs, the run is `failed` before any call, with an error that names the target:
+
+```text
+The target "Support agent" (<target id>) changed since this run started; the run did not call the changed target. Start a new run to evaluate it as it is now
+```
+
+The cases it finished keep their results, and a local run's suite scoring job is cancelled, as for
+any run that does not complete. A target that has not changed resumes as before. What each kind of
+target is compared by:
+
+| Target | Its pin | What changes it |
+| --- | --- | --- |
+| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body` or `response_path`, or the id becoming another kind of target |
+| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target |
+| A function | `{"kind": "agent", "agent_id"}` | Only the id becoming another kind of target. A function is the installation's own code, with nothing to digest, so one replaced by another function under the same id is not detected; give the new function a new id |
+| A registered agent | The executor's `check`, asked again in the process that calls the agent | Whatever the executor's pin holds. On the Martian server that is the agent's approved connection, its revision and its approval (`EvalTarget.pin` in `app/evals_targets.py`) |
+
+A credential's value is in no pin: `${NAME}` stays unexpanded, so a rotated key is not a changed
+target. A run with no pin, which no launch records, fails the same way. A target the worker no
+longer has fails the run as before, with "The worker cannot call this run's target", or with the
+executor's refusal. The target does not change during one start: an in-process worker keeps the
+targets it was built with, and a run's process receives its HTTP target once, as it starts.
+
+`tests/evals/test_worker_targets.py` takes over a run whose worker stopped while its second case was
+in flight, and resumes a run stopped at its time limit after its first case with `resume_run`,
+each with the worker in process and with a process per run: when the HTTP target under the run's
+id changed meanwhile, the run fails naming it and the changed target gets no request; when it did
+not, the run completes and only its unfinished cases are called. A run whose HTTP target, target
+kind (a function for an HTTP target, or the other way) or registered agent's pin changed between
+its admission and its first start fails the same way, with no call. `tests/evals/test_local_runs.py`
+resumes a local run whose target was edited by hand in `targets.json`: it fails naming the target,
+and its suite does not score it.
 
 ### One process per run
 
@@ -671,7 +717,8 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
 - **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
   claimable again once the lease runs out. The next worker takes it again: a run or scoring job
   still `running` is queued again and resumes after the cases already finished (`take_over`,
-  [checkpoints](#checkpoints-and-resuming)). A worker that is stopped (`stop()`, or a cancelled
+  [checkpoints](#checkpoints-and-resuming)), on the target it was admitted with ([the same
+  target](#the-same-target-on-every-start)). A worker that is stopped (`stop()`, or a cancelled
   `serve()`) stops its work and gives it back at once, without counting the attempt; the next
   worker resumes it the same way. After `max_attempts` claims the work is `failed` with "The
   worker stopped before this work finished, too many times; it is not taken again". Work that
@@ -750,7 +797,9 @@ again continues where it stopped instead of starting over:
   so their judges are not asked again, and counts their scores into `succeeded` and `errors`.
 - **The same versions.** A run taken again reads the dataset version it was admitted with
   (`store.dataset_id`, checked against `dataset_digest`), never a newer one, so the cases it skips
-  and the cases it calls are of one version. A scoring job keeps the scorers, the suite version
+  and the cases it calls are of one version. It calls only the target it was admitted with: one
+  whose pin changed meanwhile fails the run before any call ([the same
+  target](#the-same-target-on-every-start)). A scoring job keeps the scorers, the suite version
   and the judge models it was recorded with, so a suite saved again meanwhile changes neither what
   the job scores the rest of the run with nor which cases it reuses. Both are the record's own
   pins, which nothing changes after admission. A suite file's resume into an output folder, which
@@ -810,8 +859,10 @@ together. `None` is no limit.
 - **Resuming.** `resume_run(store, records, worker, principal, run, entitlements=..., limits=...)`
   and `resume_scoring(store, records, worker, principal, run, job, entitlements=..., limits=...)`
   in `martian.evals.server.launch` queue a stopped run or scoring job again and submit it; the
-  worker goes on after its checkpoints. New `limits`, when given, replace the run's own; a scoring
-  job's replace its run's. Each start has its limits afresh. Resuming is refused (`409`) for work
+  worker goes on after its checkpoints, and fails a run whose target changed since it started
+  instead of calling it ([the same target](#the-same-target-on-every-start)). New `limits`, when
+  given, replace the run's own; a scoring job's replace its run's. Each start has its limits
+  afresh. Resuming is refused (`409`) for work
   that is not `stopped`, while the organisation has its edition's `concurrent_runs` or
   `concurrent_scoring_jobs` in progress ([editions and entitlements](#editions-and-entitlements))
   or the run another active scoring job, and (`422`) for a run the worker did not run, such as a
@@ -1346,7 +1397,9 @@ Where the keys are and are not:
 
 A launch from the local UI names the chosen target by its id in the launch request's `agent_id`,
 the frozen contract's one target field. Editing a target is not built; remove it and define it
-again. A run already recorded keeps its results and its pin of the target.
+again, which gives it a new id. A run already recorded keeps its results and its pin of the
+target, and a run whose target was edited by hand in `targets.json` under the same id fails at its
+next start instead of calling it ([the same target](#the-same-target-on-every-start)).
 
 `tests/evals/test_local_targets.py` defines, lists and removes targets of both kinds, refuses
 targets that would not work, maps each kind onto the shared model, checks the key file's mode, and
@@ -1417,9 +1470,11 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
   `concurrent_scoring_jobs` once the run has completed, and is queued then even when that limit is
   reached, so a completed run is never left unscored.
 - **Resume** goes on with a run that stopped at one of its limits, in a new process, after the cases
-  it finished, and then its suite scores it; or, for a completed run whose suite's scoring job
-  stopped at one, with that job, after the cases it scored. `limits` in the request replace the
-  run's. A run in neither case is `409`, and a run `martian evals run` recorded `422`.
+  it finished, on the target it was admitted with ([the same
+  target](#the-same-target-on-every-start)), and then its suite scores it; or, for a completed
+  run whose suite's scoring job stopped at one, with that job, after the cases it scored. `limits`
+  in the request replace the run's. A run in neither case is `409`, and a run `martian evals run`
+  recorded `422`.
 - **Run again** repeats a run that has finished (`completed`, `partial`, `failed`, `cancelled` or
   `stopped`; a queued or running one is `409`) with what it kept: the same target, the same dataset
   version, even when a newer one is published, the same suite version, even when the suite has a

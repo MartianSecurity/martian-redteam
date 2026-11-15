@@ -12,8 +12,10 @@ Work it is given with ``submit`` runs while the process does and is lost with it
 work stays in the queue until it has ended, and a worker takes it again if this process stops
 first. ``targets`` are the targets it calls itself, by id: a ``TargetCall``, or an HTTP target whose
 ``${NAME}`` values come from ``credentials``. ``executor`` calls the registered agents, through
-martian-agents, for any other id (:mod:`martian.evals.worker.targets`). The judge, if any, is one
-``Judge`` for every model scorer. ``target_timeout_seconds`` bounds every target call, and
+martian-agents, for any other id (:mod:`martian.evals.worker.targets`). Before each start of a
+run it pins the run's target again, as :meth:`InProcessWorker.check_target` pinned it when the
+run was admitted, and fails the run without calling a target whose pin changed. The judge, if
+any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds every target call, and
 ``limits`` are the installation's limits for a run that has none of its own
 (:class:`~martian.evals.model.RunLimits`).
 """
@@ -75,6 +77,11 @@ class InProcessWorker:
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         self._check_organisation(principal)
+        return await self._pin(principal, target)
+
+    async def _pin(self, principal: Principal, target: Target | None) -> dict[str, Any]:
+        """The pin of ``target`` as this worker has it now: when a run is admitted, and again
+        before each start of the run, which fails when the two differ."""
         http = {key: value for key, value in self._targets.items() if isinstance(value, Target)}
         return await target_pin(principal, target, calls=self._targets.keys(), http=http, executor=self._executor)
 
@@ -111,6 +118,7 @@ class InProcessWorker:
                 self._records,
                 work,
                 call_for=lambda run: self._call_for(work.principal, run),
+                pin_for=lambda run: self._pin(work.principal, run.target),
                 timeout_seconds=self._timeout,
                 limits=self._limits,
             )
