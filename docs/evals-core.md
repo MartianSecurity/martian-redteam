@@ -3511,8 +3511,9 @@ through the store and the record store as `SINGLE_USER`, in the default project;
   verdict. Two imported runs compare when they cover the same samples; a sample's first epoch has
   its own id as its case id, so runs with different numbers of epochs pair on it.
 - Every log is read before anything is written, so a file that is not a finished Inspect log
-  (a log still `started`, another format version, one with no samples, a damaged archive) stops
-  the command with exit code `2` and writes nothing. A data folder that cannot be opened does
+  (a log still `started`, another format version, one with no samples, a damaged archive), or a
+  log that gives a sample two scores of one name and source (a scorer named like another's dict
+  entry, `<scorer>/<key>`), stops the command with exit code `2` and writes nothing. A data folder that cannot be opened does
   the same.
 - The run is `running` while its cases are written; an import that stops early leaves it
   `failed`, with `error` naming the exception's type, or `cancelled` when interrupted.
@@ -3524,7 +3525,8 @@ through the store and the record store as `SINGLE_USER`, in the default project;
 format; `fixture_task.py` there wrote them) and reads them back through the local edition's
 routes: every score against the log, Inspect's metrics recomputed from them, the run and its
 trace's spans, Compare of the two runs and a review. It also covers each kind of score value, a
-code score and a judge's of one name on one sample, chat inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+code score and a judge's of one name on one sample, chat inputs, an `.eval` log with Deflate entries, and the files the command
+refuses, two code scores of one name on one sample among them.
 
 ## promptfoo results and configs
 
@@ -3757,7 +3759,9 @@ What maps where ([the eval model](eval-model.md#mlflow-tracking-stores) lists ev
 
 The command prints what each experiment, run and dataset became, the counts written and the counts
 there already, and what was not copied and why: deleted experiments and runs, runs without traces
-(parameters and metrics only) or still running, assessments a later one overrides, records without
+(parameters and metrics only) or still running, assessments a later one overrides, a run's second
+feedback of one name and source on a case and a case's second expectation of one name (each stays on
+its trace; the case keeps the first), records without
 inputs, traces whose spans are in an artifact store that is not a file on this machine, and the
 registered scorers, labeling schemas, review queues, logged models and registered models or
 prompts the core has no place for.
@@ -3786,8 +3790,10 @@ with their cases and scores, each score's own assessment, their provenance and C
 source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
 artifact file are read from there, that an older, unknown or missing schema revision, a missing
 table, workspaces and files that are not stores are refused with nothing written, the project
-limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
-Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
+limit, and the command's report. On a record store on SQLite, and on Postgres with
+`MARTIAN_TEST_POSTGRES_URL` set, it checks that a case keeps the first of two judges' feedbacks of
+one name and the first of two expectations of one name, its trace both, and that the report names
+the others. With `MARTIAN_TEST_POSTGRES_URL` set it also copies a store on Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
 
 ## Data export
 
