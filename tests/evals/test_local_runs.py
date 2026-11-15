@@ -358,6 +358,28 @@ def test_run_again_needs_a_run_started_in_the_ui_whose_target_is_still_defined(c
     assert again(client, finished["id"], 404) == {"detail": "Target not found"}
 
 
+def test_a_target_the_worker_refuses_is_422_naming_it_on_a_launch_and_on_run_again(client, home, target, monkeypatch):
+    defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
+    finished = launch(client, defined["id"])
+    drain(client)
+    # The target as the worker pins it now: a response_path that indexes a list with other digits.
+    model_target = LocalTargets.model_target
+
+    def wrong(self: LocalTargets, found: Any) -> Target:
+        return model_target(self, found).model_copy(update={"response_path": "reply.².text"})
+
+    monkeypatch.setattr(LocalTargets, "model_target", wrong)
+    refusal = {
+        "detail": f"The target \"Support agent\" ({defined['id']}) is refused: targets['{defined['id']}']"
+        ".response_path indexes lists with the digits 0-9 only; step 2 uses other digits"
+    }
+    body = {"request_id": str(uuid.uuid4()), "agent_id": defined["id"], "dataset_name": DATASET}
+    assert call(client, "POST", RUNS, 422, json=body) == refusal
+    assert again(client, finished["id"], 422) == refusal
+    # Neither recorded a run: the first is the only one.
+    assert [item["id"] for item in call(client, "GET", "/v1/evals", 200)] == [finished["id"]]
+
+
 def test_a_run_that_does_not_complete_cancels_its_suites_scoring(client, target):
     defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
     queued = launch(client, defined["id"], save_suite(client, str(uuid.uuid4())))
