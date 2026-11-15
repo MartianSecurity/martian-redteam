@@ -131,6 +131,11 @@ nobody editing) for an exact copy: what changes meanwhile may or may not be in i
 run that started after the export did stops the export, since an import could not record that
 trace without its run; export again into a new folder.
 
+A run still queued or running is exported as it is, state and all: the export records what the
+install holds. Nothing is working on it in the fresh install, so the first time the local edition
+opens that data folder (`martian ui`) it finishes the run as `failed` with the interrupted error,
+as it does for any run no process is working on. An import does not refuse the export for it.
+
 ## Importing
 
 An import goes into a fresh install: one whose projects hold no runs, datasets, traces, suites,
@@ -161,13 +166,16 @@ receiving store's:
 - A dataset draft's `revision`, `updated_at` and `updated_by`, and a saved view's `revision` and
   `updated_at`.
 
-Every other field of every object comes back as it was exported.
+Every other field of every object comes back as it was exported. The one change comes after the
+import, not in it: a run exported queued or running is finished as interrupted when the local
+edition opens the folder (see Exporting and resuming).
 
 `tests/evals/test_data_export.py` fills an organisation with every kind of object, exports it,
 imports it into a fresh install and exports that again, and compares the two exports field by
 field with only the fields above set aside: on the in-memory store, on the local edition's data
 folder (with Inspect AI logs imported into it, and with the Evals UI's routes answering the same
-for every run and review, but for the store's own ids), and on a data folder that `martian evals import mlflow` filled. It
+for every run and review, but for the store's own ids and the moment a run exported queued was
+finished as interrupted), and on a data folder that `martian evals import mlflow` filled. It
 interrupts an export inside a run's step and on a page of traces, resumes it and compares the
 files byte for byte with an uninterrupted export, and covers what an export and an import refuse
 and both commands.

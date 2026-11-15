@@ -29,6 +29,7 @@ from martian.evals.data_export import (
 )
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
+from martian.evals.local_runs import INTERRUPTED
 from martian.evals.mlflow_import import import_mlflow_store
 from martian.evals.model import (
     Case,
@@ -435,16 +436,21 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
 
 
 def served(home: Path, ui: Path) -> dict[str, Any]:
-    """What the local Evals UI shows of every run and review, without the ids the store assigns."""
+    """What the local Evals UI shows of every run and review, without the ids the store assigns.
+    Opening the data folder finishes a run nothing is working on as interrupted, so the run an
+    export holds queued is shown ``failed`` with that error, and the moment it was finished (which
+    each data folder stamps for itself) is left out."""
 
     def without_store_ids(value: Any) -> Any:
         if isinstance(value, list):
             return [without_store_ids(item) for item in value]
         if isinstance(value, dict):
+            interrupted = value.get("error") == INTERRUPTED
             return {
                 k: without_store_ids(v)
                 for k, v in value.items()
                 if k not in ("dataset_id", "native_id", "evals_assessment_id")
+                and not (interrupted and k in ("finished_at", "updated_at"))
             }
         return value
 
@@ -475,6 +481,8 @@ def test_the_local_edition_comes_back_whole_in_a_fresh_data_folder(tmp_path):
     (ui / "index.html").write_text("<!doctype html><title>Martian Evals</title>", encoding="utf-8")
     shown = served(home, ui)
     assert len(shown) == 2 + 2 * 4 and shown == served(fresh, ui)
+    # The queued run in the export was not running anywhere: each data folder finished it as interrupted.
+    assert [run["state"] for run in shown["/v1/evals"] if run["error"] == INTERRUPTED] == ["failed"]
 
 
 def test_a_data_folder_copied_from_mlflow_comes_back_whole(tmp_path):
