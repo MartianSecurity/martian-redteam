@@ -12,7 +12,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 
 1. [Architecture](architecture.md) — three systems, data flow, cost model, what this repo is not
 2. [Setup](setup.md) — install, environment, first local run
-3. [Evals](evals.md) — running a suite file locally, the judges and deterministic checks, and the dataset regression gate
+3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, pass rates and their confidence intervals, comparing two runs, the judges and deterministic checks, and the dataset regression gate
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
    - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, its OpenTelemetry traces endpoint, and the worker interface
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
@@ -20,14 +20,14 @@ Hosted features also need the SDK APIs enabled for the organisation.
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment, WAF
-9. [Security and data](security-and-data.md) — origin isolation and what leaves the customer network
+9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off
 10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
 11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line
 
 ## SDK release
 
 - [Architecture](architecture.md): execution, scoring and trust boundaries
-- [Release preparation](releasing.md): distributions, clean installs, the local edition's image and publishing
+- [Release preparation](releasing.md): distributions, clean installs, the local edition's image, bills of materials and the licence check, and publishing
 - [Validation](validation.md): reproducible package checks and running-service release gates
 
 ## Repository

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,7 +45,9 @@ from martian.evals.model import (
     Value,
     digest,
 )
+from martian.evals.repeats import flaky, reliability
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
+from martian.evals.stats import wilson
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION, map_span, mapping_table
 
 DEFAULT_PROJECT = "default"
@@ -181,6 +184,60 @@ def item_out(result: CaseResult) -> EvalItemOut:
         latency_ms=result.latency_ms,
         finished_at=result.finished_at,
     )
+
+
+_ATTEMPT_VERDICT: dict[str, bool] = {"passed": True, "failed": False}
+
+
+def attempt_verdicts(result: CaseResult) -> list[bool | None]:
+    """A case result's attempts' verdicts in order: True passed, False failed, None no verdict."""
+    return [_ATTEMPT_VERDICT.get(attempt.status) for attempt in result.attempts]
+
+
+def reliability_out(results: Sequence[CaseResult]) -> dict[str, Any]:
+    """The run's reliability for the core's own attempts route: the cases that passed every attempt
+    (``passed``), failed one (``failed``) or are left open (``errors``), their share
+    (``pass_rate``) with its 95% Wilson interval, and ``flaky``, the case ids whose verdict changed
+    between attempts. Only results with attempts count; the cases count as independent, as in a
+    scorecard."""
+    cases = [(result.case_id, attempt_verdicts(result)) for result in results if result.attempts]
+    found = reliability(cases)
+    graded = found["passed"] + found["failed"]
+    interval = wilson(found["passed"], graded)
+    return {
+        "passed": found["passed"],
+        "failed": found["failed"],
+        "errors": found["errors"],
+        "pass_rate": found["passed"] / graded if graded else None,
+        "confidence_95": list(interval) if interval else None,
+        "flaky": found["flaky"],
+    }
+
+
+def attempts_out(result: CaseResult) -> dict[str, Any]:
+    """A case result's attempts, for the core's own attempts route: each attempt's verdict, each
+    check's verdict, the reply as text, the target error, latency and trace, and whether the
+    case is flaky, its verdict changing between attempts. Empty, and not flaky, for a case that
+    ran once."""
+    return {
+        "id": result_id(result.run_id, result.case_id),
+        "dataset_item_id": result.case_id,
+        "position": result.position,
+        "status": result.status,
+        "flaky": flaky(attempt_verdicts(result)),
+        "attempts": [
+            {
+                "number": attempt.number,
+                "status": attempt.status,
+                "output": text_of(attempt.output),
+                "error": attempt.error,
+                "latency_ms": attempt.latency_ms,
+                "trace_id": attempt.trace_id,
+                "checks": {label: verdict.model_dump(mode="json") for label, verdict in attempt.checks.items()},
+            }
+            for attempt in result.attempts
+        ],
+    }
 
 
 def _run_fields(run: Run) -> dict[str, Any]:
