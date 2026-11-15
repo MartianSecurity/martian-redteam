@@ -5,12 +5,14 @@ output folder, writes the report to the job summary, and on a pull request edits
 that carries this suite's hidden marker, creating it only when there is none. Standard library
 only, so it runs on the action's Python without further installs.
 
-The comment holds counts, check names and case ids, never inputs, replies or judge reasons.
+The comment holds counts, pass rates with their intervals, check names and case ids, never
+inputs, replies or judge reasons.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -81,6 +83,16 @@ def code(text: str, limit: int = 60, *, cell: bool = True) -> str:
     return f"{fence}{pad}{text}{pad}{fence}"
 
 
+def rate(counts: Mapping[str, Any]) -> str:
+    """A pass rate and its interval from summary.json, written as ``martian.evals.stats.rate_text``
+    writes them: the rate to the nearest percent, the bounds rounded outward."""
+    if counts["pass_rate"] is None:
+        return "—"
+    low, high = counts["confidence_95"]
+    shown = math.floor(counts["pass_rate"] * 100 + 0.5)
+    return f"{shown}% ({math.floor(low * 100 + 1e-9)}–{math.ceil(high * 100 - 1e-9)}%)"
+
+
 def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, run_url: str | None = None) -> str:
     """The comment body: the marker line, a headline, per-check counts and the cases that did not pass.
 
@@ -102,15 +114,38 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases, {summary['passed']} passed, "
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
-            "| Check | Passed | Failed | Errors |",
-            "| --- | ---: | ---: | ---: |",
+        ]
+        # A suite whose checks a refusal passes says how many benign cases were refused, next to
+        # the pass count, so a model that refuses everything cannot look as if it passed.
+        if (refusals := summary.get("false_refusals")) is not None:
+            lines += [false_refusals(refusals), ""]
+        lines += [
+            "| Check | Passed | Failed | Errors | Pass rate (95% CI) |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ]
         checks = list(summary["checks"].items())
         for name, counts in checks[:MAX_ROWS]:
-            lines.append(f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} |")
-        lines.append(f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} |")
+            lines.append(
+                f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} | {rate(counts)} |"
+            )
+        lines.append(
+            f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} | {rate(summary)} |"
+        )
+        # With repeats, the share of cases that passed every attempt, under the pass rate.
+        if reliable := summary.get("reliability"):
+            lines.append(
+                f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
+                f"{reliable['errors']} | {rate(reliable)} |"
+            )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
+        if summary["groups"]:
+            plural = "group" if summary["groups"] == 1 else "groups"
+            lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
+        if repeats := summary.get("repeats"):
+            lines.append(f"\n{_repeats(repeats)}")
+        if reliable:
+            lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
         failed = [case for case in outcome.cases if case["passed"] is False]
         errored = [case for case in outcome.cases if case["passed"] is None]
@@ -128,6 +163,24 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
     return "\n".join(lines) + "\n"
 
 
+def false_refusals(found: dict[str, Any]) -> str:
+    """The same line `martian evals run` prints under its table."""
+    if not found["checks"]:
+        return (
+            "False refusals: not measured. A reply that refuses everything passes these checks; "
+            "add a no_refusal check and mark the benign cases."
+        )
+    if not found["benign"] and not found["errors"]:
+        return "False refusals: not measured. No case is marked benign."
+    line = "False refusals: not measured"
+    if found["benign"]:
+        case = "case" if found["benign"] == 1 else "cases"
+        line = f"False refusals: {found['refused']} of {found['benign']} benign {case} refused ({found['rate']:.1%})"
+    if found["errors"]:
+        line += f"; {found['errors']} benign {'case' if found['errors'] == 1 else 'cases'} without a verdict"
+    return line + "."
+
+
 def _table(
     heading: str, column: str, cases: list[dict[str, Any]], detail: Callable[[dict[str, Any]], str]
 ) -> list[str]:
@@ -138,8 +191,30 @@ def _table(
     return [*lines, ""]
 
 
-def _names(names: list[str]) -> str:
-    shown = ", ".join(code(name) for name in names[:5])
+def _repeats(repeats: Mapping[str, Any]) -> str:
+    """How many times each case ran, and which checks' attempts combined by which rule."""
+    by_rule: dict[str, list[str]] = {}
+    for name, rule in repeats["checks"].items():
+        by_rule.setdefault(rule["combine"], []).append(name)
+    rules = "; ".join(f"{code(rule, cell=False)} for {_names(names, cell=False)}" for rule, names in by_rule.items())
+    return (
+        f"Each case ran {repeats['attempts']} times, and the counts are of cases: each check's attempts "
+        f"combine by its rule, {rules}."
+    )
+
+
+def _flaky(names: list[str]) -> str:
+    """What reliability counts, and the cases whose verdict changed between attempts."""
+    meaning = "Reliability counts the cases that passed every attempt."
+    if not names:
+        return f"{meaning} No flaky cases: no case's verdict changed between attempts."
+    return f"{meaning} Flaky cases, whose verdict changed between attempts: {_names(names, cell=False)}" + (
+        "; summary.json lists every one." if len(names) > 5 else "."
+    )
+
+
+def _names(names: list[str], *, cell: bool = True) -> str:
+    shown = ", ".join(code(name, cell=cell) for name in names[:5])
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 

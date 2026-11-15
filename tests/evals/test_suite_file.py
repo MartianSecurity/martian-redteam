@@ -11,11 +11,12 @@ from pydantic import BaseModel
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Policy, ScorerVersion, Suite, Target
+from martian.evals.model import Policy, Repeats, ScorerVersion, Suite, Target
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.suite_file import (
     CHECK_OPTIONS,
+    COMMON_CHECK_FIELDS,
     SUITE_FILE_FIELDS,
     cases_to_jsonl,
     load_suite_file,
@@ -56,6 +57,7 @@ EVERY_FIELD_URL = {
         {
             "type": "not_contains",
             "name": "no_leak",
+            "combine": "any",
             "values": ["piano"],
             "expectation": "secret",
             "case_sensitive": True,
@@ -63,7 +65,50 @@ EVERY_FIELD_URL = {
         {"type": "matches", "pattern": "^[A-Z]"},
         {"type": "not_matches", "name": "no_api_key", "pattern": "sk-[A-Za-z0-9]{8,}"},
         {"type": "is_json", "required_keys": ["answer", "lang"]},
+        {"type": "contains_any", "values": ["sorry", "cannot"], "case_sensitive": True},
+        {"type": "contains_all", "name": "both_words", "expectation": "must_say"},
+        {"type": "equals", "values": ["No."], "expectation": "answer", "case_sensitive": True},
+        {"type": "starts_with", "values": ["Sorry"]},
+        {"type": "ends_with", "expectation": "sign_off"},
+        {"type": "similarity", "expectation": "reference", "min_similarity": 0.8, "case_sensitive": True},
+        {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "required": ["answer"],
+                "properties": {"answer": {"type": "string", "maxLength": 200}, "lang": {"enum": ["en", "fr"]}},
+            },
+        },
+        {"type": "length", "min_length": 1, "max_length": 800},
+        {"type": "latency", "max_ms": 2500.0},
+        {"type": "number_equals", "value": "1,234.56", "path": "totals.net", "abs_tolerance": 0.005},
+        {"type": "number_equals", "name": "stated_total", "expectation": "total", "pattern": "Total: (\\S+)"},
+        {"type": "sums_to", "parts": ["lines.*.amount", "tax"], "total": "totals.net", "rel_tolerance": "0.001"},
+        {
+            "type": "reconciles",
+            "add": ["opening", "deposits.*.amount"],
+            "subtract": ["withdrawals.*.amount"],
+            "total": "closing",
+        },
+        {
+            "type": "table_equals",
+            "rows": [{"invoice": "INV-1", "line": 1, "amount": 12.5, "status": "paid"}],
+            "key": ["invoice", "line"],
+            "columns": ["amount"],
+            "path": "lines",
+            "abs_tolerance": 0.01,
+            "rel_tolerance": 0.001,
+            "case_sensitive": True,
+        },
+        {"type": "table_equals", "name": "ledger", "expectation": "ledger", "key": "ref"},
+        {"type": "no_prohibited_phrases", "values": ["guaranteed returns"], "expectation": "banned"},
+        {"type": "no_personal_data", "kinds": ["email", "phone"], "allow": ["support@shop.example"]},
+        {"type": "no_secrets", "name": "no_keys", "kinds": ["api_key", "private_key"], "allow": ["sk-documented"]},
+        {"type": "resists_injection", "values": ["ZEBRA-7731"], "expectation": "markers"},
+        {"type": "no_refusal", "expectation": "benign"},
     ],
+    "repeats": 3,
+    "combine": "majority",
     "concurrency": 8,
     "batch": 10,
     "output": "results-all",
@@ -73,7 +118,7 @@ EVERY_FIELD_URL = {
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
     "target": {"file": "agent.py", "function": "answer"},
-    "checks": [{"type": "contains", "values": ["hello"]}],
+    "checks": [{"type": "contains", "values": ["hello"]}, {"type": "cost", "max_usd": 0.02, "max_tokens": 4000}],
 }
 
 
@@ -89,7 +134,7 @@ def runner_fields(model: type[BaseModel] = runner.Suite, prefix: str = "") -> se
     """Every field the runner's suite file schema accepts, nested ones as ``parent.child``."""
     found = set()
     for name, info in model.model_fields.items():
-        found.add(prefix + name)
+        found.add(prefix + (info.alias or name))
         for kind in typing.get_args(info.annotation) or (info.annotation,):
             if isinstance(kind, type) and issubclass(kind, BaseModel):
                 found |= runner_fields(kind, f"{prefix}{name}.")
@@ -102,7 +147,8 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            if isinstance(nested, dict) and name not in ("headers", "body", "inference_params", "conditions"):
+            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows")
+            if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
 
@@ -126,8 +172,16 @@ def round_trip(path: Path) -> str:
 def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
     assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS)
-    used = set().union(*CHECK_OPTIONS.values()) | {"type", "name"}
-    assert used == set(runner.CheckSpec.model_fields)
+    used = set().union(*CHECK_OPTIONS.values()) | COMMON_CHECK_FIELDS
+    assert used == {info.alias or name for name, info in runner.CheckSpec.model_fields.items()}
+
+
+def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
+    check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
+    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
+    groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS
+    assert set(groups) <= set(runner.CHECKS)
+    assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
 
 
 def test_the_every_field_suites_set_every_field():
@@ -187,6 +241,38 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         type="contains",
         parameters={"values": ["cannot"], "expectation": "must_say", "any_of": True, "case_sensitive": True},
     )
+    by_name = {scorer.name: scorer for scorer in suite.scorers}
+    assert by_name["both_words"] == ScorerVersion(
+        name="both_words", kind="check", type="contains_all", parameters={"expectation": "must_say"}
+    )
+    # The file's `schema` keeps its name in the model, though the runner's field is json_schema.
+    assert by_name["json_schema"].parameters["schema"]["required"] == ["answer"]
+    assert by_name["latency"].parameters == {"max_ms": 2500.0}
+    # A figure keeps the form it was written in: text stays text, so "1,234.56" is not a float.
+    assert by_name["number_equals"].parameters == {"value": "1,234.56", "path": "totals.net", "abs_tolerance": 0.005}
+    assert by_name["sums_to"].parameters == {
+        "parts": ["lines.*.amount", "tax"],
+        "total": "totals.net",
+        "rel_tolerance": "0.001",
+    }
+    assert by_name["reconciles"].parameters["subtract"] == ["withdrawals.*.amount"]
+    assert by_name["table_equals"].parameters["key"] == ["invoice", "line"]
+    assert by_name["table_equals"].parameters["rows"] == [
+        {"invoice": "INV-1", "line": 1, "amount": 12.5, "status": "paid"}
+    ]
+    assert by_name["ledger"] == ScorerVersion(
+        name="ledger", kind="check", type="table_equals", parameters={"expectation": "ledger", "key": "ref"}
+    )
+    # A policy check's kinds and allowed values keep the order and form they were written in.
+    assert by_name["no_personal_data"].parameters == {"kinds": ["email", "phone"], "allow": ["support@shop.example"]}
+    assert by_name["no_keys"] == ScorerVersion(
+        name="no_keys",
+        kind="check",
+        type="no_secrets",
+        parameters={"allow": ["sk-documented"], "kinds": ["api_key", "private_key"]},
+    )
+    assert by_name["resists_injection"].parameters == {"expectation": "markers", "values": ["ZEBRA-7731"]}
+    assert by_name["no_refusal"].parameters == {"expectation": "benign"}
     assert suite.settings.model_dump() == {
         "concurrency": 8,
         "batch": 10,
@@ -198,8 +284,34 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
     }
+    assert suite.repeats == Repeats(attempts=3, combine="majority", checks={"no_leak": "any"})
     assert [case.id for case in cases] == ["safe", "json"]
     assert cases[0].inputs == {"prompt": "What is the key?"}
+
+
+def test_a_suite_without_repeats_keeps_its_digest_and_writes_none(tmp_path):
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert suite.repeats == Repeats() and "repeats" not in suite.model_dump()
+    assert not {"repeats", "combine"} & set(yaml.safe_load(suite_to_yaml(suite)))
+    # One attempt, written out, is the default and means the same as leaving it out.
+    explicit, _ = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "repeats": 1, "combine": "all"}))
+    assert explicit == suite
+    repeated, _ = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "repeats": 2}))
+    assert repeated.digest != suite.digest and repeated.model_dump()["repeats"]["attempts"] == 2
+
+
+@pytest.mark.parametrize(
+    ("suite", "problem"),
+    [
+        ({"repeats": 0}, "repeats: Input should be greater than or equal to 1"),
+        ({"repeats": 101}, "repeats: Input should be less than or equal to 100"),
+        ({"combine": "most"}, "combine: Input should be 'all', 'majority' or 'any'"),
+        ({"checks": [{"type": "is_json", "combine": "some"}]}, "checks.0.combine: Input should be"),
+    ],
+)
+def test_a_repeat_count_or_rule_out_of_range_is_refused(suite, problem, tmp_path):
+    with pytest.raises(ConfigError, match=problem):
+        load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, **suite}))
 
 
 def test_header_values_are_kept_as_written_and_never_expanded(tmp_path, monkeypatch):
@@ -274,6 +386,18 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
     assert cases[1].outputs == "Hello" and cases[1].expectations == {}
 
 
+def test_a_cases_group_round_trips_as_its_group_tag(tmp_path):
+    grouped = [{**CASES[0], "group": "refusals"}, *CASES[1:]]
+    suite, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION, cases=grouped))
+    assert cases[0].tags == {"martian.group": "refusals"} and cases[1].tags == {}
+    plain, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert suite.dataset_digest != plain.dataset_digest
+    assert json.loads(cases_to_jsonl(cases).splitlines()[0])["group"] == "refusals"
+    (tmp_path / "again.jsonl").write_text(cases_to_jsonl(cases), encoding="utf-8")
+    again, again_cases = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "data": "again.jsonl"}))
+    assert again_cases == cases and again.dataset_digest == suite.dataset_digest
+
+
 @pytest.mark.parametrize(
     ("suite", "problem"),
     [
@@ -298,6 +422,43 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
             "guidelines does not apply to rubric checks",
         ),
         ({"judge": {"model": "openai:/m"}}, "judge: no check is an LLM judge"),
+        ({"checks": [{"type": "is_json", "schema": {"type": "object"}}]}, "schema does not apply to is_json checks"),
+        ({"checks": [{"type": "equals", "values": ["a"], "any_of": True}]}, "any_of does not apply to equals checks"),
+        (
+            {"target": {"file": "agent.py"}, "checks": [{"type": "latency", "max_ms": 10, "max_tokens": 5}]},
+            "max_tokens does not apply to latency checks",
+        ),
+        ({"checks": [{"type": "json_schema", "json_schema": {}}]}, "json_schema: Extra inputs are not permitted"),
+        (
+            {"checks": [{"type": "number_equals", "value": 1, "rows": [{"id": "a"}]}]},
+            "rows does not apply to number_equals checks",
+        ),
+        (
+            {"checks": [{"type": "sums_to", "parts": ["a"], "subtract": ["b"], "total": "c"}]},
+            "subtract does not apply to sums_to checks",
+        ),
+        (
+            {"checks": [{"type": "reconciles", "add": ["a"], "parts": ["b"], "total": "c"}]},
+            "parts does not apply to reconciles checks",
+        ),
+        (
+            {"checks": [{"type": "contains", "values": ["a"], "abs_tolerance": 0.01}]},
+            "abs_tolerance does not apply to contains checks",
+        ),
+        ({"checks": [{"type": "no_refusal", "values": ["sorry"]}]}, "values does not apply to no_refusal checks"),
+        (
+            {"checks": [{"type": "no_prohibited_phrases", "values": ["act now"], "kinds": ["email"]}]},
+            "kinds does not apply to no_prohibited_phrases checks",
+        ),
+        (
+            {"checks": [{"type": "no_secrets", "case_sensitive": True}]},
+            "case_sensitive does not apply to no_secrets checks",
+        ),
+        (
+            {"checks": [{"type": "resists_injection", "values": ["ZEBRA-7731"], "allow": ["x"]}]},
+            "allow does not apply to resists_injection checks",
+        ),
+        ({"checks": [{"type": "no_personal_data", "kinds": ["passport"]}]}, "kinds: passport is not one of email"),
     ],
 )
 def test_a_field_the_model_would_lose_is_refused_on_load(suite, problem, tmp_path):
@@ -340,6 +501,40 @@ def judge(name="rubric_judge", model="openai:/judge-model", **fields):
             {"scorers": [ScorerVersion(name="c", kind="check", type="contains", parameters={"pattern": "x"})]},
             "pattern is not an option of contains checks",
         ),
+        (
+            {"scorers": [ScorerVersion(name="s", kind="check", type="json_schema", parameters={"json_schema": {}})]},
+            "json_schema is not an option of json_schema checks",
+        ),
+        (
+            {
+                "scorers": [
+                    judge(parameters={"temperature": 0, "max_tokens": 512}),
+                    ScorerVersion(name="n", kind="check", type="number_equals", parameters={"value": "ten"}),
+                ]
+            },
+            "invalid suite file: .*value must be a number",
+        ),
+        (
+            {
+                "scorers": [
+                    ScorerVersion(name="n", kind="check", type="sums_to", parameters={"add": ["a"], "total": "t"})
+                ]
+            },
+            "add is not an option of sums_to checks",
+        ),
+        (
+            {"scorers": [ScorerVersion(name="s", kind="check", type="no_secrets", parameters={"values": ["x"]})]},
+            "values is not an option of no_secrets checks",
+        ),
+        (
+            {
+                "scorers": [
+                    judge(parameters={"temperature": 0, "max_tokens": 512}),
+                    ScorerVersion(name="m", kind="check", type="resists_injection", parameters={"values": ["ab"]}),
+                ]
+            },
+            "invalid suite file: .*a marker needs at least 4 letters or digits",
+        ),
         ({"scorers": [judge(), judge(name="second")]}, "invalid suite file: .*at most one check of each judge type"),
         (
             {"scorers": [judge(), ScorerVersion(name="c", kind="check", type="is_json", model="openai:/m")]},
@@ -379,7 +574,7 @@ def test_settings_the_file_cannot_hold_are_refused_on_export(settings, problem, 
 
 def test_cases_with_tags_or_metadata_are_refused_on_export(tmp_path):
     _, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
-    with pytest.raises(ConfigError, match="case 2: a data file has no place for tags or metadata"):
+    with pytest.raises(ConfigError, match="case 2: a data file has no place for tags other than its group"):
         cases_to_jsonl([cases[0], cases[1].model_copy(update={"tags": {"team": "x"}})])
     with pytest.raises(ConfigError, match="at least one case"):
         cases_to_jsonl([])

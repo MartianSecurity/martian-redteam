@@ -1,0 +1,24 @@
+# Run with:  martian evals run examples/evals/reconciliation/evals.yaml
+# This suite grades stored month-end bank reconciliations with numeric and table checks, so it
+# needs no model key. In the first case every figure is right; in the second, one deposit is a
+# cent off, which fails the arithmetic and names the deposit that differs from the statement.
+data: cases.jsonl
+
+checks:
+  - type: reconciles             # opening balance + deposits - withdrawals = closing balance
+    add: [opening_balance, deposits.*.amount]
+    subtract: [withdrawals.*.amount]
+    total: closing_balance
+  - type: sums_to                # the deposits add up to the total the reply states
+    parts: [deposits.*.amount]
+    total: total_deposits
+  - type: number_equals          # the closing balance is the bank statement's
+    path: closing_balance
+    expectation: closing_balance
+  - type: table_equals           # every deposit matches the statement, by its reference
+    path: deposits
+    key: ref
+    expectation: deposits
+
+# Each check compares exact decimals, so a one-cent error fails. To allow a difference, add
+# abs_tolerance (such as 0.005) or rel_tolerance (such as 0.001, a tenth of a percent).

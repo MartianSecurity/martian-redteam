@@ -46,6 +46,15 @@ def run_evals(
         int | None, typer.Option("--concurrency", min=1, max=64, help="Suite file only: cases run at the same time.")
     ] = None,
     limit: Annotated[int | None, typer.Option("--limit", min=1, help="Suite file only: run the first N cases.")] = None,
+    repeats: Annotated[
+        int | None,
+        typer.Option(
+            "--repeats",
+            min=1,
+            max=100,
+            help="Suite file only: run each case N times and combine the attempts by each check's rule.",
+        ),
+    ] = None,
     fresh: Annotated[
         bool, typer.Option("--fresh", help="Suite file only: discard earlier results instead of resuming.")
     ] = False,
@@ -74,12 +83,19 @@ def run_evals(
             typer.echo("Give one suite file and no pytest options: martian evals run evals.yaml", err=True)
             raise typer.Exit(code=2)
         _run_suite(
-            Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh, home=data_dir
+            Path(suite_files[0]),
+            output=output,
+            concurrency=concurrency,
+            limit=limit,
+            repeats=repeats,
+            fresh=fresh,
+            home=data_dir,
         )
         return
-    if output is not None or concurrency is not None or limit is not None or fresh or data_dir is not None:
+    if any(value is not None for value in (output, concurrency, limit, repeats, data_dir)) or fresh:
         typer.echo(
-            "--output, --concurrency, --limit, --fresh and --data-dir apply to a suite file (evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh and --data-dir apply to a suite file "
+            "(evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -91,7 +107,14 @@ def run_evals(
 
 
 def _run_suite(
-    path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool, home: Path | None
+    path: Path,
+    *,
+    output: Path | None,
+    concurrency: int | None,
+    limit: int | None,
+    repeats: int | None,
+    fresh: bool,
+    home: Path | None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -99,7 +122,8 @@ def _run_suite(
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
-    from martian.evals.runner import run_suite
+    from martian.evals.runner import false_refusal_line, run_suite
+    from martian.evals.stats import rate_text
 
     console = Console()
     try:
@@ -111,22 +135,65 @@ def _run_suite(
             resume=not fresh,
             progress=console.print,
             home=home,
+            repeats=repeats,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
         raise typer.Exit(code=2) from None
-    table = Table(title=f"{path.name}: {summary['cases']} cases")
-    for column in ("Check", "Passed", "Failed", "Errors"):
+    groups = summary["groups"]
+    plan = summary.get("repeats")
+    notes = [f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}"] if groups else []
+    if plan:
+        notes.append(
+            "Counts are of cases. Each check combines its attempts by its own rule (check), all for a "
+            "security check (security), or the suite's rule (suite). Reliability counts the cases that "
+            "passed every attempt"
+        )
+    table = Table(
+        title=f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else ""),
+        caption="; ".join(notes) or None,
+    )
+    columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
+    for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
-    for name, counts in summary["checks"].items():
-        table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
-    table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
+    # With repeats, the share of cases that passed every attempt sits under the pass rate.
+    reliable = summary.get("reliability")
+    totals = [("All checks", summary), *([("Reliability", reliable)] if reliable else [])]
+    for name, counts in [*summary["checks"].items(), *totals]:
+        row = [
+            name,
+            str(counts["passed"]),
+            str(counts["failed"]),
+            str(counts["errors"]),
+            rate_text(counts["pass_rate"], counts["confidence_95"]),
+        ]
+        if plan and counts is reliable:
+            row.append("every attempt")
+        elif plan and counts is summary:
+            row.append("every check")
+        elif plan:
+            rule = plan["checks"][name]
+            row.append(f"{rule['combine']} ({rule['from']})")
+        table.add_row(*row, style="bold" if counts is summary or counts is reliable else None)
     console.print(table)
+    if reliable:
+        flaky = reliable["flaky"]
+        shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
+        console.print(
+            f"Flaky cases, whose verdict changed between attempts: {shown}"
+            if flaky
+            else "No flaky cases: no case's verdict changed between attempts",
+            markup=False,
+            highlight=False,
+        )
+    if (refusals := summary.get("false_refusals")) is not None:
+        console.print(false_refusal_line(refusals), markup=False, highlight=False, soft_wrap=True)
+    unit = "attempt(s)" if plan else "case(s)"
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
-        console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
+        console.print(f"{count} {unit}: {reason}", markup=False, highlight=False)
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
-            console.print(f"{count} case(s), {label}: {reason}", markup=False, highlight=False)
+            console.print(f"{count} {unit}, {label}: {reason}", markup=False, highlight=False)
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
     recorded = summary["run"]
     ui = (
