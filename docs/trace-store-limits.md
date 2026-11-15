@@ -171,8 +171,8 @@ Postgres drops.
   saturation. Postgres spent 6 to 9 ms of CPU per 5-span trace.
 - **A request or a response over 8,000 characters is refused on Postgres** as `invalid`, because
   the binding keeps them whole in MLflow's trace metadata (`varchar(8000)`). Nothing of the trace
-  is kept. The refusal's detail carries MLflow's SQL error, including the SQL parameters, so it
-  quotes the start of the request.
+  is kept. The refusal names `record_trace` and MLflow's `trace_request_metadata` table, never
+  the request ([what store errors contain](security-and-data.md#what-store-errors-contain)).
 - **Storage is linear**: about 17 KB per trace of 5 spans and 1,000-character fields, more than
   half of it spans; about 1.7 GB per 100,000 traces. The store interface has no way to delete old
   traces.

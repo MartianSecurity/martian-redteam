@@ -24,7 +24,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
-| `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
+| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, and `_policy.py` the patterns, checksums and refusal reading of the policy checks; the suite file runner checks options with all three |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
@@ -116,7 +116,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   suite: `tests/evals/test_trace_store_load.py` only checks its arguments and runs every phase on
   a few traces on SQLite. Its results and how to re-run it are in
   [trace store limits](trace-store-limits.md).
+- `tests/evals/test_policy_checks.py` measures each policy check on its labelled set in `tests/evals/policy_sets/` and fails unless the error-rate table in `docs/evals.md` gives the same numbers; when a check or its set changes, copy the row the failure prints into that table. Every value in the sets is synthetic, and each secret in `no_secrets.jsonl` has one character written as a JSON escape so the file holds no secret shape.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
+- `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
+  checks the shape of their labelled set, `tests/evals/benchmarks/grounding_judges.jsonl`.
+  Scoring the judges on that set needs a real model, so it is not part of CI:
+  `scripts/benchmark_grounding_judges.py --model openai:/<model> --out results.jsonl` (with the
+  provider's key and address in the environment) makes one call per case, about 75 in all, and
+  prints each judge's false pass and false fail rates for [the evals guide](evals.md#grounding-and-retrieval-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
@@ -159,9 +166,9 @@ run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 ## MLflow upgrades
 
 `mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
-test module that runs MLflow itself: the store binding (`test_store_mlflow.py`), the judge
-transport and the judges built on it, the private-import guard (`test_mlflow_private.py`), the
-pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
+test module that runs MLflow itself: the store binding (`test_store_mlflow.py`) and its errors
+(`test_store_errors.py`), the judge transport and the judges built on it, the private-import
+guard (`test_mlflow_private.py`), the pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
 the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
 the store giving MLflow only ids of MLflow's own form, and the upgrade path.
 `scripts/mlflow_compat.py` lists the modules and runs them on any release:
