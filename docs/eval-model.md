@@ -42,9 +42,9 @@ rejects unknown fields.
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`. Never a key | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
 | `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder and the MLflow location. Unset means the runner's default | none |
-| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, and its `settings`. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
+| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
 | `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it | Run |
-| `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint` | Trace |
+| `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint`. A case its suite runs more than once has every attempt in `attempts` (`Attempt`: `number`, `status`, `checks` with one `CheckVerdict` per check, `output`, `error`, `latency_ms`, `trace_id`); its own `status` and scores are the attempts combined ([repeated attempts](evals.md#repeated-attempts)). `attempts` is left out when empty | Trace; each attempt's own trace too |
 | `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `source_id`, `trace_id`, `metadata`. A judge score made by the evals core's worker has the model and version that produced it as `source_id` (`model@version`) and in `metadata` (`martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint`), with the judge's own version in `martian.judge.version` | Assessment (feedback) |
 | `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them. A job that applies a saved suite names it (`suite_id`, `suite_version`) and carries its `policies`; `cancel_requested_at` as for a run. A policy judge's guidelines are in its scorer's `criteria` | none |
 | `Trace`, `Span` | A recorded call to the thing under test, from an eval run or from live traffic, and the steps inside it. A case result is a trace of a run. `session_id` and `user_id` are the application's conversation and user. Search results leave `spans` empty and may give a preview of a long `request` or `response`; the trace's `martian.request_preview_truncated` or `martian.response_preview_truncated` metadata is then `"true"`, and reading the trace gives them whole | Trace and spans; session and user are the `mlflow.trace.session` and `mlflow.trace.user` metadata MLflow tracing records |
@@ -75,12 +75,14 @@ and its data give them again on the next load.
 | Suite file | Model |
 | --- | --- |
 | `data` | `Suite.dataset_location`, as written. `dataset_name` is the file's stem and `dataset_digest` the digest a store gives its cases as a `DatasetVersion` |
-| A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`) |
+| A row of the data file | `Case` (`id`, `inputs` or `input`, `expectations`, `outputs` or `output`); a JSONL row's `group` is the tag `martian.group` in `Case.tags` |
 | No `target` | `Target` of kind `stored`: the outputs come with the cases |
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds` |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
+| `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
 | `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
 | `judge.max_retries`, `judge.rate_limit_wait_seconds`, `judge.headers` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written) |
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
@@ -110,7 +112,8 @@ grades stored outputs, which is a `stored` target), an `agent` target, `policies
 case passes when every check passes it), `code` or `human` scorers, a pinned scorer `version`,
 `llm_judge` scorers with different models or parameters (a file has one judge), run settings
 for a target or judge the suite does not have, and a suite with no `dataset_location`.
-`cases_to_jsonl` refuses cases with `tags` or `metadata`. The written text is then loaded again
+`cases_to_jsonl` writes the `martian.group` tag as the row's `group` and refuses cases with any
+other `tags` or with `metadata`. The written text is then loaded again
 and must give the same definition, so a field the writer does not know is refused too.
 
 `martian evals run` loads its suite with `load_suite_file`, so it refuses the same fields before
@@ -133,10 +136,18 @@ map. `martian evals run` records every case this way:
 | `output` | `CaseResult.output` |
 | `error` | `CaseResult.error` |
 | `fingerprint` | `CaseResult.fingerprint` |
+| `attempts`, only when the suite repeats its cases | `CaseResult.attempts`: each entry's `number`, `passed` (as `Attempt.status`), `checks` (one `CheckVerdict` per label), `output` and `error` (`martian.evals.model.ATTEMPT_RECORD_FIELDS`) |
 
 `summary.json` is derived: `cases`, `passed`, `failed` and `errors` are `Run.counts`; the per-check
-counts and `target_errors` are counted from scores and case results; `invalidated`,
-`seconds_this_run` and `output` describe that one local invocation and are not stored.
+counts and `target_errors` are counted from scores and case results; `pass_rate`,
+`confidence_95` and `groups` are computed from those verdicts and the cases' `martian.group` tags
+([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)); with repeats,
+`repeats` is the run's `provenance.repeats`, and `attempts` and `reliability` are counted from
+the case results' attempts; `false_refusals`, for a suite with a policy check, is counted from
+the cases' `no_refusal` verdicts, with repeats their attempts combined
+([false refusals](evals.md#false-refusals)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
+are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
+its result.
 
 ## The server's evals tables
 

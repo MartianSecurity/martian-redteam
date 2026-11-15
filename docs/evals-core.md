@@ -176,12 +176,18 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
-| `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
+| `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
 | `POST /v1/evals/sessions/search` | The sessions among the first 1,000 matching traces ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
+
+The core adds one read route of its own, which the server's contract does not have:
+
+| Route | Answers with | Reads |
+| --- | --- | --- |
+| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -219,6 +225,14 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
   digest (or store dataset).
+- **Repeated cases.** A case result of a run that repeats its cases is one item, with the status
+  of its attempts combined; the contract's `EvalItemOut` has no place for attempts, so they are
+  served by the attempts route above. So are the run's reliability and each case's `flaky`: the
+  run routes' responses, `EvalRunOut` and `EvalRunDetailOut`, are typed in the frozen contract,
+  and a field there would need a new contract version on the server. The run's
+  `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
+  its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
+  comparison pairs these combined statuses.
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -228,6 +242,30 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
   jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
   (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
+  Each criterion carries `confidence_95`, the Wilson interval of a boolean scorer's pass rate, as
+  the server's does, and `mean_confidence_95`, the Student t interval of a numeric scorer's mean
+  (`null` for fewer than two values), which the server's scorecard does not have yet
+  ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)). Both treat the
+  run's cases as independent.
+- **Comparisons.** A comparison carries `significance`, the paired test of the exact-match
+  verdicts over the pairs that are not `not_comparable`. With both scoring jobs it also carries
+  `criteria_significance`, the same for each scorer, in its policy's direction: the exact
+  McNemar test for boolean values, the paired t test for numbers, and `null` for text. Each is
+  `null` when no pair compared, as in an incompatible comparison. The server's comparison does
+  not have either yet. The method and the label are in
+  [comparing two runs](evals.md#comparing-two-runs).
+
+  | Field | Value |
+  | --- | --- |
+  | `label` | `better`, `worse` or `within_noise` |
+  | `test` | `mcnemar_exact` or `paired_t` |
+  | `p_value` | The two-sided p-value |
+  | `alpha` | The significance level, `0.05` |
+  | `compared` | Pairs with a verdict or a score in both runs |
+  | `changed`, `improved`, `regressed` | The pairs that changed, then those that moved the better way and the worse way |
+  | `baseline`, `candidate` | The pass rate or the mean over the compared pairs |
+  | `effect` | `candidate` minus `baseline` |
+  | `minimum_detectable_effect` | The smallest change the comparison could label, or `null` when it could label none |
 - **Members and queues.** The workbench's `members` is the requesting principal only, under the
   id the bootstrap gives: the core knows no organisation membership. Its `queues` are the run's
   review queues, newest first, at most 100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
@@ -481,8 +519,9 @@ evaluation. `MlflowStore`'s own calls are not affected: each sets the workspace 
 `ProcessWorker.submit` starts `python -m martian.evals.worker` with `MLFLOW_WORKSPACE` set to the
 work's organisation's workspace (`workspace_name(principal)` in `martian.evals.store.mlflow_local`:
 `org-` and a hash of the organisation id, or `local`) and without `MLFLOW_EXPERIMENT_ID` or
-`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's. The new
-process:
+`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's, so
+MLflow's telemetry is off there as it is in the API process ([telemetry](security-and-data.md#telemetry)).
+The new process:
 
 1. reads the work as JSON on its standard input (`dump_work` and `load_work`), so a principal's
    details never appear on a command line;
@@ -642,7 +681,9 @@ endpoint, and keeps the local edition's default in its data folder.
   [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
-- The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
+- The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
+  and the core's own route for the attempts of repeated cases, with the run's reliability and its
+  flaky cases.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
@@ -952,6 +993,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   [below](#the-local-edition-in-a-container).
 - If the UI folder holds no `index.html`, because an install has lost the packaged UI or
   `--ui-dir` names another folder, the command stops with exit code `2` and says so.
+- It sends nothing off the machine: MLflow's telemetry is off unless `MLFLOW_DISABLE_TELEMETRY`
+  says otherwise, the UI loads nothing from another host, and no other library it bundles has
+  telemetry ([telemetry](security-and-data.md#telemetry); `tests/evals/test_no_outbound.py`).
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
@@ -1265,9 +1309,9 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id` |
-| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
@@ -1292,8 +1336,9 @@ default project:
 
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
-trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
-cannot be opened.
+trace search, Compare of two runs with its label (within noise for the same deterministic
+system twice, worse for a seeded regression), a run that repeats its cases and its attempts, its
+reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot be opened.
 
 ## Not built yet
 
@@ -1308,7 +1353,7 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
-`test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py` and the store and
+`test_worker_process.py`, `test_worker_targets.py`, `test_no_outbound.py`, `test_worker_judges.py` and the store and
 record tests run the core
 without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.
