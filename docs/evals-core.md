@@ -282,7 +282,9 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
-  target request"), a job keeps the scores it made. Cancelling a finished run is `409`.
+  target request"), a job keeps the scores it made. A running run whose worker says that nothing is
+  working on it any more (`InterruptedRuns`, [the worker](#the-worker)) is cancelled at once, with
+  the reason as its `error`, even when a stop was asked before. Cancelling a finished run is `409`.
 - **Scoring.** The scorers are the built-in ones by name (`exact_match`, `contains_expected`,
   `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
   registered judges pinned by name and version, or a saved suite version's scorers and policies
@@ -349,6 +351,7 @@ then calls `Worker.submit(Work(...))`:
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
+| `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `LocalWorker` can ([local runs](#local-runs)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
 
 `execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
 record before each case, so a cancel request reaches a worker in another process too, and move
@@ -834,7 +837,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). The targets the user defines are in
-  `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)).
+  `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)). `locks/`
+  holds an empty file per process working on a run, which that process holds an OS lock on
+  ([runs whose process stopped](#runs-whose-process-stopped)).
   `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
   and an application can record its traces there with MLflow tracing
   ([below](#traces-from-an-application)). What another process writes while the UI is open shows
@@ -1058,10 +1063,6 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 - **The key.** The server's own process never reads a key: only each run's process does, and no
   request but the one that defines a target, no answer, log line, trace or record holds one.
 
-Work runs while `martian ui` does. A run whose process had not finished when the server stopped
-stays `running`, as with every worker until the durable queue (MorningHQ/martian-notes#139), and
-then blocks the next launch with `409`.
-
 `tests/evals/test_local_runs.py` starts runs through these routes on `martian ui`'s application,
 with a loopback HTTP target that wants the key and a loopback OpenAI-compatible endpoint as the
 default judge model, and checks that the run completes in its own process with its results,
@@ -1069,6 +1070,60 @@ traces and the suite's scores, model judges included, that the server's process 
 key, that run again keeps the target, dataset version, suite version and budget when newer
 versions exist, the refusals above, the suite job of a run that does not complete, and that the
 frozen launch runs too.
+
+#### Runs whose process stopped
+
+Work is not queued durably (MorningHQ/martian-notes#139): a run runs while the processes working
+on it do. Each of them holds the run with an OS lock on its own file in the data folder's
+`locks/`, `<run id>.server.lock` or `<run id>.process.lock` (`RunLock` in
+`martian.evals.local_runs`), and the operating system releases the lock when the process ends,
+however it ends, a crash, a kill or a reboot included:
+
+| Holder | Holds the run |
+| --- | --- |
+| `martian ui`, the server that admitted the run | From submitting it until the run's process has ended |
+| The run's own process | While it runs the run, even when `martian ui` stops first |
+| `martian evals run` | From before it records the run until the run ends |
+
+A queued or running run that no process holds any more, and one with no lock file, such as a run an
+earlier release left `running`, is interrupted: nothing will finish it, and it would block every
+launch with `409`. It is finished in two places:
+
+- **When `martian ui` starts**, before it admits a run (`finish_interrupted`): each such run is
+  `failed`, or `cancelled` when a stop had been asked, with the `error` "Interrupted: the process
+  working on this run stopped before it finished", and its suite's queued scoring job is
+  `cancelled` ("The run did not complete, so its suite did not score it"). The server's log names
+  each run it finished. A new run is then admitted, and an interrupted run can run again.
+- **When it is cancelled** (`POST /v1/evals/{run_id}/cancel`): a running run that no process holds
+  is `cancelled` at once with the same `error`, and its suite's job is cancelled, even when a stop
+  had been asked before (`LocalWorker.cancel_interrupted`, the worker's `InterruptedRuns`). This
+  finishes a run whose process was killed while `martian ui` kept running, such as a
+  `martian evals run` stopped with `kill -9`.
+
+A run another live process holds is left alone: a `martian evals run` recording into the same data
+folder, or a run's process that outlived the `martian ui` that started it, which then finishes
+the run. Such a run keeps blocking launches until it ends, and cancelling it asks its process to
+stop, as for any running run.
+
+What this does not do:
+
+- Scoring jobs are not covered. A suite's scoring job that a stopped `martian ui` would have
+  started after its run completed stays `queued` until it is cancelled. A scoring job whose process
+  was killed stays `running`, so scoring that run again is `409`, until the durable queue.
+- Each `martian ui` only finishes runs when it starts. Two servers on one data folder are not
+  coordinated: one that starts while the other is between recording a run and holding it could
+  take that run for interrupted. Keep one `martian ui` per data folder.
+- Locks need processes that share one operating system's locks, as SQLite's own locking does: a
+  data folder on a network share, or shared between a container and a host whose file locks do
+  not reach each other, is not supported. On Windows the locks use `msvcrt`; CI tests them on
+  Linux only.
+
+`tests/evals/test_local_runs.py` kills a `martian ui` and its run's process while the run waits on
+its target, and checks that the restarted server shows the run interrupted, cancels its suite's
+job and admits a run that completes; that a run another live process holds is left alone and
+counts against launches, and that cancelling it once that process is killed finishes it; that runs
+with no lock are finished at start; and that `martian evals run` holds its run while it records
+it.
 
 ### The local edition in a container
 
@@ -1146,7 +1201,10 @@ default project:
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
   not. A run that stops on an error is `failed`, with `error` naming the exception's type, and an
-  interrupted one is `cancelled`.
+  interrupted one is `cancelled`. The process holds the run while it runs, so `martian ui` leaves
+  it alone; a run whose process was killed before it could record its end is finished by
+  `martian ui` when it starts or when the run is cancelled there
+  ([runs whose process stopped](#runs-whose-process-stopped)).
 - A resumed run is a new run. A case whose verdict it reuses from the output folder's
   `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
   that graded the case; that result's trace route answers `409`.
