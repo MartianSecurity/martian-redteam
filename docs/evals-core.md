@@ -768,8 +768,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   new ones, so a data folder an earlier release wrote reads back unchanged.
 - Trace search applies MLflow's own filters (run, session, user, tags, time), reads every trace
   they match into this process, and there applies the text filter, sorts and takes the page. A
-  search therefore costs time and memory in proportion to the traces its MLflow filters match,
-  not to its page: the Traces page with no filters reads the whole project. MLflow's filters have
+  search's time and memory therefore grow with the traces its MLflow filters match, not with its
+  page: the Traces page with no filters reads the whole project. MLflow's filters have
   no "or", so a search for a run's traces is two searches, on the tag and on `mlflow.sourceRun`.
   A session search reads the same traces and groups the first of them in this process.
 - On Postgres, a trace's request and its response are each at most 8,000 characters: the binding
