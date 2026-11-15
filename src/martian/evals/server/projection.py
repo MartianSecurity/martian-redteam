@@ -9,6 +9,8 @@ stay a port of the server's and the mapping is in one place:
 - A case result has no id of its own in the model. Its API ``id`` is a UUID derived from its run
   and case ids, and a score's ``id`` one derived from its run, case, scorer and scoring job, so
   each is the same in every response.
+- A person is named by a UUID (``user_out``): their id when it is one, else one derived from it,
+  so the local user ``local`` has an id the routes that take a user accept.
 - A case's text (``prompt``, ``expected``, ``output``) is what the server shows: the first text
   under ``message``, ``prompt``, ``question`` or ``content`` of the inputs, and under
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
@@ -96,6 +98,14 @@ def user_uuid(user_id: str) -> uuid.UUID:
         return derived_id("user", user_id)
 
 
+def user_out(user_id: str) -> str:
+    """A person as the API names them: :func:`user_uuid` of their id, as text. Every user id a
+    response carries is in this form, and a user id a request names is compared in it, so the id
+    the API gives for the principal is one the routes that take a user (a UUID) accept. A UUID id
+    is itself; the local user ``local`` is a UUID derived from it."""
+    return str(user_uuid(user_id))
+
+
 def suite_version_id(suite_id: str, version: int) -> uuid.UUID:
     """The API id of one version of a suite."""
     return derived_id("suite-version", suite_id, str(version))
@@ -173,6 +183,10 @@ def item_out(result: CaseResult) -> EvalItemOut:
 
 def _run_fields(run: Run) -> dict[str, Any]:
     target = run.target
+    # A worker that knows its targets by name pins the name with the target, as the local
+    # edition's does; a registered agent's name is the server's.
+    pinned = run.provenance.get("target")
+    name = pinned.get("name") if isinstance(pinned, dict) else None
     return {
         "id": uuid.UUID(run.id),
         "run_code": run.code,
@@ -190,6 +204,7 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "errored": run.counts.errors,
         "error": run.error,
         "agent_id": uuid.UUID(target.agent_id) if target and target.kind == "agent" and target.agent_id else NO_AGENT,
+        "agent_name": name if isinstance(name, str) else None,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
@@ -276,8 +291,8 @@ class ReviewRow:
             queue_id=review.queue_id,
             criterion=review.criterion,
             previous_id=review.previous_id,
-            actor_id=review.reviewer,
-            assignee_id=review.assignee,
+            actor_id=user_out(review.reviewer) if review.reviewer else None,
+            assignee_id=user_out(review.assignee) if review.assignee else None,
             assessment_id=review.score_id,
             state=review.state,
             value=review.value,
@@ -345,7 +360,7 @@ def queue_out(queue: ReviewQueue) -> dict[str, Any]:
         "name": queue.name,
         "question": queue.questions[0].model_dump(mode="json"),
         "questions": [question.model_dump(mode="json") for question in queue.questions],
-        "assignee_id": queue.assignee,
+        "assignee_id": user_out(queue.assignee) if queue.assignee else None,
         "item_ids": [str(result_id(queue.run_id, case_id)) for case_id in queue.case_ids],
         "native_state": "persisted",
         "native_id": None,

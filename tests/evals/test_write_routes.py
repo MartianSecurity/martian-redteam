@@ -13,6 +13,7 @@ import pytest
 
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import COMMUNITY, ENTERPRISE, create_app, organisation_principal
+from martian.evals.server.projection import user_out
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
 from tests.evals.write_fixture import AGENT, JUDGE_MODEL, Inert, Served, agent, request_id, serve
@@ -295,7 +296,7 @@ def test_a_suite_is_versioned_and_pins_what_a_scoring_job_applies(memory: Served
     assert (first["version"], first["definition"]["scorers"], first["actor_id"]) == (
         1,
         ["contains_expected", "exact_match"],
-        ADMIN.user_id,
+        user_out(ADMIN.user_id),
     )
     assert memory.call("POST", "/v1/evals/suites", 201, json=body) == first
     changed = {**body, "request_id": request_id(), "suite_id": first["suite_id"], "scorers": ["exact_match"]}
