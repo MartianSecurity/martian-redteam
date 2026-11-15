@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.store import MemoryStore
@@ -138,3 +139,42 @@ def test_a_repeated_launch_with_other_limits_is_a_different_request(records):
             json={"agent_id": AGENT, "dataset_name": "support-faq", **body, "limits": {"max_seconds": 900}},
         )
     assert refused["detail"] == "request_id was already used for a different eval"
+
+
+class Pausable:
+    """A server's admission (``martian.evals.records.admission.RunAdmission``): it refuses new work
+    while paused and otherwise numbers the run by a code of its own, which a resume must not take."""
+
+    def __init__(self) -> None:
+        self.paused, self.asked = False, []
+
+    async def admit(self, principal, run):
+        self.asked.append(run.id)
+        if self.paused:
+            raise HTTPException(409, "New runs are paused")
+        return run.model_copy(update={"code": "N-1"})
+
+
+def test_a_resume_is_asked_of_the_stores_admission_as_a_launch_is_and_keeps_the_runs_code(records, monkeypatch):
+    called: list[str] = []
+    client, served, limits = stopped_after_first_case(records, monkeypatch, called)
+    with client:
+        run = served.launch(**limits)
+        served.drain()
+        admission = Pausable()
+        records.admission = admission  # what ``SqlRecordStore(..., admission=...)`` holds
+        # While the organisation is paused its resume is refused as its launch is, and nothing restarts.
+        admission.paused = True
+        refused = served.call("POST", f"/v1/evals/{run['id']}/resume", 409, json={})
+        assert refused["detail"] == "New runs are paused"
+        still = served.call("GET", f"/v1/evals/{run['id']}", 200)
+        assert still["state"] == "stopped" and still["provenance"]["stopped"]["limit"] == "max_seconds"
+        assert called == ["faq-1"] and admission.asked == [run["id"]]
+        # Once it is not paused the resume goes on, and the run keeps the code it was launched with.
+        admission.paused = False
+        resumed = served.call("POST", f"/v1/evals/{run['id']}/resume", 202, json={})
+        assert resumed["run_code"] == run["run_code"] and resumed["state"] == "queued"
+        served.drain()
+        done = served.call("GET", f"/v1/evals/{run['id']}", 200)
+    assert (done["state"], done["run_code"]) == ("completed", run["run_code"])
+    assert called == ["faq-1", "faq-2"] and admission.asked == [run["id"], run["id"]]

@@ -524,8 +524,11 @@ All paths are under `/v1/evals`. How the core carries them out:
   and the worker goes on after the cases it finished ([limits](#limits-stopping-and-resuming)). A
   run that is not `stopped` is `409` ("Only a run stopped at one of its limits can be resumed"),
   one the worker did not run (`martian evals run`) `422`, and it is refused as a launch is while
-  the organisation has its `concurrent_runs` in progress and while a dataset is being published
-  (`409`), and for an archived project. It needs the `run` capability and answers `202` with the
+  the organisation has its `concurrent_runs` in progress, while a dataset is being published and
+  when the record store's admission, the seam through which a server pauses new work
+  (`SqlRecordStore(..., admission=...)`), refuses it (`409` or what the admission raises), and for
+  an archived project. The admission is asked once before the run restarts and its answer's code
+  is not used: the run keeps its code. It needs the `run` capability and answers `202` with the
   queued run.
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
