@@ -2,8 +2,8 @@
 
 MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, registered judges
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
-it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and
-the Traces page's saved views.
+it gates on, scoring jobs, the human review chain, versioned suites and their audits, editable
+dataset drafts and the Traces page's saved views.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -24,6 +24,7 @@ from martian.evals.model import (
     Case,
     CaseResult,
     DatasetDraft,
+    Digest,
     Identifier,
     Page,
     Review,
@@ -55,6 +56,24 @@ class SavedView(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class SuiteAudit(BaseModel):
+    """The latest audit of one saved suite version (``martian.evals.audit``): the dataset it was
+    run over, whether it flagged the suite, and the whole result. The evals core's own record: the
+    server keeps no audits, so the shared model has no object for one."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    suite_id: Identifier
+    suite_version: int = Field(ge=1)
+    suite_digest: Digest
+    dataset_name: str = Field(min_length=1, max_length=200)
+    dataset_digest: Digest
+    flagged: bool
+    result: dict[str, Any]
+    created_at: datetime | None = None
+    created_by: str | None = None
 
 
 @runtime_checkable
@@ -164,6 +183,15 @@ class RecordStore(Protocol):
         """The latest version of each suite."""
         ...
 
+    async def put_suite_audit(self, principal: Principal, project_id: str, audit: SuiteAudit) -> SuiteAudit:
+        """Store the audit with its suite version, replacing an earlier audit of that version. A
+        suite version not saved raises ``not_found``."""
+        ...
+
+    async def get_suite_audit(
+        self, principal: Principal, project_id: str, suite_id: str, version: int
+    ) -> SuiteAudit | None: ...
+
     # Dataset drafts: editable until published.
     async def create_draft(self, principal: Principal, project_id: str, draft: DatasetDraft) -> DatasetDraft: ...
 
@@ -243,4 +271,5 @@ __all__ = [
     "RecordStore",
     "SavedView",
     "Subscription",
+    "SuiteAudit",
 ]

@@ -53,6 +53,8 @@ It leaves out what the interfaces cannot list or the model does not describe:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
+- A suite version's [audit](evals-core.md#suite-audits): an import holds none, so audit the suite
+  versions again.
 
 ## The format
 
