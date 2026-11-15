@@ -75,6 +75,7 @@ push and keeps one comment with the result, also without a Martian account. See
   ([in a container](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`),
   twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
   their order, turn by turn, and the call's latency and cost, custom checks written as Python

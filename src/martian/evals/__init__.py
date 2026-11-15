@@ -45,6 +45,7 @@ from martian.evals.checks import (
 )
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
+from martian.evals.conversation_judges import knowledge_retention, policy_adherence, task_completion
 from martian.evals.dataset import EvalDataset, load_dataset
 from martian.evals.evaluate import EvaluationError, evaluate
 from martian.evals.gate import GateFailure, assert_checks, assert_gate
@@ -79,6 +80,7 @@ __all__ = [
     "groundedness",
     "is_json",
     "json_schema",
+    "knowledge_retention",
     "latency",
     "length",
     "load_dataset",
@@ -90,6 +92,7 @@ __all__ = [
     "not_contains",
     "not_matches",
     "number_equals",
+    "policy_adherence",
     "python_check",
     "reconciles",
     "resists_injection",
@@ -101,6 +104,7 @@ __all__ = [
     "step_count",
     "sums_to",
     "table_equals",
+    "task_completion",
     "tool_called",
     "tool_not_called",
     "tool_trajectory",
