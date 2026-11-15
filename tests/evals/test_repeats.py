@@ -1,9 +1,20 @@
 """The rules that combine a case's attempts: each rule's answer, attempts without a verdict, where a
-check's rule comes from, and which attempt stands for the case."""
+check's rule comes from, and which attempt stands for the case; and over the attempts' own verdicts,
+whether a case passed every attempt and whether it is flaky."""
 
 import pytest
 
-from martian.evals.repeats import combine, combine_attempts, describe, plan, representative, rule_for
+from martian.evals.repeats import (
+    combine,
+    combine_attempts,
+    describe,
+    flaky,
+    passed_every_attempt,
+    plan,
+    reliability,
+    representative,
+    rule_for,
+)
 
 T, F, E = True, False, None  # an attempt that passed, failed, or has no verdict
 
@@ -85,3 +96,25 @@ def test_a_case_combines_each_check_by_its_own_rule():
     assert open_case["passed"] is None and open_case["checks"]["no_leak"]["rationale"] is None
     assert open_case["checks"]["no_leak"]["error"].startswith("the attempts without a verdict leave it open")
     assert (open_case["output"], open_case["error"]) == (None, "the target call failed")
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "every", "changed"),
+    [
+        ([T, T, T], T, False),
+        ([T, F, T], F, True),  # passed one attempt and failed another
+        ([F, F, F], F, False),  # always wrong is not flaky
+        ([T, T, E], E, False),  # an attempt without a verdict counts neither way
+        ([F, T, E], F, True),
+        ([F, E], F, False),
+        ([T], T, False),
+    ],
+)
+def test_a_case_passed_every_attempt_or_not_and_is_flaky_when_its_verdict_changed(verdicts, every, changed):
+    assert (passed_every_attempt(verdicts), flaky(verdicts)) == (every, changed)
+
+
+def test_reliability_counts_cases_and_lists_the_flaky_ones_in_order():
+    cases = [("a", [T, T, T]), ("b", [T, F, T]), ("c", [F, F, F]), ("d", [T, E, T]), ("e", [E, F, T])]
+    assert reliability(cases) == {"passed": 1, "failed": 3, "errors": 1, "flaky": ["b", "e"]}
+    assert reliability([]) == {"passed": 0, "failed": 0, "errors": 0, "flaky": []}

@@ -69,7 +69,7 @@ def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_pat
     assert "wrote no results (exit code 2)" in body and "old" not in body
 
 
-def test_a_repeated_run_says_how_often_each_case_ran_and_each_checks_rule(tmp_path):
+def test_a_repeated_run_says_how_often_each_case_ran_each_checks_rule_and_its_reliability(tmp_path):
     counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
     summary = {
         "cases": 2,
@@ -84,14 +84,30 @@ def test_a_repeated_run_says_how_often_each_case_ran_and_each_checks_rule(tmp_pa
             },
         },
         "checks": {"no_leak": counts, "polite": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+        "reliability": {**counts, "pass_rate": 0.0, "confidence_95": [0.0, 0.66], "flaky": ["key", "hint"]},
     }
     body = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE)
     assert (
         "Each case ran 5 times, and the counts are of cases: each check's attempts combine by its rule, "
         "`all` for `no_leak`; `any` for `polite`."
     ) in body
-    plain = comment.render(comment.Outcome(1, {**summary, "repeats": None}), suite=SUITE, key=SUITE)
-    assert "Each case ran" not in plain
+    # The share of cases that passed every attempt, under the pass rate, and the flaky cases.
+    rows = body.splitlines()
+    assert rows[rows.index("| **All checks** | 0 | 2 | 0 | 0% (0–66%) |") + 1] == (
+        "| **Reliability** (every attempt) | 0 | 2 | 0 | 0% (0–66%) |"
+    )
+    assert (
+        "Reliability counts the cases that passed every attempt. Flaky cases, whose verdict changed "
+        "between attempts: `key`, `hint`."
+    ) in body
+    calm = {**summary, "reliability": {**summary["reliability"], "flaky": []}}
+    assert "No flaky cases: no case's verdict changed between attempts." in comment.render(
+        comment.Outcome(1, calm), suite=SUITE, key=SUITE
+    )
+    plain = comment.render(
+        comment.Outcome(1, {**summary, "repeats": None, "reliability": None}), suite=SUITE, key=SUITE
+    )
+    assert "Each case ran" not in plain and "Reliability" not in plain and "Flaky" not in plain
 
 
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():

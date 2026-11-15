@@ -89,7 +89,9 @@ suite, and the two comments they produce
   Below it are per-check counts, each pass rate with its 95% interval
   ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),
   for a suite that [repeats its cases](evals.md#repeated-attempts) how many
-  times each case ran and the rule each check's attempts combined by,
+  times each case ran, the rule each check's attempts combined by, a
+  **Reliability** row under the pass rate and the
+  [flaky cases](evals.md#reliability-and-flaky-cases),
   and up to 25 failed and 25 unfinished case
   IDs with the checks that did not pass. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own

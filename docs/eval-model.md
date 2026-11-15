@@ -136,8 +136,8 @@ map. `martian evals run` records every case this way:
 counts and `target_errors` are counted from scores and case results; `pass_rate`,
 `confidence_95` and `groups` are computed from those verdicts and the cases' `martian.group` tags
 ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)); with repeats,
-`repeats` is the run's `provenance.repeats` and `attempts` is counted from the case results'
-attempts; `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
+`repeats` is the run's `provenance.repeats`, and `attempts` and `reliability` are counted from
+the case results' attempts; `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
 
