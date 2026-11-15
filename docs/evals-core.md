@@ -2697,6 +2697,12 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   the session call, and the local targets and runs under `/v1/local`. Every other path is a file
   of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
   origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
+- The UI's pages call routes the core does not serve in three places, and those show the server's
+  error (`404` or `405`) in the local edition: the Overview and Quality issues pages and the traces
+  export, whose explorer routes are not ported ([write routes](#write-routes)), and the runs page's
+  CI sessions and API keys views, which read the Martian server's CI gate and API keys. The
+  Monitoring and Reviews pages need features Community does not include, and say they are not in
+  this edition.
 - The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it. The container
@@ -2712,7 +2718,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
 when no `--ui-dir` is given, `--concurrency` and its variable in the bootstrap's limits and the
 worker, the container settings below with their warning, and an application's traces recorded
-with MLflow tracing ([below](#traces-from-an-application)).
+with MLflow tracing ([below](#traces-from-an-application)). It also requires the local edition to
+serve every `/v1` route the packaged UI names, but the gaps above.
 
 ### Traces from an application
 
