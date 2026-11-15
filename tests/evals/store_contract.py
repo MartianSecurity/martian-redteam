@@ -13,6 +13,7 @@ import pytest
 from martian.evals.model import (
     Case,
     Counts,
+    Page,
     Project,
     ReviewQuestion,
     ReviewQueue,
@@ -25,8 +26,8 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
 )
-from martian.evals.server.principal import SINGLE_USER, organisation_principal
-from martian.evals.store import EvalStore, StoreError
+from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
+from martian.evals.store import EvalStore, MemoryStore, StoreError
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, UNKNOWN, sample_trace
 
@@ -70,6 +71,19 @@ async def refused(kind: str, awaitable: object) -> None:
     with pytest.raises(StoreError) as caught:
         await awaitable  # type: ignore[misc]
     assert caught.value.kind == kind
+
+
+class EmptyFirstPages(MemoryStore):
+    """``MemoryStore`` whose trace search answers each page first with no traces and a
+    ``next_cursor``, then whole: what the store interface allows a binding that filters in its
+    own process, such as ``MlflowStore`` with free text, to return. A caller that takes an empty
+    page for the end of a search misses every trace."""
+
+    async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
+        if query.cursor is None or not query.cursor.startswith("then:"):
+            return Page[Trace](items=[], next_cursor=f"then:{query.cursor or ''}")
+        whole = query.model_copy(update={"cursor": query.cursor.removeprefix("then:") or None})
+        return await super().search_traces(principal, whole)
 
 
 class StoreContract:

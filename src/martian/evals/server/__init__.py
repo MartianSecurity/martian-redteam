@@ -35,6 +35,9 @@ frozen evals API contract: status and bootstrap here, the read routes in ``runs`
 their scores and on schedules' gate results, which send alerts, ``schedules`` the schedules
 that run a saved suite against a target unattended, and ``push`` the runs another installation
 pushes here (``martian evals push``), written as :func:`~martian.evals.server.push.push_principal`.
+Some routes are the core's own, which the contract does not have: a run's attempts in ``runs``,
+the judges' agreement with people and people's agreement with each other in ``agreement``, each
+judge version's calibration in ``calibration``, and ``push``, under ``/v1/push``.
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ from fastapi.responses import JSONResponse
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
 from martian.evals.server import (
+    agreement,
+    calibration,
     datasets,
     drafts,
     launch,
@@ -199,6 +204,8 @@ def create_app(
         reviews.explorer,
         suites.router,
         suites.explorer,
+        agreement.explorer,
+        calibration.explorer,
         projects.router,
         views.router,
         drafts.router,

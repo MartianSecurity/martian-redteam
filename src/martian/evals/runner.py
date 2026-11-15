@@ -73,6 +73,8 @@ from martian.evals.conversations import (
     user_text,
 )
 from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, SimulatedUser, Turn
+from martian.evals.panel import PREFIX as PANEL_PREFIX
+from martian.evals.panel import check_models
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability, representative
 from martian.evals.simulation import GOAL, SIMULATOR_VERSION, SimulatedUsers, Step, goal_verdict
 from martian.evals.stats import proportion_interval
@@ -257,7 +259,8 @@ class TargetRef(_Model):
 
 
 class JudgeConfig(_Model):
-    model: str
+    # The model of every LLM judge check that names no panel of its own.
+    model: str | None = None
     inference_params: dict[str, float | int] = Field(default_factory=dict)
     # Added to every judge request; ${NAME} in a value is read from the environment.
     headers: dict[str, str] = Field(default_factory=dict)
@@ -265,6 +268,11 @@ class JudgeConfig(_Model):
     max_retries: int = Field(default=5, ge=0, le=10)
     # Rate limits are retried for up to this many seconds, as long as the provider asks.
     rate_limit_wait_seconds: float = Field(default=300, ge=0, le=3600)
+
+
+class SimulatorConfig(JudgeConfig):
+    # The simulator has the judge's settings, and always names its model: it has no panel.
+    model: str
 
 
 class CheckSpec(_Model):
@@ -314,6 +322,9 @@ class CheckSpec(_Model):
     rubric: str | None = None
     guidelines: list[str] | None = None
     conditions: list[dict[str, str]] | None = None
+    # An LLM judge's panel: the judge models that each grade it, in place of judge.model; the
+    # strict majority of those that give a verdict decides (martian.evals.panel).
+    panel: list[str] | None = None
     # Deterministic checks.
     values: list[str] = Field(default_factory=list)
     expectation: str | None = None
@@ -371,6 +382,10 @@ class CheckSpec(_Model):
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
+        if self.panel is not None:
+            if self.type not in JUDGES:
+                raise ValueError(f"a panel names judge models, and a {self.type} check is no LLM judge")
+            check_models(self.panel)
         if self.type in CONVERSATION_JUDGES and self.scope != "conversation":
             raise ValueError(f"a {self.type} judge reads a whole conversation; give it scope: conversation")
         if self.scope == "conversation" and self.type in JUDGES and self.type not in CONVERSATION_JUDGES:
@@ -516,7 +531,7 @@ class Suite(_Model):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     # The model that plays the data's simulated users (martian.evals.simulation), with the judge's
     # settings.
-    simulator: JudgeConfig | None = None
+    simulator: SimulatorConfig | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -526,8 +541,9 @@ class Suite(_Model):
         kinds = [check.type for check in self.checks if check.type in JUDGES]
         if len(set(kinds)) != len(kinds):
             raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
-        if kinds and self.judge is None:
-            raise ValueError("LLM judge checks need a judge.model")
+        single = [check for check in self.checks if check.type in JUDGES and check.panel is None]
+        if single and (self.judge is None or self.judge.model is None):
+            raise ValueError("LLM judge checks need a judge.model, or a panel of their own")
         if self.limits.max_judge_tokens is not None and not kinds and self.simulator is None:
             raise ValueError(
                 "limits.max_judge_tokens counts the tokens of LLM judge checks and simulated users, "
@@ -1094,6 +1110,7 @@ def _build_scorers(suite: Suite, base: Path) -> list[Any]:
     """The scorer of each check. A python check's file is imported here, as the run starts, and
     never when the suite loads."""
     from martian.evals import conversation_judges, grounding, judges
+    from martian.evals.panel import judge_panel
 
     built = []
     modules: dict[Path, Any] = {}
@@ -1112,23 +1129,24 @@ def _build_scorers(suite: Suite, base: Path) -> list[Any]:
         "policy_adherence": conversation_judges.policy_adherence,
         "knowledge_retention": conversation_judges.knowledge_retention,
     }
+    settings = suite.judge or JudgeConfig()
     for check in suite.checks:
         if check.type in JUDGES:
-            assert suite.judge is not None
+            options: dict[str, Any] = {
+                "name": check.label,
+                "inference_params": dict(settings.inference_params) or None,
+                "max_retries": settings.max_retries,
+                "rate_limit_wait_seconds": settings.rate_limit_wait_seconds,
+                "headers": judge_headers,
+            }
             factory = factories[check.type]
             # A conversation judge reads the conversation a conversation check is given, not an input.
-            reads = {} if check.type in CONVERSATION_JUDGES else {"input_key": suite.input_key}
-            built.append(
-                factory(
-                    model=suite.judge.model,
-                    name=check.label,
-                    **reads,
-                    inference_params=dict(suite.judge.inference_params) or None,
-                    max_retries=suite.judge.max_retries,
-                    rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
-                    headers=judge_headers,
-                )
-            )
+            if check.type not in CONVERSATION_JUDGES:
+                options["input_key"] = suite.input_key
+            if check.panel is not None:
+                built.append(judge_panel(factory, models=check.panel, **options))
+            else:
+                built.append(factory(model=settings.model, **options))
         elif check.type in CODE_CHECKS:
             built.append(_python_check(check, base, modules))
         else:
@@ -1285,7 +1303,10 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
             target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
     checks = []
     for check in suite.checks:
-        written = check.model_dump(mode="json", exclude={"combine"} | ({"scope"} if check.scope == "turn" else set()))
+        # A check without a panel, or of the default scope, leaves the field out, so its fingerprint
+        # is the one it had before panels and scopes existed.
+        left_out = ({"panel"} if check.panel is None else set()) | ({"scope"} if check.scope == "turn" else set())
+        written = check.model_dump(mode="json", exclude={"combine"} | left_out)
         if check.type in CODE_CHECKS:
             written["file_sha256"] = hashlib.sha256(_relative(check.file or "", base).read_bytes()).hexdigest()
         checks.append(written)
@@ -1769,6 +1790,7 @@ def run_suite(
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
     scorers = _build_scorers(suite, base)
     labels = [check.label for check in suite.checks]
+    panelled = {check.label for check in suite.checks if check.panel is not None}
     scorer_of = dict(zip(labels, scorers, strict=True))
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
     turn_labels = [label for label in labels if scopes[label] == "turn"]
@@ -1858,6 +1880,14 @@ def run_suite(
             # A function target's exception may hold anything, so only the SDK's own words
             # (TargetCallError, such as NOT_RUN or TIMED_OUT) give a reason.
             reason = (why() if broke else None) or ("the target call failed" if broke else None)
+            # A panel check's votes, from its feedback's metadata (martian.evals.panel).
+            votes: dict[str, dict[str, str]] = {}
+            assessments = frame["assessments"].iloc[position] if "assessments" in frame.columns else None
+            for item in assessments if isinstance(assessments, list) else []:
+                found = (item.get("metadata") or {}) if isinstance(item, dict) else {}
+                panel = {key: str(value) for key, value in found.items() if str(key).startswith(PANEL_PREFIX)}
+                if panel and item.get("assessment_name") in panelled:
+                    votes[str(item["assessment_name"])] = panel
             verdicts: dict[str, dict[str, Any]] = {}
             for label in checked:
                 value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
@@ -1879,6 +1909,8 @@ def run_suite(
                         "the target failed" if broke else str(detail)[:300] if not _missing(detail) else "no verdict"
                     ),
                 }
+                if label in votes and not broke:
+                    verdicts[label]["metadata"] = votes[label]
             values = [verdict["passed"] for verdict in verdicts.values()]
             return {
                 "passed": None if any(v is None for v in values) else all(values),

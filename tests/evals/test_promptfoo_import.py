@@ -3,7 +3,8 @@ local edition with every assertion as the file grades it.
 
 ``examples/promptfoo/results.json`` is written by hand for ``promptfooconfig.yaml`` there, in the
 shape promptfoo's configuration reference gives its output file (``EvaluateSummary`` version 3);
-it is not promptfoo's own test data.
+it is not promptfoo's own test data. ``tests/evals/promptfoo/results.json`` is: promptfoo 0.125.1
+wrote it for the config there, two Python providers answering from a table.
 """
 
 import json
@@ -20,12 +21,17 @@ from martian.evals.promptfoo_import import (
     PromptfooResultsError,
     case_id,
     import_promptfoo_results,
+    promptfoo_runs,
     promptfoo_scores,
+    read_promptfoo_results,
 )
 from tests.evals.evals_contract import validate_response
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "promptfoo"
 RESULTS = EXAMPLE / "results.json"
+# promptfoo's own output: each provider has its own prompt columns, so bot-v1's rows have
+# promptIdx 0 and 1 and bot-v2's 2 and 3 for the same two prompts.
+WRITTEN = Path(__file__).resolve().parent / "promptfoo" / "results.json"
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +170,55 @@ def test_two_providers_of_one_file_compare_case_by_case(tmp_path):
     }
 
 
+def test_two_providers_of_a_file_promptfoo_wrote_compare_case_by_case(tmp_path):
+    home = tmp_path / "evals-home"
+    v1, v2 = import_promptfoo_results([WRITTEN], home)
+    client = local_ui(home)
+    assert (v1.code, v2.code) == ("promptfoo-bot-v1-1", "promptfoo-bot-v2-1")
+    cases = [f"test {test}, prompt {prompt}" for test in (1, 2, 3) for prompt in (1, 2)]
+    assert list(items_of(client, v1.id)) == list(items_of(client, v2.id)) == cases
+    compared = client.get("/v1/evals/compare", params={"baseline_id": v1.id, "candidate_id": v2.id}).json()
+    assert (compared["compatible"], compared["coverage"]["paired"]) == (True, 6)
+    # bot-v2 answers the opening hours with 9am, and bot-v1 has no reply to the card question.
+    assert {row["dataset_item_id"]: row["change"] for row in compared["items"]} == {
+        "test 1, prompt 1": "improved",
+        "test 1, prompt 2": "improved",
+        "test 2, prompt 1": "unchanged",
+        "test 2, prompt 2": "unchanged",
+        "test 3, prompt 1": "not_comparable",
+        "test 3, prompt 2": "not_comparable",
+    }
+
+
+def provider_prompts(path: Path) -> list[dict[str, str]]:
+    """Each provider's cases as an import gives them: case id and rendered prompt."""
+    runs = promptfoo_runs(read_promptfoo_results(path), codes={"bot-v1": "v1", "bot-v2": "v2"})
+    return [{case.result.case_id: case.result.inputs["prompt"] for case in run.cases} for run in runs]
+
+
+def one_label(found: dict) -> None:
+    """Two prompts with one label: promptfoo gives them one promptId."""
+    for row in found["results"]["results"]:
+        row["promptId"] = found["results"]["results"][0]["promptId"]
+
+
+def second_prompt_for_v1(found: dict) -> None:
+    """bot-v1 limited to the second prompt (promptfoo's providerPromptMap): one column fewer."""
+    rows = found["results"]["results"]
+    rows[:] = [row for row in rows if (row["provider"]["label"], row["promptIdx"]) != ("bot-v1", 0)]
+    for row in rows:
+        row["promptIdx"] -= 1
+
+
+@pytest.mark.parametrize("change", [None, one_label, second_prompt_for_v1], ids=["as written", "one label", "map"])
+def test_a_case_id_names_the_same_prompt_under_every_provider(tmp_path, change):
+    v1, v2 = provider_prompts(WRITTEN if change is None else changed(tmp_path, change, WRITTEN))
+    # Every bot-v1 case pairs with bot-v2's case of the same id, on the same prompt, and bot-v2's
+    # six cases stay six.
+    assert v1.keys() <= v2.keys() and all(v1[case] == v2[case] for case in v1)
+    assert len(set(v2.values())) == 6 and len(v1) == (3 if change is second_prompt_for_v1 else 6)
+
+
 def test_assertion_scores_name_repeats_and_sets_and_keep_grader_errors():
     grading = PromptfooGrading.model_validate(
         {
@@ -231,8 +286,8 @@ def text_file(tmp_path: Path, text: str, name: str = "changed.json") -> Path:
     return path
 
 
-def changed(tmp_path: Path, change) -> Path:
-    found = json.loads(RESULTS.read_text(encoding="utf-8"))
+def changed(tmp_path: Path, change, source: Path = RESULTS) -> Path:
+    found = json.loads(source.read_text(encoding="utf-8"))
     change(found)
     return text_file(tmp_path, json.dumps(found))
 

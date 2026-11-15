@@ -698,6 +698,29 @@ def test_the_conversation_judges_tokens_count_towards_the_run_limit(tmp_path, is
     assert summary["stopped"]["limit"] == "max_judge_tokens" and summary["stopped"]["used"] == 150
 
 
+def test_a_conversation_judge_graded_by_a_panel_reads_the_conversation_on_each_member(
+    tmp_path, isolated_run, fake_judge
+):
+    # Any LLM judge check takes a panel (martian.evals.panel), a conversation judge too.
+    members = ["openai:/a", "openai:/b", "openai:/c"]
+    adherence = '    guidelines: ["Never ask again for something the customer already gave."]\n'
+    path = write(tmp_path, SUITE.replace(adherence, adherence + f"    panel: {json.dumps(members)}\n"))
+    suite, cases = load_suite_file(path)
+    (judge,) = [scorer for scorer in suite.scorers if scorer.type == "policy_adherence"]
+    assert (judge.model, [member.model for member in judge.panel]) == (None, members)
+    assert judge.criteria == {"guidelines": ["Never ask again for something the customer already gave."]}
+    assert suite_from_yaml(suite_to_yaml(suite), name=suite.name, cases=cases) == suite
+
+    run_suite(path)
+    check = results_of(tmp_path)["cancel-later"]["checks"]["policy_adherence_judge"]
+    assert check["passed"] is False and check["metadata"]["martian.panel.verdict"] == "fail"
+    assert [check["metadata"][f"martian.panel.{n}.model"] for n in (1, 2, 3)] == members
+    # Each member was sent the whole conversation, two cases each; the other judges their one model.
+    sent = [call for call in fake_judge if call["response_format"] is _AdherenceJudgment]
+    assert sorted(call["model_uri"] for call in sent) == sorted(members * 2)
+    assert all(len(payload_of(call)["conversation"]) == 3 for call in sent)
+
+
 def test_a_judge_error_leaves_the_conversation_without_a_verdict(tmp_path, isolated_run, monkeypatch):
     def provider(**kwargs):
         return Feedback(name=kwargs["assessment_name"], value=completed("pass", turn=9), metadata={})

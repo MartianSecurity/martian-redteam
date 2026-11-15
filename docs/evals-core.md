@@ -114,10 +114,11 @@ sign-in has been checked:
 ```
 
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
-own routes this way: the review queue routes, the question library and answering a queue's item
-need `review_queues`, and `GET /v1/evals/monitoring` and every monitor, threshold and schedule
-route need `monitoring` ([write routes](#write-routes), [monitors](#monitors),
-[thresholds](#thresholds-and-alerts), [schedules](#schedules)).
+own routes this way: the review queue routes, the question library, answering a queue's item and
+the reviewers' agreement (`GET /v1/evals/reviewer-agreement`) need `review_queues`, and
+`GET /v1/evals/monitoring` and every monitor, threshold and schedule route need `monitoring`
+([write routes](#write-routes), [monitors](#monitors), [thresholds](#thresholds-and-alerts),
+[schedules](#schedules)).
 
 How each edition enforces the keys and the limits:
 
@@ -227,12 +228,17 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Martian
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
 
-The core adds two read routes of its own, which the server's contract does not have:
+The core adds read routes of its own, which the server's contract does not have:
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
 | `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
+| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `reviewer_agreement` is the [reviewers' agreement](evals.md#agreement-between-reviewers) on each question named like a judge of `items`, as `GET /reviewer-agreement` gives it across queues. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and reviews. Store: the registered judges, the runs' review queues and the newest 1,000 traces |
+| `GET /v1/evals/reviewer-agreement` | People's agreement with each other on the items two or more of them answered ([agreement between reviewers](evals.md#agreement-between-reviewers)): `project_id`, `minimum` (30), `queues`, one per review queue of the project, newest first, each with `queue_id`, `name`, `run_id` and `questions`, and `questions`, one per question name across every queue that asks it. A question's report has `question`, `kind`, `answered`, `shared` (the items two or more reviewers answered, the ones compared), `reviewers`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `method` (`cohen` or `lin` for two reviewers, `fleiss` or `icc` for more), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `mean_absolute_difference` and its `_confidence_95`, and `concordance`. Below `minimum` the counts and `agreed` are given and `method` and every rate, interval and coefficient are `null`. `project_id` and `queue_id` narrow it to a project and one queue; a project or queue that does not exist is `404`. It needs `review_queues` | Records: every link of each run's review chains. Store: the runs' review queues |
+| `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `panel` (the members a judge graded by a [panel](evals.md#a-panel-of-judges) runs on, each `model` and `endpoint`, in place of a model; empty for any other judge), `status` (`checked` or `unchecked`), `reason` (`null`; `none` when it has no calibration, which the `policy` judge never has; `model_changed` when it runs on another model, or panel, than its calibration was measured on; or `definition_changed` when what it means differs from what it meant then) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
+| `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `panel`, `definition` (the digest of what the version meant when it was measured), `labelled`, `items` (the labelled items it rests on, each a case result's `run_id` and `case_id` or a trace's `trace_id`, with its `label` and the `verdict` compared with it, `null` for an item a re-check got no verdict for), `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved, or the re-check's), `recheck_of` (the calibration a re-check graded again to make this one, else `null`), `actor_id` and `created_at`. `project_id` names its project | Records |
+| `GET /v1/evals/judge-rechecks/{recheck_id}` | One [re-check](evals.md#calibration) of a calibration: `id`, `project_id`, `judge`, `version`, `calibration_id` (the calibration whose items it grades again), `model`, `endpoint` and `panel` (what the version runs on, pinned when it was asked for), `definition`, `state` (`queued`, `running`, `completed` or `failed`), `total` (the labelled items), `graded` and `errors` (the items with and without a verdict so far), `error` (why it failed), `result_id` (the calibration it saved), `actor_id`, `created_at` and `finished_at`. `project_id` names its project | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -278,6 +284,29 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
   its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
   comparison pairs these combined statuses.
+- **Judge agreement.** A judge version's verdicts are the judge scores of every run of the
+  project in the record store (a scoring job's, and a suite-file run's own), and the judge scores
+  on the project's traces that are on no case result's trace and name no case result, such as an
+  application's judges on live traffic. The copy each scored value also leaves on its case's
+  trace is not read again. People's labels are each run's complete current reviews and the human
+  feedback on the project's traces, but not the copy of a review's answer on its case's trace
+  (metadata `martian.review_criterion`) nor an expectation annotation. Every version of each judge
+  registered in the project is reported, with its definition's kind, even before it scored
+  anything. Traces are read newest first, at most 1,000 (`traces_examined`); `traces_truncated`
+  says older ones were left out. Runs, their scores and their reviews are read in full. The
+  report is the core's own because the judges' responses are typed in the frozen contract.
+- **Reviewers' agreement.** A second reviewer's answer follows the first in the case's chain for
+  the question and becomes the current review, the one the contract's review routes and the judge
+  report read. The reviewer report reads every link of the chains, each reviewer's newest, so both
+  answers count. It is the core's own for the same reason as the judge report, and the judge
+  report carries it beside its items rather than in them, so a judge version's
+  [calibration](evals.md#calibration), its item of the report, is unchanged.
+- **Judge calibrations.** A judge version is `checked` while its newest calibration was measured
+  on the model it runs on now, as a scoring job admitted now would pin it, and with the
+  definition it has now (`martian.evals.calibration.judge_definition`); the routes are the core's
+  own for the same reason as the agreement report. `POST /judge-calibrations` saves one and
+  `POST /judge-rechecks` re-checks one ([write routes](#write-routes)). A judge graded by a panel
+  is calibrated as one judge, on its members ([calibration](evals.md#calibration)).
 - **Conversation cases.** A conversation case result is one item, with its conversation's status,
   its first turn's prompt as `prompt` and the conversation as messages, in JSON, as `output`.
   `EvalItemOut` has no place for turns, so they are served by the turns route above, which the
@@ -350,16 +379,25 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   start of its request and response ([free text](#the-in-process-binding)). A page of results is
   the store's page of the whole project, whatever its size, so it may hold fewer traces than its
   limit, or none, and still have a `next_cursor`, when the store filtered in its own process (the
-  MLflow binding does for free text and the assessment filter). A cursor names the store's page
-  and belongs to its query: reused with another, it is `409`. One whose store page is not a
+  MLflow binding does for free text and the assessment filter). Only a `next_cursor` of `null` ends
+  a search, so a client reads on to fill a page (the Evals UI's bound is in
+  `docs/evals-workbench.md` in MartianSecurity/MartianFrontend). A cursor names the store's page and
+  belongs to its query: reused with another, it is `409`. One whose store page is not a
   `next_cursor` that store returned, such as `²` or `١`, is `422` ("cursor is not a next_cursor
   this store returned"). A session search is the store's `search_sessions` with the same filters
-  and order. A session search with a cursor is `422`, as on the server.
+  and order. One that stopped before it read `limit` matching traces, such as one with free text on
+  `MlflowStore`, has `has_more` and a `traces_examined` below its `limit`. A session search with a
+  cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
 
-`tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
+`tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`;
+`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics,
+`tests/evals/test_reviewer_agreement.py` the reviewers' agreement route on both, two people
+answering a queue through the review route, and its statistics, and
+`tests/evals/test_calibration.py` and `test_calibration_recheck.py` the calibration and re-check
+routes.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
@@ -428,7 +466,7 @@ contract:
 | `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
-| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on | `suites` |
+| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on; `GET` lists a judge graded by a panel with `panel` in its `definition` | `suites` |
 | `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
 | `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
@@ -437,21 +475,30 @@ contract:
 | `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
 | `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
 
+The core adds three write routes of its own, which the server's contract does not have:
+
+| Route | What it does | Module |
+| --- | --- | --- |
+| `POST /judge-panels` | Register a new version of a judge graded by a [panel of judges](evals.md#a-panel-of-judges): the body of `POST /judges` with `panel`, 2 to 9 different members, each a `model` (required) and an optional `endpoint`, and no `model` or `endpoint` of its own. A panel decides pass or fail, so its `kind` is `boolean`; a duplicate member, another kind, or a judge model of its own is `422`. Versions, idempotency and `manageJudges` are as for `POST /judges`, and the answer (`201`) is the version as `GET /judges` lists it, with `panel` in its `definition`. The contract's `JudgeVersionRequest` has no field for a panel, and the core does not change it | `suites` |
+| `POST /judge-calibrations` | Save a judge version's current item of the agreement report as its [calibration](evals.md#calibration), with the labelled items it compared, the model it runs on now and its definition. The body is `request_id`, `project_id` (optional), `name` and `version` (`"2"`, or `"v1"` for a built-in model judge); the answer (`201`) is the calibration as `GET /judge-calibrations/{calibration_id}` gives it. A judge version the project has not registered and that is no built-in model judge is `404`; the `policy` judge, whose guidelines come with each scoring request, and a report that is not measured, below 30 labelled items or of a free-text judge, are `422`. It needs `manageJudges`, and an archived project takes none (`409`) | `calibration` |
+| `POST /judge-rechecks` | Re-check a judge version's newest calibration: grade exactly its labelled items again with the version as it runs now, and save the result as its newest calibration when it is measured. The body is `request_id`, `project_id` (optional), `name`, `version` and `acknowledge_model_cost`, which must be `true`: each item is a model call (`422` without it). It records a `queued` re-check, with the version pinned to the model it runs on now (the default judge model for a judge that names none, or its panel's members), submits it to the worker and answers `202` with the re-check as `GET /judge-rechecks/{recheck_id}` gives it. A version with no calibration, or one the project has not registered, is `404`; the `policy` judge, a calibration that records no labelled items, and a worker without a judge are `422`; a re-check of the version still queued or running, and an archived project, are `409`. It needs `manageJudges`. It is the route a schedule of re-checks calls; the core keeps no schedule | `calibration` |
+
 All paths are under `/v1/evals`. How the core carries them out:
 
 - **Requests are idempotent by their `request_id`.** The id of what a request creates (a run, a
-  scoring job, a review, a queue, a suite, a project, a view) is a UUID derived from its
+  scoring job, a review, a queue, a suite, a project, a view, a calibration, a re-check) is a UUID derived from its
   `request_id` (`projection.derived_id`), so the same request again returns the same object, and
   the same `request_id` with other content is `409`, as on the server. A judge version keeps its
   `request_id` as `operation_id` in its criteria, and a trace annotation in its score's metadata.
 - **No target or model call in a request.** A launch checks the request, asks the worker whether
   it can call the target (`Worker.check_target`), records a `queued` run with the published
   dataset version it will read and the target's pin in `provenance.target`, and submits it. A
-  scoring request records a `queued` scoring job and submits it. Both answer `202` at once. The
+  scoring request records a `queued` scoring job, and a re-check request a `queued` re-check, and
+  submits it. Each answers `202` at once. The
   launch checks only the target it names. When the worker refuses the submit or fails, the
-  recorded run or job is `failed` with "The worker did not accept this work, so nothing ran"
+  recorded run, job or re-check is `failed` with "The worker did not accept this work, so nothing ran"
   before the error is raised (`submit_or_fail`), so it never stays `queued` and blocks the next
-  launch or scoring request.
+  launch, scoring request or re-check.
 - **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
   target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
   id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. An
@@ -568,12 +615,12 @@ whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
 ## The worker
 
 `martian.evals.worker` is what the write routes hand long-running work to, in place of the
-server's background tasks. A route records the work first, as a queued `Run` or `ScoringJob`, and
-then calls `Worker.submit(Work(...))`:
+server's background tasks. A route records the work first, as a queued `Run`, `ScoringJob` or
+`CalibrationRecheck`, and then calls `Worker.submit(Work(...))`:
 
 | Member | What it does |
 | --- | --- |
-| `Work` | `kind` (`run`, `scoring`, `monitor` or `schedule`), the `principal`, `project_id`, `run_id` for a run or scoring, `job_id` for scoring, `monitor_id` for a monitor's pass ([monitors](#monitors)) and `schedule_id` for a schedule's turn ([schedules](#schedules)) |
+| `Work` | `kind` (`run`, `scoring`, `recheck`, `monitor` or `schedule`), the `principal`, `project_id`, `run_id` for a run or scoring (empty for the others), `job_id` for scoring and, for a re-check, the re-check's id, `monitor_id` for a monitor's pass ([monitors](#monitors)) and `schedule_id` for a schedule's turn ([schedules](#schedules)) |
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`, or `TargetRefused` (a `ValueError` in `martian.evals.worker.targets`, which the launch answers `422`) for a target it has but refuses; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
@@ -583,7 +630,8 @@ then calls `Worker.submit(Work(...))`:
 | `RunsMonitors.monitor_seconds` | Optional, for a worker that takes a monitor's work again after each pass, as `QueueWorker` does: how long after a pass ends the next is due. The routes that create and resume a monitor need it ([monitors](#monitors)) |
 | `RunsSchedules.schedules` | Optional, for a worker that takes a schedule's work again at each of its slots and admits its runs, as a `QueueWorker` given `schedules` does: the `ScheduleServices` it admits them with, or `None`. The routes that create and resume a schedule need one ([schedules](#schedules)) |
 
-`execute_run` and `execute_scoring` are the work itself, for any worker to call. `execute_run`
+`execute_run`, `execute_scoring` and `execute_recheck` are the work itself, for any worker to
+call. `execute_run`
 takes the worker's `call_for(run)`, the call for the run's target, and `pin_for(run)`, the
 target's pin as the worker has it now, which must still be the run's before any call. They read the
 record before each case, so a cancel request reaches a worker in another process too, and move
@@ -594,6 +642,11 @@ next one starts. Work whose worker stopped part way is queued again by the queue
 which resumes it after the cases already finished (`take_over`, [checkpoints and
 resuming](#checkpoints-and-resuming)), or marked `failed` where no queue takes it again
 (`fail_unfinished`).
+A re-check (`martian.evals.worker.recheck`) reads its calibration's labelled items, a case
+result's request, expected response and saved output or a trace's request and response, and
+grades each with the judge request a scoring job would send for it; an item no longer stored, or
+with no saved output, gets no verdict. It keeps no checkpoint: a re-check the queue's next worker
+takes over starts again from its first item. It has no cancel request.
 
 A target is called once per case and returns its output ([targets](#targets)); a judge is an
 async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
@@ -1155,6 +1208,16 @@ provider's or Agents' own error text. Any other exception is logged, and its sco
 unavailable; no automatic model retry". A scorer the judge leaves out of `JudgeResult.verdicts`
 with a reason in `JudgeResult.errors` gets that reason.
 
+**A judge graded by a panel.** A registered judge with a `panel` ([`POST /judge-panels`](#write-routes))
+is in the `JudgeRequest` of each of its members' models, beside the other judges of the job on
+that model, so each member grades it on its own through the same `Judge`, in one call per model
+and case as before. Its score is decided by the strict majority of the members that gave a
+verdict, from more than half of them ([a panel of judges](evals.md#a-panel-of-judges)): a member
+whose request failed, or that gave no pass/fail verdict, does not vote, and no majority is the
+score's error (`Judge panel has no majority [judge_panel_no_majority]: ...`), never a pass. The
+SDK judge grades panels; the Agents judge refuses every request pinned to a model, so on it each
+member errors and a panel never decides.
+
 `tests/evals/test_worker_judges.py` scores a run through the routes with the SDK judge against a
 loopback OpenAI-compatible endpoint (the rubrics, the context, one call per case, the reported
 version, a numeric judge's error, a wrong key, an unreachable endpoint, no model at all), and with
@@ -1219,11 +1282,14 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   such as `openai:/gpt-4o-mini`), and `endpoint`, the base address of the OpenAI-compatible
   endpoint that serves it (`http://localhost:4000/v1`). Both are optional and part of the version,
   so a new model is a new version, and `GET /judges` returns them in each version's `definition`.
-  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`.
+  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`. A judge graded by a
+  panel (`POST /judge-panels`) names its members instead, each a model and an optional endpoint,
+  kept as `ScorerVersion.panel`; its `model` and `endpoint` are `null`.
 - **The default judge model.** `GET /judge-model` answers `{"model", "endpoint", "selectable"}`
   for the principal's organisation; `PUT /judge-model` sets it (`manageJudges`), and `{}` clears
   it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
-  included. With none set, the worker's judge uses its own model. `selectable` says whether the
+  included; a panel's members always name theirs, so the default never applies to a panel. With
+  none set, the worker's judge uses its own model. `selectable` says whether the
   installation runs a judge on the model it names: always `true` from the core's own routes. The
   Martian server answers `false` (`docs/evals-workbench.md` in MartianSecurity/MartianBackend); its
   judges run in Agents, which grades on a judge's model only when Agents' operator allows it, as
@@ -1243,7 +1309,15 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   `martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint` and
   `martian.judge.version`, the judge's own version (`response-rubrics-v1` for the SDK judge,
   `martian-eval-judge-v1` or `v2` for Agents); a judge score with no verdict still names the model
-  it was pinned to. The same values are on the case's trace.
+  it was pinned to. It also names, as `martian.calibration_id`, the judge version's
+  [calibration](evals.md#calibration) that applied: its newest when the job started, if it
+  checks the version as the job runs it (on the same model, with the same definition), else
+  `none`. The same values are on the case's
+  trace. A panel's score has `source_id` `panel:` and a digest of its members, and its metadata
+  holds the decision and each member's model, endpoint, reported model version, verdict and
+  reason (`martian.panel.*`, [what is recorded](evals.md#a-panel-of-judges)) in place of
+  `martian.judge.model`, `model_version` and `endpoint`, with `martian.judge.version` when the
+  members' answers report one, and the calibration of the panel as a whole.
 - **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
   its own environment, and a per-organisation key store is MartianSecurity/martian-notes#135. An
   endpoint is a plain `http` or `https` address, so one with a user name, password, query or
@@ -1255,6 +1329,10 @@ Each judge runs on a model of its own, or on the default judge model when it nam
 `tests/evals/test_judge_models.py` scores one run with two registered judges on two models and a
 built-in judge on the default, keeps a job's model when the default changes, refuses a key in an
 endpoint, and keeps the local edition's default in its data folder.
+`tests/evals/test_judge_panel.py` covers the panel's rule, a panel in Python and in a suite file
+against a loopback endpoint, and a registered panel the worker grades with a fake judge: one
+member's error still decides, no majority is an error, every vote is on the score, and a panel is
+reported and calibrated as one judge.
 
 ## Monitors
 
@@ -1995,7 +2073,11 @@ store keeps the watch, its progress and the noted changes on both databases.
   [pushed runs](#pushed-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own routes for the attempts of repeated cases, with the run's reliability and its
-  flaky cases, and for the turns of conversation cases.
+  flaky cases, for the turns of conversation cases, for each judge version's agreement with
+  people's labels, for people's agreement with each other per review queue, and for each judge
+  version's calibration and its re-checks, which the core's own write routes save and ask for.
+  Another registers a judge graded by a [panel of judges](evals.md#a-panel-of-judges), which the
+  worker grades on each member.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
@@ -2433,8 +2515,8 @@ written by one MLflow release reads back the same on the next.
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
 on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
-page's saved views, monitors, thresholds and schedules, and the manifests of the dataset versions
-it published.
+page's saved views, judge calibrations and their re-checks, monitors, thresholds and schedules,
+and the manifests of the dataset versions it published.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -2454,7 +2536,7 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   against the organisation the store sets for each transaction, and applies to the tables' owner.
   A role that bypasses row-level security, such as a superuser, is held only by the store's own
   filter.
-- Updates that move a run or scoring job on name the state they expect, and draft and view edits
+- Updates that move a run, scoring job or re-check on name the state they expect, and draft and view edits
   name the revision they expect. A review chain never forks: a review is replaced at most once.
 - `put_results(..., scores=[...])` stores case results and their scores in one transaction, so a
   case has both or neither: the worker's checkpoint of each finished case
@@ -2474,6 +2556,20 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 - The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
   database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
   method: only a `QueueWorker` uses it.
+- A judge calibration (`JudgeCalibration` in `martian.evals.records`) is the core's own record,
+  not part of the shared model: `save_calibration` records one, or returns the stored one with
+  the same id; `get_calibration` reads one and `list_calibrations` lists a project's, or one
+  judge's, newest first. A calibration is never changed, so a score that names one can always
+  read it. A panel judge's calibration keeps its members in `panel`, and every calibration its
+  labelled `items` and `definition`, inside the stored record, so no migration adds a column for
+  them. Migration `0010` adds its table. It is kept here, not with the registered judge in
+  MLflow: a registered judge version is immutable there, so a calibration on it would need a new
+  version, and every earlier calibration must stay readable by the scores that name it.
+- A re-check of a calibration (`CalibrationRecheck` in `martian.evals.records`) is the core's own
+  record too: `create_recheck` records one, or returns the stored one with the same id;
+  `update_recheck` moves it on, naming the state it expects; `get_recheck` reads one and
+  `list_rechecks` lists a project's, or one judge's, newest first. Migration `0011` adds its
+  table.
 - [Monitors](#monitors) (`Monitor`, `MonitorFilter`, `MonitorProgress` and `MonitoredTrace` in
   `martian.evals.records`) are the core's own records, not part of the shared model. Migration
   `0005` adds `martian_monitors`, one row per monitor holding the monitor as its routes write it
@@ -3000,7 +3096,7 @@ default project:
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
 | `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`, or for a panel check `panel:` and a digest of its members, with every member's vote in its `metadata` (from the check's `metadata` in `results.jsonl`). With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
 | `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts, and tagged `martian.simulated` when a simulated user wrote it; the case result's trace is its first turn with the conversation's verdict, else its first |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
@@ -3113,6 +3209,8 @@ martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
 [`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
 configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
 the results promptfoo writes for that config with its two providers, also written by hand.
+[`tests/evals/promptfoo`](../tests/evals/promptfoo) has results promptfoo 0.125.1 wrote itself,
+for a config with two prompts and two Python providers that answer from a table.
 
 ### Imported results
 
@@ -3134,7 +3232,11 @@ maps every field:
 - A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
   grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
   `threshold` counts as promptfoo counted it.
-- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts,
+  and a case id names the test and the prompt. promptfoo numbers each provider's prompts as
+  columns of their own (`promptIdx` 0 and 1 for the first provider's two prompts, 2 and 3 for the
+  second's), so `prompt <m>` counts the prompts by their `promptId` instead, in the order the file
+  first gives them.
 - Every file is read before anything is written, so a file that is not promptfoo results, one
   of another version, one without rows, or one that has a provider's case twice or two providers
   with one label stops the command with exit code `2` and writes nothing.
@@ -3149,7 +3251,8 @@ and writes the suite files where the features map:
   `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
   `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
   Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
-  promptfoo. Case ids are the ones the importer gives the same tests' results.
+  promptfoo. Case ids are the ones the importer gives the same tests' results under every
+  provider, when the file's first provider runs every prompt.
 - `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
   them. `{{ name }}` in an assertion's value is filled from the test's vars.
 - A suite file applies every check to every case, and promptfoo asserts per test, so tests that
@@ -3166,7 +3269,7 @@ and writes the suite files where the features map:
 - A folder that already has one of the files to write stops the command with exit code `2` before
   anything is written, and so does a config with nothing that converts.
 
-Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+Assertions map onto the built-in checks ([deterministic checks](evals.md#deterministic-checks) and
 the rubric judge). An assertion converts only when its check decides the way promptfoo does;
 everything else is listed:
 
@@ -3198,7 +3301,7 @@ a score threshold.
 | --- | --- |
 | `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
 | `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
-| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `is-json` with any other schema, `equals` with a JSON value | No built-in check validates a schema or compares JSON values |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
 | `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
 | `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
@@ -3211,7 +3314,7 @@ a score threshold.
 | `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
 | `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
 | Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
-| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No built-in check reads them |
 | `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 
 `not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
@@ -3232,12 +3335,15 @@ each suite file holds it as comments at its top, with the tests it covers.
 `tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
 through the local edition's routes: both providers' runs, their cases and verdicts, every
 assertion's pass and score against the file, the provenance, a trace, and Compare of the two
-providers; it also covers repeated and nested assertions, grader errors, and the files the command
-refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
-file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
-stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
-and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
-convert is listed.
+providers. It compares the two providers of the file promptfoo 0.125.1 wrote case by case too, and
+checks that a case id names the same prompt under every provider when two prompts share a label
+or a provider runs only some prompts; it also covers repeated and nested assertions, grader
+errors, and the files the command refuses. `tests/evals/test_promptfoo_convert.py` converts the
+example config, checks each suite file and the list of what it left out, and runs its three suites
+against `agent.py`; it runs a stored-reply suite, checks that the converted cases of the config
+promptfoo 0.125.1 ran have the case ids its results give both providers, that each converted
+assertion type decides a reply, or a call's time and cost, as promptfoo does, and that every
+assertion, option, prompt and test that does not convert is listed.
 
 ## Copied MLflow stores
 
@@ -3371,17 +3477,18 @@ serves them without a new contract version.
 | Route | What it does |
 | --- | --- |
 | `GET /v1/push` | The export format and version the server reads, and the organisation a push writes into (`organisation_id`, `organisation_name`) |
-| `PUT /v1/push/runs/{run_id}` | The run, its project and its finished scoring jobs. `200` with `created`, whether this request recorded the run, and `cases`: each case the server holds a result of, with the scorer and scoring job (empty for the run's own) of each score it holds of it |
+| `PUT /v1/push/runs/{run_id}` | The run, its project and its finished scoring jobs. `200` with `created`, whether this request recorded the run, and `cases`: each case the server holds a result of, with the scorer, the scoring job (empty for the run's own) and the source of each score it holds of it |
 | `POST /v1/push/runs/{run_id}/cases` | Some of the run's cases, each with its result, its scores and every trace they refer to, or traces of the run that no case refers to. `200` with how many it took |
 
 A push carries the lines of the [data export's format](data-export.md#the-format) under its name
 and version, written by the export's own code (`run_records` and `export_line` in
 `martian.evals.data_export`): the run's `runs.jsonl` line, its project's `projects.jsonl` line, and
 its `scoring_jobs.jsonl`, `case_results.jsonl`, `scores.jsonl` and `traces.jsonl` lines. A server
-reads only its own version and refuses another with `422`. A batch of cases:
+reads only its own version (`VERSION` in `martian.evals.data_export`) and refuses another with
+`422`. A batch of cases:
 
 ```json
-{"format": "martian-evals-export", "version": 3,
+{"format": "martian-evals-export", "version": 4,
  "run": {"project_id": "default", "run": {"id": "…", "state": "completed", "…": "…"}, "store_run": {"…": "…"}},
  "case_results": [{"project_id": "default", "result": {"run_id": "…", "case_id": "c1", "…": "…"}}],
  "scores": [{"project_id": "default", "score": {"run_id": "…", "case_id": "c1", "scorer": "exact_match", "…": "…"}}],
@@ -3426,7 +3533,7 @@ reads only its own version and refuses another with `422`. A batch of cases:
   more runs (`409`).
 - **Who writes.** The routes write as `push_principal` (`martian.evals.server.push`), a dependency
   that is the edition's principal unless the edition binds another for these routes alone. The
-  Martian server binds its organisation API keys to it ([below](#the-martian-server)).
+  Martian server takes its organisation API keys on these routes too ([below](#the-martian-server)).
 - **What a push leaves.** A run's reviews and review queues, its artifacts and its dataset version,
   scoring jobs still queued or running with their scores, traces of no run, and the rest of the data
   folder: [the data export](data-export.md) moves a whole install. A score given to a trace after its
@@ -3476,10 +3583,11 @@ each organisation's default judge model, and `current_agent_names` its agent reg
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
 names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
 contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`) but
-the [push routes](#pushed-runs), which it mounts beside the contract with `push_principal` bound
-to its organisation API keys: a key with `evals:write`, bound to no agent and no datasets, pushes
-as a member of its organisation on behalf of the member who created it, and any other bearer is a
-signed-in member, as on every route. So a route reads
+the [push routes](#pushed-runs), which it mounts beside the contract. They take what its other core
+routes take (a signed-in member, or a service account's key, which pushes into its own project
+only when it is limited to one) and, on these routes alone, an organisation API key with
+`evals:write` bound to no agent and no datasets, which pushes as a member of its organisation on
+behalf of the member who created it. So a route reads
 what an edition supplies only through these dependencies, never from `create_app`'s
 `app.state` (the OTLP route's write lock is the exception, and the server does not mount it).
 `tests/evals/test_write_routes.py` serves the scorers route on an application of its own that
@@ -3488,10 +3596,11 @@ way.
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
-`test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
-`test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
-`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_schedules.py`,
-`test_model_changes.py`, `test_no_outbound.py`, `test_push.py` and the store and record
-tests run the core without the backend. The `Evals core` job in CI runs them with the model
+`test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`,
+`test_calibration_recheck.py`, `test_write_routes.py`, `test_write_contract.py`,
+`test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
+`test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,
+`test_worker_limits.py`, `test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`,
+`test_schedules.py`, `test_model_changes.py`, `test_no_outbound.py`, `test_push.py` and the store
+and record tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.
