@@ -61,9 +61,10 @@ WRITE_OPERATIONS = [
 ]
 
 # The core's own status and bootstrap operations are in the contract's shape under the core's names
-# (tests/evals/test_bootstrap.py). CI gate sessions and tokens stay with the server's CI gate, and
-# the explorer's overview, quality issues, trace export and capabilities are not ported yet.
-OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap")}
+# (tests/evals/test_bootstrap.py), and OpenTelemetry's POST /v1/traces is OTLP's, not the contract's
+# (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and the
+# explorer's overview, quality issues, trace export and capabilities are not ported yet.
+OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have (MorningHQ/martian-notes#180,
 # MorningHQ/martian-notes#191).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}

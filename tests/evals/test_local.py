@@ -39,6 +39,7 @@ def no_telemetry(monkeypatch):
     # The container image's settings: unset unless a test sets them.
     monkeypatch.delenv(local.BIND_ENV, raising=False)
     monkeypatch.delenv(local.ALLOWED_HOSTS_ENV, raising=False)
+    monkeypatch.delenv(local.CONCURRENCY_ENV, raising=False)
 
 
 @pytest.fixture
@@ -204,6 +205,24 @@ def test_the_command_defaults_to_the_data_folder_in_home_and_opens_the_browser(m
     assert served["port"] == 7600 and served["open_browser"] is True
     assert served["host"] == "127.0.0.1"
     assert (tmp_path / ".martian" / "evals" / "mlflow.db").is_file()
+
+
+def test_the_concurrency_is_how_many_runs_and_scoring_jobs_may_be_in_progress_at_once(monkeypatch, tmp_path, ui):
+    served = {}
+    monkeypatch.setattr(local, "serve", lambda app, **options: served.update(options, app=app))
+    command = ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"]
+    for options, setting, expected in (([], None, 1), (["--concurrency", "3"], None, 3), ([], "2", 2)):
+        if setting is not None:
+            monkeypatch.setenv(local.CONCURRENCY_ENV, setting)
+        result = CliRunner().invoke(cli, [*command, *options])
+        assert result.exit_code == 0, result.output
+        bootstrap = TestClient(served["app"], base_url=LOCAL).get("/v1/evals/bootstrap").json()
+        assert bootstrap["edition"]["key"] == "community"
+        assert bootstrap["entitlements"]["limits"] == {"concurrent_runs": expected, "concurrent_scoring_jobs": expected}
+        assert served["app"].state.martian_evals_worker.concurrency == expected
+    monkeypatch.delenv(local.CONCURRENCY_ENV)
+    refused = CliRunner().invoke(cli, [*command, "--concurrency", "0"])
+    assert refused.exit_code == 2 and "--concurrency" in refused.output
 
 
 def test_the_image_settings_listen_on_the_named_address_keep_the_host_check_and_warn(monkeypatch, tmp_path, ui):

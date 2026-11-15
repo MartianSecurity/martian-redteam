@@ -37,6 +37,7 @@ from martian.evals.conversations import graded_turns
 from martian.evals.model import (
     Case,
     Repeats,
+    RunLimits,
     RunSettings,
     ScorerVersion,
     SimulatedUser,
@@ -59,7 +60,7 @@ SUITE_FILE_FIELDS = {
     "target.headers": "Target.headers (kind http), values as written",
     "target.body": "Target.body (kind http)",
     "target.response_path": "Target.response_path (kind http)",
-    "target.timeout_seconds": "RunSettings.target_timeout_seconds",
+    "target.timeout_seconds": "RunSettings.target_timeout_seconds (a function or http target)",
     "judge": "The llm_judge scorers",
     "judge.model": "ScorerVersion.model of each llm_judge scorer",
     "judge.inference_params": "ScorerVersion.parameters of each llm_judge scorer",
@@ -109,6 +110,9 @@ SUITE_FILE_FIELDS = {
     "mlflow": "RunSettings.mlflow_tracking_uri and mlflow_experiment",
     "mlflow.tracking_uri": "RunSettings.mlflow_tracking_uri",
     "mlflow.experiment": "RunSettings.mlflow_experiment",
+    "limits": "RunSettings.limits",
+    "limits.max_seconds": "RunSettings.limits.max_seconds (RunLimits)",
+    "limits.max_judge_tokens": "RunSettings.limits.max_judge_tokens (RunLimits)",
     "simulator": "Suite.simulator, the model that plays the data's simulated users",
     "simulator.model": "Simulator.model",
     "simulator.inference_params": "Simulator.parameters",
@@ -385,6 +389,8 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
     for name in ("tracking_uri", "experiment"):
         if name in mlflow.model_fields_set:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
+    if limits := {name: getattr(file_suite.limits, name) for name in file_suite.limits.model_fields_set}:
+        values["limits"] = RunLimits(**limits)
     simulator = file_suite.simulator
     for name in ("max_retries", "rate_limit_wait_seconds", "headers"):
         if simulator is not None and name in simulator.model_fields_set:
@@ -492,6 +498,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     }
     if mlflow:
         file["mlflow"] = mlflow
+    if settings.limits is not None:
+        file["limits"] = settings.limits.model_dump(exclude_none=True)
     return file
 
 
@@ -503,14 +511,16 @@ def _target_file(target: Target | None, settings: RunSettings) -> dict[str, Any]
         )
     if target.kind == "agent":
         raise ConfigError("an agent target is an agent registered on the server, which a suite file cannot name")
-    if settings.target_timeout_seconds is not None and target.kind != "http":
-        raise ConfigError("settings.target_timeout_seconds applies only to an http target")
+    if settings.target_timeout_seconds is not None and target.kind == "stored":
+        raise ConfigError("settings.target_timeout_seconds applies only to a function or http target")
     if target.kind == "stored":
         return None
     if target.kind == "function":
         written: dict[str, Any] = {"file": target.file}
         if target.function != _DEFAULT_FUNCTION:
             written["function"] = target.function
+        if settings.target_timeout_seconds is not None:
+            written["timeout_seconds"] = settings.target_timeout_seconds
         return written
     written = {"url": target.url}
     if target.headers:

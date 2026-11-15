@@ -16,7 +16,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from martian.evals.judge_settings import JudgeSettings, MemoryJudgeSettings
-from martian.evals.model import Case, Project
+from martian.evals.model import Case, Project, RunLimits
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Entitlements, Principal, create_app
 from martian.evals.store import EvalStore
@@ -121,6 +121,7 @@ def serve(
     credentials: Credentials | None = None,
     executor: AgentExecutor | None = None,
     target_timeout_seconds: float = 2,
+    limits: RunLimits | None = None,
 ) -> tuple[TestClient, Served]:
     """The core with a dataset published for ``principal``, who makes the requests until
     ``act_as`` names another. Use the client as a context manager, so the worker's tasks run
@@ -136,6 +137,7 @@ def serve(
         target_timeout_seconds=target_timeout_seconds,
         credentials=credentials,
         executor=executor,
+        limits=limits,
     )
     holder: dict[str, Principal] = {"current": principal}
     options: dict[str, Any] = {} if entitlements is None else {"entitlements": entitlements}
