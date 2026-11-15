@@ -33,7 +33,8 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 `martian evals run evals.yaml` does not use the platform connection above and sends nothing to
 Martian. Its outbound calls are the ones the suite file names:
 
-- **A URL target** (`target.url`) receives one JSON `POST` per case, carrying that case's input.
+- **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
+  suite repeats its cases, carrying that case's input.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -52,12 +53,49 @@ Martian. Its outbound calls are the ones the suite file names:
 
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
-verdicts and reasons as `results.jsonl` holds them, its trace with the target's spans, and the
+verdicts and reasons as `results.jsonl` holds them (every attempt's, when the suite repeats
+cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
+
+## Telemetry
+
+The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
+`martian evals run`, the eval gate, a server that serves the [evals core](evals-core.md) and
+each of its worker processes. Importing `martian.evals` sets `MLFLOW_DISABLE_TELEMETRY=true`
+before it imports MLflow, unless the environment already sets the variable, and each worker
+process inherits it. MLflow decides when it is first imported whether to start its telemetry
+client, which otherwise asks `config.mlflow-telemetry.io` for a configuration and then posts
+usage events from a background thread. A process that imports MLflow before `martian.evals`,
+such as an application that serves the core beside its own MLflow code, must set the variable
+in its environment.
+
+| Setting | In the evals processes | Effect |
+| --- | --- | --- |
+| `MLFLOW_DISABLE_TELEMETRY` | `true` unless the environment sets it | MLflow's usage telemetry. `false` turns it back on |
+| `DO_NOT_TRACK` | Not set | `true` also turns MLflow's telemetry off |
+
+What each part sends without a setting of yours:
+
+| Part | Sends by itself | Sends only when you configure it |
+| --- | --- | --- |
+| `mlflow-skinny` | Usage telemetry, off as above | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
+| `opentelemetry-sdk`, under MLflow tracing | Nothing | Spans to the collector `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` names |
+| `databricks-sdk` and `google-auth`, which MLflow brings | Nothing | Databricks and Google Cloud URIs, which the local and on-premises stores do not use |
+| FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
+| The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
+| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+
+`tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
+deterministic check, `martian ui` serving the UI and that run, and the core with a process
+worker running a function target, each in a clean environment (no CI or pytest variables, under
+which MLflow turns its telemetry off by itself, and no telemetry settings) with every connection
+and name lookup for an address other than loopback refused. It fails on any such attempt and on
+MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
+loads nothing from another host.
 
 ## The local edition has no login
 

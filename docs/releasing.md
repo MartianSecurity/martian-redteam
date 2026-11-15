@@ -24,11 +24,15 @@ uv run --all-extras pytest -q
 uv build
 uv run --all-extras twine check --strict dist/*
 uv run --all-extras python scripts/check_release.py --install
+uv run --all-extras python scripts/sbom.py wheel
 docker build -t ghcr.io/morninghq/martian-evals:<version> .
 uv run --all-extras python scripts/check_image.py --image ghcr.io/morninghq/martian-evals:<version>
+uv run --all-extras python scripts/sbom.py image --image ghcr.io/morninghq/martian-evals:<version>
 ```
 
-The last two build [the local edition's image](#the-local-editions-image) from the wheel in
+The two `sbom.py` commands write the [bills of materials](#bills-of-materials-and-the-licence-check)
+into `release-sbom/` and stop on a licence outside the allowed list. `docker build` and
+`check_image.py` build [the local edition's image](#the-local-editions-image) from the wheel in
 `dist/` and check it. `check_release.py` requires one wheel and one sdist, matching versions, Apache-2.0
 metadata and license files, Python 3.12+, both modules, typed markers, CLI
 entry points, the documented extras and the pinned Evals UI
@@ -75,7 +79,7 @@ release publishes to PyPI:
 
 | Job | Permissions | Environment | What it does |
 | --- | --- | --- | --- |
-| `build` | `contents: read` | None | Checks, builds and keeps the distributions and the image; publishes nothing |
+| `build` | `contents: read` | None | Checks, builds and keeps the distributions, the image and their bills of materials; publishes nothing |
 | `publish` | `id-token: write` (OIDC for PyPI Trusted Publishing) | `pypi` | Uploads the two distributions to PyPI |
 | `publish-image` | `packages: write` (the job's `GITHUB_TOKEN` pushes to GitHub Container Registry) | `ghcr` | Pushes the checked image, after `publish` succeeded |
 
@@ -141,9 +145,55 @@ to about 640 KB, and the sdist from about 410 KB to about 860 KB. `ls -l dist` a
 shows the current figures.
 
 **Licences.** `third-party-licenses.md` in the build holds the licences of the packages bundled in
-it: MIT, ISC and Apache-2.0, and OFL-1.1 for the Inter font. The Evals app's own packages in the
-frontend carry no licence yet (MorningHQ/martian-notes#220); settle that before publishing a
-release that ships the UI.
+it: MIT, ISC and Apache-2.0, and OFL-1.1 for the Inter font. The wheel's bill of materials lists
+those packages from it ([below](#bills-of-materials-and-the-licence-check)). The Evals app's own
+packages in the frontend carry no licence yet (MorningHQ/martian-notes#220); settle that before
+publishing a release that ships the UI.
+
+## Bills of materials and the licence check
+
+Each release writes two CycloneDX 1.6 JSON bills of materials into `release-sbom/`, and the
+release workflow keeps them as the `release-sbom` artifact:
+
+| File | What it lists | How |
+| --- | --- | --- |
+| `martian-sdk-<version>.cdx.json` | The wheel with the `evals` extra (the server and the worker): the SDK, each Python dependency at the version `uv.lock` pins, and the Evals UI in `martian/ui/` with the npm packages bundled in it | `sbom.py wheel` installs the one wheel in `dist/` as the `Dockerfile` does, in a fresh Python 3.12 environment, and reads every installed distribution's metadata and the UI's `third-party-licenses.md` |
+| `martian-evals-image-<version>.cdx.json` | The local edition's image: the same, read from inside the image, plus its CPython interpreter, the base image's Python packages and its Debian packages | `sbom.py image` runs the same probe with the image's Python, with no network |
+
+Each component has its name, version, package URL and licence: the SPDX expression its metadata
+declares (`acknowledgement: declared`), or the one the policy concluded after reading its licence
+file (`concluded`, with the declared text in the `martian:declared-licence` property). The
+`martian:licence-policy` property records how the check treated it. A Debian package lists the
+`License:` names of its machine-readable copyright file, which are Debian's names, not SPDX. The
+lists cover the `evals` extra only; the `mcp` and `postgres` extras are not in either.
+
+**The check.** Both commands hold every third-party component to `scripts/licence-policy.json` and
+exit with code 1 after writing the file when one fails. In the release workflow the wheel's check
+runs before the image is built and the image's before anything is kept, so either stops the release.
+CI's `packaging` job runs `sbom.py wheel` on every pull request. The policy has, in one file:
+
+- **`allowed`**: the SPDX licences we ship: 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, BSL-1.0,
+  CC0-1.0, ISC, MIT, MIT-0, MPL-2.0, PSF-2.0, Python-2.0, Unlicense and Zlib. An expression passes
+  when one side of each `OR` and both sides of each `AND` are allowed; a licence `WITH` an exception
+  passes when the licence does. GPL, LGPL, AGPL, SSPL, any other licence, a `LicenseRef-`, a
+  licence the metadata does not name (such as "BSD License", which names no variant) and no
+  licence all fail.
+- **`first_party`**: `martian-sdk` and the `@martian/*` packages of the Evals UI, which are ours and
+  not checked.
+- **`concluded`**: a component whose metadata does not name an SPDX licence, with the licence read
+  from its licence file. It applies only while the metadata declares the text it was reviewed
+  against, and the concluded licence must itself be allowed. Today: `gitdb`, `pyasn1-modules` and
+  `sqlparse` (metadata "BSD", no variant) and the image's CPython (no metadata).
+- **`exceptions`**: one component accepted under one licence outside the list, with the reason.
+  Today the only one is the Inter font, `@fontsource-variable/inter`, under OFL-1.1.
+- **`not_checked`**: the Debian packages of the image's base image (`deb:*`). They are listed, but
+  many are GPL or LGPL system programs and libraries that Debian distributes; they are not held to
+  the allowed list.
+
+A new dependency under another licence fails the check. Change the dependency, or add a reviewed
+entry with its reason to the policy in the same pull request. MorningHQ/MartianFrontend runs the
+same check on its builds with the same allowed list, in its own `scripts/licence-policy.json`;
+change both together.
 
 ## Trusted Publishing setup
 
@@ -176,7 +226,7 @@ passes, a maintainer can create an immutable `v<version>` tag matching the canon
 version. The workflow checks out the fully qualified `refs/tags/<tag>`, verifies
 the peeled tag commit equals HEAD and belongs to `origin/main`, and records
 the source commit in its summary. A branch with the same name is not a release.
-A tag push builds/checks and retains the distributions and the image; it does **not**
+A tag push builds/checks and retains the distributions, the image and their bills of materials; it does **not**
 publish. To publish the reviewed tag, explicitly dispatch **SDK release** with
 that tag and `publish: true` **from `main`**, satisfying the `pypi` and `ghcr` environments'
 protection. The workflow rebuilds/validates the tag, clean-installs both artifacts, builds and
@@ -185,8 +235,8 @@ and then pushes the checked image. Actual publication requires an explicit relea
 
 Check PyPI's receipt/version and independently install the published package
 before announcing it. Create the matching GitHub release at that immutable tag
-with the same publishing run's wheel, sdist, and checksum manifest, and name the image digest
-the `publish-image` job's summary records. Verify asset
+with the same publishing run's wheel, sdist, checksum manifest and the two bills of materials
+from `release-sbom`, and name the image digest the `publish-image` job's summary records. Verify asset
 digests after upload. Do not rebuild a different set of files for GitHub.
 The legacy metadata-only `martian-evals-kit` package
 requires a matching available SDK version; publish its compatibility update
