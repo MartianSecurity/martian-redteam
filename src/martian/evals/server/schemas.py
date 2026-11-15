@@ -1,7 +1,7 @@
 """The typed request and response bodies of the read routes, as the frozen evals contract has them.
 
 Each class is the schema of the same name in version 3 of ``contracts/evals-api.json`` in
-MorningHQ/MartianBackend (``app/schemas.py`` and ``app/evals_explorer_schema.py`` there), field for
+MartianSecurity/MartianBackend (``app/schemas.py`` and ``app/evals_explorer_schema.py`` there), field for
 field, so the core's OpenAPI operations are the contract's. ``tests/evals/test_read_contract.py``
 compares them. The routes build these from the shared model in ``martian.evals.server.projection``.
 """

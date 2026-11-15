@@ -31,7 +31,7 @@ on:
         default: 30
       sdk-ref:
         description: >
-          Git ref of MorningHQ/martian-redteam to install. Empty (default)
+          Git ref of MartianSecurity/martian-redteam to install. Empty (default)
           installs the commit this workflow file was called at
           (job.workflow_sha), so pinning the workflow to a tag or SHA pins the
           SDK too. Only letters, digits, ".", "_", "/" and "-" are accepted.
@@ -94,7 +94,7 @@ jobs:
           # externally managed and uv refuses to install into it.
           uv venv "${RUNNER_TEMP}/martian-redteam"
           uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
-            "martian-sdk @ git+https://github.com/MorningHQ/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
+            "martian-sdk @ git+https://github.com/MartianSecurity/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
           echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Run assessment

@@ -1,4 +1,4 @@
-"""Simulated users (MorningHQ/martian-notes#192): a conversation case that names a goal, a persona, a
+"""Simulated users (MartianSecurity/martian-notes#192): a conversation case that names a goal, a persona, a
 turn budget and a stop condition instead of scripted turns, played by a model on the judges'
 provider path, recorded turn by turn as a scripted conversation is, with its goal verdict beside
 the conversation's checks; and personas built from real transcripts with personal data removed.

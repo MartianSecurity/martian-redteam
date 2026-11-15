@@ -16,7 +16,7 @@
 # request's code. Pull requests from forks and from Dependabot get a read-only
 # token, and the result then goes to the job summary only.
 #
-# Pin MorningHQ/martian-redteam to a release tag or a full commit SHA that has
+# Pin MartianSecurity/martian-redteam to a release tag or a full commit SHA that has
 # .github/actions/evals; replace the placeholder SHA below. @main moves under you.
 
 name: Evals
@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
 
       - name: Run evals and comment
-        uses: MorningHQ/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
+        uses: MartianSecurity/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
         with:
           suite: examples/github-action/${{ matrix.suite }}/evals.yaml
           output: results/${{ matrix.suite }}

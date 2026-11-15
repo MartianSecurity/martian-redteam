@@ -4,7 +4,7 @@ Read README.md, then docs/README.md and docs/development.md as needed before cha
 
 This SDK is the customer entry point for **Martian Protect** (Evals and Red Team) outside the console. The optional MCP binding, runtime reporter and call gate are integration extras, not a product line; do not extend them unless a current product needs it.
 
-Every change starts with an issue on the Martian Security Board (https://github.com/orgs/MorningHQ/projects/2), filed in `MorningHQ/martian-notes`. Each branch is tied to one issue and its pull request links it.
+Every change starts with an issue on the Martian Security Board (https://github.com/orgs/MartianSecurity/projects/2), filed in `MartianSecurity/martian-notes`. Each branch is tied to one issue and its pull request links it.
 
 The distribution is `martian-sdk`, with `martian.evals` and `martian.redteam`
 modules and a combined `martian ci` gate. See docs/sdk-and-ci.md. The relocated

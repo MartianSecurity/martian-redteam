@@ -1,4 +1,4 @@
-"""Score trends of a monitor's scorers (MorningHQ/martian-notes#199): each scorer's pass rate or
+"""Score trends of a monitor's scorers (MartianSecurity/martian-notes#199): each scorer's pass rate or
 mean in consecutive windows of time, each with its 95% interval, for the Monitoring page.
 
 A trend reads what a threshold reads: the monitor's own record of the traces it scored

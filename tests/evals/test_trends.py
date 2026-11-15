@@ -1,4 +1,4 @@
-"""Score trends of a monitor's scorers (MorningHQ/martian-notes#199).
+"""Score trends of a monitor's scorers (MartianSecurity/martian-notes#199).
 
 ``GET /v1/evals/monitors/{id}/trends`` gives each scorer's pass rate or mean in windows aligned to
 their width, each with the 95% interval a threshold would compute over the same scores. It reads

@@ -123,7 +123,7 @@ class Credentials(Protocol):
     never travels with the request that started the run and is never written to a record; the
     run keeps the target as written, with ``${name}`` unexpanded. The local edition answers with
     the key it keeps for the target (``LocalTargets.key``); a per-organisation key store is
-    MorningHQ/martian-notes#135. A worker given none has no credentials, so a target that needs
+    MartianSecurity/martian-notes#135. A worker given none has no credentials, so a target that needs
     one fails each case with the setting that names it."""
 
     def __call__(self, principal: Principal, target_id: str, name: str, /) -> str | None: ...
@@ -136,8 +136,8 @@ class AgentExecutor(Protocol):
     On the Martian server a registered agent's credential stays with its approved connection:
     admitting a run pins the connection and its approval, and each case's call carries a
     short-lived target lease that martian-agents exchanges for the credential, so neither the
-    worker nor a record ever holds it (``app/evals_targets.py`` in MorningHQ/MartianBackend). The
-    server implements this interface when it mounts the core (MorningHQ/martian-notes#102); a
+    worker nor a record ever holds it (``app/evals_targets.py`` in MartianSecurity/MartianBackend). The
+    server implements this interface when it mounts the core (MartianSecurity/martian-notes#102); a
     worker without one calls no registered agent."""
 
     async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:

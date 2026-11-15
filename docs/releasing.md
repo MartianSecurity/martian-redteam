@@ -1,7 +1,7 @@
 # Releasing the SDK
 
 The canonical distribution is `martian-sdk`; source stays in the
-`MorningHQ/martian-redteam` repository. Read the version to release from
+`MartianSecurity/martian-redteam` repository. Read the version to release from
 `src/martian/_version.py` and verify existing Git tags and PyPI versions before
 publishing. Backward-compatible fixes use a patch bump; new functionality uses
 a minor bump. A release request authorizes only its identified repositories
@@ -25,9 +25,9 @@ uv build
 uv run --all-extras twine check --strict dist/*
 uv run --all-extras python scripts/check_release.py --install
 uv run --all-extras python scripts/sbom.py wheel
-docker build -t ghcr.io/morninghq/martian-evals:<version> .
-uv run --all-extras python scripts/check_image.py --image ghcr.io/morninghq/martian-evals:<version>
-uv run --all-extras python scripts/sbom.py image --image ghcr.io/morninghq/martian-evals:<version>
+docker build -t ghcr.io/martiansecurity/martian-evals:<version> .
+uv run --all-extras python scripts/check_image.py --image ghcr.io/martiansecurity/martian-evals:<version>
+uv run --all-extras python scripts/sbom.py image --image ghcr.io/martiansecurity/martian-evals:<version>
 ```
 
 The two `sbom.py` commands write the [bills of materials](#bills-of-materials-and-the-licence-check)
@@ -64,7 +64,7 @@ release publishes to PyPI:
   extra and the dependencies `uv.lock` pins. It never builds the package: `.dockerignore` lets in
   only `pyproject.toml`, `uv.lock` and `dist/*.whl`, so the image cannot hold a second build of
   the checkout. The release builds it after `check_release.py` has checked that wheel, as
-  `ghcr.io/morninghq/martian-evals:<version>`, labelled with the version and the source commit.
+  `ghcr.io/martiansecurity/martian-evals:<version>`, labelled with the version and the source commit.
 - **The version check.** `scripts/check_image.py` compares the wheel in `dist/` with the image.
   It runs the image's Python, which reads the installed `martian-sdk` version and every file of
   the UI that `martian ui` serves, and requires the SDK version and the UI's version, commit,
@@ -91,7 +91,7 @@ publish.** Before dispatching a release with `publish: true` for a version that 
    deployments limited to `main`. GitHub creates an environment a job names when it does not
    exist, without protection, so create it first.
 2. Let the organisation's package settings allow the repository to create the container package.
-   The first push creates `ghcr.io/morninghq/martian-evals`, linked to this repository by its
+   The first push creates `ghcr.io/martiansecurity/martian-evals`, linked to this repository by its
    `org.opencontainers.image.source` label, and private like the repository. Make it public at
    the open-source launch.
 3. Settle the UI's licence ([below](#the-evals-ui-in-the-wheel)); the image ships the same UI as
@@ -100,7 +100,7 @@ publish.** Before dispatching a release with `publish: true` for a version that 
 ## The Evals UI in the wheel
 
 `martian ui` serves the Evals UI that the wheel ships in `martian/ui/`. It is a build of the
-stand-alone Evals app in MorningHQ/MartianFrontend (`packages/evals/app`, `npm run build:evals`),
+stand-alone Evals app in MartianSecurity/MartianFrontend (`packages/evals/app`, `npm run build:evals`),
 copied into `src/martian/ui/` and committed here. A build from a checkout or from the sdist
 therefore needs no Node.js, no network and no access to that private repository, and the release
 workflow builds exactly what the tag holds. The frontend build is reproducible: the same commit
@@ -126,7 +126,7 @@ To ship another UI, build the frontend commit to ship, on its `main`, from a cle
 copy the build in:
 
 ```bash
-# In MorningHQ/MartianFrontend, at the commit to ship:
+# In MartianSecurity/MartianFrontend, at the commit to ship:
 git status --porcelain     # prints nothing
 npm ci
 npm run build:evals        # -> dist-evals/
@@ -148,7 +148,7 @@ shows the current figures.
 **Licences.** `third-party-licenses.md` in the build holds the licences of the packages bundled in
 it: MIT, ISC and Apache-2.0, and OFL-1.1 for the Inter font. The wheel's bill of materials lists
 those packages from it ([below](#bills-of-materials-and-the-licence-check)). The Evals app's own
-packages in the frontend carry no licence yet (MorningHQ/martian-notes#220); settle that before
+packages in the frontend carry no licence yet (MartianSecurity/martian-notes#220); settle that before
 publishing a release that ships the UI.
 
 ## Bills of materials and the licence check
@@ -192,7 +192,7 @@ CI's `packaging` job runs `sbom.py wheel` on every pull request. The policy has,
   the allowed list.
 
 A new dependency under another licence fails the check. Change the dependency, or add a reviewed
-entry with its reason to the policy in the same pull request. MorningHQ/MartianFrontend runs the
+entry with its reason to the policy in the same pull request. MartianSecurity/MartianFrontend runs the
 same check on its builds with the same allowed list, in its own `scripts/licence-policy.json`;
 change both together.
 
@@ -209,7 +209,7 @@ A maintainer with authority over the PyPI project should configure:
 | Field | Value |
 | --- | --- |
 | Project | `martian-sdk` |
-| GitHub owner | `MorningHQ` |
+| GitHub owner | `MartianSecurity` |
 | Repository | `martian-redteam` |
 | Workflow filename | `release.yml` |
 | Environment | `pypi` |

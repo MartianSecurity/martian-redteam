@@ -1,5 +1,5 @@
 {
-  "$comment": "The licences a release may ship, read by scripts/sbom.py; see docs/releasing.md#bills-of-materials-and-the-licence-check. Components are named <ecosystem>:<name>. MorningHQ/MartianFrontend keeps the same allowed list in its scripts/licence-policy.json.",
+  "$comment": "The licences a release may ship, read by scripts/sbom.py; see docs/releasing.md#bills-of-materials-and-the-licence-check. Components are named <ecosystem>:<name>. MartianSecurity/MartianFrontend keeps the same allowed list in its scripts/licence-policy.json.",
   "allowed": [
     "0BSD",
     "Apache-2.0",
@@ -18,7 +18,7 @@
   ],
   "first_party": [
     {"component": "pypi:martian-sdk", "reason": "This repository's package."},
-    {"component": "npm:@martian/*", "reason": "The Evals UI's own packages, built in MorningHQ/MartianFrontend; their licence is MorningHQ/martian-notes#220."}
+    {"component": "npm:@martian/*", "reason": "The Evals UI's own packages, built in MartianSecurity/MartianFrontend; their licence is MartianSecurity/martian-notes#220."}
   ],
   "concluded": [
     {

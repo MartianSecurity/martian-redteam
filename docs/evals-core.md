@@ -79,7 +79,7 @@ The edition comes from, in order:
 
 1. a licence, which decides for the whole installation (on-premises). `resolve_edition(licence=...)`
    takes the edition a licence names; verifying the signed licence file is
-   MorningHQ/martian-notes#131;
+   MartianSecurity/martian-notes#131;
 2. the organisation's plan on the cloud, `community` or `enterprise`
    (`resolve_edition(plan=...)`);
 3. nothing, which is Community. The local edition is always Community.
@@ -102,8 +102,8 @@ own routes this way: the review queue routes, the question library and answering
 need `review_queues`, and `GET /v1/evals/monitoring` and every monitor, threshold and schedule
 route need `monitoring` ([write routes](#write-routes), [monitors](#monitors),
 [thresholds](#thresholds-and-alerts), [schedules](#schedules)). The Martian server gates its own routes the same way until it
-mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
-MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
+mounts the core (MartianSecurity/martian-notes#102); its copy of the map is `app/entitlements.py` in
+MartianSecurity/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
 `concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
 side of this map.
 
@@ -124,7 +124,7 @@ place of its own role table.
 `review` covers answering a review and annotating a trace, both free; answering an item of a
 review queue also needs `review_queues`, which the route checks. Pages such as Monitoring have no
 capability: the UI shows them from the edition's feature keys. The server's copy of the table is in
-`app/entitlements.py` in MorningHQ/MartianBackend.
+`app/entitlements.py` in MartianSecurity/MartianBackend.
 
 Every write route declares the capability it needs with
 `dependencies=[Depends(require_capability(name))]`. A principal whose most privileged role is not
@@ -138,7 +138,7 @@ assigning review work to someone else needs `assignReviews`, and changing anothe
 
 `GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
 same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3 of
-`contracts/evals-api.json` in MorningHQ/MartianBackend). The local edition answers:
+`contracts/evals-api.json` in MartianSecurity/MartianBackend). The local edition answers:
 
 ```json
 {
@@ -186,7 +186,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
 Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
-version 3 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
+version 3 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
@@ -403,7 +403,7 @@ All paths are under `/v1/evals`. How the core carries them out:
   record store has no query across runs. A job's scores sit beside the run's own, and each scored
   value is also kept on its case's trace. A request cannot name a
   [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
-  names, so any other is `422`, and `GET /scorers` does not offer one (MorningHQ/martian-notes#334).
+  names, so any other is `422`, and `GET /scorers` does not offer one (MartianSecurity/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. Only a role
@@ -667,17 +667,17 @@ no registered agent, so an install with no martian-agents service runs functions
   with the setting that holds it (`target.headers.Authorization needs the credential
   MARTIAN_TARGET_KEY`) and sends nothing. The local edition's credentials are the keys it keeps
   for its targets (`LocalTargets.credential`, [local runs](#local-runs)); a per-organisation key
-  store is MorningHQ/martian-notes#135.
+  store is MartianSecurity/martian-notes#135.
 - **Registered agents** need leased credentials, so they stay on the martian-agents path. An
   `AgentExecutor` has `check(principal, agent_id)`, which admits the agent and returns its pin
   (`provenance.target`), or raises `StoreError` (`not_found`), and `call(principal, run, case,
   timeout_seconds=...)`, which calls the agent once. On the Martian server, admission pins the
   agent's approved connection and each call carries a short-lived target lease that martian-agents
-  exchanges for the credential (`app/evals_targets.py` in MorningHQ/MartianBackend), so the worker
+  exchanges for the credential (`app/evals_targets.py` in MartianSecurity/MartianBackend), so the worker
   never holds it. The worker asks `check` again before each start of a run ([the same
   target](#the-same-target-on-every-start)), so an executor's pin stays the same for as long as
   the agent does, and holds nothing, such as a lease or a time, that changes while the agent does
-  not. The server implements the executor when it mounts the core (MorningHQ/martian-notes#102).
+  not. The server implements the executor when it mounts the core (MartianSecurity/martian-notes#102).
 
 #### The model a target reports
 
@@ -692,7 +692,7 @@ reported it (`gpt-4o-2024-08-06`):
 | A local target | A `model` target reads `model` from each chat completion, as `model_path` ([local targets](#local-targets)); an `http` target reports none, since the UI has no field for it |
 | A function | Returns a `TargetReply`; a function that returns its bare output reports none |
 | A function target | Reports none: its process sends its reply back as JSON, which holds no `TargetReply` ([targets](#targets)) |
-| A registered agent | The executor's `call` returns a `TargetReply`. On the Martian server that is martian-agents' reply carrying the model the agent used, which its executor (`app/evals_targets.py` in MorningHQ/MartianBackend) passes on when it mounts the core (MorningHQ/martian-notes#102); until then registered agents report none |
+| A registered agent | The executor's `call` returns a `TargetReply`. On the Martian server that is martian-agents' reply carrying the model the agent used, which its executor (`app/evals_targets.py` in MartianSecurity/MartianBackend) passes on when it mounts the core (MartianSecurity/martian-notes#102); until then registered agents report none |
 | A suite file's URL target under `martian evals run` | Not read: the command-line runner records no model for its runs |
 
 The worker keeps it, as text of at most 200 characters, in two places:
@@ -841,7 +841,7 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#135 | A key store for each organisation's provider keys |
+| MartianSecurity/martian-notes#135 | A key store for each organisation's provider keys |
 
 ### The durable queue
 
@@ -969,7 +969,7 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process with the `concurrency` its hosts can take (the backend part of MorningHQ/martian-notes#139) |
+| MartianSecurity/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process with the `concurrency` its hosts can take (the backend part of MartianSecurity/martian-notes#139) |
 
 #### Checkpoints and resuming
 
@@ -1122,7 +1122,7 @@ judge calls its models itself, not at an endpoint; ..."). An installation on the
 sets judge models and the default judge model only to models Agents allows. It uses the route's
 static authorization; the per-case target lease the Martian server sends
 (`X-Martian-Target-Lease` with an `action_id`) is not part of it, and a server that needs it
-supplies its own `Judge` when it mounts the core (MorningHQ/martian-notes#102). It is separate
+supplies its own `Judge` when it mounts the core (MartianSecurity/martian-notes#102). It is separate
 from the worker's `AgentExecutor`, which calls registered agents as targets.
 
 **What a score says when there is no verdict.** A judge that fails with a message it can show
@@ -1180,7 +1180,7 @@ worker = ProcessWorker(worker_services, records, options={...})
   setup's module to check its import path, so the setup imports scorer modules inside the
   function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
   request or suite can name only those, so a job of custom scorers is recorded by the edition's
-  own code until the contract carries them (MorningHQ/martian-notes#334). A judge request carries
+  own code until the contract carries them (MartianSecurity/martian-notes#334). A judge request carries
   only judge scorers. The local edition installs none. What the worker isolates, and what it does
   not, is in [security and data](security-and-data.md#custom-python-scorers).
 - **Scoring jobs only, never a monitor.** A [monitor](#monitors) refuses a scorer of kind `code`
@@ -1292,14 +1292,14 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
   included. With none set, the worker's judge uses its own model. `selectable` says whether the
   installation runs a judge on the model it names: always `true` from the core's own routes. The
-  Martian server answers `false` (`docs/evals-workbench.md` in MorningHQ/MartianBackend); its
+  Martian server answers `false` (`docs/evals-workbench.md` in MartianSecurity/MartianBackend); its
   judges run in Agents, which grades on a judge's model only when Agents' operator allows it, as
   with `agents_judge` ([the worker's judge](#the-workers-judge)). Where the default lives is the
   edition's `JudgeSettings`:
   `FileJudgeSettings` keeps the local edition's in `settings.json` in its data folder, since the
   local edition has no organisation; `MemoryJudgeSettings` keeps each organisation's in memory, for
   tests; the server keeps an organisation's with the organisation when it mounts the core
-  (MorningHQ/martian-notes#102).
+  (MartianSecurity/martian-notes#102).
 - **Pinned when a job is admitted.** A scoring job records each judge scorer with the model it will
   run on, and the worker sends one `JudgeRequest` per model and endpoint. A judge that answers from
   another model than the request names gets an error on each of those scores ("The judge answered
@@ -1312,7 +1312,7 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   `martian-eval-judge-v1` or `v2` for Agents); a judge score with no verdict still names the model
   it was pinned to. The same values are on the case's trace.
 - **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
-  its own environment, and a per-organisation key store is MorningHQ/martian-notes#135. An
+  its own environment, and a per-organisation key store is MartianSecurity/martian-notes#135. An
   endpoint is a plain `http` or `https` address, so one with a user name, password, query or
   fragment is refused (`422`), as is an endpoint without a model or with a provider other than
   `openai`. Headers for the judge's endpoint (`judge.headers` in a suite file) are how the
@@ -2036,7 +2036,7 @@ store keeps the watch, its progress and the noted changes on both databases.
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
   `EvalsStatusOut` in the server's frozen evals contract (`contracts/evals-api.json` in
-  MorningHQ/MartianBackend).
+  MartianSecurity/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
 - `martian ui`, the local edition: the core and the Evals UI from one process, with no login, the
@@ -2145,7 +2145,7 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   `Trace.session_id`. Every trace filter applies before grouping. The query's `limit` does not
   apply, and a `cursor` is refused as `invalid`: a session search starts from the first trace.
 - It returns `SessionSearch`, the shape the server's `POST /v1/evals/sessions/search` returns
-  today (`sessions()` in `app/evals_explorer.py` in MorningHQ/MartianBackend):
+  today (`sessions()` in `app/evals_explorer.py` in MartianSecurity/MartianBackend):
 
   ```json
   {
@@ -2992,7 +2992,7 @@ docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data
 ```
 
 A release builds the image from the wheel it publishes, checks that both hold the same SDK
-version and Evals UI, and publishes it as `ghcr.io/morninghq/martian-evals:<version>`
+version and Evals UI, and publishes it as `ghcr.io/martiansecurity/martian-evals:<version>`
 ([releasing](releasing.md#the-local-editions-image)). To run a published version instead of a
 local build, give that name as the image, the last argument of `docker run`.
 
@@ -3406,13 +3406,13 @@ export holds, resuming, and what the receiving store assigns are in [data export
 
 | Piece | Issue |
 | --- | --- |
-| The signed offline licence file | MorningHQ/martian-notes#131 |
-| The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
-| The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
-| Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
-| LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
-| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
-| The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
+| The signed offline licence file | MartianSecurity/martian-notes#131 |
+| The server's REST binding of the store, moving its MLflow calls behind the interface | MartianSecurity/martian-notes#105 |
+| The Martian server's queue worker process | MartianSecurity/martian-notes#139, after MartianSecurity/martian-notes#102 |
+| Mounting the core in the Martian server | MartianSecurity/martian-notes#102 |
+| LLM judges of a whole conversation | MartianSecurity/martian-notes#176 |
+| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
+| The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MartianSecurity/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).

@@ -1,4 +1,4 @@
-"""The grader is out of the target's reach (MorningHQ/martian-notes#215).
+"""The grader is out of the target's reach (MartianSecurity/martian-notes#215).
 
 A function target runs in a process of its own and is given the case's inputs only; the
 expectations, the checks, the scorers' code, the results and the stores stay where it cannot read

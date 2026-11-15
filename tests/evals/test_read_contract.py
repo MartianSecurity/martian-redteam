@@ -31,7 +31,7 @@ READ_OPERATIONS = [
 ]
 
 # The fields of the server's untyped responses, from the code that builds them in
-# MorningHQ/MartianBackend: public_job, public_assessment, public_review (app/evals_workbench.py),
+# MartianSecurity/MartianBackend: public_job, public_assessment, public_review (app/evals_workbench.py),
 # project_out (app/api/evals_explorer.py), project_trace and sessions (app/evals_explorer.py), safe_trace and
 # compare_runs (app/evals_workbench.py), compare_assessments and scorecard (app/evals_quality.py).
 JOB = {"id", "run_id", "config", "state", "error", "created_at", "finished_at", "total", "succeeded", "errors"}
@@ -127,7 +127,7 @@ def test_a_refused_parameter_is_the_contracts_validation_error(served):
 
 
 def test_the_ui_trace_query_is_the_contracts():
-    # initialQuery in the Evals UI (packages/evals/src/lib/eval-explorer.js in MorningHQ/MartianSecurityFrontend).
+    # initialQuery in the Evals UI (packages/evals/src/lib/eval-explorer.js in MartianSecurity/MartianFrontend).
     validate_request(
         "TraceQuery",
         {"project_id": None, "q": "", "state": "", "session_id": "", "user_id": "", "order": "newest", "limit": 25},
