@@ -147,9 +147,10 @@ place of its own role table.
 | `createReviewQueues` | owner, admin, member | `review_queues` |
 | `publishDatasets`, `assignReviews`, `manageViews`, `manageApiKeys`, `retryCiExport`, `manageProjects`, `manageJudges` | owner, admin | |
 
-`review` covers answering a review and annotating a trace, both free; answering an item of a
-review queue also needs `review_queues`, which the route checks. Pages such as Monitoring have no
-capability: the UI shows them from the edition's feature keys. Martian Cloud uses this table too.
+`review` covers answering a review, annotating a trace and triaging quality issues, all free;
+answering an item of a review queue also needs `review_queues`, which the route checks. Pages such
+as Monitoring have no capability: the UI shows them from the edition's feature keys. The
+bootstrap's `hostedRoutes` is not in the table ([bootstrap response](#bootstrap-response)). Martian Cloud uses this table too.
 
 Every write route declares the capability it needs with
 `dependencies=[Depends(require_capability(name))]`. A principal whose most privileged role is not
@@ -180,7 +181,7 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3
     "run": true, "score": true, "review": true, "createReviewQueues": false,
     "saveSuites": true, "saveViews": true, "editDrafts": true, "publishDatasets": true,
     "assignReviews": true, "manageViews": true, "manageApiKeys": true, "retryCiExport": true,
-    "manageProjects": true, "manageJudges": true
+    "manageProjects": true, "manageJudges": true, "hostedRoutes": false
   },
   "status": {
     "status": "ready", "ready": true, "error_code": null, "updated_at": null,
@@ -200,7 +201,15 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3
 - `entitlements.features` lists the feature keys the edition includes, sorted; `limits` holds each
   limit the edition sets, by key ([editions and entitlements](#editions-and-entitlements)), and
   leaves out a key it sets no limit for. The local edition's are its `--concurrency`.
-- `capabilities` holds every capability in the table above, `true` or `false`.
+- `capabilities` holds every capability in the table above, `true` or `false`, and
+  `hostedRoutes`, which is not one of them and which the contract's `EvalCapabilities` does not
+  name (its schema allows a property it does not list, so the answer is still one the contract
+  allows). It says whether the server serves the Martian server's own routes the Evals UI calls:
+  CI sessions (`/v1/evals/ci-sessions`), API keys (`/v1/api-keys`) and the traces export
+  (`POST /v1/evals/traces/export`). The core serves none of them, so it is always `false`, and
+  the UI then leaves out the runs page's CI sessions and API keys views and the traces export.
+  The Martian server answers the contract's capabilities, with no such key, and the UI reads a
+  missing key as served.
 - `status` is the store's readiness, as `GET /v1/evals/status`.
 
 `tests/evals/test_bootstrap.py` fixes the shape and the capabilities for each edition and role; the
@@ -208,8 +217,8 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 
 ## Read routes
 
-The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
-Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
+The core serves the read routes the Evals UI's Runs, run detail, Compare, Overview, Traces,
+Sessions, Quality issues and Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
 version 3 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
 
@@ -224,6 +233,8 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Martian
 | `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
 | `POST /v1/evals/sessions/search` | The sessions among the first 1,000 traces the query matches ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
+| `POST /v1/evals/overview` | The Overview page: requests, errors, latency, reported tokens and cost, each feedback score's summary and a time series, over the newest 1,000 traces the query matches ([the Overview and Quality issues](#the-overview-and-quality-issues)) | Store |
+| `POST /v1/evals/quality-issues/search` | The Quality issues page: the execution errors and failed boolean feedback among the newest 1,000 traces the query matches, grouped, with how many are still open ([the Overview and Quality issues](#the-overview-and-quality-issues)) | Store |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
@@ -473,6 +484,7 @@ contract:
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
 | `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
 | `POST /traces/{trace_id}/annotations` | A person's feedback or expectation on a trace | `reviews` |
+| `POST /quality-issues/triage` | Triage up to 100 traces of quality issues: a state (`open`, `investigating`, `resolved`, `dismissed`) and a rationale ([the Overview and Quality issues](#the-overview-and-quality-issues)) | `explorer` |
 | `POST /projects`, `POST /projects/{project_id}/archive` | Create a project; archive an idle one | `projects` |
 | `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
 | `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
@@ -601,8 +613,9 @@ All paths are under `/v1/evals`. How the core carries them out:
   its owner. At most 100 per person.
 
 Not served: the CI gate's routes (`/ci/...`, `/ci-sessions/...`), which stay with the server's CI
-gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overview`,
-`POST /quality-issues/search` and `/triage`, `POST /traces/export`). Beside the contract, the core
+gate, and two explorer routes that stay the server's: `GET /capabilities`, which the bootstrap
+replaces, and `POST /traces/export`. The bootstrap's `hostedRoutes` says so to the UI
+([bootstrap response](#bootstrap-response)). Beside the contract, the core
 serves its own `/monitors` routes ([monitors](#monitors)) and `/schedules` routes
 ([schedules](#schedules)).
 
@@ -618,6 +631,46 @@ every route that takes or names a user uses the bootstrap's id, for the local us
 whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
 `test_worker_targets.py`, `test_worker_queue.py`, `test_worker_limits.py` and
 `test_worker_concurrency.py` cover the worker.
+
+### The Overview and Quality issues
+
+`martian.evals.server.explorer` serves the Overview and Quality issues pages: `POST /overview`,
+`POST /quality-issues/search` and `POST /quality-issues/triage`, ports of the server's routes
+(`app/api/evals_explorer.py` and `app/evals_explorer.py` in MartianSecurity/MartianBackend). Each
+operation is the contract's: the overview and the issue search take the trace search's
+`TraceQuery`, with all its filters, and triage the contract's `IssueTriageRequest`; the contract
+leaves the three responses untyped, and the core answers with the server's fields.
+
+- **What they read.** The overview and the issue search read the newest 1,000 traces the query
+  matches through the store's trace search, whatever its `limit`, as the trace search's rows, and
+  set `has_more` when it matches more; `limit` in the answer is 1,000. They start from the first
+  trace, so a `cursor` is `422` ("Start a fresh search for an aggregate or export"). Before the
+  default project exists both answer as for no traces; another project that does not exist is
+  `404`.
+- **The overview.** `requests` and `errors` (traces whose state is `ERROR`); `latency` (`count`,
+  `p50`, the median, and `p95`, the nearest rank); `tokens` and `cost` (`reported`, the traces
+  that report one, and `total`); `feedback`, each feedback score by name that has a value and no
+  error: `boolean` with `pass_rate`, `numeric` with `mean`, or `categorical` with the count of each
+  value, each with its `count`; and `series`, one point per `bucket_ms` from the first trace's
+  bucket to the last's, empty ones included, with `requests`, `errors` and the mean `latency_ms`.
+  `bucket_ms` is an hour, or as many whole hours as keep the traces' span within 168 buckets.
+- **Quality issues.** `items` holds one group for the traces whose state is `ERROR`
+  (`execution_error`, "Execution errors") and one for each feedback score name with a `false`
+  verdict and no error (`failed:<name>`, "Failed <name>"), in the order the newest traces first
+  give them. A group has its `count`, `open` (its traces not triaged, or triaged `open` or
+  `investigating`) and its first 100 `traces`. `traces_examined` is how many traces were read, and
+  `method` says what the groups are: quality signals, not verified findings.
+- **Triage** needs the `review` capability ("Requires member role") and a project that takes
+  writes: an archived one is `409`. Every trace it names must be in the project, or it is `404`
+  ("Trace not found") and no trace changes. It writes the decision on each trace as its
+  `martian.evals.triage` tag, the JSON of `state`, `rationale` (trimmed), `actor_id` (the person
+  as the bootstrap names them) and `at`, and answers `{"persisted": <traces>, "state": <state>}`.
+  Each trace search row and quality issue trace shows it as `triage`. Triage again replaces it.
+
+The Martian server answers these three routes with its own code and does not mount this router
+yet. `tests/evals/test_explorer.py` checks the answers on `MemoryStore` and `MlflowStore`, the
+bound of 1,000 traces, triage and its refusals; `tests/evals/test_read_contract.py` and
+`test_write_contract.py` check the operations and `IssueTriageRequest` against the contract.
 
 ## The worker
 
@@ -2765,12 +2818,12 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   the session call, and the local targets and runs under `/v1/local`. Every other path is a file
   of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
   origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
-- The UI's pages call routes the core does not serve in three places, and those show the server's
-  error (`404` or `405`) in the local edition: the Overview and Quality issues pages and the traces
-  export, whose explorer routes are not ported ([write routes](#write-routes)), and the runs page's
-  CI sessions and API keys views, which read the Martian server's CI gate and API keys. The
-  Monitoring and Reviews pages need features Community does not include, and say they are not in
-  this edition.
+- Every page of the UI works against the local edition or is left out of it. The bootstrap's
+  `hostedRoutes` is `false` ([bootstrap response](#bootstrap-response)), so the runs page has no CI
+  sessions or API keys views and the Traces page no export: those read the Martian server's CI
+  gate, API keys and trace export. The dataset drafts' admin scopes are the console's admin pages
+  only, and the stand-alone UI has no route to them. The Monitoring and Reviews pages need
+  features Community does not include, and say they are not in this edition.
 - The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it. The container
@@ -2787,7 +2840,9 @@ the UI files, the `Host` check, the port, the browser and the command, which ser
 when no `--ui-dir` is given, `--concurrency` and its variable in the bootstrap's limits and the
 worker, the container settings below with their warning, and an application's traces recorded
 with MLflow tracing ([below](#traces-from-an-application)). It also requires the local edition to
-serve every `/v1` route the packaged UI names, but the gaps above.
+serve every `/v1` route the packaged UI names but those of the views left out above
+(`HOSTED_ROUTES` and `ADMIN_ROUTES`), with no known gaps (`UI_ROUTES_NOT_SERVED` is empty), and
+the packaged UI to read `hostedRoutes`.
 
 ### Traces from an application
 
@@ -3658,7 +3713,9 @@ default project), `current_records` a `SqlRecordStore` on its Postgres (schema `
 scoring job, with the agent's target lease; not the durable queue yet), `current_judge_settings`
 each organisation's default judge model, and `current_agent_names` its agent registry. It
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
-names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
+names (so its bootstrap has no `hostedRoutes`), keeps its CI gate and its own explorer routes
+(`GET /capabilities`, `POST /overview`, `/quality-issues/*` and `POST /traces/export`; it does not
+mount the core's `explorer` router yet), and leaves out the core's routes outside the
 contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`) but
 the [push routes](#pushed-runs), which it mounts beside the contract. They take what its other core
 routes take (a signed-in member, or a service account's key, which pushes into its own project
@@ -3673,7 +3730,7 @@ way.
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`,
+`test_explorer.py`, `test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`,
 `test_calibration_recheck.py`, `test_write_routes.py`, `test_write_contract.py`,
 `test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
 `test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,

@@ -35,6 +35,7 @@ WRITE_OPERATIONS = [
     ("get", "/v1/evals/review-questions"),
     ("post", "/v1/evals/review-questions"),
     ("post", "/v1/evals/traces/{trace_id}/annotations"),
+    ("post", "/v1/evals/quality-issues/triage"),
     ("post", "/v1/evals/projects"),
     ("post", "/v1/evals/projects/{project_id}/archive"),
     ("get", "/v1/evals/views"),
@@ -62,8 +63,9 @@ WRITE_OPERATIONS = [
 
 # The core's own status and bootstrap operations are in the contract's shape under the core's names
 # (tests/evals/test_bootstrap.py), and OpenTelemetry's POST /v1/traces is OTLP's, not the contract's
-# (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and the
-# explorer's overview, quality issues, trace export and capabilities are not ported yet.
+# (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and so do
+# the explorer's trace export and capabilities, which the Evals UI hides where the core serves it
+# (the bootstrap's `hostedRoutes`).
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: a run's attempts
 # (MartianSecurity/martian-notes#180) and turns (MartianSecurity/martian-notes#191), the judges' agreement
@@ -131,9 +133,6 @@ NOT_SERVED = {
     ("get", "/v1/evals/ci/tokens"),
     ("post", "/v1/evals/ci/tokens"),
     ("delete", "/v1/evals/ci/tokens/{token_id}"),
-    ("post", "/v1/evals/overview"),
-    ("post", "/v1/evals/quality-issues/search"),
-    ("post", "/v1/evals/quality-issues/triage"),
     ("post", "/v1/evals/traces/export"),
 }
 
@@ -159,11 +158,12 @@ def test_the_schemas_the_write_operations_use_are_the_contracts(openapi):
     ours = openapi["components"]["schemas"]
     used = references([operation(method, path) for method, path in WRITE_OPERATIONS])
     assert {"EvalRunRequest", "ScoreRequest", "ReviewRequest", "QueueRequest", "SuiteRequest", "DraftOut"} <= used
+    assert "IssueTriageRequest" in used
     for name in sorted(used):
         assert ours[name] == CONTRACT["components"]["schemas"][name], name
 
 
-def test_the_core_serves_the_whole_contract_but_the_ci_gate_and_four_explorer_reads(openapi):
+def test_the_core_serves_the_whole_contract_but_the_ci_gate_the_trace_export_and_capabilities(openapi):
     served = {(method, path) for path, methods in openapi["paths"].items() for method in methods}
     contract = {(method, path) for path, methods in CONTRACT["paths"].items() for method in methods}
     assert served == set(WRITE_OPERATIONS) | set(READ_OPERATIONS) | OWN_NAMES

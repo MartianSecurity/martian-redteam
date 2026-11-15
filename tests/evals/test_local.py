@@ -311,11 +311,11 @@ def test_the_command_says_how_to_name_a_ui_when_the_package_has_none(monkeypatch
 # ends at its inner backtick.
 UI_LITERAL = re.compile(r"(?:\.(get|post|put|patch|delete)\(\s*)?`(/v1/[^`]*)")
 
-# The routes the packaged UI names that the local edition does not serve: the runs page's CI sessions
-# and API keys views (the Martian server's CI gate and API keys), the Overview and Quality issues
-# pages and the traces export (explorer routes not ported into the core; docs/evals-core.md lists
-# them), and the dataset drafts' admin scopes, which only the console's admin pages reach.
-UI_ROUTES_NOT_SERVED = {
+# The routes the packaged UI names that the local edition does not serve, each in a view the UI leaves
+# out of the local edition. The runs page's CI sessions and API keys views and the traces export call
+# the Martian server's CI gate, API keys and trace export: the UI shows them only where the bootstrap's
+# `hostedRoutes` is not false, and the core answers false.
+HOSTED_ROUTES = {
     ("GET", "/v1/evals/ci-sessions"),
     ("GET", "/v1/evals/ci-sessions/{}"),
     ("POST", "/v1/evals/ci-sessions/{}/export"),
@@ -323,14 +323,18 @@ UI_ROUTES_NOT_SERVED = {
     ("POST", "/v1/api-keys"),
     ("GET", "/v1/api-keys/readiness"),
     ("DELETE", "/v1/api-keys/{}"),
-    ("POST", "/v1/evals/overview"),
-    ("POST", "/v1/evals/quality-issues/search"),
-    ("POST", "/v1/evals/quality-issues/triage"),
     (None, "/v1/evals/traces/export"),
+}
+# The dataset drafts' admin scopes, which only the console's admin pages reach: the stand-alone app
+# has no route to them.
+ADMIN_ROUTES = {
     (None, "/v1/admin/evals/global-dataset-drafts"),
     (None, "/v1/admin/organisations/{}/evals/dataset-drafts"),
     (None, "/v1/admin/organisations/{}/evals/dataset-operations"),
 }
+# The known gaps: routes the packaged UI names that the local edition does not serve and that a view
+# of the local edition calls.
+UI_ROUTES_NOT_SERVED: set[tuple[str | None, str]] = set()
 
 
 def route_of(literal: str) -> str:
@@ -353,20 +357,26 @@ def route_of(literal: str) -> str:
     return path
 
 
-def test_every_route_the_packaged_ui_names_is_served_but_the_known_gaps(tmp_path):
+def test_every_route_the_packaged_ui_names_is_served_or_in_a_view_the_local_edition_leaves_out(tmp_path):
     ui = local.packaged_ui()
     named = {
         (method.upper() or None, route_of(literal))
         for script in (ui / "assets").glob("*.js")
         for method, literal in UI_LITERAL.findall(script.read_text(encoding="utf-8"))
     }
-    paths = create_local_app(tmp_path / "home", ui).openapi()["paths"]
+    app = create_local_app(tmp_path / "home", ui)
+    paths = app.openapi()["paths"]
     served = {(method.upper(), re.sub(r"\{[^}]+\}", "{}", path)) for path, item in paths.items() for method in item}
     served_paths = {path for _, path in served}
     assert ("GET", "/v1/evals/bootstrap") in named & served
     # A literal that is not a call's first argument names a path only: any method serves it.
     missing = {call for call in named if (call not in served if call[0] else call[1] not in served_paths)}
-    assert missing == UI_ROUTES_NOT_SERVED
+    assert missing == HOSTED_ROUTES | ADMIN_ROUTES | UI_ROUTES_NOT_SERVED
+    assert not UI_ROUTES_NOT_SERVED
+    # The build reads the bootstrap's answer, and the local edition's answer hides those views.
+    assert any("hostedRoutes" in script.read_text(encoding="utf-8") for script in (ui / "assets").glob("*.js"))
+    bootstrap = TestClient(app, base_url=LOCAL).get("/v1/evals/bootstrap")
+    assert bootstrap.json()["capabilities"]["hostedRoutes"] is False
 
 
 TRACED_APPLICATION = """
