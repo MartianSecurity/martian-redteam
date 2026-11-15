@@ -131,7 +131,7 @@ types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with the [cache](#a-cache-of-model-calls) on, `cache`: how many replies came from it |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 | `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, a digest of each check's definition, and the names of the security checks: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
@@ -150,10 +150,14 @@ change is worse than noise, that a case newly failed a security check, or that a
 result in the baseline failed.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
-`--baseline DIR`, `--data-dir DIR`, `--max-seconds N` and `--max-judge-tokens N`. A run that is
+`--cache` or `--no-cache`, `--baseline DIR`, `--data-dir DIR`, `--max-seconds N` and
+`--max-judge-tokens N`. A run that is
 stopped can be started again: finished cases are skipped, and cases that errored are tried again.
 `--repeats` runs each case N times, 1 to 100, in place of the suite file's `repeats`
-([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--baseline`
+([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--cache` replays
+the target's and the judges' replies an earlier run stored for the same request, and
+`--no-cache` turns a suite file's `cache` block off ([a cache of model calls](#a-cache-of-model-calls)).
+`--baseline`
 compares the run with an earlier run's output folder and gates on the comparison
 ([comparing with a baseline](#comparing-with-a-baseline)). `--data-dir` names the local Evals
 UI's data folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`,
@@ -187,7 +191,8 @@ limits:
   skipped, as for any stopped run. Each run has its limits afresh.
 - **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
   reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
-  batch, and says so. A judge call that fails reports nothing and counts nothing.
+  batch, and says so. A judge call that fails reports nothing and counts nothing, and a judgment
+  replayed from the [cache](#a-cache-of-model-calls) counts 0: it made no call.
   `max_judge_tokens` needs an LLM judge check.
 - **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
   next case, as **cancelled**; the command checks for it every second.
@@ -208,7 +213,8 @@ combine by ([repeated attempts](#repeated-attempts)), the values of its combinat
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
-address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
+address in the environment, the MLflow location or the [cache](#a-cache-of-model-calls) keeps
+earlier results. The SDK cannot see
 changes in modules the target file imports, or in the service behind a URL target: use `--fresh`
 after those.
 
@@ -301,7 +307,8 @@ checks:
 
 `martian evals run evals.yaml --repeats 5`, or `run_suite(path, repeats=5)` from
 `martian.evals.runner`, replaces the file's `repeats` for one run. Each attempt calls the target
-and every judge again, so five attempts cost five times as much.
+and every judge again, so five attempts cost five times as much; with the
+[cache](#a-cache-of-model-calls) on, a later run replays each attempt's own replies.
 
 | Rule | A check passes the case when |
 | --- | --- |
@@ -537,6 +544,99 @@ martian ui                                                 # Prompts: versions, 
   version. The prompts are the evals core's, served by its own routes
   ([prompt routes](evals-core.md#prompt-versions)); Python can push one with
   `martian.evals.prompts.push_suite_prompts`.
+
+## A cache of model calls
+
+Running an unchanged case again pays for the same model calls again. With the cache on, each
+reply of the target and of the LLM judges is stored by its full request, and a later run that
+sends the same request gets the stored reply instead of calling the model:
+
+```yaml
+cache:                     # turns the cache on; `cache:` alone takes every default
+  folder: .model-cache     # relative to this file; default: `cache` in the local data folder
+  ttl_seconds: 86400       # how long an entry is used; default 604800 (seven days), at most 366 days
+  functions: true          # a function target's calls too; default false
+```
+
+`martian evals run evals.yaml --cache` turns it on for one run of a suite without a `cache`
+block, with the defaults, and `--no-cache` turns a suite file's block off;
+`run_suite(path, cache=True)` or `cache=False` does the same from Python. Without either, nothing
+is cached and every call is made, as before. The default folder is `cache` in the local Evals UI's
+data folder: `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, so
+`~/.martian/evals/cache`.
+
+- **What is cached.** A URL target's calls, and every LLM judge's, through the judges' shared
+  provider call (both stages of a judge that reviews its draft). A function target's calls only
+  with `functions: true`: a function is your code and may do more than answer, such as write to a
+  database or send a message, so replaying it is your choice. Deterministic checks call no model.
+- **The key is the full request**, as a SHA-256 digest of everything that decides the reply:
+
+  | Call | In the key |
+  | --- | --- |
+  | URL target | The address as called, with `${NAME}` read from the environment; the headers; the body with the case's inputs and the combination's [matrix](#a-matrix-of-prompts-and-models) values filled in; `response_path`. `{{uuid}}` counts as written, not as the new id each call sends, or no request would ever repeat |
+  | Function target | The SHA-256 of its file, the function's name and its arguments: the case's inputs and the combination's values |
+  | LLM judge | The judge model, the address serving it (for an `openai:/` model `OPENAI_API_BASE`, else `OPENAI_BASE_URL`), the messages it sends (its prompt with your criteria, the case's input and the reply under test), the reply's schema, `judge.inference_params`, `judge.headers`, the stage (draft or review) and the judge's version, such as `response-rubrics-v1` |
+
+  `timeout_seconds`, `judge.max_retries` and `judge.rate_limit_wait_seconds` are not in it: they
+  change how a call is made, not what it asks. Neither are modules a function target's file
+  imports, nor the model behind an endpoint, which the SDK cannot see: delete the folder after
+  changing those, or use `--no-cache`.
+- **Credentials are never in it.** A header or a query parameter of the address whose name says
+  it holds a credential is left out of the key: `Authorization`, `Proxy-Authorization` and
+  `Cookie`, any name that holds `auth`, `key`, `token`, `secret`, `pass`, `credential`, `cookie`,
+  `session` or `signature`, and `sig`, `code` and `pwd`. A user name or password in an address is
+  left out too. Rotating a key keeps the cache, while a header such as `X-Tenant`, which changes
+  what is asked, counts. A judge's key (`OPENAI_API_KEY`) is never read into the key. What an
+  entry holds is in [security and data](security-and-data.md#the-cache-of-model-calls).
+- **A failed call is never stored.** A target call that fails (an error status, a timeout, a
+  response with nothing at `response_path`, an exception from a function target) and a judge call
+  that fails, or whose reply is not the judgment asked for, fail as they do without the cache, and
+  the next run makes them again. A function target's reply that JSON cannot hold exactly, such as
+  a tuple, is not stored either.
+- **Repeats still sample.** Within one `martian evals run`, the nth identical request is attempt
+  n, with its own entry. Each of a case's [attempts](#repeated-attempts) gets the reply that
+  attempt got in the earlier run, and a first run makes exactly the calls it makes without the
+  cache: identical requests in one run are never answered with one reply. Raising `--repeats`
+  from 3 to 5 replays three attempts of each case and calls the model for two.
+- **A changed prompt misses.** Editing a judge's criteria calls the judge again and replays the
+  target. Editing the prompt in the target's body, or a case's input, calls the target again, and
+  the judge too when the reply it grades changed.
+- **Time to live.** An entry older than `ttl_seconds` is not used, and the next successful call
+  replaces it. Delete the folder to empty the cache.
+- **`--fresh` replays too.** It discards earlier results and grades every case again; with the
+  cache on, the replies come from the cache. Add `--no-cache` to call the models again.
+- **Checks of the call itself.** `latency` and `cost` measure the target's call, and a replayed
+  reply took no time and spent no tokens, so a suite whose target's calls are cached is refused
+  before any case: run it with `--no-cache`, or, for a function target, leave `functions` off.
+- **Time limits and budgets.** A replayed call made no model call, so it spends nothing of the
+  run's [limits](#run-a-suite-file-locally): a replayed judgment counts 0 tokens towards
+  `max_judge_tokens`, and a replayed reply takes only the moment it takes to read, against
+  `max_seconds` and `timeout_seconds`. A run whose judgments are all replayed can therefore run
+  under a token limit it would otherwise reach. A target call that outlasted `timeout_seconds` is
+  the case's error and is never stored, even when it ends later. A run that reaches a limit calls
+  no more targets, replayed or not, and the next run resumes after the cases it finished.
+- **In a matrix** each combination is its own run, with its own counts in its `summary.cache` and
+  `provenance.cache` and its limits afresh. Attempt numbers run across the whole command, so two
+  combinations that send the same judge request, such as two prompts whose replies are the same,
+  each have an entry of their own and each make their own call the first time, as without the
+  cache.
+- **Resume and the baseline.** The cache is not part of what a reused verdict depends on, so a
+  finished case is skipped as before and turning the cache on or off keeps earlier results; a
+  run compares with a [baseline](#comparing-with-a-baseline) as before.
+- **Suite-file runs only.** The pytest gate (`assert_gate`, `assert_checks`) does not cache. In
+  Python, every judge factory takes `cache=`, a `martian.evals.cache.ModelCallCache`.
+
+A run with the cache on says so wherever its result is read, so a replayed result is never taken
+for a fresh one:
+
+| Where | What |
+| --- | --- |
+| `summary.json` | `cache`: `folder`, `ttl_seconds`, `functions`, and for `target` and for `judge` this run's `hits` (replies from the cache), `calls` (requests sent to the model) and `stored` (replies written to the cache), or `null` when the suite makes no such call that the cache holds. A run without the cache has no `cache` |
+| `matrix.json` | Each combination's own counts in its `summary.cache` |
+| The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
+| The local Evals UI's data folder | The run's `provenance.cache`: the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled |
+| `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call |
 
 ## Pass rates and confidence intervals
 

@@ -29,6 +29,10 @@
   combination's text values that is a registered prompt version's text, by content digest, is
   named under ``prompts`` (:func:`martian.evals.prompts.matched_prompts`), with the prompt's name
   and version, so the run shows the prompt version it used.
+- A run with the cache of model calls on (:mod:`martian.evals.cache`) has it in ``provenance``
+  under ``cache``: its folder, time to live and whether function targets are cached from the
+  start, and once the run ends how many target and judge replies came from the cache, so a
+  replayed result is never taken for a fresh one.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -110,11 +114,18 @@ class RunRecorder:
     first."""
 
     def __init__(
-        self, home: Path, suite: Suite, *, limits: RunLimits | None = None, matrix: dict[str, Any] | None = None
+        self,
+        home: Path,
+        suite: Suite,
+        *,
+        limits: RunLimits | None = None,
+        matrix: dict[str, Any] | None = None,
+        cache: dict[str, Any] | None = None,
     ) -> None:
         """``limits`` are the run's (``provenance.limits`` when it has any), and ``matrix`` the run's
         combination of the suite's matrix, as ``provenance.matrix`` holds it, for a suite with a
-        matrix."""
+        matrix. ``cache`` is the cache of model calls the run uses, as ``provenance.cache`` holds it
+        from the start; :meth:`used_cache` gives its counts, which ending the run adds."""
         from martian.evals.local import LocalEditionError, open_stores
 
         self._hold: RunHold | None = None
@@ -130,6 +141,8 @@ class RunRecorder:
         self.home = home
         self.suite = suite
         self.matrix = matrix
+        self.cache = cache
+        self._cache_used: dict[str, Any] | None = None
         self.run: Run | None = None
         self._ended = False
         self._scorers = {scorer.name: scorer for scorer in suite.scorers}
@@ -173,6 +186,8 @@ class RunRecorder:
             used = await matched_prompts(self.store, SINGLE_USER, suite.matrix, self.matrix["values"])
             if used:
                 provenance[PROVENANCE_KEY] = used
+        if self.cache is not None:
+            provenance["cache"] = self.cache
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,
@@ -223,6 +238,11 @@ class RunRecorder:
     def finish(self) -> Run:
         """Record that every case has a result."""
         return _wait(self._end("completed", ""))
+
+    def used_cache(self, report: dict[str, Any]) -> None:
+        """Keep the run's use of the cache of model calls, with its counts, for ``provenance.cache``
+        when the run ends, whether it finished, stopped at a limit or was cancelled."""
+        self._cache_used = report
 
     def stop(self, stopped: dict[str, Any]) -> Run:
         """Record that the run reached one of its limits before its last case (``RunLimits.stop``):
@@ -291,8 +311,13 @@ class RunRecorder:
         counts = self._counts()
         current = await self._current()
         changes: dict[str, Any] = {"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
+        provenance = dict(current.provenance)
         if stopped is not None:
-            changes["provenance"] = {**current.provenance, "stopped": stopped}
+            provenance["stopped"] = stopped
+        if self._cache_used is not None:
+            provenance["cache"] = self._cache_used
+        if provenance != current.provenance:
+            changes["provenance"] = provenance
         finished = current.model_copy(update=changes)
         self.run = await self.records.update_run(SINGLE_USER, finished, expected_state="running")
         await self.store.finish_run(SINGLE_USER, DEFAULT_PROJECT, finished.id, state=state, counts=counts)

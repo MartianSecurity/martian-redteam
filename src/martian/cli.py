@@ -111,6 +111,16 @@ def run_evals(
             "to resume. Replaces limits.max_judge_tokens.",
         ),
     ] = None,
+    cache: Annotated[
+        bool | None,
+        typer.Option(
+            "--cache/--no-cache",
+            show_default=False,
+            help="Suite file only: replay the target's and the judges' replies stored by an earlier run for the "
+            "same request, and store new ones; --no-cache turns off the suite file's cache block. Default: the "
+            "suite file's cache block, else off.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -136,13 +146,14 @@ def run_evals(
             baseline=baseline,
             max_seconds=max_seconds,
             max_judge_tokens=max_judge_tokens,
+            cache=cache,
         )
         return
-    suite_only = (output, concurrency, limit, repeats, baseline, data_dir, max_seconds, max_judge_tokens)
+    suite_only = (output, concurrency, limit, repeats, baseline, data_dir, max_seconds, max_judge_tokens, cache)
     if fresh or any(option is not None for option in suite_only):
         typer.echo(
-            "--output, --concurrency, --limit, --repeats, --fresh, --max-seconds, --max-judge-tokens, --baseline "
-            "and --data-dir apply to a suite file (evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh, --max-seconds, --max-judge-tokens, --cache, "
+            "--baseline and --data-dir apply to a suite file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -208,6 +219,7 @@ def _run_suite(
     baseline: Path | None = None,
     max_seconds: float | None = None,
     max_judge_tokens: int | None = None,
+    cache: bool | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -215,7 +227,7 @@ def _run_suite(
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
-    from martian.evals.runner import false_refusal_line, run_suite
+    from martian.evals.runner import cache_line, false_refusal_line, run_suite
     from martian.evals.stats import rate_text
 
     console = Console()
@@ -232,6 +244,7 @@ def _run_suite(
             baseline=baseline,
             max_seconds=max_seconds,
             max_judge_tokens=max_judge_tokens,
+            cache=cache,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -286,6 +299,8 @@ def _run_suite(
         )
     if (refusals := summary.get("false_refusals")) is not None:
         console.print(false_refusal_line(refusals), markup=False, highlight=False, soft_wrap=True)
+    if (used := summary.get("cache")) is not None:
+        console.print(cache_line(used), markup=False, highlight=False, soft_wrap=True)
     unit = "attempt(s)" if plan else "case(s)"
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} {unit}: {reason}", markup=False, highlight=False)
@@ -339,7 +354,7 @@ def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: 
     from rich.table import Table
 
     from martian.evals.local import data_folder
-    from martian.evals.runner import false_refusal_line
+    from martian.evals.runner import cache_line, combined_cache, false_refusal_line
     from martian.evals.stats import rate_text
 
     compared = baseline is not None
@@ -379,6 +394,9 @@ def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: 
             row.append(entry["gate"])
         table.add_row(*row)
     console.print(table)
+    # The cache's counts over every combination, once: each combination's are in matrix.json.
+    if used := [entry["summary"]["cache"] for entry in combinations if "cache" in entry["summary"]]:
+        console.print(cache_line(combined_cache(used)), markup=False, highlight=False, soft_wrap=True)
     unit = "attempt(s)" if plan else "case(s)"
     for entry in combinations:
         summary, comparison = entry["summary"], entry["comparison"]
