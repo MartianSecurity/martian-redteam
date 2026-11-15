@@ -1083,8 +1083,8 @@ endpoint, and keeps the local edition's default in its data folder.
   [promptfoo results and configs](#promptfoo-results-and-configs).
 - `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
   check: [copied MLflow stores](#copied-mlflow-stores).
-- `martian evals export` writes everything an organisation holds as JSON Lines files with a
-  manifest, and `martian evals import martian` loads them into a fresh install:
+- `martian evals export` writes everything an organisation's store and record store hold as JSON
+  Lines files with a manifest, and `martian evals import martian` loads them into a fresh install:
   [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own route for the attempts of repeated cases, with the run's reliability and its
@@ -2201,7 +2201,7 @@ a score threshold.
 
 | Listed, not converted | Why |
 | --- | --- |
-| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
 | `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
 | `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
@@ -2212,7 +2212,10 @@ a score threshold.
 | Other red team graders | Graded by a model with their own prompts |
 | `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
 | `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
-| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-valid-function-call`, `is-valid-openai-function-call`, `is-valid-openai-tools-call` | Validate the reply's tool calls against the schemas of the provider's own `tools` or `functions`. The closest check, `tool_called` with `arguments_match: schema`, checks the calls of a tool it names against a schema it gives; add it by hand to use it |
+| `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
+| `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
+| Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
 | `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
 | `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 
@@ -2347,7 +2350,8 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 
 ## Data export
 
-`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals export <folder>` exports everything the local edition's store and record store
+hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
