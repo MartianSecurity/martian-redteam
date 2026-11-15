@@ -1,8 +1,9 @@
 """The full data export: everything an organisation holds, exported, imported into a fresh install
 and exported again with nothing lost, on the in-memory store and on the local edition's MLflow
 store; every table of the record store and every kind of object of the two store interfaces either
-exported or left out with a reason; an interrupted export resumed to the same files; and what an
-import refuses."""
+exported or left out with a reason; monitors and schedules imported paused, and a threshold's
+webhook secret in no export; an interrupted export resumed to the same files; and what an import
+refuses."""
 
 from __future__ import annotations
 
@@ -51,16 +52,40 @@ from martian.evals.model import (
     ReviewQuestion,
     ReviewQueue,
     Run,
+    RunLimits,
     Score,
     ScorerVersion,
     ScoringJob,
     Span,
     StoreRef,
     Suite,
+    Target,
     Trace,
     suite_digest,
 )
-from martian.evals.records import RECORD_METHODS, RecordStore, SavedView
+from martian.evals.records import (
+    RECORD_METHODS,
+    Alert,
+    EmailChannel,
+    ModelChange,
+    ModelWatch,
+    ModelWatchProgress,
+    Monitor,
+    MonitoredTrace,
+    MonitorFilter,
+    MonitorProgress,
+    MonitorScores,
+    Observation,
+    RecordStore,
+    SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleGates,
+    ScheduleProgress,
+    Threshold,
+    ThresholdStatus,
+    WebhookChannel,
+)
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import metadata
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
@@ -70,6 +95,8 @@ ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
 T0 = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 INSPECT = Path(__file__).resolve().parents[1] / "fixtures" / "inspect"
+CANARY = "whsec-export-canary-" + "5d1e9b" * 4
+"""The webhook secret of the threshold the export test fills in: no file of an export may hold it."""
 
 # What the receiving store assigns itself for what it creates (docs/data-export.md): left out of
 # the comparison. Every other field of every object must come back as it was exported.
@@ -78,6 +105,9 @@ REASSIGNED = {
     "datasets.jsonl": ("dataset", {"created_at", "created_by"}),
     "drafts.jsonl": ("draft", {"revision", "updated_at", "updated_by"}),
     "views.jsonl": ("view", {"revision", "updated_at"}),
+    # An import creates monitors and schedules paused, whatever they were (checked on its own).
+    "monitors.jsonl": ("monitor", {"revision", "updated_at", "state"}),
+    "schedules.jsonl": ("schedule", {"revision", "updated_at", "state"}),
 }
 
 
@@ -307,8 +337,10 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     )
 
     # Live traffic: a session's turns, one annotated by a person.
+    live = []
     for turn in range(2):
         _, trace_id = ids()
+        live.append(trace_id)
         annotation = Score(
             trace_id=trace_id,
             scorer="correct",
@@ -339,6 +371,7 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
                 scores=[annotation] if turn == 0 else [],
             ),
         )
+    await monitoring(store, records, principal, project, run_id=run_id, dataset=first, judge=judge, live=live)
 
     # Dataset drafts, one published, and saved views.
     draft = DatasetDraft(id=str(uuid.uuid4()), project_id=project, name="support next", source_dataset_id=first.id)
@@ -366,6 +399,231 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
             ),
         )
     await store.archive_project(principal, retired.id)
+
+
+async def monitoring(
+    store: EvalStore,
+    records: RecordStore,
+    principal: Principal,
+    project: str,
+    *,
+    run_id: str,
+    dataset: Any,
+    judge: ScorerVersion,
+    live: list[str],
+) -> None:
+    """A monitor on the live traffic with the traces it took, a schedule of the suite with the
+    slots it ran and skipped, and thresholds on both with their status and alerts, one signed with
+    :data:`CANARY`."""
+    day = T0 + timedelta(days=2)
+    monitor = await records.create_monitor(
+        principal,
+        project,
+        Monitor(
+            id=str(uuid.uuid4()),
+            project_id=project,
+            name="Live politeness",
+            scorers=[judge],
+            sampling_rate=0.5,
+            filter=MonitorFilter(state="OK", user_id="customer-7"),
+            max_judge_tokens_per_day=10_000,
+            created_by=principal.user_id,
+            created_at=day,
+        ),
+    )
+    await records.set_monitor_progress(
+        principal,
+        project,
+        monitor.id,
+        MonitorProgress(
+            watermark=day + timedelta(minutes=5),
+            day=day.date(),
+            judge_tokens=40,
+            examined=2,
+            sampled=2,
+            scored=1,
+            last_pass_at=day + timedelta(minutes=6),
+        ),
+    )
+    verdict = Score(
+        trace_id=live[1],
+        scorer="politeness",
+        scorer_version="2",
+        source="llm_judge",
+        source_id="glm-5",
+        value=True,
+        passed=True,
+        rationale="Kind.",
+        metadata={"martian.monitor": monitor.id},
+        created_at=day + timedelta(minutes=6),
+    )
+    logged = await store.log_score(principal, project, live[1], verdict)
+    for taken in (
+        MonitoredTrace(
+            monitor_id=monitor.id,
+            trace_id=live[1],
+            state="scored",
+            pass_id="pass-1",
+            tokens=40,
+            scores=[verdict.model_copy(update={"store": logged.store})],
+            created_at=day + timedelta(minutes=5),
+            finished_at=day + timedelta(minutes=6),
+        ),
+        # Taken by a pass that stopped before it stored its scores.
+        MonitoredTrace(
+            monitor_id=monitor.id,
+            trace_id=live[0],
+            state="scoring",
+            pass_id="pass-2",
+            created_at=day + timedelta(hours=1),
+        ),
+    ):
+        await records.finish_monitored_trace(principal, project, taken)
+
+    schedule = await records.create_schedule(
+        principal,
+        project,
+        Schedule(
+            id=str(uuid.uuid4()),
+            project_id=project,
+            name="Nightly support",
+            cron="0 2 * * *",
+            on_model_change=ModelWatch(source="runs"),
+            suite_id="suite-1",
+            suite_version=2,
+            suite_name="Support",
+            scorers=[judge],
+            policies=[Policy(scorer="politeness", threshold=0.5)],
+            target=Target(kind="agent", agent_id="support-agent"),
+            dataset_name="support",
+            dataset_id=dataset.id,
+            dataset_digest=dataset.digest,
+            max_cases=3,
+            limits=RunLimits(max_seconds=600),
+            created_by=principal.user_id,
+            created_at=T0 - timedelta(days=1),
+        ),
+    )
+    await records.set_schedule_progress(
+        principal,
+        project,
+        schedule.id,
+        ScheduleProgress(
+            next_slot=T0 + timedelta(days=2, hours=2),
+            last_slot=T0 + timedelta(days=1),
+            last_turn_at=T0 + timedelta(days=1, seconds=3),
+            model_watch=ModelWatchProgress(model="glm-5", watermark=T0 + timedelta(hours=1), observed=1),
+        ),
+    )
+    await records.add_scheduled_run(
+        principal,
+        project,
+        ScheduledRun(schedule_id=schedule.id, slot=T0, state="admitted", run_id=run_id, created_at=T0),
+    )
+    await records.set_scheduled_run_gate(principal, project, schedule.id, T0, "passed")
+    change = ModelChange(previous="glm-4", current="glm-5", at=T0 + timedelta(hours=20))
+    await records.add_scheduled_run(
+        principal,
+        project,
+        ScheduledRun(
+            schedule_id=schedule.id,
+            slot=T0 + timedelta(days=1),
+            state="skipped",
+            reason="the target is not registered",
+            missed=1,
+            trigger="model_change",
+            model_change=change,
+            created_at=T0 + timedelta(days=1, seconds=3),
+        ),
+    )
+
+    on_monitor = Threshold(
+        id=str(uuid.uuid4()),
+        project_id=project,
+        name="Live politeness pass rate",
+        source=MonitorScores(monitor_id=monitor.id, scorer="politeness"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.9,
+        window_seconds=3600,
+        min_count=1,
+        webhook=WebhookChannel(url="https://alerts.example.com/martian"),
+        email=EmailChannel(to=["oncall@example.com"]),
+        created_by=principal.user_id,
+        created_at=day,
+    )
+    await records.create_threshold(principal, project, on_monitor, webhook_secret=CANARY)
+    seen = Observation(
+        at=day + timedelta(minutes=7),
+        window_start=day - timedelta(minutes=53),
+        count=1,
+        estimate=0.0,
+        interval=[0.0, 0.79],
+        verdict="breach",
+    )
+    alerts = [
+        Alert(
+            id=str(uuid.uuid4()),
+            threshold_id=on_monitor.id,
+            channel=channel,
+            event="breached",
+            sequence=1,
+            payload={"type": "threshold.breached", "sequence": 1, "threshold": {"id": on_monitor.id}},
+            created_at=seen.at,
+            next_attempt_at=seen.at,
+        )
+        for channel in ("webhook", "email")
+    ]
+    breached = ThresholdStatus(state="breached", sequence=1, since=seen.at, last=seen)
+    await records.set_threshold_status(principal, project, on_monitor.id, breached, expected_sequence=0, alerts=alerts)
+    sent = seen.at + timedelta(seconds=1)
+    await records.finish_alert(
+        principal,
+        project,
+        alerts[0].model_copy(
+            update={"state": "delivered", "attempts": 1, "next_attempt_at": None, "delivered_at": sent}
+        ),
+    )
+    await records.finish_alert(
+        principal,
+        project,
+        alerts[1].model_copy(
+            update={"attempts": 1, "last_error": "SMTP 451", "next_attempt_at": sent + timedelta(minutes=1)}
+        ),
+    )
+    on_gates = Threshold(
+        id=str(uuid.uuid4()),
+        project_id=project,
+        name="Nightly gate pass rate",
+        source=ScheduleGates(schedule_id=schedule.id),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.5,
+        window_seconds=7 * 86400,
+        min_count=1,
+        created_at=T0,
+    )
+    await records.create_threshold(principal, project, on_gates, webhook_secret=None)
+
+
+def lines_of(folder: Path, name: str) -> list[dict[str, Any]]:
+    return [json.loads(raw) for raw in (folder / name).read_text(encoding="utf-8").splitlines()]
+
+
+def assert_monitoring_comes_back_paused_and_unsigned(first: Path, again: Path, imported: Any) -> None:
+    """Monitors and schedules active in the export come back paused, with nothing queued for them,
+    and the threshold with a webhook without its secret, which no file of the export holds."""
+    for path in first.rglob("*"):
+        if path.is_file():
+            assert CANARY.encode() not in path.read_bytes(), path.name
+    active = []
+    for name, key in (("monitors.jsonl", "monitor"), ("schedules.jsonl", "schedule")):
+        assert [line[key]["state"] for line in lines_of(first, name)] == ["active"], name
+        assert [line[key]["state"] for line in lines_of(again, name)] == ["paused"], name
+        active += [line[key]["id"] for line in lines_of(first, name)]
+    assert imported.paused == tuple(active)
+    signed = [line["threshold"]["id"] for line in lines_of(first, "thresholds.jsonl") if line["threshold"]["webhook"]]
+    assert len(signed) == 1 and imported.needs_secret == tuple(signed)
 
 
 def normalised(folder: Path, references: dict[str, dict[str, str]] | None = None) -> dict[str, list[Any]]:
@@ -440,10 +698,12 @@ def table_rows(database: Path, space: str) -> dict[str, int]:
 
 
 def assert_tables_round_trip(source: Path, target: Path, space: str) -> None:
-    """Every table the export carries holds rows in the source, and as many in the fresh install."""
+    """Every table the export carries holds rows in the source, and as many in the fresh install;
+    the import queued nothing, for a run, a monitor or a schedule."""
     before, after = table_rows(source, space), table_rows(target, space)
     assert {name: before[name] > 0 for name in EXPORTED_TABLES} == dict.fromkeys(EXPORTED_TABLES, True)
     assert {name: after[name] for name in EXPORTED_TABLES} == {name: before[name] for name in EXPORTED_TABLES}
+    assert after["martian_work_queue"] == 0
 
 
 def models_in(hint: Any) -> set[str]:
@@ -503,12 +763,24 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     imported = await import_data(target, target_records, ORG_A, tmp_path / "first")
     again = await export_data(target, target_records, ORG_A, tmp_path / "again")
 
+    assert_monitoring_comes_back_paused_and_unsigned(tmp_path / "first", tmp_path / "again", imported)
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
     assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
-    # The receiving store's dataset ids are new, and the references to them follow.
+    # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
+    [schedule] = await target_records.list_schedules(ORG_A, "default")
+    assert await target.get_dataset(ORG_A, "default", schedule.dataset_id) is not None
+    # The threshold's webhook signs nothing until its secret is given again, once.
+    [webhook] = imported.needs_secret
+    assert await source_records.threshold_secret(ORG_A, "default", webhook) == CANARY
+    assert await target_records.threshold_secret(ORG_A, "default", webhook) is None
+    assert not await target_records.threshold_signed(ORG_A, "default", webhook)
+    assert await target_records.set_threshold_secret(ORG_A, "default", webhook, "a-new-secret-of-yours")
+    assert await target_records.threshold_signed(ORG_A, "default", webhook)
+    assert not await target_records.set_threshold_secret(ORG_A, "default", webhook, "another-secret-of-yours")
+    assert await target_records.threshold_secret(ORG_A, "default", webhook) == "a-new-secret-of-yours"
     source_records.close()
     target_records.close()
 
@@ -550,6 +822,7 @@ def test_the_local_edition_comes_back_whole_in_a_fresh_data_folder(tmp_path):
     imported = import_local(tmp_path / "first", fresh)
     export_local(fresh, tmp_path / "again")
 
+    assert_monitoring_comes_back_paused_and_unsigned(tmp_path / "first", tmp_path / "again", imported)
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
     assert_tables_round_trip(home / "martian.db", fresh / "martian.db", "~local")
     # MLflow assigns its own experiment, run and assessment ids; every reference follows them.
@@ -621,6 +894,11 @@ async def test_an_interrupted_export_resumes_to_the_same_files(tmp_path, monkeyp
     progress = json.loads((folder / PROGRESS).read_text(encoding="utf-8"))
     assert not (folder / MANIFEST).exists()
     assert (folder / "case_results.jsonl").stat().st_size > progress["sizes"]["case_results.jsonl"]
+    # Stopped again in the monitoring step, at the second threshold's alerts, after the first's.
+    with pytest.raises(Interrupted):
+        await export_data(store, Interrupting(records, "list_alerts", 2), ORG_A, folder)  # type: ignore[arg-type]
+    progress = json.loads((folder / PROGRESS).read_text(encoding="utf-8"))
+    assert (folder / "alerts.jsonl").stat().st_size > progress["sizes"]["alerts.jsonl"] == 0
     # Stopped again on the second page of traces, after the first was written.
     with pytest.raises(Interrupted):
         await export_data(Interrupting(store, "get_trace", 3), records, ORG_A, folder)  # type: ignore[arg-type]
@@ -651,6 +929,24 @@ async def test_an_export_stops_at_a_trace_of_a_run_that_started_after_it(tmp_pat
     records.close()
 
 
+async def test_an_export_stops_at_a_slot_whose_run_started_after_it(tmp_path):
+    store, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
+    await populate(store, records, ORG_A, default_exists=False)
+    folder = tmp_path / "export"
+    with pytest.raises(Interrupted):
+        await export_data(store, Interrupting(records, "list_scores", 1), ORG_A, folder)  # type: ignore[arg-type]
+    # The schedule's turn admits a run while the export is stopped: the export would not hold it.
+    late, _ = ids()
+    await records.create_run(ORG_A, Run(id=late, project_id="default", source="console", state="queued"))
+    [schedule] = await records.list_schedules(ORG_A, "default")
+    entry = ScheduledRun(schedule_id=schedule.id, slot=T0 + timedelta(days=3), state="admitted", run_id=late)
+    await records.add_scheduled_run(ORG_A, "default", entry)
+    with pytest.raises(ExportError, match=f"schedule {schedule.id} started run {late}, which started after"):
+        await export_data(store, records, ORG_A, folder)
+    assert not (folder / MANIFEST).exists()
+    records.close()
+
+
 async def test_what_an_export_and_an_import_refuse(tmp_path):
     store, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
     await populate(store, records, ORG_A, default_exists=False)
@@ -673,8 +969,8 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 2}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 2; this SDK reads version 1"):
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 1}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 1; this SDK reads version 2"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
@@ -689,6 +985,24 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
 def test_the_commands_export_and_import_a_data_folder(tmp_path):
     home, fresh = tmp_path / "home", tmp_path / "fresh"
     import_inspect_logs([INSPECT / "glm5.json"], home)
+    _, records = open_stores(home)
+    judge = ScorerVersion(name="politeness", kind="llm_judge", type="guidelines", model="glm-5")
+    monitor = Monitor(id=str(uuid.uuid4()), project_id="default", name="Live", scorers=[judge], sampling_rate=1)
+    signed = Threshold(
+        id=str(uuid.uuid4()),
+        project_id="default",
+        name="Live pass rate",
+        source=MonitorScores(monitor_id=monitor.id, scorer="politeness"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.9,
+        window_seconds=3600,
+        min_count=1,
+        webhook=WebhookChannel(url="https://alerts.example.com/martian"),
+    )
+    asyncio.run(records.create_monitor(SINGLE_USER, "default", monitor))
+    asyncio.run(records.create_threshold(SINGLE_USER, "default", signed, webhook_secret=CANARY))
+    records.close()
     out = tmp_path / "out"
 
     exported = CliRunner().invoke(app, ["evals", "export", str(out), "--data-dir", str(home)])
@@ -697,6 +1011,8 @@ def test_the_commands_export_and_import_a_data_folder(tmp_path):
     imported = CliRunner().invoke(app, ["evals", "import", "martian", str(out), "--data-dir", str(fresh)])
     assert imported.exit_code == 0, imported.output
     assert f"Imported into {fresh}: 1 project, 0 dataset versions, 1 run, 4 case results" in imported.output
+    assert "Monitors and schedules come back paused (active in the export: 1)" in imported.output
+    assert "Webhook secrets are never exported (thresholds with a webhook: 1)" in imported.output
     assert f"Open them in the local Evals UI: martian ui --data-dir {fresh}" in imported.output
 
     again = CliRunner().invoke(app, ["evals", "import", "martian", str(out), "--data-dir", str(fresh)])
