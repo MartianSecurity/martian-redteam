@@ -22,11 +22,11 @@ app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer chec
 evals_app.add_typer(
     import_app, name="import", help="Bring runs from other eval tools, or a Martian export, into the local Evals UI."
 )
+app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 DATA_DIR_HELP = (
     "The local Evals UI's data folder, as for `martian ui`. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals."
 )
-app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 
 @app.callback(invoke_without_command=True)

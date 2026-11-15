@@ -29,6 +29,7 @@ from martian.evals.data_export import (
 )
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
+from martian.evals.mlflow_import import import_mlflow_store
 from martian.evals.model import (
     Case,
     CaseResult,
@@ -476,6 +477,24 @@ def test_the_local_edition_comes_back_whole_in_a_fresh_data_folder(tmp_path):
     assert len(shown) == 2 + 2 * 4 and shown == served(fresh, ui)
 
 
+def test_a_data_folder_copied_from_mlflow_comes_back_whole(tmp_path):
+    # What `martian evals import mlflow` copied, as MLflow itself wrote it: sessions, MLflow's
+    # own spans, a person's feedback and expectation, an overridden one, evaluation runs.
+    from tests.evals.test_mlflow_import import write_store
+
+    source, home = tmp_path / "mlflow" / "store", tmp_path / "home"
+    source.parent.mkdir()
+    write_store(source)
+    import_mlflow_store(str(source / "mlflow.db"), home)
+
+    export_local(home, tmp_path / "first")
+    imported = import_local(tmp_path / "first", tmp_path / "fresh")
+    export_local(tmp_path / "fresh", tmp_path / "again")
+    for name in ("traces.jsonl", "runs.jsonl", "case_results.jsonl", "scores.jsonl", "datasets.jsonl"):
+        assert manifest(tmp_path / "first")["files"][name]["lines"] > 0, name
+    assert normalised(tmp_path / "first", imported.references) == normalised(tmp_path / "again")
+
+
 class Interrupted(Exception):
     """Stands in for the export being stopped."""
 
@@ -558,7 +577,7 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="not an empty folder"):
         await export_data(store, records, ORG_A, tmp_path / "busy")
     # An install that holds data already, here the source itself.
-    with pytest.raises(ExportError, match=r"already holds data: project \S+ has datasets"):
+    with pytest.raises(ExportError, match=r"already holds data: project \S+ has \w+.*Import into a fresh install"):
         await import_data(store, records, ORG_A, folder)
 
     fresh = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'fresh.db'}")

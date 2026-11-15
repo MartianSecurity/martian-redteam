@@ -66,6 +66,11 @@ password is not printed or stored: the report and each copied run's provenance k
 without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
 See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
+`martian evals export` writes everything the data folder holds into the folder it names: every
+case's inputs and outputs, traces with their spans, scores, reasons and reviews, and run
+artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
+
 ## The local edition has no login
 
 `martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
