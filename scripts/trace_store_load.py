@@ -62,7 +62,19 @@ INTERVAL_MS = 1000
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 WINDOW = 1000
 """The ``window`` search asks for traces since the newest ``WINDOW`` traces began."""
-SEARCHES = ("page", "mlflow_page", "session", "user", "tag", "window", "text", "sessions", "get")
+SEARCHES = (
+    "page",
+    "mlflow_page",
+    "last_page",
+    "session",
+    "user",
+    "tag",
+    "window",
+    "text",
+    "text_all",
+    "sessions",
+    "get",
+)
 _VOCABULARY = (
     "the order was refunded after the customer asked about delivery and the agent checked the account "
     "balance then called the shipping tool with a tracking number and summarised the policy for returns "
@@ -553,6 +565,8 @@ class Load:
         queries = {
             # The Traces page: the newest 50, no filters.
             "page": TraceQuery(project_id=PROJECT, limit=50),
+            # Its last page, the oldest 50. The cursor is MlflowStore's: the offset of the page.
+            "last_page": TraceQuery(project_id=PROJECT, limit=50, cursor=str(max(len(self.written) - 50, 0))),
             # One session's turns.
             "session": TraceQuery(project_id=PROJECT, session_id=f"session-{some // TURNS}", limit=50),
             # One user's newest 50, of one trace in USERS.
@@ -572,6 +586,16 @@ class Load:
 
             found[name] = await self._time(search)
 
+        async def text_all() -> int:
+            # Free text that only the oldest trace holds, following the cursor until it is found: a
+            # text search pages through the whole project a bounded number of traces at a time.
+            query = TraceQuery(project_id=PROJECT, text=f"needle-{min(self.written)} ", limit=50)
+            while True:
+                page = await store.search_traces(principal, query)
+                if page.items or page.next_cursor is None:
+                    return len(page.items)
+                query = query.model_copy(update={"cursor": page.next_cursor})
+
         async def sessions() -> int:
             return len((await store.search_sessions(principal, TraceQuery(project_id=PROJECT))).items)
 
@@ -579,9 +603,9 @@ class Load:
             return 0 if await store.get_trace(principal, PROJECT, trace_id(some)) is None else 1
 
         def mlflow_page() -> int:
-            # MLflow's own first page of 50, newest first, from the same SQL store: what the Traces
-            # page would cost if the binding passed MLflow's paging through instead of reading
-            # every trace. It reaches into the binding, so it is a measurement only.
+            # MLflow's own first page of 50, newest first, from the same SQL store: what the
+            # database alone costs for the Traces page, without the binding. It reaches into the
+            # binding, so it is a measurement only.
             experiment = store._experiment(PROJECT)
             page, _ = store._store.search_traces(locations=[experiment.experiment_id], max_results=50)
             return len(page)
@@ -590,6 +614,7 @@ class Load:
             return int(await store._call(principal, mlflow_page))
 
         found["mlflow_page"] = await self._time(native)
+        found["text_all"] = await self._time(text_all)
         found["sessions"] = await self._time(sessions)
         found["get"] = await self._time(get)
         return {name: found[name] for name in SEARCHES}
