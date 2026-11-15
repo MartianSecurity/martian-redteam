@@ -56,6 +56,8 @@ It leaves out what the interfaces cannot list or the model does not describe:
 - Monitors, their progress and their record of the traces they took
   ([monitors](evals-core.md#monitors)); exporting them is not built yet. The scores they stored are
   on their traces, which are exported.
+- Schedules, their progress and their history of slots ([schedules](evals-core.md#schedules));
+  exporting them is not built yet. The runs they started, and their scoring jobs, are exported.
 
 ## The format
 

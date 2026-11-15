@@ -19,7 +19,9 @@ their own worker without changing the routes:
 - :class:`QueueWorker` implements ``submit`` by putting the work in a durable queue in the record
   store's database, and a worker, beside the app or in a process of its own, takes it from there
   and runs it with either of the two above, its :class:`Runner`. Restarting the API process then
-  loses no queued or running work (:mod:`martian.evals.worker.queue`).
+  loses no queued or running work (:mod:`martian.evals.worker.queue`). Given ``schedules``, it
+  also takes each schedule's turn at its slots and admits the schedule's runs itself
+  (:mod:`martian.evals.worker.schedule`).
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
@@ -59,24 +61,28 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class Work:
     """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``), or one pass of a monitor over its project's new traces
-    (``kind="monitor"``, with ``monitor_id`` and no run). The record store holds everything else
-    about it."""
+    (``kind="scoring"``, with ``job_id``), one pass of a monitor over its project's new traces
+    (``kind="monitor"``, with ``monitor_id`` and no run), or one turn of a schedule, which admits
+    its run when a slot is due (``kind="schedule"``, with ``schedule_id`` and no run). The record
+    store holds everything else about it."""
 
-    kind: Literal["run", "scoring", "monitor"]
+    kind: Literal["run", "scoring", "monitor", "schedule"]
     principal: Principal
     project_id: str
     run_id: str = ""
     job_id: str | None = None
     monitor_id: str | None = None
+    schedule_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.kind == "scoring") != (self.job_id is not None):
             raise ValueError("scoring work names its job, and only scoring work does")
         if (self.kind == "monitor") != (self.monitor_id is not None):
             raise ValueError("monitor work names its monitor, and only monitor work does")
-        if (self.kind == "monitor") == bool(self.run_id):
-            raise ValueError("run and scoring work name their run, and monitor work names none")
+        if (self.kind == "schedule") != (self.schedule_id is not None):
+            raise ValueError("schedule work names its schedule, and only schedule work does")
+        if (self.kind in ("monitor", "schedule")) == bool(self.run_id):
+            raise ValueError("run and scoring work name their run, and monitor and schedule work name none")
 
 
 TargetCall = Callable[[Case], Awaitable[Any]]
@@ -261,12 +267,25 @@ class RunsMonitors(Protocol):
         ...
 
 
+@runtime_checkable
+class RunsSchedules(Protocol):
+    """What a worker adds when it runs schedules: it takes a schedule's work (``kind="schedule"``)
+    again at each of its slots for as long as the schedule exists, and admits the schedule's run
+    there, as a :class:`QueueWorker` given ``schedules`` does
+    (:mod:`martian.evals.worker.schedule`). ``schedules`` is what it admits runs with, or None when
+    it runs no schedules. The routes that create and resume schedules need one."""
+
+    @property
+    def schedules(self) -> ScheduleServices | None: ...
+
+
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.monitor import execute_monitor, sampled  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
+from martian.evals.worker.schedule import ScheduleServices  # noqa: E402
 
 __all__ = [
     "AgentExecutor",
@@ -283,6 +302,8 @@ __all__ = [
     "QueueWorker",
     "Runner",
     "RunsMonitors",
+    "RunsSchedules",
+    "ScheduleServices",
     "TargetCall",
     "Verdict",
     "Work",

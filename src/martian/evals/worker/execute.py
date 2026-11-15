@@ -706,9 +706,10 @@ async def take_over(records: RecordStore, work: Work) -> None:
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
     A finished or queued record is left alone. A monitor's pass has no record to queue again: the
-    next pass goes on from the monitor's watermark and takes over the traces it had taken."""
+    next pass goes on from the monitor's watermark and takes over the traces it had taken. Nor
+    has a schedule's turn: the next turn looks at the same due slot again."""
     principal, project = work.principal, work.project_id
-    if work.kind == "monitor":
+    if work.kind in ("monitor", "schedule"):
         return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
@@ -747,7 +748,7 @@ async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
     as a run's process that exited early: a run or scoring job still queued or running becomes
     ``failed``. A finished record is left alone. A monitor, which has no end, keeps ``detail`` as
-    its progress's ``error`` and runs again at its next pass."""
+    its progress's ``error`` and runs again at its next pass; so does a schedule, at its next turn."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
     if work.kind == "monitor":
@@ -755,6 +756,12 @@ async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None
         if progress is not None:
             failed = progress.model_copy(update={"error": detail, "last_pass_at": _now()})
             await records.set_monitor_progress(principal, project, work.monitor_id or "", failed)
+        return
+    if work.kind == "schedule":
+        found = await records.schedule_progress(principal, project, work.schedule_id or "")
+        if found is not None:
+            stuck = found.model_copy(update={"error": detail, "last_turn_at": _now()})
+            await records.set_schedule_progress(principal, project, work.schedule_id or "", stuck)
         return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)

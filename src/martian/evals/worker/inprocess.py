@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
 OTHER_ORGANISATION = "This worker runs one organisation's work; another organisation's work needs a process of its own"
+NOT_A_RUNNERS = "A schedule's turn admits a run; the queue's worker takes it itself and never hands it to a runner"
 
 
 class InProcessWorker:
@@ -131,5 +132,7 @@ class InProcessWorker:
             )
         elif work.kind == "scoring":
             await execute_scoring(self._store, self._records, work, judge=self._judge, limits=self._limits)
-        else:
+        elif work.kind == "monitor":
             await execute_monitor(self._store, self._records, work, judge=self._judge, settle_seconds=self._settle)
+        else:
+            raise ValueError(NOT_A_RUNNERS)

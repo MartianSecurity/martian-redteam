@@ -35,8 +35,9 @@ FEATURES: Mapping[str, str] = MappingProxyType(
 """Every feature key, with the name a refusal uses.
 
 - ``review_queues``: review queues with an assignee, and the library of review questions they ask.
-- ``monitoring``: the Monitoring page: scoring jobs and their scorecards across runs, and the
-  monitors that score a project's live traces (:mod:`martian.evals.server.monitors`).
+- ``monitoring``: the Monitoring page: scoring jobs and their scorecards across runs, the
+  monitors that score a project's live traces (:mod:`martian.evals.server.monitors`), and the
+  schedules that run a saved suite against a target unattended (:mod:`martian.evals.server.schedules`).
 """
 
 LIMITS: Mapping[str, str] = MappingProxyType(

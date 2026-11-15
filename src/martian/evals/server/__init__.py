@@ -28,7 +28,8 @@ frozen evals API contract: status and bootstrap here, the read routes in ``runs`
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
 ``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
 ``POST /v1/traces``, which records an application's spans as traces through the store, and
-``monitors`` the monitors that score a project's live traces.
+``monitors`` the monitors that score a project's live traces, and ``schedules`` the schedules that
+run a saved suite against a target unattended.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from martian.evals.server import (
     projects,
     reviews,
     runs,
+    schedules,
     scoring,
     suites,
     traces,
@@ -180,6 +182,7 @@ def create_app(
         launch.router,
         scoring.router,
         monitors.router,
+        schedules.router,
         reviews.router,
         reviews.explorer,
         suites.router,
