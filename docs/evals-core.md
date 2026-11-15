@@ -450,8 +450,9 @@ imported run's source yet; they are on the list so the run routes keep showing w
 and the importers record for their readers, as they did before the allowlist.
 `test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps` in
 `tests/evals/test_read_routes.py` records a CI run carrying all four CI token fields and reads it
-through every route that answers with a run or with what a run holds, the core's and the local
-edition's. It also fails when a route under `/v1/evals/{run_id}` or `/v1/local/runs` is added
+through every route that answers with a run or with what a run holds, the core's (its
+[inspection for cheating](#runs-inspected-for-cheating) and that inspection's review queue among
+them) and the local edition's. It also fails when a route under `/v1/evals/{run_id}` or `/v1/local/runs` is added
 that it neither reads nor lists as answering with no run.
 
 ## Write routes
