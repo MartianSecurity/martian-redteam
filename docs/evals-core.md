@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, with their [score trends](#score-trends), [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended, and again [when the model behind it changes](#when-the-model-changes) | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -100,8 +100,9 @@ sign-in has been checked:
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
 own routes this way: the review queue routes, the question library, answering a queue's item and
 the reviewers' agreement (`GET /v1/evals/reviewer-agreement`) need `review_queues`, and
-`GET /v1/evals/monitoring` needs `monitoring`
-([write routes](#write-routes)). The Martian server gates its own routes the same way until it
+`GET /v1/evals/monitoring` and every monitor, threshold and schedule route need `monitoring`
+([write routes](#write-routes), [monitors](#monitors), [thresholds](#thresholds-and-alerts),
+[schedules](#schedules)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
 MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
 `concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
@@ -479,7 +480,9 @@ All paths are under `/v1/evals`. How the core carries them out:
 
 Not served: the CI gate's routes (`/ci/...`, `/ci-sessions/...`), which stay with the server's CI
 gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overview`,
-`POST /quality-issues/search` and `/triage`, `POST /traces/export`).
+`POST /quality-issues/search` and `/triage`, `POST /traces/export`). Beside the contract, the core
+serves its own `/monitors` routes ([monitors](#monitors)) and `/schedules` routes
+([schedules](#schedules)).
 
 `tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
@@ -500,13 +503,15 @@ server's background tasks. A route records the work first, as a queued `Run`, `S
 
 | Member | What it does |
 | --- | --- |
-| `Work` | `kind` (`run`, `scoring` or `recheck`), the `principal`, `project_id`, `run_id` (empty for a re-check), and `job_id` for scoring and for a re-check, the re-check's id |
+| `Work` | `kind` (`run`, `scoring`, `recheck`, `monitor` or `schedule`), the `principal`, `project_id`, `run_id` for a run or scoring (empty for the others), `job_id` for scoring and, for a re-check, the re-check's id, `monitor_id` for a monitor's pass ([monitors](#monitors)) and `schedule_id` for a schedule's turn ([schedules](#schedules)) |
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
 | `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
 | `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
 | `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `QueueWorker` and `LocalWorker` can ([the durable queue](#the-durable-queue)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
+| `RunsMonitors.monitor_seconds` | Optional, for a worker that takes a monitor's work again after each pass, as `QueueWorker` does: how long after a pass ends the next is due. The routes that create and resume a monitor need it ([monitors](#monitors)) |
+| `RunsSchedules.schedules` | Optional, for a worker that takes a schedule's work again at each of its slots and admits its runs, as a `QueueWorker` given `schedules` does: the `ScheduleServices` it admits them with, or `None`. The routes that create and resume a schedule need one ([schedules](#schedules)) |
 
 `execute_run`, `execute_scoring` and `execute_recheck` are the work itself, for any worker to
 call. `execute_run`
@@ -536,7 +541,8 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None)` runs each piece of
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None,
+  monitor_settle_seconds=20)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -548,11 +554,13 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
   and so does the local edition's `LocalWorker` ([local runs](#local-runs)), because a run's
   MLflow state would otherwise be the server's.
 - `QueueWorker(queue, runner, records, in_process=False, lease_seconds=30, poll_seconds=1,
-  max_attempts=3, concurrency=1)` puts each piece of work in a durable queue in the record store's
-  database, and a worker takes it from there and runs it with `runner`, either of the two above,
-  `concurrency` pieces at once, so that a restart loses no queued or running work
-  ([the durable queue](#the-durable-queue)). The local edition's `LocalWorker` is one, served
-  beside the app.
+  max_attempts=3, concurrency=1, monitor_seconds=10, schedules=None)` puts each piece of work in a
+  durable queue in the record store's database, and a worker takes it from there and runs it with
+  `runner`, either of the two above, `concurrency` pieces at once, so that a restart loses no queued
+  or running work ([the durable queue](#the-durable-queue)), takes each monitor's work again every
+  `monitor_seconds` ([monitors](#monitors)), and, given `schedules`, takes each schedule's work again
+  at its slots and admits its runs itself ([schedules](#schedules)). The local edition's
+  `LocalWorker` is one, served beside the app, with no schedules.
 
 ### Targets
 
@@ -623,6 +631,41 @@ no registered agent, so an install with no martian-agents service runs functions
   the agent does, and holds nothing, such as a lease or a time, that changes while the agent does
   not. The server implements the executor when it mounts the core (MorningHQ/martian-notes#102).
 
+#### The model a target reports
+
+A provider can change the model behind an agent without notice, so the worker records the model
+that answered each case wherever the target reports one. A target call returns its output, or a
+`TargetReply(output, model)` (`martian.evals.worker`) that also names the model, as the target
+reported it (`gpt-4o-2024-08-06`):
+
+| Target | How it reports the model |
+| --- | --- |
+| An HTTP target | `model_path`, a path into the JSON response written as `response_path` is (`model` for an OpenAI-compatible reply), or `model_header`, a response header such as `X-Model`; one of them. `http_call` reads it from each response (`response_model` in `martian.evals.worker.targets`) |
+| A local target | A `model` target reads `model` from each chat completion, as `model_path` ([local targets](#local-targets)); an `http` target reports none, since the UI has no field for it |
+| A function | Returns a `TargetReply`; a function that returns its bare output reports none |
+| A registered agent | The executor's `call` returns a `TargetReply`. On the Martian server that is martian-agents' reply carrying the model the agent used, which its executor (`app/evals_targets.py` in MorningHQ/MartianBackend) passes on when it mounts the core (MorningHQ/martian-notes#102); until then registered agents report none |
+| A suite file's URL target under `martian evals run` | Not read: the command-line runner records no model for its runs |
+
+The worker keeps it, as text of at most 200 characters, in two places:
+
+- **The case's trace**: its `model`, and `gen_ai.response.model` on its `target` span, so the
+  Traces page shows it and the store's trace search finds it (`TraceQuery.model`,
+  [trace conventions](#trace-conventions)).
+- **The run**: `provenance.model`, with `name`, the model of the latest case that reported one,
+  and `cases`, how many cases each model answered (at most 20 models). A run whose model changed
+  part way counts both.
+
+A response that names no model, or a value that is not text, records none for that case; the
+case's output and verdict stand, since a target that reports no model is not wrong. `model_path`
+is refused as `response_path` is, naming `targets['ID'].model_path`. Both fields are part of an
+HTTP target as written, so of its pin ([the same target](#the-same-target-on-every-start)); unset,
+they are left out, so a target without them keeps its pin.
+
+`tests/evals/test_model_changes.py` runs an HTTP target on loopback that names its model in its
+JSON and in a header, and one that names none, and a function and a registered agent that return
+a `TargetReply`, and checks the model on every case's trace and span, in the run's provenance and
+in a trace search by model.
+
 `ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
 gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
 the HTTP target its run names, as written, with its work, and no other, so a target the run does
@@ -659,8 +702,8 @@ target is compared by:
 
 | Target | Its pin | What changes it |
 | --- | --- | --- |
-| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body` or `response_path`, or the id becoming another kind of target |
-| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target |
+| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body`, `response_path`, `model_path` or `model_header`, or the id becoming another kind of target |
+| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target. A `model` target's pin includes `model_path`, which an earlier release left out, so a run of one admitted by an earlier release and resumed after an upgrade fails as changed |
 | A function | `{"kind": "agent", "agent_id"}` | Only the id becoming another kind of target. A function is the installation's own code, with nothing to digest, so one replaced by another function under the same id is not detected; give the new function a new id |
 | A registered agent | The executor's `check`, asked again in the process that calls the agent | Whatever the executor's pin holds. On the Martian server that is the agent's approved connection, its revision and its approval (`EvalTarget.pin` in `app/evals_targets.py`) |
 
@@ -759,7 +802,7 @@ runner's, so the routes do not change.
 
 The queue is `SqlWorkQueue(database_url, schema="martian", migrate=True)`
 (`martian.evals.records.queue`): the `martian_work_queue` table in the record store's database,
-SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with).
+SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with, and `0005` the `available_at` of a row given back for later).
 
 ```python
 from martian.evals.records.queue import SqlWorkQueue
@@ -779,9 +822,21 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   stopped](#runs-whose-process-stopped)). Otherwise the API process only queues
   work, and a worker process of its own builds the same `QueueWorker`, usually with a
   `ProcessWorker` runner, and runs `await worker.serve()`.
-- **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
+- **One row per piece of work**, `run:<run id>`, `scoring:<scoring job id>`, `monitor:<monitor id>`
+  or `schedule:<schedule id>`, holding the work as
   `dump_work` writes it, its principal included. Submitting the same work again while it is in
   the queue changes nothing. The row is removed once the work has ended.
+- **Monitors' and schedules' rows come back.** A monitor's row stays in the queue for as long as
+  the monitor exists. Each claim of it is one pass ([monitors](#monitors)); when the pass ends the
+  worker gives the row back (`SqlWorkQueue.reschedule`) with no attempt counted, due
+  `monitor_seconds` later, or at once when the pass stopped at its read bound. A schedule's row
+  stays the same way; each claim of it is one turn, which the worker takes itself rather than
+  hand it to its runner, and it is given back due at the schedule's next slot
+  ([schedules](#schedules)). No claim takes a row before its `available_at`, it then waits behind
+  the work queued before that time, and `pending()`, which `drain()` waits on, leaves out rows not
+  due yet. A deleted monitor's or schedule's row is removed at its next turn. A monitor whose
+  worker stopped during its pass `max_attempts` times, or a schedule whose turn failed that often,
+  is paused, saying so in its progress's `error`, instead of failed.
 - **Claims and leases.** A worker takes a row that is queued, or claimed by a lease that ran out,
   and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
   claim moves a row only while the row is still claimable, in one statement; on Postgres it also
@@ -1087,6 +1142,9 @@ worker = ProcessWorker(worker_services, records, options={...})
   own code until the contract carries them (MorningHQ/martian-notes#334). A judge request carries
   only judge scorers. The local edition installs none. What the worker isolates, and what it does
   not, is in [security and data](security-and-data.md#custom-python-scorers).
+- **Scoring jobs only, never a monitor.** A [monitor](#monitors) refuses a scorer of kind `code`
+  in its record (`Monitor`), whoever writes it: a custom scorer reads a case's `inputs` and
+  `expectations`, and a production trace has a request and a response only.
 
 `tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
 values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
@@ -1152,6 +1210,715 @@ against a loopback endpoint, and a registered panel the worker grades with a fak
 member's error still decides, no majority is an error, every vote is on the score, and a panel is
 reported and calibrated as one judge.
 
+## Monitors
+
+A monitor attaches judges and deterministic checks to a project's live traffic: the worker scores
+a sample of the project's new traces with them and stores each score on its trace. Monitors are
+part of the `monitoring` feature key, so every route below needs an edition that includes it
+(Enterprise, On-Premises; Community is `403`), and the routes that change a monitor need the
+`score` capability. The routes are the core's own (`martian.evals.server.monitors`); the server's
+frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/monitors` | The project's monitors (`project_id`, the default project without it) by name, each with its progress |
+| `POST /v1/evals/monitors` | Create a monitor (`201`) and hand its work to the worker |
+| `GET /v1/evals/monitors/{monitor_id}` | One monitor and its progress |
+| `GET /v1/evals/monitors/{monitor_id}/trends` | Each of its scorers' pass rate or mean in windows of time, with its 95% interval ([score trends](#score-trends)) |
+| `POST /v1/evals/monitors/{monitor_id}/pause` | Stop it before its next trace |
+| `POST /v1/evals/monitors/{monitor_id}/resume` | Score again, the traces from now on; those recorded while it was paused are not scored |
+| `DELETE /v1/evals/monitors/{monitor_id}` | Remove it, its progress and its record of the traces it took (`204`); the scores it stored stay on their traces |
+
+```json
+{
+  "request_id": "0b9f3c4e-5d0a-4d8e-9a43-3f6d2b9e8c11",
+  "project_id": null,
+  "name": "Live safety",
+  "scorers": ["safety", "response_length"],
+  "judges": [{"name": "tone", "version": 2}],
+  "sampling_rate": 0.1,
+  "filter": {"state": "OK", "min_latency_ms": 500},
+  "max_judge_tokens_per_day": 200000,
+  "acknowledge_model_cost": true
+}
+```
+
+- **Scorers** are named as in a scoring request: the built-in ones by name (with `guidelines` for
+  `policy`) and registered judges by name and version, one to seven. A production trace has no
+  expected response, so `exact_match`, `contains_expected` and `correctness` are refused (`422`):
+  the checks are `valid_json` and `response_length`, the built-in judges `safety` and `policy`, and
+  a registered judge whose instructions name `{{ expectations }}` reads an empty expected
+  response. Each judge is pinned to its model when the monitor is created, its own or the default
+  judge model ([judge models](#judge-models)), as a scoring job's are. Judges need a worker with a
+  judge (`422`), `acknowledge_model_cost` and a `max_judge_tokens_per_day`. A monitor runs no
+  [custom Python scorer](#custom-scorers-in-the-worker): the route names none, and the `Monitor`
+  record refuses a scorer of kind `code`.
+- **`sampling_rate`**, 0 to 1, is the share of matching traces scored. A trace is in when the first
+  8 bytes of the SHA-256 of its id, as a fraction of 2^64, are below the rate (`sampled` in
+  `martian.evals.worker.monitor`). It depends on the trace id alone: a trace is in or out the same
+  way on every pass, two monitors at one rate score the same traces, and a trace in at one rate is
+  in at every higher rate.
+- **`filter`** holds the trace search's filters, with their names: `q`, `state` (`OK`, `ERROR` or
+  empty), `session_id`, `user_id`, `min_latency_ms`, and `assessment` with `assessment_value`. The
+  time range, order and paging are the monitor's own. A trace still in progress and a trace of an
+  eval run are never scored.
+- **`max_judge_tokens_per_day`** caps its judges' tokens per UTC day ([below](#the-daily-cap)).
+- The monitor's id is derived from `request_id`: the same request again returns the same monitor,
+  and another one with that `request_id` is `409`. A project has at most 20 monitors (`409`), and an
+  archived project takes none (`409`). A worker that does not run monitors (`RunsMonitors`, which
+  `QueueWorker` is) refuses creating and resuming one with `503`, "This installation's worker does
+  not run monitors".
+
+A monitor in a response carries its definition, with each scorer's `name`, `kind`, `version`,
+`model` and `endpoint`, its `state` (`active` or `paused`), `revision`, `active_since` (when it was
+created or last resumed), and its `progress`: `watermark` (every trace with an earlier request time
+has been read), `day` and `judge_tokens`, `examined`, `sampled` (the traces taken), `scored` and
+`errors` (scores with a verdict and without), `capped`, `caught_up` (false when the last pass
+stopped at its read bound), `error` (why the last pass failed, else empty) and `last_pass_at`.
+
+### How the worker scores
+
+A monitor's work (`Work(kind="monitor")`) is a row of the durable queue that comes back after each
+pass ([the durable queue](#the-durable-queue)), so monitoring needs a `QueueWorker`, beside the app
+or in a worker process of its own; it runs on the worker's runner, in a process of the
+organisation's own with a `ProcessWorker`. A pass (`execute_monitor` in
+`martian.evals.worker.monitor`):
+
+1. **Reads new traces by time, and nothing else.** It calls `search_traces` with `since` its
+   watermark (at first its `active_since`), `until` now less `monitor_settle_seconds` (20 unless
+   the worker is given another), oldest first, and the filters the store applies (session, user,
+   text, state), in pages of 100, and applies the minimum latency and the assessment to each page
+   as the trace search does. It never reads a project from its first trace: this is the `since`
+   search the [load report](trace-store-limits.md#volume-ceiling-for-monitoring) measured, which
+   project size does not slow. A pass reads at most 1,000 traces (`READ_BOUND`); one that stops
+   there says so (`caught_up`), and its next pass is due at once.
+2. **Scores each sampled trace once.** It reads the monitor again, takes the trace
+   (`claim_monitored_trace`), reads it whole (`get_trace`), runs the checks itself and the judges
+   through the worker's judge, one request per model, with the trace's request as the prompt, its
+   response as the output and no expected text, and stores every score that has a value on the
+   trace as an assessment: the `scorer`, its `scorer_version`, `source`, `source_id`, and metadata
+   naming the monitor (`martian.monitor_id`) and, for a judge, its model and version as for a
+   scoring job ([judge models](#judge-models)). A score with no verdict is kept with the monitor's
+   record of the trace, not on the trace, as a scoring job keeps it only with the run.
+3. **Moves its watermark on** and saves its progress after each scored trace and each page.
+4. **Judges its thresholds** and delivers their due alerts
+   ([thresholds and alerts](#thresholds-and-alerts)). A paused monitor's pass only delivers.
+
+**The delay.** A trace is first read `monitor_settle_seconds` (20) after its request time, the
+time it has to be recorded, and a monitor's next pass is due `monitor_seconds` (10) after its last
+one ended, which an idle worker sees within its `poll_seconds` (1). So a new trace is scored within
+about 31 seconds of its request time, plus the time its pass takes, mostly its judge's, while the
+passes keep up. A trace recorded more than `monitor_settle_seconds` after its request time, such
+as a long agent run that MLflow tracing writes when it ends, has been passed by then and is not
+scored. `tests/evals/test_monitors.py` measures it with a fake judge, with settings of 0.5, 0.5 and
+0.05 seconds, whose bound is 1.05 seconds: each trace is scored about 0.6 seconds after its request
+time.
+
+**Once per trace.** `martian_monitored_traces` holds one row per monitor and trace, taken before
+the trace is scored and `scored` once its scores are stored, so a trace is scored by a monitor at
+most once, however often a pass reads it again (traces at its watermark's time are read again).
+A pass that stopped part way leaves the trace `scoring`; the next pass takes it over and stores
+only the scores the trace has no assessment of from this monitor yet. One pass of a monitor runs
+at a time, under the queue's claim.
+
+#### The daily cap
+
+Judge tokens are what the judge reports (`JudgeResult.tokens`), input and output together, as for a
+run's limits ([limits](#limits-stopping-and-resuming)), counted per UTC day in the monitor's
+progress; checks use none. After each scored trace, once the day's tokens reach
+`max_judge_tokens_per_day`, or a judge reports no usage so the cap cannot be kept, the monitor stops
+scoring until the next UTC midnight: the rest of the day's traces are passed over unread and never
+scored, and its progress says so:
+
+```json
+{
+  "limit": "max_judge_tokens_per_day", "value": 40, "used": 45, "until": "2026-11-16T00:00:00Z",
+  "message": "Stopped until 2026-11-16T00:00:00Z at its daily judge token cap (max_judge_tokens_per_day 40) after 45 tokens; traces until then are not scored"
+}
+```
+
+The trace that reaches the cap is scored, so a day can go over by one trace's judgment. The next
+day the count starts afresh, from that day's traffic.
+
+**Pausing, deleting and failing.** The monitor is read again before each sampled trace, and taking
+a trace fails once it is paused or gone, so a pass stops before its next trace. A paused monitor's
+passes score nothing and only deliver its thresholds' due alerts; resuming moves `active_since` to
+then. A pass that fails part way says so in its
+progress's `error` and the next goes on from its watermark; a worker that stopped during a pass
+three times (`max_attempts`) pauses the monitor, with "The worker stopped during this monitor's
+pass too many times; the monitor is paused" as its `error`.
+
+`tests/evals/test_monitors.py` checks the sampling rate over 4,000 fixed trace ids and that the
+same ids are sampled every time; scores 200 traces at a rate of 0.3 and finds exactly the sampled
+ones scored, each once, and the same again when it reads them all again; applies a filter; reads
+only by time from `active_since`, never older traffic, 100 traces a pass at a bound of 100; stops
+at a cap of 40 tokens after the trace that reached it, says so, scores nothing more that day and
+scores the next day's traffic; stops when a judge reports no tokens; takes over a trace whose
+pass failed part way without storing a score twice; stops a pass when the monitor is paused;
+refuses a Community edition, a viewer, scorers that need an expected response, judges without a
+cap and a worker that does not run monitors; measures the delay through the routes and the queue
+on `MlflowStore`, with the scores as assessments; pauses, resumes and deletes a monitor through
+the queue on SQLite and Postgres; and pauses a monitor whose worker stopped too often. The record
+contract checks the monitor records, and the queue contract a row given back for later, on both
+databases.
+
+### Score trends
+
+`GET /v1/evals/monitors/{monitor_id}/trends` is how each of a monitor's scorers has done over
+time, for the Evals UI's Monitoring page: the scorer's pass rate, or its mean, in consecutive
+windows, each with its 95% interval (`monitor_trend` in `martian.evals.server.monitors`,
+`martian.evals.trends`). It needs `monitoring`, as every monitor route does.
+
+| Parameter | Default | What it is |
+| --- | --- | --- |
+| `span_seconds` | 86400 | How far back it reaches, 60 seconds to 30 days |
+| `bucket_seconds` | 3600 | Each window's width, 60 seconds to a day; at most 200 windows (`422` otherwise) |
+
+```json
+{
+  "monitor_id": "0e0c1d7a-3f1b-5b8e-9c2d-7a6f5e4d3c2b", "bucket_seconds": 3600,
+  "since": "2026-11-14T11:00:00Z", "until": "2026-11-15T10:42:10Z", "confidence": 0.95,
+  "read": 812, "truncated": false, "complete_since": null,
+  "scorers": [
+    {"name": "safety", "measure": "pass_rate", "points": [
+      {"start": "2026-11-15T10:00:00Z", "end": "2026-11-15T10:42:10Z", "count": 38,
+       "estimate": 0.947, "interval": [0.827, 0.985], "truncated": false}
+    ]}
+  ]
+}
+```
+
+- **Windows** start on whole multiples of their width since the Unix epoch, in UTC, so a point
+  covers the same hour or day on every read; the newest ends now, so it is partial.
+- **What a point measures** is what a [threshold](#thresholds-and-alerts) on the scorer
+  measures, computed the same way (`measured` in `martian.evals.thresholds`): `pass_rate` for the
+  boolean checks and judges (`valid_json`, `safety`, `policy`, a registered judge that answers yes
+  or no), with the Wilson interval, and `mean` for numbers (`response_length`, a registered judge
+  that answers with a number), with the Student t interval, which needs two scores. A judge whose
+  answers are text has `measure: null`, and its points carry only their `count`. A score without
+  a verdict counts for nothing, and a window with no score has no `estimate` and no `interval`.
+- **Where it reads.** The scores are the monitor's own record of the traces it scored
+  (`scored_monitored_traces`, indexed on the monitor and the time it took each trace), by that
+  time, from the oldest window's start to now, newest first, at most 5,000 traces
+  (`THRESHOLD_WINDOW_BOUND`), as a threshold's window is read. It never reads the trace store or
+  a project's traces, so its cost is bounded whatever the project's size
+  ([volume ceiling for monitoring](trace-store-limits.md#volume-ceiling-for-monitoring)). A read
+  that reached the bound says so (`truncated`): `complete_since` is the oldest time it read, and
+  each window that starts at or before it is `truncated`, holding only part of its scores.
+- A point is by the time the monitor took the trace, about its request time plus the
+  [delay](#how-the-worker-scores).
+
+`tests/evals/test_trends.py` aligns the windows, checks each window's pass rate and mean against
+the intervals `martian.evals.stats` computes for the same scores, a text judge's counts and a
+score without a verdict counted for nothing, marks the windows a read cut short, and through the
+route reads the monitor's scored traces once, by time from the oldest window's start and at most
+5,000, never a monitor's whole record, leaving out a trace older than the span; it also refuses
+more than 200 windows, an unknown monitor and a Community edition.
+
+## Thresholds and alerts
+
+A threshold watches one scorer of a [monitor](#monitors), or the gate results of a
+[schedule](#schedules)'s runs: it is healthy while the pass rate, or the mean score, over a window
+is at least, or at most, a value. The worker judges it after each of the monitor's passes, or each
+time the schedule's suite has scored one of its runs, and sends one alert when it breaches and one
+when it recovers, by signed webhook, by email, or both. Thresholds are part of the `monitoring` feature key, so every
+route needs an edition that includes it (`403` on Community), and the routes that change one need
+the `score` capability. The routes are the core's own (`martian.evals.server.thresholds`); the
+server's frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/thresholds` | The project's thresholds (`project_id`, the default project without it), by name, each with its status; `monitor_id` keeps those on one monitor, `schedule_id` those on one schedule's gate results |
+| `POST /v1/evals/thresholds` | Create a threshold (`201`) |
+| `GET /v1/evals/thresholds/{threshold_id}` | One threshold and its status |
+| `GET /v1/evals/thresholds/{threshold_id}/alerts` | Its alerts, newest first, with their delivery (`limit`, `cursor`) |
+| `POST /v1/evals/thresholds/{threshold_id}/secret` | Give a webhook that has no secret, as an [import](data-export.md#importing) leaves it, its secret: `{"secret": "..."}`, once. `409` for one that has a secret, `422` for a threshold without a webhook |
+| `DELETE /v1/evals/thresholds/{threshold_id}` | Remove it, its secret and its alerts (`204`) |
+
+```json
+{
+  "request_id": "6a1d0c1e-3c0f-4b55-9a6e-1f3b8f2a7d10",
+  "name": "Live safety pass rate",
+  "source": {"kind": "monitor", "monitor_id": "0e0c1d7a-3f1b-5b8e-9c2d-7a6f5e4d3c2b", "scorer": "safety"},
+  "measure": "pass_rate",
+  "direction": "at_least",
+  "value": 0.9,
+  "window_seconds": 3600,
+  "min_count": 30,
+  "webhook": {"url": "https://alerts.example.com/martian", "secret": "a-long-random-secret-of-yours"},
+  "email": {"to": ["oncall@example.com"]}
+}
+```
+
+- **`source`** names the monitor and one of its scorers, or, as `{"kind": "gate", "schedule_id":
+  ...}`, a schedule's gate results ([gate results](#gate-results)). A deleted monitor or schedule
+  takes its thresholds and their alerts with it.
+- **`measure`**: `pass_rate` counts the scorer's boolean scores (`valid_json`, `safety`, `policy`,
+  and registered judges that answer yes or no); `mean` averages its numeric ones
+  (`response_length`, and judges that answer with a number). A score without a verdict counts for
+  neither. A built-in scorer takes the measure it has, and a schedule's gate results `pass_rate`
+  (`422` otherwise).
+- **`direction`** and **`value`**: healthy while the measure is `at_least` (the default) or
+  `at_most` the value. A pass rate's value is strictly between 0 and 1: no interval can clear 0
+  or 1, so such a threshold could never be decided.
+- **`window_seconds`**, 60 seconds to 30 days (3600 by default): the scores of the traces the
+  monitor took for scoring in that time before the evaluation, or the gate results of the
+  schedule's slots in it. One evaluation reads at most the
+  newest 5,000 (`THRESHOLD_WINDOW_BOUND`), and says so (`truncated`).
+- **`min_count`**, at least 1 (30 by default; at least 2 for a mean): with fewer scores in the
+  window there is no verdict.
+- **`webhook`** and **`email`** are where its alerts go. Each needs a worker that sends that
+  channel; an installation sends neither until it is configured
+  ([sending alerts](#sending-alerts)), and asking for one before then is `422`. With neither, the
+  threshold still changes state, and its status shows it.
+- The webhook's **`secret`**, 16 to 256 printable ASCII characters, signs its alerts. It is
+  written once and no route returns it: a threshold shows `"webhook": {"url": ..., "signed":
+  true}`. An export never holds it, so a threshold imported into a fresh install
+  ([data export](data-export.md#importing)) shows `"signed": false` and its webhook alerts fail
+  ("The threshold has no webhook secret") until `POST .../secret` gives it one.
+- The id is derived from `request_id`: the same request again returns the same threshold, and
+  another one with that `request_id` is `409`. A project has at most 50 thresholds (`409`), and an
+  archived project takes none (`409`). A threshold cannot be changed; delete it and create another.
+
+### How a threshold is judged
+
+Each evaluation computes the measure over the window and its 95% interval with
+`martian.evals.stats`, the same intervals the scorecards report
+([pass rates and confidence intervals](evals.md#pass-rates-and-confidence-intervals)): Wilson for
+a pass rate and Student t for a mean, ungrouped, since a trace carries no group.
+
+**It alerts on the interval, not the point estimate.** A window of sampled traffic is a sample,
+and its rate moves from one evaluation to the next with no change in quality. At the point
+estimate, a monitor whose real pass rate sits at its threshold would breach and recover on about
+half its evaluations, and one a little above it, 93% against 90% over windows of 200, would still
+dip below about one time in twenty. So the verdict is:
+
+| Verdict | When (for `at_least`; the reverse for `at_most`) | Effect |
+| --- | --- | --- |
+| `breach` | The whole interval is below the value: its upper bound is less than it | State `breached` |
+| `healthy` | The whole interval is at or above the value: its lower bound is at least it | State `ok` |
+| `undecided` | The interval holds the value | State unchanged |
+| `insufficient` | Fewer than `min_count` scores, or no interval | State unchanged |
+
+Against 90%, 85 of 100 (interval 77–91%) is `undecided`, 80 of 100 (71–87%) a `breach`, and 97 of
+100 (92–99%) `healthy`. A source that is really at the value breaches by chance in at most 2.5% of
+windows, and the windows of successive evaluations overlap, so it does so far less often in turn.
+The cost is a slower call where the interval is wide, and near a high value a threshold breaches
+sooner than it recovers: against `at_least 0.9`, one failure and nothing else is already a breach
+(0 of 1 is 0–79%), which is what `min_count` is for, while 35 passes and nothing else are needed
+before it is healthy (35 of 35 is 90–100%).
+
+**The state machine.** A threshold's state is `unknown` until a verdict first decides it, then
+`ok` or `breached`. The `undecided` band, the interval's width either side of the value, is its
+hysteresis: once breached, the rate must climb until its whole interval clears the value, and noise
+inside the band changes nothing. A change to `breached` raises one breach alert per channel, a
+change from `breached` to `ok` one recovery alert per channel, and the first change from `unknown`
+to `ok` none. The status in a response is `state`, `sequence` (the number of its changes), `since`
+and `last`, the latest evaluation: `at`, `window_start`, `count`, `estimate`, `interval`,
+`verdict` and `truncated`.
+
+**Exactly one alert per change.** The status lives in the record store, and an evaluation writes a
+change of state and its alerts in one transaction that holds only while the stored `sequence` is
+still the one it read (`set_threshold_status`). So however often, and by however many workers, the
+same window is evaluated, a change is written once and its alerts once; a worker that restarts
+reads the state it left and raises nothing again, and alerts it had not delivered are delivered by
+the next pass. An alert's id is derived from the threshold, the change's `sequence` and the
+channel.
+
+`evaluate_thresholds` (`martian.evals.thresholds`) takes its scores from a `Source`, which finds
+each threshold's window. `MonitorSource` reads a monitor's scored traces
+(`scored_monitored_traces`), once per monitor for the widest window. `GateSource` reads a
+schedule's slots (`list_scheduled_runs`), newest first, at most the newest 5,000 for the widest
+window, and takes each slot's gate result as a boolean ([gate results](#gate-results)), judged by
+the same state machine.
+
+### Sending alerts
+
+An alert's body is JSON:
+
+```json
+{
+  "id": "0b6f5f3e-0d2a-5a8e-8d7c-1c9b2a3d4e5f",
+  "type": "threshold.breached",
+  "created_at": "2026-11-15T10:42:10Z",
+  "sequence": 2,
+  "threshold": {
+    "id": "…", "name": "Live safety pass rate", "project_id": null,
+    "source": {"kind": "monitor", "monitor_id": "…", "scorer": "safety"},
+    "measure": "pass_rate", "direction": "at_least", "value": 0.9, "window_seconds": 3600, "min_count": 30
+  },
+  "observation": {
+    "at": "2026-11-15T10:42:10Z", "window_start": "2026-11-15T09:42:10Z", "count": 80,
+    "estimate": 0.5, "interval": [0.393, 0.607], "verdict": "breach", "truncated": false, "confidence": 0.95
+  }
+}
+```
+
+`type` is `threshold.breached` or `threshold.recovered`. It carries the threshold and the counts,
+never a trace, a prompt or a response.
+
+**Webhooks.** Each alert is one `POST` of that body to the threshold's URL with these headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Martian-Alert-Id` | The alert's id, the same on every attempt |
+| `X-Martian-Timestamp` | The attempt's time, in whole seconds since 1970 (UTC) |
+| `X-Martian-Signature` | `v1=` and the hex HMAC-SHA256, keyed with the threshold's secret, of the timestamp, a full stop and the body's bytes |
+
+A receiver keeps the secret it gave when it created the threshold, recomputes the HMAC over the
+`X-Martian-Timestamp` header and the raw body exactly as received (before any JSON parsing),
+compares in constant time, and refuses a timestamp more than five minutes from its clock, so a
+captured request cannot be replayed later. With the standard library only:
+
+```python
+import hashlib
+import hmac
+import time
+
+
+def verify_martian_webhook(secret: str, body: bytes, timestamp: str, signature: str) -> bool:
+    """Whether a request is a Martian alert: ``body`` is the raw request body, ``timestamp`` the
+    X-Martian-Timestamp header and ``signature`` the X-Martian-Signature header."""
+    if not timestamp.isdigit() or abs(time.time() - int(timestamp)) > 300:
+        return False
+    digest = hmac.new(secret.encode("utf-8"), timestamp.encode("ascii") + b"." + body, hashlib.sha256)
+    return hmac.compare_digest("v1=" + digest.hexdigest(), signature)
+```
+
+`martian.evals.alerts.verify(secret, body, timestamp, signature)` is the same check for a receiver
+that has the SDK. A 2xx answer is a delivery; anything else, or no answer within the timeout, is a
+failed attempt. A receiver that may see an alert twice drops a repeat by `X-Martian-Alert-Id`
+(below). The URL is `https`, or `http` only to `localhost`, holds no user name or password, and
+redirects from it are not followed.
+
+**Email** is a plain-text message through the installation's SMTP server, to the threshold's
+recipients (one to ten addresses), with the subject `[Martian] <threshold name>: breached` or
+`recovered`, the measure, its interval and the window in the text, and the alert's id as
+`X-Martian-Alert-Id`.
+
+**Retries.** A failed attempt is tried again 30 seconds later, then after twice as long each time
+up to an hour: eight attempts over about 64 minutes, after which the alert is `failed`.
+Delivery runs at the end of each pass of the monitor, its due alerts one at a time, so an attempt
+is due at the first pass after its time. An alert is taken before it is sent, so two deliveries
+never send it at once. A worker that stops after a receiver accepted an alert and before it
+recorded the delivery sends it again when it is next due: delivery is at least once, and the alert
+id is how a receiver tells. `GET .../alerts` shows each alert's `state` (`pending`, `delivered`
+or `failed`), `attempts`, `next_attempt_at`, `delivered_at` and `last_error`, which names a status
+or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`) and never an address, a body or a
+secret.
+
+**Configuring an installation.** Alerts are sent by the worker, so it is the worker that is
+configured, with `AlertSettings` (`martian.evals.alerts`). Its default sends nothing, so an
+on-premises install makes no outbound call for alerts until its operator sets a channel:
+
+```python
+from martian.evals.alerts import AlertSettings, EmailSettings, WebhookSettings
+from martian.evals.worker import InProcessWorker
+
+alerts = AlertSettings(
+    webhook=WebhookSettings(),  # private_addresses=True for a receiver inside your network
+    email=EmailSettings(
+        host="smtp.example.com", port=587, security="starttls",
+        username="martian-alerts", password=smtp_password, sender="martian@example.com",
+    ),
+)
+runner = InProcessWorker(store, records, judge=judge, alerts=alerts)
+```
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `webhook` | None: no webhooks | `WebhookSettings(private_addresses=False, timeout_seconds=10)`. Before each attempt the host is resolved, and a loopback, private, link-local or reserved address is refused unless `private_addresses` |
+| `email` | None: no email | `EmailSettings(host, sender, port=587, security="starttls", username=None, password=None, timeout_seconds=10)`; `security` is `starttls`, `ssl` or `none` (a relay on the machine or its network). The password is never shown in a repr or a log line |
+| `retry_seconds`, `max_retry_seconds`, `max_attempts` | 30, 3600, 8 | The backoff above |
+
+A worker with a `ProcessWorker` runner gives the settings to each process through its setup
+(`WorkerServices(alerts=...)`) and names the channels it sends with
+`ProcessWorker(..., alert_channels=("webhook", "email"))`, which the routes check. Which channels
+a worker sends is `SendsAlerts` (`martian.evals.worker`), which `InProcessWorker`, `ProcessWorker`
+and `QueueWorker` implement. The local edition is Community and runs no monitors, so it sends no
+alerts. What leaves the installation, and where the secret is kept, is in
+[security and data](security-and-data.md#threshold-alerts).
+
+`tests/evals/test_thresholds.py` checks that 85 of 100 against 90% is undecided and 80 of 100 a
+breach, and the same for a mean; that at a real rate of 93% the point estimate would have alerted
+again and again over 300 windows of 200 scores while the interval raises nothing, and that a drop
+to 80% and a return to 97% raise one breach and one recovery; that six evaluations of a breach
+send one webhook, scores that leave the interval holding the value change nothing, and a recovery
+sends one; that a breach recorded before a worker stopped is delivered once by the next worker,
+and three restarts send nothing more; that a second source drives the same state machine; that a
+delivered signature verifies with the code above, copied out of this page, and fails for a changed
+body, secret or timestamp; that failed deliveries are retried after 0.3 and then 0.6 seconds at a
+`retry_seconds` of 0.3 and a cap of 0.6, and given up after `max_attempts`, logged by status
+without the address; that email goes through a fake SMTP server with its subject, recipients and
+alert id; that default settings send nothing and connect to nothing, and that webhooks without
+`private_addresses` refuse the loopback receiver before any call; that a breach through the routes
+and the queue sends one signed webhook over several passes, and that no route answer, log line or
+alert holds the secret; that a webhook with no secret, as an import writes it, shows unsigned until
+its secret is given, once, and then signs with it; and the routes' entitlement, role, validation,
+idempotency and deletion with the monitor. A loopback webhook receiver and a fake SMTP server stand in for the receivers.
+The record contract checks the threshold records, their conditioned changes of state, the secret
+given once to a webhook without one and the taking of due alerts on SQLite and Postgres.
+
+## Schedules
+
+A schedule runs a saved suite version against a target unattended, every so many seconds or on a
+cron expression, always in UTC, and, if it is set to, again when the model behind the target
+changes ([below](#when-the-model-changes)), and keeps a history of its runs. Schedules are part of the
+`monitoring` feature key, so every route below needs an edition that includes it (Enterprise,
+On-Premises; Community is `403`), and the routes that change a schedule need the `run` capability,
+as a launch does. The routes are the core's own (`martian.evals.server.schedules`); the server's
+frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/schedules` | The project's schedules (`project_id`, the default project without it) by name, each with its progress |
+| `POST /v1/evals/schedules` | Create a schedule (`201`) and hand its work to the worker |
+| `GET /v1/evals/schedules/{schedule_id}` | One schedule and its progress |
+| `GET /v1/evals/schedules/{schedule_id}/runs` | Its history: each slot it ran or skipped, the latest first (`page`, `limit` up to 100) |
+| `POST /v1/evals/schedules/{schedule_id}/pause` | Admit no more runs; a run in progress goes on |
+| `POST /v1/evals/schedules/{schedule_id}/resume` | Admit runs again, at the slots from now on; the slots that passed while it was paused are not run |
+| `DELETE /v1/evals/schedules/{schedule_id}` | Remove it, its progress and its history (`204`); the runs it started stay |
+
+```json
+{
+  "request_id": "6f1c0d9e-3a52-4b8e-8f2d-1c7b9a4e5d20",
+  "project_id": null,
+  "name": "Nightly regression",
+  "suite_version_id": "<suite version id>",
+  "agent_id": "<target id>",
+  "dataset_name": "support-faq",
+  "max_items": 100,
+  "cron": "0 2 * * *",
+  "limits": {"max_seconds": 1800, "max_judge_tokens": 200000},
+  "on_model_change": {"source": "traces", "settle_seconds": 300, "min_interval_seconds": 3600},
+  "acknowledge_model_cost": true
+}
+```
+
+- **When it is due** is `every_seconds` or `cron`, exactly one (`martian.evals.slots`).
+  `every_seconds`, at least 60, is due on its multiples since the Unix epoch, in UTC: `3600` on
+  the hour, `86400` at midnight UTC, whenever the schedule was created. `cron` is five fields,
+  minute (0-59), hour (0-23), day of the month (1-31), month (1-12) and day of the week (0-7, 0
+  and 7 Sunday), read in UTC, with no time zone of its own. Each field is `*`, a number, a range
+  `a-b`, either with a step (`*/15`, `8-18/2`), or a list of them; names (`MON`) and shortcuts
+  (`@daily`) are not read. When both day fields are restricted, a day is due when either
+  matches, as in cron. An expression it cannot read, or one never due (`0 0 31 2 *`), is `422`
+  naming why. A response says `"timezone": "UTC"`.
+- **What it pins.** The suite version (`suite_version_id`, a version's id from `GET /suites`) with
+  its scorers and policies, each judge pinned to its model when the schedule is created, its own
+  or the default judge model ([judge models](#judge-models)); the published dataset version that
+  is the newest of `dataset_name` then; `max_items`; and `limits`, each run's own
+  ([limits](#limits-stopping-and-resuming)), or the worker's without them. So the schedule's runs
+  compare with each other; a newer suite or dataset version needs a new schedule. The target is
+  not pinned: each run pins it when it is admitted, as a launch does
+  ([the same target](#the-same-target-on-every-start)), since a changed target is what a
+  regression schedule is for.
+- **`on_model_change`**, optional, also runs the suite when the model behind the target changes:
+  `source` (`traces` or `runs`, required), `settle_seconds` (0 to 7 days, 300 by default) and
+  `min_interval_seconds` (at least 60, at most 30 days, 3600 by default)
+  ([when the model changes](#when-the-model-changes)).
+- **Refused when it is created:** a suite version not saved (`404`), a dataset not published
+  (`422`), a target the worker does not know (`404`), a suite with a model judge without
+  `acknowledge_model_cost` or on a worker without a judge (`422`), an archived project (`409`), a
+  21st schedule in a project (`409`), and a worker that does not run schedules (`503`, "This
+  installation's worker does not run schedules"). The schedule's id is derived from `request_id`:
+  the same request again returns the same schedule, and another with that `request_id` is `409`.
+
+A schedule in a response carries its definition, `on_model_change` among it (or `null`),
+`timezone`, `next_slot` (when its next run is due; `null` while it is paused, and in the past
+while no worker has taken its turn), its `state` (`active` or `paused`), `revision`,
+`active_since` (when it was created or last resumed), and its `progress`: `next_slot`,
+`last_slot` (the slot it last ran or skipped), `error` (why its last turn failed, else empty),
+`last_turn_at` and `model_watch`, how far it has watched the model (`null` until its first turn,
+and for a schedule without `on_model_change`): `model`, `candidate`, `candidate_since`,
+`watermark`, `observed`, `last_change_at`, `change`, `caught_up`, `error` and `checked_at`
+([when the model changes](#when-the-model-changes)).
+
+### How the worker runs a schedule
+
+A schedule's work (`Work(kind="schedule")`) is a row of the durable queue that comes back at each
+of its slots ([the durable queue](#the-durable-queue)). A `QueueWorker` given
+`schedules=ScheduleServices(store, entitlements)`, the store and the edition's entitlements
+function that `create_app` is given, takes each turn itself, not through its runner and in no
+process of its own, as the API process admits a launch: a turn calls no target and no model
+(`execute_schedule` in `martian.evals.worker.schedule`).
+
+```python
+from martian.evals.worker import QueueWorker, ScheduleServices
+
+worker = QueueWorker(queue, runner, records, in_process=True, schedules=ScheduleServices(store, entitlements))
+app = create_app(store=store, records=records, principal=principal, worker=worker, entitlements=entitlements)
+```
+
+1. **The slot due** is its `next_slot`, or the first slot after `active_since`, whichever is later.
+   Before then a turn does nothing, and the row is given back due at that slot.
+2. **One run per turn.** When a turn comes after its slot, it admits one run, for the earliest slot
+   due, and counts the later slots due by then in `missed`: they are not run. A worker that was
+   down for an hour on a schedule due every minute runs it once when it returns, not 60 times. The
+   same holds when every place of the queue's workers was taken at the slot, since a turn takes a
+   place like any work. The next slot is then the first after the turn.
+3. **Admitted as a launch is** (`admit_run`): the edition must include `monitoring` then, the
+   project must not be archived, the worker pins the target as it is now (`check_target`), the
+   pinned dataset and suite versions must still be there, a model judge needs a worker with a
+   judge, and the organisation must have a place under `concurrent_runs`
+   ([editions and entitlements](#editions-and-entitlements)). A run that is not admitted is
+   recorded as `skipped` with the refusal as its `reason`, such as "An eval run is already in
+   progress", "Agent not found", "The Community edition does not include monitoring" or "The
+   schedule's dataset version is no longer in the store". Nothing waits for a place: the next run
+   is the next slot's. The run is the schedule creator's, the principal its queue row was put
+   with, under that organisation's entitlements at the slot.
+4. **Scored by its suite.** The run keeps its suite version, as a local run does
+   ([local runs](#local-runs)), its limits, and `provenance.schedule`: the schedule's `id` and
+   `name` and the `slot`. Its suite scoring job is recorded `queued`, with the schedule's pinned
+   scorers and policies, before the run is queued. Once the run's work has ended, the worker
+   queues the job if the run completed, and cancels it otherwise ("The run did not complete, so
+   its suite did not score it"), a run stopped at one of its limits included, since nothing
+   resumes a scheduled run. The job is admitted with its run, under `concurrent_runs`, and queued
+   even when `concurrent_scoring_jobs` is reached, as the local edition's suite job is.
+5. **Each slot once.** The history keeps one entry per slot, and the run's id is derived from the
+   schedule and the slot, so a turn whose worker stopped after admitting the run records it at
+   the next turn without admitting another. A turn that fails is taken again once its lease runs
+   out, for the same slot; a schedule whose turn failed `max_attempts` times is paused, with "This
+   schedule's turn failed too many times; the schedule is paused" in its progress's `error`.
+
+Every worker of a queue that holds schedules needs `schedules`: one without it that takes a
+schedule's row gives it back, due one lease later, for another worker. A deleted schedule's row
+leaves the queue at its next slot. Pausing stops the next turn admitting a run; resuming moves
+`active_since` to then, so the slots of the pause are not run.
+
+### When the model changes
+
+A provider can update the model behind an agent without notice, and a regression suite should run
+again when it does. A schedule with `on_model_change` watches the model and runs its suite once
+when it changes, besides its slots (`martian.evals.worker.model_watch`). Its row then comes back
+every `model_watch_seconds` (60 unless `ScheduleServices` is given another) as well as at its
+slots, and at once while its watch has more to read; each turn reads the model first, then runs
+the slot if one is due.
+
+**Where the model is read**, the watch's `source`:
+
+| Source | What it reads | For |
+| --- | --- | --- |
+| `traces` | The model of the project's live traces, `Trace.model`, which the [trace conventions](#trace-conventions) map from `gen_ai.response.model` before `gen_ai.request.model`. It reads by time only, as a monitor does: request times from its `watermark` to `now - trace_settle_seconds` (20 unless `ScheduleServices` is given another), oldest first, at most 1,000 traces a turn, never older traffic. Traces of eval runs and traces in progress are not traffic | An agent whose project holds its production traffic, sent over [OpenTelemetry](#opentelemetry-traces) or recorded through the store |
+| `runs` | The model the target reported on the project's runs of it, `provenance.model` ([the model a target reports](#the-model-a-target-reports)), from the project's 100 newest runs, each counted once, when it finishes after the `watermark`. A run the schedule itself started evaluated the model it reports, so it moves the watch's `model` there and starts nothing | A target that reports its model: runs launched by hand, by CI or by the schedule |
+
+A trace whose search result names no model, such as one MLflow tracing wrote straight into the
+in-process binding's database (which maps such a trace only when it is read on its own), is not
+read. The watch reads from when the schedule was created or last resumed, so nothing seen while
+it was paused counts; on its first turn it starts from the latest model seen before that, if
+there is one, else from the first seen after.
+
+**What counts as a change.** The watch keeps `model`, the model the suite last ran for (at first
+the one it starts from, which runs nothing: the slots evaluate it). Another model becomes the
+`candidate`, from when it was first seen after the last sight of any other (`candidate_since`);
+seeing `model` again drops it, and a third model is the candidate from then. A candidate is a
+change once:
+
+1. **it has settled**: `settle_seconds` have passed since `candidate_since` with no other model
+   seen. This is the debounce. A model that flaps back and forth more often than that never
+   settles, so it starts nothing;
+2. **and the interval has passed**: `min_interval_seconds` since the last change that started the
+   suite (`last_change_at`). A change that settles sooner waits, and one whose model goes back
+   meanwhile starts nothing. So however often the model flaps, the watch starts the suite at most
+   once per interval, and each run is for the change from the model the previous one ran for.
+
+**Once, and noted.** A change is written to the progress as `change`, with `previous`, `current`
+and the slot `at` that will hold it, before any run is admitted: the regular slot due at the same
+turn, whose run then stands for the change, or a slot of its own at the turn's time. Its run is
+admitted as a slot's is, under the rules of a launch, with `provenance.schedule` naming the
+`trigger` (`model_change`, for a slot of its own) and the `model_change` (`from`, `to`). A run that
+is not admitted is recorded as `skipped` with the reason, the change noted on it, and is not tried
+again: the next slot runs the suite on the new model. The watch's `model` then becomes the new one.
+A turn that stops part way leaves the change in the progress, and the next turn records it at the
+same slot without admitting a second run, as for a regular slot. A read that fails is the watch's
+`error`, and the schedule's slots go on; the next turn reads again.
+
+### A schedule's history
+
+`GET /v1/evals/schedules/{schedule_id}/runs` answers `items`, the latest slot first, with `page`,
+`limit` and `has_more`. Each item:
+
+| Field | Value |
+| --- | --- |
+| `slot` | The slot it ran or skipped, in UTC |
+| `missed` | The later slots that were also due when its turn came, which this run stood for (counted up to 1,000) |
+| `fired_at` | When its turn came |
+| `trigger` | `slot`, its schedule's timing, or `model_change`, a slot of its own that a change of the model started |
+| `model_change`, `note` | The change of the model its run was started for, `{"from": ..., "to": ...}`, and `model changed from X to Y`, on either kind of slot; else `null` and empty |
+| `state` | `skipped`, or its run's state |
+| `reason` | Why it was skipped, else empty |
+| `error` | Its run's `error`, else empty |
+| `run_id`, `run_code` | Its run, or `null` when skipped |
+| `model` | The model its run's target reported (`provenance.model.name`), or `null` |
+| `pass_rate`, `counts` | Its run's exact-match pass rate, `passed / (passed + failed)`, or `null` with neither, and its `passed`, `failed`, `skipped` and `errored` cases |
+| `gate` | Its run's gate result, once its suite has scored it ([gate results](#gate-results)), else `null` |
+| `scoring` | Its suite scoring job: `job_id`, `state`, `error`, and the scorecard's `gate` and each criterion's `name`, `kind`, `pass_rate`, `mean` and `gate`, as the Monitoring page's scorecard has them ([read routes](#read-routes)) |
+| `comparison` | For a completed run, its paired comparison with the schedule's latest earlier run that completed, among the 100 slots before it, or `null` |
+
+A comparison is the one `GET /v1/evals/compare` makes, without the pairs and the scorecards:
+`baseline_id`, `candidate_id`, `compatible`, `reason`, `coverage`, `changes` and `significance`,
+the paired test of the exact-match verdicts; once both runs' suite jobs have finished, also
+`baseline_job_id`, `candidate_job_id`, `criteria` and `criteria_significance`, the same for each of
+the suite's scorers ([read routes](#read-routes), [comparing two
+runs](evals.md#comparing-two-runs)). Since the schedule pins its dataset and suite versions, its
+runs pair by case.
+
+The history is not pruned: it keeps every slot until the schedule is deleted.
+
+### Gate results
+
+Once a scheduled run's suite job has scored it, the worker that ran the job records the run's
+gate result on its slot: the suite scorecard's `gate`, `passed`, `failed`, `insufficient_coverage`
+or `unconfigured` ([read routes](#read-routes)). A [threshold](#thresholds-and-alerts) whose
+source is `{"kind": "gate", "schedule_id": ...}` judges them: its window is the slots in the last `window_seconds`, a `passed` gate is a pass and a
+`failed` or `insufficient_coverage` one a failure, and its measure is the `pass_rate` (`422`
+otherwise). A suite without a policy gates nothing (`unconfigured`), and a skipped slot, a run
+that did not complete and a run its suite has not scored yet have no gate result, so none of them
+count. The same worker then evaluates the thresholds on the schedule's gate results and delivers
+their due alerts (`record_gate` in `martian.evals.worker.schedule`), as a monitor's pass does for
+the thresholds on its scores, with the alert settings of the process that ran the job. So a gate
+threshold is judged once per scored run, and an alert whose delivery failed is tried again when
+the schedule's next run is scored. The interval rules are a threshold's
+([how a threshold is judged](#how-a-threshold-is-judged)): with few runs in the window the
+interval is wide, so `min_count` and `window_seconds` decide how many runs a breach or a recovery
+takes.
+
+`tests/evals/test_schedules.py` reads intervals and cron expressions in UTC, cron's day rule and
+the expressions it refuses; runs one turn at a time at fixed times: a turn before its first slot
+admits nothing, a turn five minutes late admits one run for the first slot and counts five missed,
+a slot due while that run is in progress is skipped with the launch's reason, a slot is skipped
+for an edition without monitoring, an unknown target, a worker without a judge and an archived
+project, a turn whose
+worker stopped after admitting its run admits no second, a paused schedule admits nothing and
+resumed skips the slots of its pause, and a scheduled run stopped at its limit has its suite job
+cancelled while a completed one has it queued. Through the routes and the queue, on SQLite and on
+Postgres as an ordinary role, with a fake target and a fake judge and a schedule due every second:
+the entitlement and capability refusals and the refusals above; a suite that runs unattended,
+with a slot skipped while a run is in progress and two runs scored by their suite, the second
+compared with the first, every case regressed and labelled `worse`; slots missed while no worker
+served the queue run once when it returns; pausing, resuming and deleting a schedule, after
+which its row leaves the queue and its runs stay; and a threshold on a schedule's gate results
+through the threshold routes, deleted with the schedule. Directly, at fixed times, a threshold on
+the gate results of a schedule whose target fails four runs and is then fixed breaches after the
+fourth failed gate and recovers once nine of the ten gates in its window passed, with one alert
+each. The record contract checks the schedule records, their slots and gates, and that deleting a
+schedule deletes the thresholds on its gate results, on both databases.
+
+`tests/evals/test_model_changes.py` checks when a model change counts: a new model only once it
+was alone for `settle_seconds`, never one that flaps faster than that, and at most once per
+`min_interval_seconds`. One turn at a time at fixed times: fake live traces whose model changes
+start the suite once, an eval run's traces are not read, and later traces of the same model start
+nothing more; a target whose reported model changes on its runs starts the suite once, and the
+schedule's own run then moves the watch to it; a change noticed at a turn whose slot is due rides
+on that slot's run; a turn that stopped after admitting a change's run admits no second; and a
+model that flips every ten seconds for half an hour starts nothing, then flipping every ten
+minutes for three hours (17 changes) starts the suite three times, an hour or more apart, each
+from the model the last run was for. Through the routes and the queue, on SQLite and on Postgres
+as an ordinary role: Community is refused, an interval under the minimum is `422`, the same
+request is the same schedule, and a changed model in the live traffic starts one completed run
+whose history entry says `model changed from X to Y` with the run's reported model. The record
+store keeps the watch, its progress and the noted changes on both databases.
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
@@ -1194,6 +1961,22 @@ reported and calibrated as one judge.
   [custom Python scorers](#custom-scorers-in-the-worker) their setup installs.
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
+- [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
+  rate, a trace filter and a daily judge token cap, scored by the queue's worker in passes over the
+  new traces and stored on each trace, with each scorer's [score trend](#score-trends): its pass
+  rate or mean in windows of time, with its interval.
+- [Schedules](#schedules): a saved suite run against a target unattended, every so many seconds or
+  on a cron expression in UTC, admitted by the queue's worker at each slot under a launch's rules,
+  with a history of each slot's run, its pass rate and its paired comparison with the schedule's
+  previous completed run; and, when set to, once more when the model behind the target changes,
+  read from the project's live traces or the target's runs, debounced, and noted in the history.
+- [The model a target reports](#the-model-a-target-reports): an HTTP target's response path or
+  header, a function's or a registered agent's `TargetReply`, recorded on each case's trace and in
+  the run's provenance.
+- [Thresholds and alerts](#thresholds-and-alerts): a pass rate or mean of a monitor's scorer over a
+  window, judged on its 95% interval once it has enough scores, with a persisted state machine
+  that sends one alert per breach and one per recovery by signed webhook or email, retried with
+  backoff, and nothing unless the installation is configured to send it.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -1228,7 +2011,7 @@ reported and calibrated as one judge.
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
   search filters and paging, sessions and users, traces in each attribute style mapped with their
-  attributes kept, scores kept with their trace, the times given to traces and scores kept as
+  attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
@@ -1344,6 +2127,9 @@ as JSON text, and MLflow's JSON-encoded values are decoded.
   `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
   the trace names (the current one when it names none), and refuses a version this release does
   not have with `409`.
+- **Searching by model.** `TraceQuery.model` keeps the traces whose model is exactly that name, on
+  every binding, so the model a trace was mapped with is searchable. The frozen contract's trace
+  search (`POST /v1/evals/traces/search`) has no model filter; its rows show each trace's `model`.
 - **Tool calls** are spans in the shared model: a `TOOL` span whose inputs are the arguments and
   whose outputs are the result, and the calls a model asked for are in its output messages. The
   span view keeps the server's fields, so the normalized `tool` and `tool_calls` of `SpanFields`
@@ -1521,7 +2307,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   experiment an earlier SDK release created keeps MLflow's layout, for its earlier runs and its
   new ones, so a data folder an earlier release wrote reads back unchanged.
 - Trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow
-  has: run, session, user, tags, trace ids, states and time. A page reads only its own traces
+  has: run, session, user, model, tags, trace ids, states and time. A trace's model is the
+  `mlflow.trace.model` metadata the binding writes when it records the trace. A page reads only its own traces
   and a session search only the traces it groups, so the Traces page and the Sessions page take
   about as long in a project of 100,000 traces as in one of 1,000. The binding checks each trace
   MLflow returns against the whole query. Only free text, and a session, user, tag or run value
@@ -1580,7 +2367,7 @@ written by one MLflow release reads back the same on the next.
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
 on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
-page's saved views, and judge calibrations and their re-checks.
+page's saved views, judge calibrations and their re-checks, monitors and thresholds.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -1626,14 +2413,46 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   judge's, newest first. A calibration is never changed, so a score that names one can always
   read it. A panel judge's calibration keeps its members in `panel`, and every calibration its
   labelled `items` and `definition`, inside the stored record, so no migration adds a column for
-  them. Migration `0005` adds its table. It is kept here, not with the registered judge in
+  them. Migration `0008` adds its table. It is kept here, not with the registered judge in
   MLflow: a registered judge version is immutable there, so a calibration on it would need a new
   version, and every earlier calibration must stay readable by the scores that name it.
 - A re-check of a calibration (`CalibrationRecheck` in `martian.evals.records`) is the core's own
   record too: `create_recheck` records one, or returns the stored one with the same id;
   `update_recheck` moves it on, naming the state it expects; `get_recheck` reads one and
-  `list_rechecks` lists a project's, or one judge's, newest first. Migration `0006` adds its
+  `list_rechecks` lists a project's, or one judge's, newest first. Migration `0009` adds its
   table.
+- [Monitors](#monitors) (`Monitor`, `MonitorFilter`, `MonitorProgress` and `MonitoredTrace` in
+  `martian.evals.records`) are the core's own records, not part of the shared model. Migration
+  `0005` adds `martian_monitors`, one row per monitor holding the monitor as its routes write it
+  and its progress as the worker writes it, in separate columns so neither overwrites the other,
+  and `martian_monitored_traces`, one row per trace a monitor took, keyed by monitor and trace.
+  `create_monitor`, `get_monitor`, `list_monitors`, `update_monitor` (naming the revision it
+  read) and `delete_monitor` keep the monitors; `monitor_progress` and `set_monitor_progress` the
+  progress; `claim_monitored_trace`, `finish_monitored_trace` and `list_monitored_traces` the
+  traces taken, and `scored_monitored_traces` the window a threshold reads.
+- [Schedules](#schedules) (`Schedule`, `ScheduleProgress` and `ScheduledRun` in
+  `martian.evals.records`) are the core's own records too. Migration `0007` adds
+  `martian_schedules`, one row per schedule holding the schedule as its routes write it and its
+  progress as the worker writes it, in separate columns, and `martian_schedule_runs`, one row per
+  slot a schedule ran or skipped, keyed by schedule and slot, so a slot is recorded once, with
+  its run's gate result once its suite has scored it. A schedule's `on_model_change`, its
+  progress's `model_watch` and a slot's `trigger` and `model_change` are fields of those JSON
+  columns, so watching the model needed no migration. `create_schedule`, `get_schedule`,
+  `list_schedules`, `update_schedule` (naming the revision it read) and `delete_schedule` keep the
+  schedules; `schedule_progress` and `set_schedule_progress` the progress; `add_scheduled_run`,
+  `get_scheduled_run`, `list_scheduled_runs` and `set_scheduled_run_gate` the slots.
+- [Thresholds](#thresholds-and-alerts) (`Threshold`, `ThresholdStatus`, `Observation` and `Alert`
+  in `martian.evals.records`) are the core's own records too. Migration `0006` adds
+  `martian_thresholds`, one row per threshold with the threshold as its route writes it, its
+  status as its evaluations write it, the `sequence` a change of state is conditioned on, and its
+  webhook's secret in a column of its own that only `threshold_secret` reads (`threshold_signed`
+  says whether there is one, and `set_threshold_secret` gives one, once, to a webhook an import
+  wrote without it); and
+  `martian_threshold_alerts`, one row per alert, keyed by an id derived from the change and the
+  channel. `create_threshold`, `get_threshold`, `list_thresholds` and `delete_threshold` keep the
+  thresholds; `threshold_status` and `set_threshold_status` (a change of state with its alerts, in
+  one transaction, while the sequence is the one read) the status; `take_due_alerts`,
+  `finish_alert` and `list_alerts` the alerts.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed: its
   `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
   `scoring_job`, its `run_id` too, which reading the job takes.
@@ -1860,7 +2679,7 @@ key for it if it needs one (`martian.evals.local_targets`). A target is one of:
 | Kind | Fields | What it calls |
 | --- | --- | --- |
 | `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{messages}}`, and may use `{{uuid}}`, `{{session_id}}` and `{{history}}`, and `response_path` finds the reply |
-| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content` |
+| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content`, and the model that answered, which the run records, at `model` |
 
 Every target has a `name`, unique among the targets. The key is sent in `key_header` (always
 `Authorization` for a model): as `Bearer <key>` in `Authorization`, as it is in any other header.
@@ -2466,14 +3285,15 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 ## Data export
 
 `martian evals export <folder>` exports everything the local edition's store and record store
-hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
+hold (not the worker's queue, a threshold's webhook secret, the local targets and their keys, or
+`settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
 core in its own process calls `export_data` and `import_data` with its store, record store and the
-organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
-an export holds, resuming, and what the receiving store assigns are in
-[data export](data-export.md).
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. Monitors and
+schedules come back paused, and a threshold's webhook without its secret. The format, what an
+export holds, resuming, and what the receiving store assigns are in [data export](data-export.md).
 
 ## Not built yet
 
@@ -2486,14 +3306,16 @@ an export holds, resuming, and what the receiving store assigns are in
 | LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
+| Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`,
-`test_calibration_recheck.py`, `test_write_routes.py`,
-`test_write_contract.py`, `test_user_ids.py`, `test_worker.py`, `test_worker_process.py`,
-`test_worker_targets.py`, `test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`,
-`test_worker_queue.py`, `test_worker_limits.py`, `test_worker_concurrency.py`,
-`test_no_outbound.py` and the store and record tests run the core without the backend. The
-`Evals core` job in CI runs them with the model tests, on Postgres as well as SQLite.
+`test_calibration_recheck.py`, `test_write_routes.py`, `test_write_contract.py`,
+`test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
+`test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,
+`test_worker_limits.py`, `test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`,
+`test_schedules.py`, `test_model_changes.py`, `test_no_outbound.py` and the store and record
+tests run the core without the backend. The `Evals core` job in CI runs them with the model
+tests, on Postgres as well as SQLite.
