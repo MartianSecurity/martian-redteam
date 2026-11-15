@@ -88,11 +88,20 @@ suite, and the two comments they produce
   request and suite, as the example does, so two quick pushes cannot both
   create it.
 - **What it says.** The headline follows the exit code: passed (0), failed (1),
-  or did not finish (2, a case without a verdict or an invalid suite file).
+  or did not finish (2, a case without a verdict, a run that stopped at one of its
+  [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
+  that stopped says how many cases it did not run and which limit it reached;
+  its counts, rates and reliability are of the cases it finished.
   A suite with a [policy check](evals.md#false-refusals) adds how many of its
   benign cases were refused, so a model that refuses everything cannot look
-  as if it passed. Below it are per-check counts and up to 25 failed and 25
-  unfinished case IDs with the checks that did not pass. Inputs, replies and judge reasons stay
+  as if it passed. Below it are per-check counts, each pass rate with its 95%
+  interval ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),
+  for a suite that [repeats its cases](evals.md#repeated-attempts) how many
+  times each case ran, the rule each check's attempts combined by, a
+  **Reliability** row under the pass rate and the
+  [flaky cases](evals.md#reliability-and-flaky-cases),
+  and up to 25 failed and 25 unfinished case
+  IDs with the checks that did not pass. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
   instead of repeating an earlier result. The same text goes to the job summary

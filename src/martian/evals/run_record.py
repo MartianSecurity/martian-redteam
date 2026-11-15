@@ -16,6 +16,12 @@
   new id and carrying the scores.
 - A case whose verdict is reused from an earlier run in the same output folder keeps that verdict.
   Its result in this run has no trace: the trace stays with the run that graded the case.
+- When the suite runs each case more than once, the run's ``provenance`` holds the repeats under
+  ``repeats``: the attempts per case and each check's rule. A case result holds every attempt, and
+  each attempt's trace is recorded with that attempt's verdicts. The case result's trace is its
+  representative attempt's (:func:`martian.evals.repeats.representative`). Its scores are the
+  attempts combined, which no one trace carries, so they name no trace. A run that stops at a limit
+  records only the cases whose attempts all ran.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -47,6 +53,7 @@ from martian.config import ConfigError
 from martian.evals.model import (
     CaseResult,
     CaseStatus,
+    CheckVerdict,
     Counts,
     Run,
     RunLimits,
@@ -57,6 +64,7 @@ from martian.evals.model import (
     Trace,
     from_results_record,
 )
+from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
 
@@ -72,12 +80,15 @@ CANCEL_POLL_SECONDS = 1.0
 @dataclass(frozen=True)
 class GradedCase:
     """One case graded in this run: its position among the run's cases, its ``results.jsonl``
-    record, its own expectations, and the JSON of the trace MLflow recorded for it, if any."""
+    record, its own expectations, and the JSON of the trace MLflow recorded for it, if any. A
+    case run more than once has the JSON of each attempt's trace in ``attempt_traces`` instead,
+    in the order of its record's ``attempts``."""
 
     position: int
     record: dict[str, Any]
     expectations: dict[str, Any]
     trace: str | None = None
+    attempt_traces: tuple[str | None, ...] = ()
 
 
 def _wait[T](work: Coroutine[Any, Any, T]) -> T:
@@ -112,16 +123,36 @@ class RunRecorder:
 
     # --- the run -----------------------------------------------------------------------------
 
-    def start(self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase]) -> Run:
+    def start(
+        self,
+        *,
+        planned: int,
+        total: int,
+        limit: int | None,
+        reused: list[GradedCase],
+        repeats: dict[str, Any] | None = None,
+    ) -> Run:
         """Record that the run started over ``planned`` of the dataset's ``total`` cases, with the
-        results it reuses from earlier runs."""
-        return _wait(self._start(planned=planned, total=total, limit=limit, reused=reused))
+        results it reuses from earlier runs, and with ``repeats``, the suite's repeat plan, when
+        it runs each case more than once."""
+        return _wait(self._start(planned=planned, total=total, limit=limit, reused=reused, repeats=repeats))
 
-    async def _start(self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase]) -> Run:
+    async def _start(
+        self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase], repeats: dict[str, Any] | None
+    ) -> Run:
         from martian.evals.local_runs import RunHold
 
         now = datetime.now(UTC)
         suite = self.suite
+        provenance: dict[str, Any] = {
+            "suite": {"name": suite.name, "digest": suite.digest},
+            "dataset": {"name": suite.dataset_name, "digest": suite.dataset_digest},
+            "sdk_version": __version__,
+        }
+        if repeats is not None:
+            provenance["repeats"] = repeats
+        if self._limits != RunLimits():
+            provenance["limits"] = self._limits.model_dump(mode="json")
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,
@@ -137,12 +168,7 @@ class RunRecorder:
             counts=Counts(cases=planned),
             max_cases=limit or None,
             truncated=planned < total,
-            provenance={
-                "suite": {"name": suite.name, "digest": suite.digest},
-                "dataset": {"name": suite.dataset_name, "digest": suite.dataset_digest},
-                "sdk_version": __version__,
-                **({} if self._limits == RunLimits() else {"limits": self._limits.model_dump(mode="json")}),
-            },
+            provenance=provenance,
             requested_by=SINGLE_USER.user_id,
             created_at=now,
             started_at=now,
@@ -264,6 +290,9 @@ class RunRecorder:
         traced: list[str] = []
         for case in cases:
             result, case_scores = self._result(case)
+            if traces and case.attempt_traces:
+                result, attempt_ids = await self._record_attempts(case, result)
+                traced += attempt_ids
             trace = self._trace(case, result, case_scores) if traces and case.trace is not None else None
             if trace is not None:
                 saved = await self.store.record_trace(SINGLE_USER, trace)
@@ -310,28 +339,100 @@ class RunRecorder:
         ]
         return result, judged
 
+    async def _record_attempts(self, case: GradedCase, result: CaseResult) -> tuple[CaseResult, list[str]]:
+        """Record each attempt's trace with that attempt's verdicts, and give the case result the
+        trace and latency of its representative attempt. The case's own scores, the attempts
+        combined, are not on any trace."""
+        assert self.run is not None
+        attempts = list(result.attempts)
+        recorded: list[str] = []
+        for position, (attempt, found) in enumerate(zip(attempts, case.attempt_traces, strict=True)):
+            if found is None:
+                continue
+            scores = [self._attempt_score(result, label, verdict) for label, verdict in attempt.checks.items()]
+            trace = self._as_run_trace(
+                found,
+                result,
+                name=f"{self.run.code} {result.case_id} attempt {attempt.number}",
+                output=attempt.output,
+                error=attempt.error,
+                scores=scores,
+                tags={"martian.case_id": result.case_id, "martian.attempt": str(attempt.number)},
+            )
+            saved = await self.store.record_trace(SINGLE_USER, trace)
+            attempts[position] = attempt.model_copy(update={"trace_id": saved.id, "latency_ms": trace.latency_ms})
+            recorded.append(saved.id)
+        verdict = {"passed": True, "failed": False}
+        chosen = attempts[representative([verdict.get(a.status) for a in attempts], verdict.get(result.status))]
+        update: dict[str, Any] = {"attempts": attempts, "latency_ms": chosen.latency_ms}
+        if chosen.trace_id is not None:
+            update["store"] = StoreRef(trace_id=chosen.trace_id)
+        return result.model_copy(update=update), recorded
+
+    def _attempt_score(self, result: CaseResult, label: str, verdict: CheckVerdict) -> Score:
+        """One check's verdict on one attempt, as a score its trace carries."""
+        scorer = self._scorers.get(label)
+        judge = scorer is not None and scorer.kind == "llm_judge"
+        return Score(
+            run_id=result.run_id,
+            case_id=result.case_id,
+            scorer=label,
+            scorer_version=scorer.version if scorer else "",
+            source="llm_judge" if judge else "code",
+            source_id=(scorer.model or "") if scorer is not None and judge else "",
+            value=verdict.passed,
+            passed=verdict.passed,
+            rationale=verdict.rationale,
+            error=verdict.error,
+            created_at=result.finished_at,
+        )
+
     def _trace(self, case: GradedCase, result: CaseResult, scores: list[Score]) -> Trace:
         """The case's trace from MLflow's evaluation harness, as a trace of this run."""
+        assert self.run is not None and case.trace is not None
+        record = case.record
+        return self._as_run_trace(
+            case.trace,
+            result,
+            name=f"{self.run.code} {result.case_id}",
+            output=record.get("output"),
+            error=record.get("error") or "",
+            scores=scores,
+            tags={"martian.case_id": result.case_id},
+        )
+
+    def _as_run_trace(
+        self,
+        found: str,
+        result: CaseResult,
+        *,
+        name: str,
+        output: Any,
+        error: str,
+        scores: list[Score],
+        tags: dict[str, str],
+    ) -> Trace:
+        """A trace MLflow's evaluation harness recorded (its JSON), as a trace of this run under a
+        new id, with ``output`` as its response and ``scores`` as its assessments."""
         from mlflow.entities import Trace as MlflowTrace
 
         from martian.evals.store.mlflow_local import trace_from_mlflow
 
-        assert self.run is not None and case.trace is not None
-        found = trace_from_mlflow(MlflowTrace.from_json(case.trace), DEFAULT_PROJECT)
+        assert self.run is not None
+        trace = trace_from_mlflow(MlflowTrace.from_json(found), DEFAULT_PROJECT)
         trace_id = "tr-" + uuid.uuid4().hex
-        record = case.record
         message = result.inputs.get(self.suite.input_key)
-        return found.model_copy(
+        return trace.model_copy(
             update={
                 "id": trace_id,
-                "name": f"{self.run.code} {result.case_id}",
-                "state": "error" if record.get("error") else found.state,
+                "name": name,
+                "state": "error" if error else trace.state,
                 "request": message
                 if isinstance(message, str)
                 else json.dumps(result.inputs, ensure_ascii=False, sort_keys=True, default=str),
-                "response": record.get("output") or "",
+                "response": output or "",
                 "run_id": self.run.id,
-                "tags": {"martian.case_id": result.case_id},
+                "tags": tags,
                 "scores": [score.model_copy(update={"trace_id": trace_id}) for score in scores],
             }
         )

@@ -5,12 +5,14 @@ output folder, writes the report to the job summary, and on a pull request edits
 that carries this suite's hidden marker, creating it only when there is none. Standard library
 only, so it runs on the action's Python without further installs.
 
-The comment holds counts, check names and case ids, never inputs, replies or judge reasons.
+The comment holds counts, pass rates with their intervals, check names and case ids, never
+inputs, replies or judge reasons.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -25,6 +27,8 @@ from typing import Any
 MARKER = "<!-- martian-evals-comment: {key} -->"
 DEFAULT_AUTHOR = "github-actions[bot]"
 MAX_ROWS = 25
+NOT_RUN = "not run: "
+"""How junit.xml's error for a case the run stopped before starts (``martian.evals.runner.write_junit``)."""
 PER_PAGE = 100
 READ_ONLY = (
     "The workflow token cannot write pull-request comments, so the result is in the job summary only. "
@@ -46,7 +50,9 @@ def load_outcome(folder: Path, exit_code: int) -> Outcome:
     """Read summary.json, and the latest record of each case in this run from results.jsonl.
 
     junit.xml lists exactly this run's cases in data order; results.jsonl can also hold records
-    of cases that an earlier run in the same folder graded.
+    of cases that an earlier run in the same folder graded. A case a stopped run did not reach is
+    in junit.xml as an error that starts ``not run:``, and its record in results.jsonl, if any, is
+    an earlier run's, so it is left out: the summary counts it under ``not_run``.
     """
     summary_path = folder / "summary.json"
     if not summary_path.is_file():
@@ -57,8 +63,14 @@ def load_outcome(folder: Path, exit_code: int) -> Outcome:
         if line.strip():
             record = json.loads(line)
             latest[str(record["id"])] = record
-    order = [str(case.get("name")) for case in ET.parse(folder / "junit.xml").getroot().iter("testcase")]
+    order = [str(case.get("name")) for case in ET.parse(folder / "junit.xml").getroot().iter("testcase") if _ran(case)]
     return Outcome(exit_code, summary, [latest[name] for name in order if name in latest])
+
+
+def _ran(case: ET.Element) -> bool:
+    """Whether the run reached this junit.xml testcase, which a stopped run's error says it did not."""
+    error = case.find("error")
+    return error is None or not error.get("message", "").startswith(NOT_RUN)
 
 
 def marker(key: str) -> str:
@@ -79,6 +91,16 @@ def code(text: str, limit: int = 60, *, cell: bool = True) -> str:
     fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
     pad = " " if not text or text[0] == "`" or text[-1] == "`" else ""
     return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def rate(counts: Mapping[str, Any]) -> str:
+    """A pass rate and its interval from summary.json, written as ``martian.evals.stats.rate_text``
+    writes them: the rate to the nearest percent, the bounds rounded outward."""
+    if counts["pass_rate"] is None:
+        return "—"
+    low, high = counts["confidence_95"]
+    shown = math.floor(counts["pass_rate"] * 100 + 0.5)
+    return f"{shown}% ({math.floor(low * 100 + 1e-9)}–{math.ceil(high * 100 - 1e-9)}%)"
 
 
 def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, run_url: str | None = None) -> str:
@@ -103,20 +125,41 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
         ]
+        # A run stopped at a limit, or cancelled, counts only the cases it finished.
+        if not_run := summary.get("not_run"):
+            why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+            lines += [f"{why}: {not_run} cases not run. Run the suite again to resume after the cases it finished.", ""]
         # A suite whose checks a refusal passes says how many benign cases were refused, next to
         # the pass count, so a model that refuses everything cannot look as if it passed.
         if (refusals := summary.get("false_refusals")) is not None:
             lines += [false_refusals(refusals), ""]
         lines += [
-            "| Check | Passed | Failed | Errors |",
-            "| --- | ---: | ---: | ---: |",
+            "| Check | Passed | Failed | Errors | Pass rate (95% CI) |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ]
         checks = list(summary["checks"].items())
         for name, counts in checks[:MAX_ROWS]:
-            lines.append(f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} |")
-        lines.append(f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} |")
+            lines.append(
+                f"| {code(name)} | {counts['passed']} | {counts['failed']} | {counts['errors']} | {rate(counts)} |"
+            )
+        lines.append(
+            f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} | {rate(summary)} |"
+        )
+        # With repeats, the share of cases that passed every attempt, under the pass rate.
+        if reliable := summary.get("reliability"):
+            lines.append(
+                f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
+                f"{reliable['errors']} | {rate(reliable)} |"
+            )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
+        if summary["groups"]:
+            plural = "group" if summary["groups"] == 1 else "groups"
+            lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
+        if repeats := summary.get("repeats"):
+            lines.append(f"\n{_repeats(repeats)}")
+        if reliable:
+            lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
         failed = [case for case in outcome.cases if case["passed"] is False]
         errored = [case for case in outcome.cases if case["passed"] is None]
@@ -162,8 +205,30 @@ def _table(
     return [*lines, ""]
 
 
-def _names(names: list[str]) -> str:
-    shown = ", ".join(code(name) for name in names[:5])
+def _repeats(repeats: Mapping[str, Any]) -> str:
+    """How many times each case ran, and which checks' attempts combined by which rule."""
+    by_rule: dict[str, list[str]] = {}
+    for name, rule in repeats["checks"].items():
+        by_rule.setdefault(rule["combine"], []).append(name)
+    rules = "; ".join(f"{code(rule, cell=False)} for {_names(names, cell=False)}" for rule, names in by_rule.items())
+    return (
+        f"Each case ran {repeats['attempts']} times, and the counts are of cases: each check's attempts "
+        f"combine by its rule, {rules}."
+    )
+
+
+def _flaky(names: list[str]) -> str:
+    """What reliability counts, and the cases whose verdict changed between attempts."""
+    meaning = "Reliability counts the cases that passed every attempt."
+    if not names:
+        return f"{meaning} No flaky cases: no case's verdict changed between attempts."
+    return f"{meaning} Flaky cases, whose verdict changed between attempts: {_names(names, cell=False)}" + (
+        "; summary.json lists every one." if len(names) > 5 else "."
+    )
+
+
+def _names(names: list[str], *, cell: bool = True) -> str:
+    shown = ", ".join(code(name, cell=cell) for name in names[:5])
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
