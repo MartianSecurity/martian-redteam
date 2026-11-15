@@ -31,8 +31,10 @@ it (:mod:`martian.evals.worker.targets`).
 
 A worker learns that someone asked it to stop from the record itself
 (``Run.cancel_requested_at``, ``ScoringJob.cancel_requested_at``), which it reads before each case,
-so a worker in another process sees it too. :func:`execute_run` and :func:`execute_scoring` are
-the work itself, for any worker to call.
+so a worker in another process sees it too. A worker that can tell when nothing is working on a run
+any more also implements :class:`InterruptedRuns`, so that cancelling such a run finishes it at once
+instead of waiting for a next case that never comes. :func:`execute_run` and
+:func:`execute_scoring` are the work itself, for any worker to call.
 """
 
 from __future__ import annotations
@@ -205,6 +207,21 @@ class Lifecycle(Protocol):
     async def stop(self) -> None: ...
 
 
+@runtime_checkable
+class InterruptedRuns(Protocol):
+    """What a worker adds when it can tell that nothing is working on a run any more, as the local
+    edition's ``LocalWorker`` can: each of its runs is held by the processes running it. The cancel
+    route asks it about a running run. Without it, a running run whose worker stopped waits for a
+    next case that never comes, until the durable queue (MorningHQ/martian-notes#139)."""
+
+    async def cancel_interrupted(self, principal: Principal, run: Run) -> Run | None:
+        """Cancel ``run``, which is ``running``, at once when nothing is working on it any more,
+        and return it cancelled, with the reason as its ``error``; None while something may be,
+        which then stops it before its next case. Raises ``StoreError`` (``conflict``) when the run
+        changed meanwhile."""
+        ...
+
+
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
@@ -216,6 +233,7 @@ __all__ = [
     "AgentsConnection",
     "Credentials",
     "InProcessWorker",
+    "InterruptedRuns",
     "Judge",
     "JudgeError",
     "JudgeRequest",
