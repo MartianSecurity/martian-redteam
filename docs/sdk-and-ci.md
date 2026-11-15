@@ -129,6 +129,8 @@ martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-expo
 martian evals run evals.yaml
 # The Evals UI on this machine, one user and no login (see the evals core guide):
 martian ui
+# Inspect AI logs as runs in that UI (see the evals core guide):
+martian evals import inspect logs/*.eval
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

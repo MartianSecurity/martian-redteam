@@ -132,6 +132,67 @@ map. `martian evals run` records every case this way:
 counts and `target_errors` are counted from scores and case results; `invalidated`,
 `seconds_this_run` and `output` describe that one local invocation and are not stored.
 
+## Inspect AI logs
+
+`martian evals import inspect` reads the logs [Inspect AI](https://inspect.aisi.org.uk/eval-logs.html)
+writes, `.eval` and `.json`, against Inspect's own log schema (`EvalLog`, log format version 2),
+and records each log as one run ([imported Inspect logs](evals-core.md#imported-inspect-logs)).
+`martian.evals.inspect_import` does the mapping without Inspect installed. An `.eval` log is a zip
+of `header.json` and one file per sample; Inspect compresses its entries with Zstandard, which the
+`zstandard` package in the `evals` extra reads, and older versions with Deflate.
+
+| Inspect log | Model |
+| --- | --- |
+| The log file | `Run.provenance["inspect"]`: `log` (its absolute path), `log_sha256`, `format` (`eval` or `json`) and `log_version` |
+| `eval.eval_id`, `run_id`, `eval_set_id`, `task`, `task_id`, `task_version`, `task_file`, `model`, `created`, `config.epochs`, `dataset` (without its sample ids), `tags`, `packages` | The same names in `Run.provenance["inspect"]` |
+| `status` | `Run.state`: `success` is `completed`, `error` `failed`, `cancelled` `cancelled`. A log still `started` is refused. Also in the provenance |
+| `results` | `Run.provenance["inspect"]["results"]`, as Inspect wrote it: each scorer's metrics, scored and unscored samples, and the headline metric. Not-a-number metrics are the text `NaN` |
+| `stats.model_usage` | `Run.provenance["inspect"]["model_usage"]` |
+| `stats.started_at`, `completed_at`; `eval.created` | `Run.started_at`, `finished_at`; `Run.created_at` |
+| `error.message` | `Run.error` |
+| `eval.dataset.name` | `Run.dataset_name`, else the task's name. `Run.dataset_digest` is the digest of the samples' ids, inputs and targets, so two runs over the same samples compare whatever their order and epochs |
+| `eval.dataset.samples` | `Run.truncated` when the log has fewer samples |
+| `eval.scorers` | `Run.scorers`: a `ScorerVersion` per score name, `type` the Inspect scorer and `parameters` its options. `kind` is `llm_judge`, with the grading model as `model`, when the scorer called a model; else `code` |
+| A sample, once per epoch | A `CaseResult`, in the dataset's order, each sample's epochs together. Its `case_id` is the sample's `id` for epoch 1 and `<id> (epoch <n>)` for a later one, so runs with different numbers of epochs pair on the first |
+| `input` | `CaseResult.inputs.prompt` when it is text; `inputs.messages` when it is chat messages, without their ids (Inspect gives messages new ids every run) |
+| `choices` | `CaseResult.inputs.choices` |
+| `target` | `CaseResult.expectations.expected_response` |
+| `output.completion` | `CaseResult.output` and the trace's response |
+| `error.message` | `CaseResult.error`, and the case's status is `error`. The message and traceback are the root span's `inspect.error` |
+| `total_time` | `CaseResult.latency_ms` and the trace's latency |
+| `started_at`, `completed_at` | The trace's request time; `CaseResult.finished_at` |
+| `scores.<name>` | One `Score` per value, below |
+| `messages`, `events` | The trace's spans, below |
+| `model_usage` | The trace's `tokens`, and `cost` when every model reports one, counting the grader's calls as Inspect does; also the root span's `inspect.model_usage` |
+| `id`, `epoch`, `uuid` | Trace tags `inspect.sample_id` and `inspect.epoch`, trace metadata `inspect.sample_uuid` (and `inspect.eval_id`), and root span attributes |
+| `metadata`, `limit`, `working_time` | Root span attributes `inspect.metadata`, `inspect.limit`, `inspect.working_time` |
+
+Scores keep Inspect's values exactly, their types too:
+
+| Inspect score | Model |
+| --- | --- |
+| `value` text, a number or a boolean | One `Score` named after the scorer, with that `value` |
+| `value` a dict | One `Score` per key, named `<scorer>/<key>`, as Inspect computes a metric per key; the key is in `metadata["inspect.key"]`. A key's `None` is a score with no value |
+| `value` a list | One `Score` per entry, named `<scorer>/<index>`, with `metadata["inspect.index"]` |
+| `value` NaN, Inspect's unscored value | A `Score` with no value, `error` `unscored` with Inspect's `reason` (such as `unscored: grader_failed`) and `metadata["inspect.value"]` `NaN`. For a dict-valued scorer, one for each key the scorer gives in other samples |
+| `C`, `I`, `P`, `N` and booleans | `Score.passed`: `C` and `true` pass; `I`, `P` (partial credit) and `N` (no answer) and `false` fail. Numbers and other text have no verdict, and the value is kept as it is |
+| `explanation` | `Score.rationale` |
+| `answer`, `reason`, `metadata` (such as a model grader's `grading` transcript), `history` | `metadata["inspect.answer"]`, `["inspect.reason"]`, `["inspect.metadata"]`, `["inspect.history"]`, with the scorer's name in `["inspect.scorer"]` |
+| A scorer that called a model | `source` `llm_judge` and `source_id` the model. Inspect records a scorer's work in a span of type `scorer`; a model call inside it is the grader's. Every other score has source `code` |
+| The sample's scores | `CaseResult.status`: `error` when the sample failed, `failed` when a score fails, else `error` when one is unscored, `passed` when one passes, and `skipped` when no score gives a verdict (only numbers or other text, or no scores) |
+
+The trace's spans are the sample's conversation under one root span, named after the task, of
+kind `AGENT`, with the sample's input and the completion. Each assistant message is a
+`CHAT_MODEL` span whose inputs are the messages since the one before it and whose output is the
+message, with its tool calls; each tool call is a `TOOL` span of the call's arguments and the
+tool's reply, marked as an error when the tool failed. Messages no reply follows, as in a sample
+that failed first, are one more span. Inspect's `model` and `tool` events give the spans their
+times, model and token use (`mlflow.chat.tokenUsage`). Text a log keeps once in the sample's
+`attachments` is put back in its place.
+
+Inspect's per-epoch reductions (`reductions`), the sample's store, sandbox and the events other
+than model, tool and span events are not imported; the log the run names keeps them.
+
 ## The server's evals tables
 
 | Table | Model |
@@ -157,6 +218,7 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 ## What uses it
 
 The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
-suite file is their written form ([above](#the-sdk-suite-file)). The evals core serves them
+suite file is their written form ([above](#the-sdk-suite-file)). Inspect AI logs are imported
+into them ([above](#inspect-ai-logs)). The evals core serves them
 (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).

@@ -17,7 +17,9 @@ from martian_redteam.cli import app as redteam_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
+import_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer checks.")
+evals_app.add_typer(import_app, name="import", help="Bring runs from other eval tools into the local Evals UI.")
 app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 
@@ -134,6 +136,48 @@ def _run_suite(
         f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
     )
     raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
+
+
+@import_app.command("inspect")
+def import_inspect(
+    logs: Annotated[
+        list[Path], typer.Argument(dir_okay=False, show_default=False, help="Inspect AI log files, .eval or .json.")
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="The local Evals UI's data folder to import into, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+) -> None:
+    """Import Inspect AI logs as runs in the local Evals UI: one run per log.
+
+    martian evals import inspect logs/*.eval    every log Inspect wrote to logs/
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy", "zstandard")):
+        typer.echo("Importing Inspect logs needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.inspect_import import InspectLogError, import_inspect_logs
+    from martian.evals.local import LocalEditionError, data_folder
+
+    home = data_folder(data_dir)
+    try:
+        runs = import_inspect_logs(logs, home)
+    except (InspectLogError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for log, run in zip(logs, runs, strict=True):
+        counts = run.counts
+        typer.echo(
+            f"{log.name}: run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
+            f"{counts.errors} errors, {counts.skipped} without a verdict"
+        )
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
 
 
 @app.command("ui")
