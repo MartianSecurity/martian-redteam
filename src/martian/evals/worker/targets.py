@@ -54,7 +54,16 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from martian.evals.model import Case, Run, Target, digest
-from martian.evals.runner import TargetCallError, _case_values, _check_url, _expand, _fill, _reply, _unreachable
+from martian.evals.runner import (
+    TargetCallError,
+    _case_values,
+    _check_url,
+    _expand,
+    _fill,
+    _reply,
+    _response_steps,
+    _unreachable,
+)
 from martian.evals.server.projection import prompt_text
 from martian.evals.store import StoreError
 from martian.evals.worker import AgentExecutor, Credentials, TargetCall
@@ -143,9 +152,17 @@ def http_target(target: Target) -> Target:
     return target
 
 
+def _steps(target_id: str, target: Target) -> list[str]:
+    """The steps of the HTTP target ``target_id``'s ``response_path``, refused as a suite file's
+    are but naming the worker's setting, ``targets[target_id].response_path``. It is checked each
+    time a check or a run names the target, so one wrong target never stops the others."""
+    return _response_steps(http_target(target).response_path, f"targets[{target_id!r}].response_path")
+
+
 def http_pin(target_id: str, target: Target) -> dict[str, Any]:
     """What pins a run of an HTTP target: its id and a digest of it as written, never a value."""
-    return {"kind": "http", "agent_id": target_id, "digest": digest(http_target(target).model_dump(mode="json"))}
+    _steps(target_id, target)
+    return {"kind": "http", "agent_id": target_id, "digest": digest(target.model_dump(mode="json"))}
 
 
 def http_call(
@@ -158,8 +175,7 @@ def http_call(
 ) -> TargetCall:
     """Call the HTTP target ``target_id`` once per case, with ``${NAME}`` filled in from
     ``credentials``. ``timeout_seconds`` is the worker's bound on one call."""
-    http_target(target)
-    steps = [part for part in (target.response_path or "").split(".") if part]
+    steps = _steps(target_id, target)
 
     def value_of(name: str) -> str | None:
         return credentials(principal, target_id, name) if credentials is not None else None

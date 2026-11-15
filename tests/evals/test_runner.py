@@ -499,6 +499,15 @@ def test_url_target_without_a_response_path_uses_the_response_text(tmp_path, age
     assert (summary["passed"], summary["errors"]) == (1, 0)
 
 
+def test_url_target_response_path_indexes_lists_with_the_digits_0_to_9(tmp_path, agent_server, monkeypatch):
+    # A key that holds another digit among other characters is still a key.
+    monkeypatch.setenv("AGENT_KEY", "k")
+    agent_server["behaviour"]["reply"] = lambda message: {"data": [{"m²": "I cannot do that."}]}
+    write_inputs(tmp_path, ["hi"])
+    summary = run_suite(write_suite(tmp_path, extra=url_target(agent_server["url"], response_path="data.0.m²")))
+    assert (summary["passed"], summary["errors"]) == (1, 0)
+
+
 @pytest.mark.parametrize(
     "fault, reason",
     [
@@ -565,6 +574,15 @@ def test_a_case_missing_a_named_input_says_so(tmp_path, agent_server, monkeypatc
         ("target: {url: 'http://127.0.0.1:1/x', body: {m: 'fixed'}}", "{{input}}"),
         ("target: {file: agent.py, response_path: a.b}", "response_path"),
         ("target: {url: 'http://127.0.0.1:1/x', function: answer, body: {m: '{{input}}'}}", "function"),
+        # A step of digits indexes a list, so its digits must be 0-9: not ², nor ١, which int() reads as 1.
+        (
+            "target: {url: 'http://127.0.0.1:1/x', body: {m: '{{input}}'}, response_path: choices.².text}",
+            "target.response_path indexes lists with the digits 0-9 only; step 2 uses other digits",
+        ),
+        (
+            "target: {url: 'http://127.0.0.1:1/x', body: {m: '{{input}}'}, response_path: data.١}",
+            "target.response_path indexes lists with the digits 0-9 only; step 2 uses other digits",
+        ),
     ],
 )
 def test_invalid_url_targets_are_rejected_with_the_field_named(tmp_path, target, problem):
