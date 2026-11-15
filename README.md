@@ -55,7 +55,7 @@ pull request with the last result of `main` and name the cases that went from pa
 - `martian evals run`: a suite file run locally, as above.
 - `martian evals prompts push`: a suite file's matrix prompts kept as immutable versions in the
   local Evals UI, where each later run shows the prompt version it used; see
-  [prompt versions](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md#prompt-versions).
+  [prompt versions](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md#prompt-versions).
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
   [imported Inspect logs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).

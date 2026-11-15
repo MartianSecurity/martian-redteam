@@ -1,5 +1,5 @@
 """Prompts and their versions: the evals core's own routes, which the server's frozen contract
-does not have (MorningHQ/martian-notes#207).
+does not have (MartianSecurity/martian-notes#207).
 
 - ``GET /prompts``: every prompt, by name, with its number of versions (``version_count``), its
   latest version without its text (``latest``), and the number of runs that used one of its
