@@ -37,7 +37,7 @@ two distributions go to the publisher. The release workflow retains the
 manifest separately as `sdk-release-checksums`, alongside `sdk-distributions`. Rebuild after any code/docs change and
 retain the checksums of the actual validated artifacts.
 
-The base dependencies support redteam. `evals` adds MLflow 3.16.1/pandas/pytest
+The base dependencies support redteam. `evals` adds MLflow-skinny 3.18.0/pandas/pytest
 and its local SQL store prerequisites. `mcp` retains the optional MCP runtime.
 CI checks Python 3.12 and 3.13. The sdist contains source, tests, examples,
 documentation, build configuration, lockfile and license/notice; no task-owned

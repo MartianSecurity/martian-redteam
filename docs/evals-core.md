@@ -463,6 +463,9 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   so other MLflow use in the same process, such as a local suite run, is unaffected.
 - On Postgres, MLflow's tables live in their own schema (`mlflow` by default), so they can
   share a database with other tables.
+- Opening a database that an older MLflow wrote migrates MLflow's tables in place, and an older
+  SDK then refuses it. Every process using one database must run the same SDK release; back the
+  database up before upgrading.
 - How the objects sit in MLflow:
   - A project is an experiment named by its id.
   - A dataset version is an evaluation dataset, whose records keep each case's id and position.
@@ -483,7 +486,9 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
-database and reads their sessions, turns and users back through the binding.
+database and reads their sessions, turns and users back through the binding. That module belongs
+to the [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
+written by one MLflow release reads back the same on the next.
 
 ## The record store
 

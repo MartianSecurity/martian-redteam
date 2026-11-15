@@ -2,9 +2,8 @@
 
 An MLflow-style regression gate for Martian dataset evals. It is the pattern from MLflow's
 [Regression Testing and CI/CD](https://mlflow.org/docs/latest/genai/eval-monitor/regression-testing/)
-page (`pytest` + `@mlflow.test` + `mlflow.genai.evaluate()`), pinned to the MLflow version that the
-hosted server runs, with MartianBackend as the scorer and system of record. The CI job never
-connects to MLflow.
+page (`pytest` + `@mlflow.test` + `mlflow.genai.evaluate()`) on a pinned `mlflow-skinny`, with
+MartianBackend as the scorer and system of record. The CI job never connects to an MLflow server.
 
 ```text
 pytest ── load_dataset ──▶ Backend  GET  /v1/evals/ci/datasets/{name}   (pinned prompts + expected)
@@ -172,7 +171,7 @@ contract with explicit scorer tracking. The combined [Python/CLI runner](sdk-and
 records evals and YAML redteam in one Backend session.
 
 1. An org admin creates an API key with the required evals/CI capabilities (`POST /v1/api-keys`) and stores it as `MARTIAN_API_TOKEN`.
-2. Install `martian-sdk[evals]` (it pins `mlflow-skinny==3.16.1`, the hosted server's version) and write tests like
+2. Install `martian-sdk[evals]` (it pins `mlflow-skinny==3.18.0`) and write tests like
    [`examples/test_support_agent.py`](../examples/evals/test_support_agent.py).
 3. Run `pytest -p martian.evals.plugin --martian-evals-gate tests/evals` (add `-n auto` with
    pytest-xdist), or copy [`workflows/eval-gate.example.yml`](../examples/combined-ci.yml).

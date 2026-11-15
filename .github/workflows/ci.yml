@@ -157,6 +157,48 @@ jobs:
           tests/evals/test_read_routes.py tests/evals/test_read_contract.py tests/evals/test_write_routes.py
           tests/evals/test_write_contract.py tests/evals/test_worker.py
 
+  mlflow-compat:
+    name: MLflow compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: martian
+          POSTGRES_PASSWORD: martian_ci
+          POSTGRES_DB: evals
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U martian -d evals"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Suite on the pinned MLflow
+        run: python3 scripts/mlflow_compat.py pinned --upgrade-store "$RUNNER_TEMP/mlflow-upgrade"
+
+      # Early warning for the next upgrade: reported, but a new MLflow release cannot fail CI.
+      - name: Suite on the newest MLflow release
+        continue-on-error: true
+        run: python3 scripts/mlflow_compat.py next --upgrade-store "$RUNNER_TEMP/mlflow-upgrade"
+
   packaging:
     name: Packaging
     runs-on: ubuntu-24.04
@@ -246,7 +288,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [lint, types, test, evals-core, packaging, action-smoke]
+    needs: [lint, types, test, evals-core, mlflow-compat, packaging, action-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -256,10 +298,11 @@ jobs:
           types_result="${{ needs.types.result }}"
           test_result="${{ needs.test.result }}"
           evals_core_result="${{ needs.evals-core.result }}"
+          mlflow_compat_result="${{ needs.mlflow-compat.result }}"
           packaging_result="${{ needs.packaging.result }}"
           action_smoke_result="${{ needs.action-smoke.result }}"
-          echo "lint=${lint_result} types=${types_result} test=${test_result} evals-core=${evals_core_result} packaging=${packaging_result} action-smoke=${action_smoke_result}"
-          if [ "$lint_result" != "success" ] || [ "$types_result" != "success" ] || [ "$test_result" != "success" ] || [ "$evals_core_result" != "success" ] || [ "$packaging_result" != "success" ] || [ "$action_smoke_result" != "success" ]; then
+          echo "lint=${lint_result} types=${types_result} test=${test_result} evals-core=${evals_core_result} mlflow-compat=${mlflow_compat_result} packaging=${packaging_result} action-smoke=${action_smoke_result}"
+          if [ "$lint_result" != "success" ] || [ "$types_result" != "success" ] || [ "$test_result" != "success" ] || [ "$evals_core_result" != "success" ] || [ "$mlflow_compat_result" != "success" ] || [ "$packaging_result" != "success" ] || [ "$action_smoke_result" != "success" ]; then
             echo "One or more required jobs failed" >&2
             exit 1
           fi
