@@ -1088,10 +1088,13 @@ the same item: the case result a verdict or label names, else the case result wh
 on, else the trace. To label a judge named `polite_tone`, give a review queue a question named
 `polite_tone`, or annotate its traces with feedback named `polite_tone`. On each item a judge
 version counts its newest verdict and the criterion its newest label. A judge version is a judge's
-name and version: a registered judge's version number, or `v1` for a built-in judge. Its verdicts
-are pooled over the models it ran on, which `models` lists. A judge version graded by a
+name and version: a registered judge's version number, or `v1` for a built-in judge. Reports come
+by judge name, then version: versions of the digits 0-9 in number order, then any other version
+as text, such as one of other digits (`²`, `١`) on an application's score. Its verdicts are
+pooled over the models it ran on, which `models` lists. A judge version graded by a
 [panel](#a-panel-of-judges) is reported as one judge: its verdicts are the panel's, `panel` is
-`true`, and `models` lists the members' models; a panel score with no majority is no verdict.
+`true`, and `models` lists the members' models, none for a score whose `martian.panel.size` is
+not written in the digits 0-9; a panel score with no majority is no verdict.
 The members' own agreement is not reported.
 
 | Judge's verdicts | What is reported |
