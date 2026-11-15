@@ -287,6 +287,185 @@ def _run_suite(
     raise typer.Exit(code=2 if summary["errors"] or summary["not_run"] else 1 if summary["failed"] else 0)
 
 
+@evals_app.command("audit")
+def audit_evals(
+    suite_file: Annotated[Path, typer.Argument(dir_okay=False, show_default=False, help="The suite file to audit.")],
+    output: Annotated[
+        Path | None, typer.Option("--output", help="Folder for audit.json. Default: the suite's output folder.")
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit", min=1, help="Audit the first N cases.")] = None,
+    run_judges: Annotated[
+        bool,
+        typer.Option(
+            "--run-judges",
+            help="Also ask the suite's LLM judges about each reply the other checks pass: one model call per "
+            "judge, case and reply, at your provider's cost.",
+        ),
+    ] = False,
+) -> None:
+    """Audit a suite file: grade replies that do nothing or cheat, in place of its target's.
+
+    martian evals audit evals.yaml    exits 1 when a weak check lets one of them through
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Auditing a suite needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from rich.console import Console
+    from rich.table import Table
+
+    from martian.config import ConfigError
+    from martian.evals.audit import audit_suite
+
+    console = Console()
+    try:
+        audit = audit_suite(suite_file, run_judges=run_judges, limit=limit, output=output, progress=console.print)
+    except (ConfigError, ValueError) as error:
+        typer.echo(f"Audit failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+
+    def say(text: str) -> None:
+        console.print(text, markup=False, highlight=False, soft_wrap=True)
+
+    table = Table(title=f"{suite_file.name}: audit of {audit['cases']} cases")
+    for column in ("Target", "Kind", "Replies", "Cases passed"):
+        table.add_column(column)
+    for target in audit["targets"]:
+        kind = "does nothing" if target["kind"] == "do_nothing" else "cheats"
+        table.add_row(target["name"], kind, str(target["replies"]), str(target["cases_passed"]))
+    console.print(table)
+    for weak in audit["weak_checks"]:
+        shown = ", ".join(weak["examples"][:5]) + (f" and {weak['cases'] - 5} more" if weak["cases"] > 5 else "")
+        say(f"Weak check {weak['label']} ({weak['type']}): {'; '.join(weak['why'])}. Cases: {shown}")
+    findings = audit["findings"]
+    quiet = [finding for finding in findings if not finding["flags"]]
+    if quiet:
+        say(f"{len(quiet)} other pass(es) do not flag the suite:")
+        for finding in quiet[:10]:
+            say(f"  {finding['case']} by {finding['target']}: {finding['note']}")
+    for check in audit["not_audited"]:
+        say(f"Not audited: {check['label']} ({check['type']}): {check['reason']}")
+    if audit["skipped"]:
+        say(f"Not audited: {audit['skipped']} conversation case(s): an audit grades one reply per case.")
+    if findings and audit["not_audited"]:
+        say("A case a target passed may still fail a check that was not audited.")
+    if audit["judges_run"]:
+        say(f"Judge calls: {audit['judge_calls']}")
+    if not audit["cases"]:
+        say("No case of this suite could be audited, so the audit says nothing about it.")
+    elif not audit["audited"]:
+        say("No check of this suite could be audited, so the audit says nothing about it.")
+    elif audit["flagged"]:
+        say(f"Flagged: {len(audit['weak_checks'])} weak check(s) let a target through.")
+    else:
+        say("Not flagged: no target got through a check that asks for something.")
+    say(f"Audit: {audit['output']}/audit.json")
+    raise typer.Exit(code=2 if not (audit["audited"] and audit["cases"]) else 1 if audit["flagged"] else 0)
+
+
+@evals_app.command("inspect-cheating")
+def inspect_cheating(
+    suite_file: Annotated[
+        Path, typer.Argument(dir_okay=False, show_default=False, help="The suite file whose run to inspect.")
+    ],
+    run: Annotated[
+        str | None,
+        typer.Option("--run", show_default=False, help="The run's code, such as evals-3, or id. Default: the newest."),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            file_okay=False,
+            show_default=False,
+            help="The folder the run wrote its results to, when it was run with --output; cheating.json goes "
+            "there. Default: the suite's output folder.",
+        ),
+    ] = None,
+    data_dir: Annotated[Path | None, typer.Option("--data-dir", file_okay=False, help=DATA_DIR_HELP)] = None,
+    judge: Annotated[
+        str | None,
+        typer.Option(
+            "--judge",
+            show_default=False,
+            help="Also ask this judge model (an MLflow model URI, such as openai:/MODEL) about each transcript no "
+            "signal flagged: one model call each, at your provider's cost. Needs --accept-judge-cost.",
+        ),
+    ] = None,
+    accept_judge_cost: Annotated[
+        bool, typer.Option("--accept-judge-cost", help="Agree to the judge's model calls that --judge makes.")
+    ] = False,
+) -> None:
+    """Inspect a suite's run for cheating: signs that the agent reached its answers, tests or grader.
+
+    martian evals inspect-cheating evals.yaml    exits 1 when a case is flagged for review
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Inspecting a run needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from rich.console import Console
+    from rich.table import Table
+
+    from martian.config import ConfigError
+    from martian.evals.cheating import inspect_suite_run, judge_transcripts, unflagged, write_report
+
+    console = Console()
+
+    def say(text: str) -> None:
+        console.print(text, markup=False, highlight=False, soft_wrap=True)
+
+    try:
+        report, transcripts = inspect_suite_run(suite_file, run=run, output=output, home=data_dir)
+    except (ConfigError, ValueError) as error:
+        typer.echo(f"Inspection failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    if judge is not None:
+        asked = len(unflagged(report, transcripts))
+        if not accept_judge_cost:
+            typer.echo(
+                f"--judge asks {judge} once for each of the {asked} transcript(s) no signal flagged, at your "
+                "provider's cost. Add --accept-judge-cost to go ahead.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        say(f"Asking {judge} about {asked} transcript(s)")
+        judge_transcripts(report, transcripts, model=judge)
+    path = write_report(report, report["output"])
+    found = report["run"]
+    table = Table(title=f"{suite_file.name}: run {found['code'] or found['id']}, {report['cases']} cases")
+    for column in ("Signal", "Transcripts"):
+        table.add_column(column)
+    for signal, count in report["signal_counts"].items():
+        if count:
+            table.add_row(signal, str(count))
+    console.print(table)
+    for finding in report["findings"][:20]:
+        attempt = f" attempt {finding['attempt']}" if finding["attempt"] is not None else ""
+        turn = f" turn {finding['turn']}" if finding.get("turn") is not None else ""
+        say(f"{finding['case']}{attempt}{turn}: {finding['reason']}")
+    if len(report["findings"]) > 20:
+        say(f"… and {len(report['findings']) - 20} more in cheating.json")
+    if report["untraced"]:
+        say(
+            f"{len(report['untraced'])} case(s) have no trace in this run, so only their replies were read: "
+            "a case reused from an earlier run keeps its trace there."
+        )
+    if not report["target_traced"]:
+        say("The target records no model or tool step, so its replies cannot be checked for work behind them.")
+    if (summary := report["judge"]) is not None:
+        say(
+            f"Judge calls: {summary['calls']}, flagged {len(summary['flagged'])}, uncertain "
+            f"{len(summary['uncertain'])}, failed {len(summary['errors'])}"
+        )
+    flagged = report["flagged_cases"]
+    say(
+        f"Flagged for review: {len(flagged)} case(s). A signal is a reason to read the transcript, not a verdict."
+        if flagged
+        else "Not flagged: no transcript shows a sign of reaching its answers, tests or grader."
+    )
+    say(f"Inspection: {path}")
+    raise typer.Exit(code=1 if flagged else 0)
+
+
 @import_app.command("inspect")
 def import_inspect(
     logs: Annotated[
