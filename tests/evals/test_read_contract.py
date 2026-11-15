@@ -42,6 +42,9 @@ ASSESSMENT = {"id", "item_id", "job_id", "name", "value", "rationale", "source",
 ASSESSMENT |= {"error", "native_id", "telemetry_state", "created_at"}
 REVIEW = {"id", "item_id", "queue_id", "criterion", "previous_id", "actor_id", "assignee_id", "assessment_id"}
 REVIEW |= {"state", "value", "comment", "created_at"}
+# The core's addition to the server's fields: whether the answer was given blind
+# (MartianSecurity/martian-notes#357). The response is untyped, so the contract allows it.
+REVIEW |= {"blind"}
 WORKBENCH = {"jobs", "assessments", "reviews", "latest_reviews", "latest_reviews_truncated", "members", "queues"}
 WORKBENCH |= {"selected_job", "pagination", "truncated", "scorecard", "calibration"}
 TRACE_ROW = {"id", "name", "state", "timestamp", "timestamp_ms", "latency_ms", "request", "response", "session_id"}

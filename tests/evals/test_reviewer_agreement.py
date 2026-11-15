@@ -219,8 +219,10 @@ def test_each_reviewer_counts_once_per_item_with_their_newest_review():
     assert set(served["questions"][0]) == {
         "question", "kind", "answered", "shared", "reviewers", "incomparable", "minimum", "status", "method",
         "agreed", "agreement", "agreement_confidence_95", "kappa", "mean_absolute_difference",
-        "mean_absolute_difference_confidence_95", "concordance",
+        "mean_absolute_difference_confidence_95", "concordance", "blind",
     }  # fmt: skip
+    # No queue here has blind double review, so no report rests on blind answers.
+    assert served["questions"][0]["blind"] is False
 
 
 def test_queues_report_each_question_and_questions_are_also_reported_across_queues():

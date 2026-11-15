@@ -246,7 +246,7 @@ The core adds read routes of its own, which the server's contract does not have:
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
 | `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case, not a person's answer of the same name) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 | `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `reviewer_agreement` is the [reviewers' agreement](evals.md#agreement-between-reviewers) on each question named like a judge of `items`, as `GET /reviewer-agreement` gives it across queues. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and reviews. Store: the registered judges, the runs' review queues and the newest 1,000 traces |
-| `GET /v1/evals/reviewer-agreement` | People's agreement with each other on the items two or more of them answered ([agreement between reviewers](evals.md#agreement-between-reviewers)): `project_id`, `minimum` (30), `queues`, one per review queue of the project, newest first, each with `queue_id`, `name`, `run_id` and `questions`, and `questions`, one per question name across every queue that asks it. A question's report has `question`, `kind`, `answered`, `shared` (the items two or more reviewers answered, the ones compared), `reviewers`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `method` (`cohen` or `lin` for two reviewers, `fleiss` or `icc` for more), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `mean_absolute_difference` and its `_confidence_95`, and `concordance`. Below `minimum` the counts and `agreed` are given and `method` and every rate, interval and coefficient are `null`. `project_id` and `queue_id` narrow it to a project and one queue; a project or queue that does not exist is `404`. It needs `review_queues` | Records: every link of each run's review chains. Store: the runs' review queues |
+| `GET /v1/evals/reviewer-agreement` | People's agreement with each other on the items two or more of them answered ([agreement between reviewers](evals.md#agreement-between-reviewers)): `project_id`, `minimum` (30), `queues`, one per review queue of the project, newest first, each with `queue_id`, `name`, `run_id` and `questions`, and `questions`, one per question name across every queue that asks it. A question's report has `question`, `kind`, `answered`, `shared` (the items two or more reviewers answered, the ones compared), `reviewers`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `method` (`cohen` or `lin` for two reviewers, `fleiss` or `icc` for more), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `mean_absolute_difference` and its `_confidence_95`, `concordance`, and `blind` (whether it rests on answers given blind: a [blind queue](evals.md#blind-double-review)'s report, and a question across queues that a blind queue asks, compare the blind queues' blind answers only). Below `minimum` the counts and `agreed` are given and `method` and every rate, interval and coefficient are `null`. `project_id` and `queue_id` narrow it to a project and one queue; a project or queue that does not exist is `404`. It needs `review_queues` | Records: every link of each run's review chains and the blind queues. Store: the runs' review queues |
 | `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `panel` (the members a judge graded by a [panel](evals.md#a-panel-of-judges) runs on, each `model` and `endpoint`, in place of a model; empty for any other judge), `status` (`checked` or `unchecked`), `reason` (`null`; `none` when it has no calibration, which the `policy` judge never has; `model_changed` when it runs on another model, or panel, than its calibration was measured on; or `definition_changed` when what it means differs from what it meant then) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
 | `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `panel`, `definition` (the digest of what the version meant when it was measured), `labelled`, `items` (the labelled items it rests on, each a case result's `run_id` and `case_id` or a trace's `trace_id`, with its `label` and the `verdict` compared with it, `null` for an item a re-check got no verdict for), `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved, or the re-check's), `recheck_of` (the calibration a re-check graded again to make this one, else `null`), `actor_id` and `created_at`. `project_id` names its project | Records |
 | `GET /v1/evals/judge-rechecks/{recheck_id}` | One [re-check](evals.md#calibration) of a calibration: `id`, `project_id`, `judge`, `version`, `calibration_id` (the calibration whose items it grades again), `model`, `endpoint` and `panel` (what the version runs on, pinned when it was asked for), `definition`, `state` (`queued`, `running`, `completed` or `failed`), `total` (the labelled items), `graded` and `errors` (the items with and without a verdict so far), `error` (why it failed), `result_id` (the calibration it saved), `actor_id`, `created_at` and `finished_at`. `project_id` names its project | Records |
@@ -310,7 +310,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   report is the core's own because the judges' responses are typed in the frozen contract.
 - **Reviewers' agreement.** A second reviewer's answer follows the first in the case's chain for
   the question and becomes the current review, the one the contract's review routes and the judge
-  report read. The reviewer report reads every link of the chains, each reviewer's newest, so both
+  report read. In a [blind queue](evals.md#blind-double-review) the reviewer report reads each
+  reviewer's answer given blind (`Review.blind`); otherwise it reads every link of the chains, each reviewer's newest, so both
   answers count. It is the core's own for the same reason as the judge report, and the judge
   report carries it beside its items rather than in them, so a judge version's
   [calibration](evals.md#calibration), its item of the report, is unchanged.
@@ -411,7 +412,9 @@ core's own routes for prompts and their versions are in [prompt versions](#promp
 `tests/evals/test_reviewer_agreement.py` the reviewers' agreement route on both, two people
 answering a queue through the review route, and its statistics, and
 `tests/evals/test_calibration.py` and `test_calibration_recheck.py` the calibration and re-check
-routes.
+routes, and `tests/evals/test_blind_review.py` blind double review: a second reviewer reading
+nothing of the first answer through the routes until they answer, the answers given blind, a
+calibration's hidden labels, and the agreement on blind answers.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
@@ -494,11 +497,12 @@ contract:
 | `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
 | `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
 
-The core adds three write routes of its own, which the server's contract does not have:
+The core adds four write routes of its own, which the server's contract does not have:
 
 | Route | What it does | Module |
 | --- | --- | --- |
 | `POST /judge-panels` | Register a new version of a judge graded by a [panel of judges](evals.md#a-panel-of-judges): the body of `POST /judges` with `panel`, 2 to 9 different members, each a `model` (required) and an optional `endpoint`, and no `model` or `endpoint` of its own. A panel decides pass or fail, so its `kind` is `boolean`; a duplicate member, another kind, or a judge model of its own is `422`. Versions, idempotency and `manageJudges` are as for `POST /judges`, and the answer (`201`) is the version as `GET /judges` lists it, with `panel` in its `definition`. The contract's `JudgeVersionRequest` has no field for a panel, and the core does not change it | `suites` |
+| `POST /blind-review-queues` | Create a review queue with [blind double review](evals.md#blind-double-review): the body of `POST /review-queues` (`QueueRequest`), its answer (`201`) the queue as `GET /review-queues` lists it, with `blind: true`. The queue is recorded as blind in the record store (`BlindQueue`) before it is created. Idempotency, `review_queues` and `createReviewQueues` are as for `POST /review-queues`; a `request_id` that created a queue through the other route is `409` on this one, and the other way round. The contract's `QueueRequest` has no field for it, and the core does not change it | `reviews` |
 | `POST /judge-calibrations` | Save a judge version's current item of the agreement report as its [calibration](evals.md#calibration), with the labelled items it compared, the model it runs on now and its definition. The body is `request_id`, `project_id` (optional), `name` and `version` (`"2"`, or `"v1"` for a built-in model judge); the answer (`201`) is the calibration as `GET /judge-calibrations/{calibration_id}` gives it. A judge version the project has not registered and that is no built-in model judge is `404`; the `policy` judge, whose guidelines come with each scoring request, and a report that is not measured, below 30 labelled items or of a free-text judge, are `422`. It needs `manageJudges`, and an archived project takes none (`409`) | `calibration` |
 | `POST /judge-rechecks` | Re-check a judge version's newest calibration: grade exactly its labelled items again with the version as it runs now, and save the result as its newest calibration when it is measured. The body is `request_id`, `project_id` (optional), `name`, `version` and `acknowledge_model_cost`, which must be `true`: each item is a model call (`422` without it). It records a `queued` re-check, with the version pinned to the model it runs on now (the default judge model for a judge that names none, or its panel's members), submits it to the worker and answers `202` with the re-check as `GET /judge-rechecks/{recheck_id}` gives it. A version with no calibration, or one the project has not registered, is `404`; the `policy` judge, a calibration that records no labelled items, and a worker without a judge are `422`; a re-check of the version still queued or running, and an archived project, are `409`. It needs `manageJudges`. It is the route a schedule of re-checks calls; the core keeps no schedule | `calibration` |
 
@@ -568,7 +572,16 @@ All paths are under `/v1/evals`. How the core carries them out:
   like a check, and never replaces it: the workbench lists both, each with its own `id` and
   `source`, and the review's `assessment_id` names the person's. Only a role
   with `assignReviews` gives another person's work to someone; the core knows no membership, so
-  an assignee is any user, named as **Users** above says.
+  an assignee is any user, named as **Users** above says. Every review the routes answer with has
+  `blind`, whether it was given blind.
+- **Blind queues** (`martian.evals.server.blind`, [blind double review](evals.md#blind-double-review)).
+  A reader who has not answered an item of a blind queue reads only its pending review and their
+  own: `GET /reviews`, the workbench's `reviews`, `latest_reviews` and human `assessments`, the
+  turns route's checks and a calibration's item labels (`null`) leave the others out. An answer
+  names the review the reader was shown as `previous_id` and is added after the chain's newest,
+  so a stale request is checked against what they may read. Its human score is not copied to the
+  case's trace. A reviewer's first complete answer to the item has `blind: true`. Every queue the
+  routes answer with (`GET /review-queues`, the workbench's `queues`, a queue's sync) has `blind`.
 - **Review queues and questions.** A queue lives in the store with one item per case's trace, so
   only results with a trace can be queued. Creating it adds a pending review per case and question;
   each answer marks the case's item completed once every question of the queue is answered, and
@@ -2381,7 +2394,8 @@ store keeps the watch, its progress and the noted changes on both databases.
   people's labels, for people's agreement with each other per review queue, and for each judge
   version's calibration and its re-checks, which the core's own write routes save and ask for.
   Another registers a judge graded by a [panel of judges](evals.md#a-panel-of-judges), which the
-  worker grades on each member.
+  worker grades on each member, and another creates a review queue with
+  [blind double review](evals.md#blind-double-review).
 - [Prompt versions](#prompt-versions): the core's own routes for prompts, their immutable
   versions and the runs that used each, and `martian evals prompts push`.
 - [Suite audits](#suite-audits): the core's own routes that audit a saved suite version with the
@@ -2842,8 +2856,9 @@ written by one MLflow release reads back the same on the next.
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
 on, scoring jobs, the human review chain, versioned suites and their audits, editable dataset
-drafts, the Traces page's saved views, judge calibrations and their re-checks, monitors,
-thresholds and schedules, and the manifests of the dataset versions it published.
+drafts, the Traces page's saved views, judge calibrations and their re-checks, the review queues
+with blind double review, monitors, thresholds and schedules, and the manifests of the dataset
+versions it published.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -2910,6 +2925,12 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   `update_recheck` moves it on, naming the state it expects; `get_recheck` reads one and
   `list_rechecks` lists a project's, or one judge's, newest first. Migration `0011` adds its
   table.
+- A review queue with [blind double review](evals.md#blind-double-review) (`BlindQueue` in
+  `martian.evals.records`) is the core's own record, kept apart from the queue in the store so
+  that every store binding keeps it: `add_blind_queue` records one before the queue is created, or
+  returns the stored one, and `list_blind_queues` lists a project's, or one run's, oldest first.
+  A blind queue is never made ordinary again. Whether a review was given blind is `Review.blind`,
+  inside the stored review, so no column is added for it. Migration `0014` adds its table.
 - [Monitors](#monitors) (`Monitor`, `MonitorFilter`, `MonitorProgress` and `MonitoredTrace` in
   `martian.evals.records`) are the core's own records, not part of the shared model. Migration
   `0005` adds `martian_monitors`, one row per monitor holding the monitor as its routes write it
@@ -3003,8 +3024,8 @@ retention, MartianSecurity/martian-notes#162). No route calls them; the edition 
   run. A caller that deletes what it lists asks again without a cursor.
 - `RecordStore.delete_run(principal, project_id, run_id)` removes, in one transaction, the run and
   every row keyed to it: its case results, its scores of every source and scoring job (a person's
-  answer beside a check's score of the same name included), its scoring jobs, its reviews, its
-  work left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
+  answer beside a check's score of the same name included), its scoring jobs, its reviews, the
+  blind mode of its review queues (`BlindQueue`), its work left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
   the schedule that started it, so the schedule's history and the thresholds on its gate results
   no longer count that run. The tables have no foreign keys, so the delete names each one. It
   returns the rows it removed from each table, by table name, such as

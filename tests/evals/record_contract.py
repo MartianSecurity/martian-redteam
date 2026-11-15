@@ -25,6 +25,7 @@ from martian.evals.model import (
 from martian.evals.outbox import queue_item_delivery, score_delivery
 from martian.evals.records import (
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     EventsLost,
     JudgeCalibration,
@@ -390,6 +391,23 @@ class RecordContract:
         assert await records.get_view(ORG_A, "p1", "v1") is None
         await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
 
+    async def test_a_blind_queue_is_kept_once_and_listed_by_its_run(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        await records.create_run(ORG_A, run("r2"))
+        first = await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="user-a"))
+        assert first.created_at is not None
+        # Marking the same queue again returns it as it was first kept.
+        assert (
+            await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="someone")) == first
+        )
+        await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q2", run_id="r2"))
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1")] == ["q1", "q2"]
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1", run_id="r2")] == ["q2"]
+        # A queue of a run the project does not have, of another project, or of another space.
+        await refused("not_found", records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q3", run_id="nope")))
+        assert await records.list_blind_queues(ORG_A, "p2") == []
+        assert await records.list_blind_queues(ORG_B, "p1") == []
+
     async def test_every_calibration_is_kept_and_listed_newest_first(self, records: RecordStore) -> None:
         def calibration(id: str, judge: str, minutes: int) -> JudgeCalibration:
             return JudgeCalibration(
@@ -705,6 +723,8 @@ class RecordContract:
             await records.put_delivery(ORG_A, "p1", score_delivery("p1", answers[run_id]))
             slot = ScheduledRun(schedule_id="sc1", slot=T0 + timedelta(days=day), state="admitted", run_id=run_id)
             await records.add_scheduled_run(ORG_A, "p1", slot)
+            # A review queue with blind double review of the run: its blind mode is keyed to the run.
+            await records.add_blind_queue(ORG_A, "p1", BlindQueue(id=f"{run_id}-queue", run_id=run_id))
 
         listener = records.events.subscribe(ORG_A)
         try:
@@ -720,9 +740,11 @@ class RecordContract:
             "martian_work_queue": 0,
             "martian_deliveries": 1,
             "martian_schedule_runs": 1,
+            "martian_blind_queues": 1,
             "martian_runs": 1,
         }
         assert await records.get_run(ORG_A, "p1", "r1") is None
+        assert await records.list_blind_queues(ORG_A, "p1", run_id="r1") == []
         await refused("not_found", records.list_results(ORG_A, "p1", "r1"))
         await refused("not_found", records.list_scores(ORG_A, "p1", "r1"))
         await refused("not_found", records.list_scoring_jobs(ORG_A, "p1", "r1"))
@@ -737,6 +759,7 @@ class RecordContract:
         assert len(await records.list_reviews(ORG_A, "p1", "r2", current_only=False)) == 2
         assert await records.get_delivery(ORG_A, "p1", score_delivery("p1", answers["r2"]).id) is not None
         assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0 + timedelta(days=1)) is not None
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1")] == ["r2-queue"]
         assert await records.get_schedule(ORG_A, "p1", "sc1") is not None
         # Gone is not found, and another organisation reaches none of it.
         await refused("not_found", records.delete_run(ORG_A, "p1", "r1"))

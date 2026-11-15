@@ -71,6 +71,7 @@ from martian.evals.outbox import save_queue_item
 from martian.evals.records import (
     RECORD_METHODS,
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     EmailChannel,
     JudgeCalibration,
@@ -317,6 +318,10 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         created_by=principal.user_id,
         created_at=T0,
     )
+    # Its reviewers answer blind: each without the others' answers until they have given theirs.
+    await records.add_blind_queue(
+        principal, project, BlindQueue(id=queue.id, run_id=run_id, created_by=principal.user_id)
+    )
     await store.create_queue(principal, project, queue, traced[:2])
     pending = Review(
         id=str(uuid.uuid4()),
@@ -336,6 +341,7 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
             "comment": "Fine.",
             "reviewer": principal.user_id,
             "previous_id": pending.id,
+            "blind": True,
             "created_at": T0 + timedelta(hours=3),
         }
     )
@@ -1119,21 +1125,26 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
         await import_data(store, records, ORG_A, folder)
 
     fresh = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'fresh.db'}")
+    whole = (folder / "scores.jsonl").read_bytes()
     with (folder / "scores.jsonl").open("ab") as handle:
         handle.write(b'{"project_id":"default"}\n')
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
+    # The files are checked in the format's order, so put it right before the later files are tried.
+    (folder / "scores.jsonl").write_bytes(whole)
     found = manifest(folder)
     # Version 3 was two formats, one with the dataset publications and one with the prompts, and
-    # versions 4 (the judge calibrations) and 5 (a score of each source) came without the prompts:
-    # version 6 holds all of them, and an export of any of those is refused.
-    for older in (3, 4, 5):
+    # versions 4 (the judge calibrations), 5 (a score of each source) and 6 (the prompts) came
+    # without the review queues with blind double review: version 7 holds all of them, and an
+    # export of any of those is refused.
+    for older in (3, 4, 5, 6):
         (folder / MANIFEST).write_text(json.dumps({**found, "version": older}), encoding="utf-8")
-        with pytest.raises(ExportError, match=f"format version {older}; this SDK reads version 6"):
+        with pytest.raises(ExportError, match=f"format version {older}; this SDK reads version 7"):
             await import_data(*fresh, ORG_A, folder)
-    # A version 6 folder without the prompt files, or without the dataset publications, is refused.
+    # A version 7 folder without the prompt files, the dataset publications or the blind queues is
+    # refused.
     (folder / MANIFEST).write_text(json.dumps(found), encoding="utf-8")
-    for name in ("prompts.jsonl", "manifests.jsonl"):
+    for name in ("prompts.jsonl", "manifests.jsonl", "blind_queues.jsonl"):
         (folder / name).rename(folder / f"{name}.away")
         with pytest.raises(ExportError, match=f"is missing {name}"):
             await import_data(*fresh, ORG_A, folder)

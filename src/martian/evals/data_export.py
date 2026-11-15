@@ -73,6 +73,7 @@ from martian.evals.model import (
 )
 from martian.evals.records import (
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     DatasetManifest,
     JudgeCalibration,
@@ -98,15 +99,16 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 6
+VERSION = 7
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
 alerts. Version 3 added the dataset publications (``manifests.jsonl``), version 4 the judge
 calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), version 5 let
 ``scores.jsonl`` hold a score of each source for one case, scorer and scoring job (a person's answer
 beside a check's or a judge's score of the same name), which an SDK that keeps one score per scorer
-and scoring job would import as one, and version 6 the organisation's prompts and their versions
-(``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
+and scoring job would import as one, version 6 the organisation's prompts and their versions
+(``prompts.jsonl`` and ``prompt_versions.jsonl``), and version 7 the review queues with blind double
+review (``blind_queues.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -132,6 +134,7 @@ FILES = (
     "scoring_jobs.jsonl",
     "reviews.jsonl",
     "queues.jsonl",
+    "blind_queues.jsonl",
     "artifacts.jsonl",
     "traces.jsonl",
     "monitors.jsonl",
@@ -164,6 +167,7 @@ EXPORTED_TABLES = {
     "martian_threshold_alerts": "alerts.jsonl",
     "martian_judge_calibrations": "calibrations.jsonl",
     "martian_calibration_rechecks": "rechecks.jsonl",
+    "martian_blind_queues": "blind_queues.jsonl",
 }
 """Each table of the record store (``martian.evals.records.tables``) that an export carries, and
 the file its rows are in."""
@@ -221,6 +225,7 @@ EXPORTED_KINDS = {
     "Alert": ("alerts.jsonl",),
     "JudgeCalibration": ("calibrations.jsonl",),
     "CalibrationRecheck": ("rechecks.jsonl",),
+    "BlindQueue": ("blind_queues.jsonl",),
 }
 """Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
 return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
@@ -612,6 +617,8 @@ async def _run(
         if queue is not None:
             items = await store.queue_items(principal, project_id, queue_id)
             files.write("queues.jsonl", export_line(project_id, queue=queue, items=items))
+    for blind in await records.list_blind_queues(principal, project_id, run_id=run_id):
+        files.write("blind_queues.jsonl", export_line(project_id, blind_queue=blind))
     if native is not None:
         for name in await store.list_artifacts(principal, project_id, run_id):
             data = await store.get_artifact(principal, project_id, run_id, name)
@@ -986,6 +993,9 @@ async def _import(
     await _put_batches(folder, "scores.jsonl", "score", Score, refs, records.put_scores, principal)
     for project_id, job in _objects(folder, "scoring_jobs.jsonl", "job", ScoringJob):
         await records.create_scoring_job(principal, project_id, job)
+    # A queue with blind double review stays blind: recorded before its reviews and its queue.
+    for project_id, blind in _objects(folder, "blind_queues.jsonl", "blind_queue", BlindQueue):
+        await records.add_blind_queue(principal, project_id, blind)
     for project_id, review in _objects(folder, "reviews.jsonl", "review", Review):
         await records.add_review(principal, project_id, review)
     await _import_queues(store, principal, folder)

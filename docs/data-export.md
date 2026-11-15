@@ -43,8 +43,9 @@ time, which a run's `provenance.prompts` names; and every project the store list
   manifest that pins the version publishing wrote, and any publication that never finished;
 - its suites, every version; its dataset drafts with their cases; its saved views;
 - its runs as the record store holds them and as the store holds them, each with its case
-  results, scores, scoring jobs, every review of every chain (replaced ones too), the review
-  queues its reviews name with each item's status, and its artifacts;
+  results, scores, scoring jobs, every review of every chain (replaced ones too) with whether it
+  was given blind, the review queues its reviews name with each item's status, which of them have
+  [blind double review](evals.md#blind-double-review), and its artifacts;
 - its traces, oldest first, each with its spans and its scores: judges' and checks' verdicts and
   people's annotations;
 - its [monitors](evals-core.md#monitors) with their progress and every trace each took for
@@ -144,6 +145,7 @@ when there is nothing of its kind. An import reads them in this order:
 | `scoring_jobs.jsonl` | Scoring job | `project_id`, `job`: `ScoringJob` |
 | `reviews.jsonl` | Review, each after the review it replaces | `project_id`, `review`: `Review` |
 | `queues.jsonl` | Review queue | `project_id`, `queue`: `ReviewQueue`, `items`: a list of `QueueItem`, one per case with its trace and status |
+| `blind_queues.jsonl` | Review queue with blind double review, by run | `project_id`, `blind_queue`: `BlindQueue`, the queue's `id`, its `run_id`, who created it and when |
 | `artifacts.jsonl` | Run artifact | `project_id`, `run_id`, `name` (a relative path), `sha256`, `size`; the bytes are `artifacts/<sha256>` |
 | `traces.jsonl` | Trace, oldest first | `project_id`, `trace`: `Trace` with its `spans` and `scores`, read one at a time, so its `request` and `response` are whole and not a search's previews |
 | `monitors.jsonl` | Monitor, by name | `project_id`, `monitor`: `Monitor`, `progress`: `MonitorProgress` |
@@ -165,7 +167,7 @@ need no new references.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 6,
+  "version": 7,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -177,7 +179,7 @@ need no new references.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `6`): a new
+`null` for the single local user. `version` is the format's version (`VERSION`, here `7`): a new
 file, or a change to a file, to a line's shape or to what a file's lines can hold, is a new
 version, and an import reads only its own. Version 2 added the six monitoring files, version 3
 added `manifests.jsonl`, version 4 added `calibrations.jsonl` and `rechecks.jsonl`, version 5
@@ -185,8 +187,8 @@ let `scores.jsonl` hold a score of each source for one case, scorer and scoring 
 answer named like a check or a judge is a line beside that scorer's, where version 4 had one line
 per case, scorer and scoring job. Its lines keep their shape, so an SDK that reads version 4
 would import such a pair as one score; it refuses version 5 instead. Version 6 added
-`prompts.jsonl` and `prompt_versions.jsonl`. An export of an earlier version is refused: import it
-with the SDK that wrote it, and export again with this one.
+`prompts.jsonl` and `prompt_versions.jsonl`, and version 7 added `blind_queues.jsonl`. An export of an
+earlier version is refused: import it with the SDK that wrote it, and export again with this one.
 
 `martian evals push` sends runs to a server as lines of this format, under its name and version,
 written by the same code (`run_records` and `export_line`): a run's lines of `runs.jsonl`,
@@ -239,7 +241,8 @@ each with its number, author and time (`EvalStore.import_prompt`), projects, sco
 dataset versions, dataset publications (a published one finished again as the receiving store's
 version, so a run of that version is still checked against its manifest), suites, runs (in the
 store, then in the record store), traces with their scores, case results, scores, scoring jobs,
-reviews, queues, artifacts, drafts and views, then monitors with the traces they took, schedules
+blind queues (before their reviews and queues, so a blind queue is never ordinary in the fresh
+install), reviews, queues, artifacts, drafts and views, then monitors with the traces they took, schedules
 with their slots, thresholds with their status and alerts, and judge calibrations and their
 re-checks, each as it was saved, who saved it and when included; projects that were archived are
 archived last. A dataset version that does not come back with its digest,

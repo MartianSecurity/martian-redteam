@@ -774,7 +774,11 @@ class ReviewQueue(_Object):
 
 class Review(_Object):
     """A person's answer about one case result. A new answer is a new review that names the one it
-    replaces in ``previous_id``; reviews are never edited."""
+    replaces in ``previous_id``; reviews are never edited.
+
+    ``blind`` says the answer was given blind: in a review queue with blind double review, before
+    its reviewer could read another reviewer's answer to the same item and question, which is their
+    first complete answer to it. Any other answer is not blind."""
 
     id: Identifier
     run_id: Identifier
@@ -788,6 +792,7 @@ class Review(_Object):
     queue_id: str | None = None
     previous_id: str | None = None
     score_id: str | None = None
+    blind: bool = False
     created_at: datetime | None = None
 
     @model_validator(mode="after")

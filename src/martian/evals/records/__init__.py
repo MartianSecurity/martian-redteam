@@ -193,6 +193,21 @@ class JudgeCalibration(BaseModel):
     created_at: datetime | None = None
 
 
+class BlindQueue(BaseModel):
+    """A review queue with blind double review (:mod:`martian.evals.server.blind`): each reviewer
+    answers an item without reading the other reviewers' answers to it until they have given their
+    own. ``id`` is the queue's id in the store. The core's own record, kept apart from the queue in
+    the store, so that every store binding keeps it: it is recorded before the queue is created and
+    never changed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    run_id: Identifier
+    created_by: Identifier | None = None
+    created_at: datetime | None = None
+
+
 RecheckState = Literal["queued", "running", "completed", "failed"]
 
 
@@ -682,8 +697,8 @@ class RecordStore(Protocol):
 
     async def delete_run(self, principal: Principal, project_id: str, run_id: str) -> dict[str, int]:
         """Remove the run and every record keyed to it, in one transaction: its case results, its
-        scores of every source and scoring job, its scoring jobs, its reviews, its work left in the
-        worker's queue, the outbox's
+        scores of every source and scoring job, its scoring jobs, its reviews, the blind mode of its
+        review queues (:class:`BlindQueue`), its work left in the worker's queue, the outbox's
         deliveries of its scores, whatever their state, and the slot of the schedule that started
         it. Returns how many rows it removed from each of those tables, by table name.
 
@@ -879,6 +894,18 @@ class RecordStore(Protocol):
     async def due_deliveries(self, principal: Principal, *, now: datetime, limit: int = 100) -> list[Delivery]:
         """Pending deliveries of every project of the principal's space whose next attempt is due,
         oldest first."""
+        ...
+
+    # Review queues with blind double review: recorded once, before the queue is created.
+    async def add_blind_queue(self, principal: Principal, project_id: str, queue: BlindQueue) -> BlindQueue:
+        """Record that a review queue of a run of the project has blind double review. Recording the
+        same queue again returns the stored one; a run the project does not have is ``not_found``."""
+        ...
+
+    async def list_blind_queues(
+        self, principal: Principal, project_id: str, *, run_id: str | None = None
+    ) -> list[BlindQueue]:
+        """The project's review queues with blind double review, or one run's, oldest first."""
         ...
 
     # Judge calibrations: every one is kept, and the newest of a judge version is its calibration.
@@ -1146,6 +1173,7 @@ __all__ = [
     "RECORD_METHODS",
     "THRESHOLD_WINDOW_BOUND",
     "Alert",
+    "BlindQueue",
     "CalibrationRecheck",
     "DatasetManifest",
     "Delivery",

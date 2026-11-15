@@ -508,6 +508,7 @@ class ReviewRow:
     state: str
     value: Value
     comment: str
+    blind: bool
     created_at: datetime | None
 
     @classmethod
@@ -524,6 +525,7 @@ class ReviewRow:
             state=review.state,
             value=review.value,
             comment=review.comment,
+            blind=review.blind,
             created_at=review.created_at,
         )
 
