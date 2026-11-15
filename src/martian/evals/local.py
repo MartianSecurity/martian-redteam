@@ -45,7 +45,8 @@ import ipaddress
 import os
 import re
 import socket
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -57,6 +58,7 @@ from starlette.staticfiles import StaticFiles
 from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
+from martian.evals.outbox import run_deliveries
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
@@ -198,12 +200,26 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS)
     targets = local_targets.LocalTargets(home)
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
     worker = local_runs.LocalWorker(home, records, targets, judge_settings)
+
+    async def principals() -> list[Principal]:
+        return [SINGLE_USER]
+
+    @asynccontextmanager
+    async def deliveries(_app: FastAPI) -> AsyncIterator[None]:
+        # The outbox's loop: what the store could not take at once is delivered when it can.
+        task = asyncio.create_task(run_deliveries(store, records, principals))
+        try:
+            yield
+        finally:
+            task.cancel()
+
     app = create_app(
         store=store,
         records=records,
         principal=lambda: SINGLE_USER,
         worker=worker,
         judge_settings=judge_settings,
+        lifespan=deliveries,
     )
     app.state.martian_local_targets = targets
     app.include_router(session_router)

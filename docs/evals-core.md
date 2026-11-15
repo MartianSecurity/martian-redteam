@@ -15,6 +15,7 @@ builds it with `create_app` and supplies these:
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 | `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
+| `agent_names` | An async function from a principal and agent ids to the agents' display names (`AgentNames`), optional | None: a run carries the name its worker pinned with the target | Its agent registry |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -218,7 +219,7 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   application's user, not a person of the server.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
-  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
+  (`NO_AGENT`). `agent_name` is the registered agent's display name from the edition's `agent_names` lookup, asked once per page of runs; without one it is the name a worker pinned with the target (`provenance.target.name`, as the local edition's does), or `null`. A CI run's `ci` is its provenance's `ci`, or its whole provenance. The Evals UI names a run
   without an agent name by its dataset, and one whose `source` is `local` as a **Local run**. `dataset_id` is the run's
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
@@ -369,11 +370,22 @@ All paths are under `/v1/evals`. How the core carries them out:
   `POST /review-queues/{id}/sync` sets every item again. The store keeps one definition per
   question name, so the library has version 1 of each question: a second version is `409`, and a
   queue question with the name of a different library question is the store's `409`.
-- **Store writes happen in the request.** A review's score, an annotation, a queue and a published
-  dataset are written to the store before the response. The store is the core's own, not a
-  telemetry export, so the server's background tasks that copied them to MLflow have no
-  counterpart, and `POST /{run_id}/assessments/{id}/sync` only writes a score the store does not
-  hold yet.
+- **A person's answer never waits on the store** (`martian.evals.outbox`). A review's score is
+  saved in the record store first, and a review queue item's status with it; their writes to the
+  store are deliveries kept in the record store's outbox (`Delivery`, record store migration
+  `0004`). Each is attempted in the request; when the store cannot take it (MLflow is down), the
+  request still succeeds and `deliver_due` retries it, 5 seconds after the first failure, doubling
+  to at most 15 minutes, until it is delivered or the store refuses it for good (`invalid`:
+  `failed`). Every attempt reads back first, so a write that reached the store is never made twice:
+  a delivered score carries its delivery's id in its metadata (`martian.delivery`), and a queue
+  item is set only when its status differs; the newest status of an item replaces a pending one.
+  `run_deliveries` runs the retries in a loop for the principals an edition serves: the local
+  edition runs it for its one user, the server for its organisations.
+  `POST /{run_id}/assessments/{id}/sync` delivers a score the store does not hold yet and answers
+  `pending` while its delivery waits. An annotation, a queue, a question, a judge and a published
+  dataset are still written to the store in the request. The outbox is one table and a loop; the
+  durable job queue (MorningHQ/martian-notes#139) can later run `deliver_due` as one of its kinds of
+  work.
 - **Dataset drafts** live in the record store's default project. A record (`id`, `input`,
   `expected_output`, `status`, `metadata`) is a case: an object `input` is its `inputs`, a text one
   `inputs.message`, anything else `inputs.input`, with the tag `martian.input_form` saying which;
@@ -381,9 +393,20 @@ All paths are under `/v1/evals`. How the core carries them out:
   for published datasets. Every edit names the revision it was made against. Validation reports
   the counts and the `sha256` publishing checks, which is the dataset version's content digest.
 - **Publishing** writes the draft's cases as a dataset version of the default project, named as
-  the draft, and marks the draft published, in one request (`202`, state `published`). A dataset
-  operation is the record of a published draft; none is ever left running, so resuming or aborting
-  one is `409` ("Dataset operation is already finished").
+  the draft, and marks the draft published, in one request (`202`, state `published`). It records
+  the version's manifest first (`martian.evals.manifests`: the digest, and each case's id and
+  digest in order) as `publishing`, writes the version, reads every case back and marks the
+  manifest `published` only when they match (otherwise `409`, and publishing again finishes it).
+  While a publication is `publishing`, launching a run is `409` ("A dataset is being published;
+  new runs are paused until it finishes"); one that has been `publishing` for more than ten
+  minutes no longer holds runs back. A dataset operation is the record of a published draft; none
+  is ever left running, so resuming or aborting one is `409` ("Dataset operation is already
+  finished").
+- **Manifest-pinned versions.** A run reads every case of its dataset version before it calls the
+  target. When Martian published the version and the store no longer holds exactly what its
+  manifest recorded (a case edited in MLflow's own UI, for example), the run fails before any call
+  with "Managed dataset content changed since it was published; publish it again". A version
+  Martian did not publish has no manifest and is read as it is.
 - **Projects** are store projects whose id is derived from the `request_id`; at most 25 besides
   the default one. An archived project takes no more runs, scores, reviews or annotations.
 - **Views** belong to a project and to the person who saved them; a private view is seen only by
@@ -841,8 +864,8 @@ written by one MLflow release reads back the same on the next.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
-page's saved views.
+on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
+page's saved views, and the manifests of the dataset versions it published.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 

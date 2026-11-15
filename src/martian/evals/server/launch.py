@@ -30,9 +30,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from martian.evals.manifests import PAUSED, publishing
 from martian.evals.model import DatasetVersion, Run, RunState, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
+    AgentNamesDep,
     OptionalWorkerDep,
     PrincipalDep,
     RecordsDep,
@@ -42,7 +44,15 @@ from martian.evals.server.dependencies import (
 )
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out, suite_version_id
-from martian.evals.server.runs import find_run, lookup_run, project_keys, project_runs, writable_project
+from martian.evals.server.runs import (
+    agent_names,
+    find_run,
+    lookup_run,
+    name_of,
+    project_keys,
+    project_runs,
+    writable_project,
+)
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
@@ -117,6 +127,8 @@ async def admit_run(
     ``provenance``."""
     if await _active(store, records, principal):
         raise HTTPException(409, "An eval run is already in progress")
+    if await publishing(records, principal, DEFAULT_PROJECT, _now()):
+        raise HTTPException(409, PAUSED)
     admitted: dict[str, Any] = {
         "dataset": {"id": dataset.id, "digest": dataset.digest, "content_sha256": None},
         "agent": {"id": target.agent_id, "artifact_revision": None, "revision_source": "unavailable"},
@@ -159,13 +171,18 @@ async def admit_run(
 
 @router.post("", response_model=EvalRunOut, status_code=202, dependencies=[Depends(require_capability("run"))])
 async def request_run(
-    body: EvalRunRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: WorkerDep
+    body: EvalRunRequest,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
+    names: AgentNamesDep,
 ) -> EvalRunOut:
     run_id = run_id_for(body.request_id)
     if existing := await lookup_run(store, records, principal, run_id):
         if not _same_request(existing, body, principal):
             raise HTTPException(409, "request_id was already used for a different eval")
-        return run_out(existing)
+        return run_out(existing, name_of(await agent_names(names, principal, [existing]), existing))
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
     try:
@@ -187,7 +204,7 @@ async def request_run(
         dataset=dataset,
         max_cases=body.max_items,
     )
-    return run_out(run)
+    return run_out(run, name_of(await agent_names(names, principal, [run]), run))
 
 
 async def _cancel_interrupted(worker: Worker | None, principal: Principal, run: Run) -> Run | None:
@@ -205,26 +222,31 @@ async def _cancel_interrupted(worker: Worker | None, principal: Principal, run: 
     dependencies=[Depends(require_capability("run"))],
 )
 async def cancel_eval(
-    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: OptionalWorkerDep
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: OptionalWorkerDep,
+    names: AgentNamesDep,
 ) -> EvalRunOut:
     # A queued run is cancelled at once; a running one when its worker reaches the next case, or at
     # once when its worker says nothing is working on it any more, even if a stop was asked before.
     run = await find_run(store, records, principal, run_id)
+    named = await agent_names(names, principal, [run])
     for _ in range(3):
         try:
             if (stopped := await _cancel_interrupted(worker, principal, run)) is not None:
-                return run_out(stopped)
+                return run_out(stopped, name_of(named, stopped))
             if run.cancel_requested_at is not None:
-                return run_out(run)
+                return run_out(run, name_of(named, run))
             if run.state not in ACTIVE or run.finished_at is not None:
                 raise HTTPException(409, "Execution has finished; its recorded results remain available")
             now = _now()
             changes: dict[str, object] = {"cancel_requested_at": now}
             if run.state == "queued":
                 changes |= {"state": "cancelled", "finished_at": now}
-            return run_out(
-                await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
-            )
+            moved = await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
+            return run_out(moved, name_of(named, moved))
         except StoreError as error:
             if error.kind != "conflict":
                 raise

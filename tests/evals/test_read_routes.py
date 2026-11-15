@@ -11,7 +11,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from martian.evals.model import Trace
+from martian.evals.model import Run, Target, Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
 from martian.evals.stats import wilson
@@ -61,6 +61,39 @@ def test_runs_are_listed_newest_first_by_project(served):
     assert codes(q="eval-1") == ["EVAL-1"] and codes(q="support") == ["EVAL-3", "EVAL-2", "EVAL-1"]
     assert codes(page=2, limit=2) == ["EVAL-1"]
     assert client.get("/v1/evals", params={"project_id": str(uuid.uuid4())}).status_code == 404
+
+
+def test_an_editions_agent_names_name_its_runs(tmp_path):
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    agent = str(uuid.uuid4())
+    run = Run(
+        id=str(uuid.uuid4()),
+        project_id=DEFAULT_PROJECT,
+        code="EV-1",
+        source="ci",
+        state="completed",
+        target=Target(kind="agent", agent_id=agent),
+        provenance={"ci": {"git_sha": "abc123", "repo": "acme/app"}, "dataset": {"id": "d-1"}},
+        created_at=T0,
+    )
+    asyncio.run(records.create_run(ORG, run))
+    asked = []
+
+    async def names(principal, ids):
+        asked.append((principal.organisation_id, ids))
+        return {agent: "Support bot"}
+
+    named = TestClient(create_app(store=MemoryStore(), records=records, principal=lambda: ORG, agent_names=names))
+    listed = named.get("/v1/evals", params={"default_only": True}).json()
+    assert [(r["agent_id"], r["agent_name"], r["ci"]["git_sha"], r["ci"]["repo"]) for r in listed] == [
+        (agent, "Support bot", "abc123", "acme/app")
+    ]
+    assert named.get(f"/v1/evals/{run.id}").json()["agent_name"] == "Support bot"
+    assert asked == [("org-a", [agent])] * 2
+    # Without a lookup the run carries no agent name.
+    plain = TestClient(create_app(store=MemoryStore(), records=records, principal=lambda: ORG))
+    assert plain.get(f"/v1/evals/{run.id}").json()["agent_name"] is None
+    records.close()
 
 
 def test_a_run_in_the_default_project_reports_no_project_and_no_agent(served):

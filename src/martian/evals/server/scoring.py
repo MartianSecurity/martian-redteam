@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import Policy, Run, ScorerVersion, ScoringJob
+from martian.evals.outbox import save_score
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
     JudgeSettingsDep,
@@ -286,11 +287,11 @@ async def sync(
     )
     if found is None:
         raise HTTPException(404, "Not found")
+    state = "unavailable"
     if found.store.assessment_id is None and found.value is not None and found.trace_id:
-        logged = await store.log_score(principal, run.project_id, found.trace_id, found)
-        found = found.model_copy(update={"store": logged.store})
-        await records.put_scores(principal, run.project_id, [found])
-    return {"id": assessment_id, "telemetry_state": "persisted" if found.store.assessment_id else "unavailable"}
+        found, delivery = await save_score(store, records, principal, run.project_id, found)
+        state = "pending" if delivery is not None and delivery.state == "pending" else state
+    return {"id": assessment_id, "telemetry_state": "persisted" if found.store.assessment_id else state}
 
 
 @router.get("/monitoring", response_model=None, dependencies=[Depends(require_entitlement("monitoring"))])
