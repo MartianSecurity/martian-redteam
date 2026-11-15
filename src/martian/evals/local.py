@@ -141,8 +141,6 @@ def open_stores(home: Path) -> tuple[MlflowStore, SqlRecordStore]:
     experiment with MLflow tracing: MLflow would otherwise create the experiment itself, with its
     artifacts outside the data folder, and the store does not take such an experiment as the
     project. A data folder holding one is refused with :class:`LocalEditionError`."""
-    # The local edition sends nothing off this machine.
-    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
     home.mkdir(parents=True, exist_ok=True)
     store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
     records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")

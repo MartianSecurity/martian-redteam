@@ -46,6 +46,15 @@ def run_evals(
         int | None, typer.Option("--concurrency", min=1, max=64, help="Suite file only: cases run at the same time.")
     ] = None,
     limit: Annotated[int | None, typer.Option("--limit", min=1, help="Suite file only: run the first N cases.")] = None,
+    repeats: Annotated[
+        int | None,
+        typer.Option(
+            "--repeats",
+            min=1,
+            max=100,
+            help="Suite file only: run each case N times and combine the attempts by each check's rule.",
+        ),
+    ] = None,
     fresh: Annotated[
         bool, typer.Option("--fresh", help="Suite file only: discard earlier results instead of resuming.")
     ] = False,
@@ -98,17 +107,18 @@ def run_evals(
             output=output,
             concurrency=concurrency,
             limit=limit,
+            repeats=repeats,
             fresh=fresh,
             home=data_dir,
             max_seconds=max_seconds,
             max_judge_tokens=max_judge_tokens,
         )
         return
-    suite_only = (output, concurrency, limit, data_dir, max_seconds, max_judge_tokens)
+    suite_only = (output, concurrency, limit, repeats, data_dir, max_seconds, max_judge_tokens)
     if fresh or any(option is not None for option in suite_only):
         typer.echo(
-            "--output, --concurrency, --limit, --fresh, --max-seconds, --max-judge-tokens and --data-dir apply "
-            "to a suite file (evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh, --max-seconds, --max-judge-tokens and "
+            "--data-dir apply to a suite file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -125,6 +135,7 @@ def _run_suite(
     output: Path | None,
     concurrency: int | None,
     limit: int | None,
+    repeats: int | None,
     fresh: bool,
     home: Path | None,
     max_seconds: float | None = None,
@@ -137,6 +148,7 @@ def _run_suite(
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
     from martian.evals.runner import false_refusal_line, run_suite
+    from martian.evals.stats import rate_text
 
     console = Console()
     try:
@@ -148,31 +160,74 @@ def _run_suite(
             resume=not fresh,
             progress=console.print,
             home=home,
+            repeats=repeats,
             max_seconds=max_seconds,
             max_judge_tokens=max_judge_tokens,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
         raise typer.Exit(code=2) from None
-    table = Table(title=f"{path.name}: {summary['cases']} cases")
-    for column in ("Check", "Passed", "Failed", "Errors"):
+    groups = summary["groups"]
+    plan = summary.get("repeats")
+    notes = [f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}"] if groups else []
+    if plan:
+        notes.append(
+            "Counts are of cases. Each check combines its attempts by its own rule (check), all for a "
+            "security check (security), or the suite's rule (suite). Reliability counts the cases that "
+            "passed every attempt"
+        )
+    title = f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else "")
+    if summary["not_run"]:
+        title += f", {summary['not_run']} not run"
+    table = Table(title=title, caption="; ".join(notes) or None)
+    columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
+    for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
-    for name, counts in summary["checks"].items():
-        table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
-    table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
+    # With repeats, the share of cases that passed every attempt sits under the pass rate.
+    reliable = summary.get("reliability")
+    totals = [("All checks", summary), *([("Reliability", reliable)] if reliable else [])]
+    for name, counts in [*summary["checks"].items(), *totals]:
+        row = [
+            name,
+            str(counts["passed"]),
+            str(counts["failed"]),
+            str(counts["errors"]),
+            rate_text(counts["pass_rate"], counts["confidence_95"]),
+        ]
+        if plan and counts is reliable:
+            row.append("every attempt")
+        elif plan and counts is summary:
+            row.append("every check")
+        elif plan:
+            rule = plan["checks"][name]
+            row.append(f"{rule['combine']} ({rule['from']})")
+        table.add_row(*row, style="bold" if counts is summary or counts is reliable else None)
     console.print(table)
+    if reliable:
+        flaky = reliable["flaky"]
+        shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
+        console.print(
+            f"Flaky cases, whose verdict changed between attempts: {shown}"
+            if flaky
+            else "No flaky cases: no case's verdict changed between attempts",
+            markup=False,
+            highlight=False,
+        )
     if (refusals := summary.get("false_refusals")) is not None:
         console.print(false_refusal_line(refusals), markup=False, highlight=False, soft_wrap=True)
+    unit = "attempt(s)" if plan else "case(s)"
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
-        console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
+        console.print(f"{count} {unit}: {reason}", markup=False, highlight=False)
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
-            console.print(f"{count} case(s), {label}: {reason}", markup=False, highlight=False)
+            console.print(f"{count} {unit}, {label}: {reason}", markup=False, highlight=False)
     if summary["not_run"]:
+        # A run stopped at a limit, or cancelled, counts only the cases it finished above.
         why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+        partly = " A case the run stopped in the middle of runs all of its attempts again." if plan else ""
         console.print(
             f"{why}: {summary['not_run']} case(s) not run. Run the same command again to resume after the cases "
-            "it finished.",
+            f"it finished.{partly}",
             markup=False,
             highlight=False,
             soft_wrap=True,
