@@ -19,7 +19,8 @@ stores and the credentials of HTTP targets, read from ``target-keys.json`` in th
 local edition keeps them; the worker sends the HTTP targets themselves with the work.
 :func:`agent_services` adds :class:`FakeMartianAgents`, a stand-in for the Martian server's
 martian-agents path, which appends each call it makes to ``chats.jsonl`` in the folder.
-:func:`scorer_services` installs the custom Python scorers of the custom scorer tests.
+:func:`scorer_services` installs the custom Python scorers of the custom scorer tests, and
+:func:`hooked_services` the case hooks and the installed check of the case hook tests.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from martian.evals.server import DEFAULT_PROJECT, Principal, organisation_princi
 from martian.evals.server.projection import prompt_text
 from martian.evals.store import StoreError
 from martian.evals.store.mlflow_local import MlflowStore, workspace_name
-from martian.evals.worker import Credentials, Work, WorkerServices, load_work
+from martian.evals.worker import CaseContext, Credentials, Work, WorkerServices, load_work
 from martian.evals.worker.process import WORKSPACE_ENV, _run_work
 from tests.evals.write_fixture import AGENT, ANSWERS, judge
 
@@ -208,6 +209,42 @@ def scorer_services(folder: str) -> WorkerServices:
         return answer(str(case.inputs["message"]))
 
     return WorkerServices(store, records, targets={AGENT: agent}, scorers=scorers)
+
+
+HOOK_LOG = "hooks.jsonl"
+"""Where :func:`hooked_services`'s hooks write each step, in the folder."""
+
+
+def hooked_services(folder: str) -> WorkerServices:
+    """The stores, an agent that ends each answer with the token its case's setup gave it, a hook
+    that writes each setup and teardown to ``hooks.jsonl`` in the folder, with the process it ran
+    in, and the check ``carries_token``, which reads the token from the case's state."""
+    home = Path(folder)
+    store, records = open_stores(home)
+
+    def log(*step: Any) -> None:
+        with (home / HOOK_LOG).open("a", encoding="utf-8") as steps:
+            steps.write(json.dumps([*step, os.getpid()]) + "\n")
+
+    class Tokens:
+        async def setup(self, context: CaseContext) -> None:
+            token = f"token-{context.case.id}"
+            context.state.target_inputs["token"] = token
+            context.state.values["token"] = token
+            log("setup", context.case.id)
+
+        async def teardown(self, context: CaseContext, error: str) -> None:
+            log("teardown", context.case.id, error)
+
+    async def agent(case: Case) -> str:
+        return f"{answer(str(case.inputs['message']))} {case.inputs['token']}"
+
+    def carries_token(outputs: str, state: Any) -> tuple[bool, str]:
+        return outputs.endswith(state.values["token"]), "the reply ends with the case's token"
+
+    return WorkerServices(
+        store, records, targets={AGENT: agent}, hooks=(Tokens(),), checks={"carries_token": carries_token}
+    )
 
 
 def run_on_threads(folder: str, works: list[Work]) -> None:

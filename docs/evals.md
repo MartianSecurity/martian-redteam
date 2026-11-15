@@ -168,7 +168,9 @@ such as the output folder, is refused before any case. What each kind of target 
 graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
 `inputs.context` and take no options; `python` names a Python function of your own, in a file
-beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
+beside the suite file ([custom Python checks](#custom-python-checks)); `installed` names a check
+that an edition's worker installs, which `martian evals run` cannot run
+([installed checks](#installed-checks)); every other type is one of
 the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
 example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
 secrets, planted instructions and refusals, and four the
@@ -403,6 +405,8 @@ by: the case may still fail one of them.
   in a suite with a target): a reply cannot put calls in a trace. With `source: reply` they are
   audited, and `check_keywords` claims the calls they look for in messages, which shows that such a
   check reads what the agent says it did rather than what it did.
+- **Installed checks** (`type: installed`): only a worker that installs a check under that name
+  runs it ([installed checks](#installed-checks)).
 
 A `python` check is audited: its function runs on each reply in the command's process, as in a run
 ([security and data](security-and-data.md#custom-python-scorers)), with no `trace`.
@@ -2091,6 +2095,33 @@ could not call, or bounds that are not numbers, when the check is made. Repeats 
 files, so it has no `security`. A worker of the
 [evals core](evals-core.md#custom-scorers-in-the-worker) runs scorers its setup installs, with the
 same rules but no `trace`; the Evals UI cannot choose one yet.
+
+### Installed checks
+
+A suite can name a check that an edition's worker installs, rather than one the SDK ships: a check
+that needs what only that edition has, such as something it prepares for each case. The suite file
+holds only the check's name and its options:
+
+```yaml
+checks:
+  - type: installed
+    name: order_state            # the name the worker installs the check under
+    options: {status: refunded}  # given to the check as written
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | The check the worker installs under this name, and the check's label |
+| `options` | No | A mapping given to the check as written |
+
+Loading and writing a suite file keep both as written, as a `code` scorer of type `installed`
+([the model](eval-model.md#the-sdk-suite-file)). Nothing in the file says what the check does or how; the
+worker that runs the suite's scoring job, or a run that names the check, decides that
+([case hooks and installed checks](evals-core.md#case-hooks-and-installed-checks-in-the-worker)).
+The open edition installs none: `martian evals run` refuses a suite with an installed check before
+it writes anything (`check order_state: an installed check runs in a worker that installs a check
+under that name, and this command installs none`, exit code `2`), and an
+[audit](#what-it-cannot-audit) lists it as not audited.
 
 ## Mistakes that raise instead of passing silently
 
