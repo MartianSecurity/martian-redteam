@@ -1,7 +1,7 @@
 """The latest audit of each saved suite version.
 
 Revision ID: 0013
-Revises: 0011
+Revises: 0012
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0013"
-down_revision = "0011"
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 
