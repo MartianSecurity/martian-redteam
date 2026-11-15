@@ -1,8 +1,9 @@
 # Evals core
 
 `martian.evals.server` is the evals core: the `/v1/evals` API that the local edition and the
-Martian server will both serve. It runs on its own, with no Martian backend, and needs only
-`martian-sdk[evals]`.
+Martian server will both serve, and OpenTelemetry's `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). It runs on its own, with no Martian backend, and
+needs only `martian-sdk[evals]`.
 
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
 builds it with `create_app` and supplies these:
@@ -645,6 +646,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
   OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
   `record_trace`.
+- [OpenTelemetry traces](#opentelemetry-traces): `POST /v1/traces` takes OTLP/HTTP traces, in
+  protobuf or JSON, and records them through the store for the edition's principal.
 - `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
   store in the same process, with no MLflow server: SQLite for the local edition, Postgres for
   on-premises installs. See [the in-process binding](#the-in-process-binding).
@@ -758,8 +761,8 @@ as JSON text, and MLflow's JSON-encoded values are decoded.
   span's kind, inputs and outputs, and MLflow adds its own `mlflow.*` attributes to the spans it
   stores.
 - **Where it applies.** Every store binding's `record_trace` maps the trace it stores, so traces
-  from `martian evals run`, the worker and an OpenTelemetry endpoint (MorningHQ/martian-notes#149)
-  are mapped once, as they are recorded. The in-process binding maps a trace that names no
+  from `martian evals run`, the worker and the [OpenTelemetry endpoint](#opentelemetry-traces)
+  are mapped as they are recorded. The in-process binding maps a trace that names no
   version as it reads it, such as one an application recorded with MLflow tracing; a search reads
   no spans, so such a trace has its model only when it is read on its own. The span view of
   `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
@@ -781,6 +784,87 @@ mapped with it keep showing what they showed, and only traces recorded afterward
 a version, use the new one. `tests/evals/test_trace_conventions.py` maps a hand-written sample turn
 in each style (`tests/evals/trace_samples.py`); the store contract records the same samples on every
 binding, and `tests/evals/test_read_routes.py` reads them through the trace routes.
+
+## OpenTelemetry traces
+
+`POST /v1/traces` takes traces over OTLP/HTTP, OpenTelemetry's protocol, so an application
+instrumented with any OpenTelemetry SDK records its traces through the store: they show in
+**Traces**, and their conversations in **Sessions**, mapped with the
+[trace conventions](#trace-conventions). It is for installs whose store runs in the core's
+process, the local edition and on-premises on `MlflowStore`, which have no MLflow server to take
+OpenTelemetry. It is the core's own route (`martian.evals.server.otlp`), beside the server's
+contract, and every edition that builds the core serves it. Traces only: there is no
+`/v1/metrics` or `/v1/logs`.
+
+| Request | |
+| --- | --- |
+| Path | `/v1/traces`, OTLP/HTTP's path for traces, so an exporter given only the server's address (`OTEL_EXPORTER_OTLP_ENDPOINT`) finds it. gRPC is not served |
+| Body | An `ExportTraceServiceRequest`, as `Content-Type: application/x-protobuf` (binary protobuf) or `application/json` (OTLP's JSON encoding, trace and span ids in hex) |
+| `Content-Encoding` | `gzip`, `deflate` or none |
+| `x-martian-project-id` | The project the traces go to, a project id. Without it, the default project, created on its first write |
+| Credentials | Those the edition's principal provider reads, as OTLP headers |
+
+**Who may send traces.** The request's principal is the edition's `principal` dependency, as on
+every route, so the traces go into the principal's organisation, which no other organisation sees.
+
+- A server whose sign-in refuses a request without credentials refuses it here too, with its own
+  status (`401`) and headers, before the body is read. An exporter sends the credential as a
+  header, for example `OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer%20<token>`. A
+  credential the exporter can keep, rather than a browser session, is the edition's to issue.
+- The principal's most privileged role must be one that writes: owner, admin or member. A viewer
+  is refused with `403` ("Requires member role"). The endpoint has no capability of its own,
+  because the capability table is the contract's.
+- **In the local edition, authentication means none.** It has one user and no sign-in, so the
+  endpoint takes the single local user without credentials, like every other route. What keeps
+  others out is what keeps them out of the rest of the local API: it listens on 127.0.0.1 and
+  answers only the `Host` names `127.0.0.1` and `localhost`. A web page cannot send it traces
+  either: OTLP's content types need a CORS preflight, which the server never answers, and a body
+  of any other type is refused with `415` before it is read.
+
+**How spans become traces.**
+
+- Spans are grouped by trace id. A trace's id is `tr-` and the OpenTelemetry trace id in hex,
+  MLflow's form, which the Traces routes take; its spans keep their span ids.
+- The root span, the one without a parent, gives the trace its name, start, latency and state:
+  `ERROR` when the root's status is an error, `OK` otherwise. Everything else (span kinds, model,
+  tokens, session, user, request and response) is the trace conventions mapping, which the
+  store's `record_trace` applies.
+- Span attributes are kept as they arrive; bytes become base64 text. A span's status is `OK`,
+  `ERROR` or unset, as sent. Resource and scope attributes, span events and links are not kept:
+  the shared model has no place for them.
+- **Spans of one trace in several requests.** An exporter sends spans as they end, so one trace's
+  spans arrive in several requests, children usually before their root. Each request merges its
+  spans into the trace already stored, a span sent again replacing itself, and records the trace
+  again, so the mapping reads all of its spans. The trace keeps its run, tags (such as its triage
+  status) and scores. Until its root span arrives the trace is `IN_PROGRESS`, named by its id,
+  and its detail answers `409`, because its spans are not yet one tree; a trace whose root span is
+  never sent stays so. Writes are serialised within one process. Processes sharing one store do
+  not coordinate theirs.
+
+**Answers.**
+
+| Status | When |
+| --- | --- |
+| `200` with an empty `ExportTraceServiceResponse`, in the request's encoding | Every span was written |
+| `200` with `partial_success` | Some spans were rejected and the rest written. `rejected_spans` counts them and `error_message` says why: a span without a valid trace, span or parent span id, or a trace the store refuses, with the store's reason. As OTLP defines, an exporter does not send them again |
+| `400` | The body does not decode, a compressed body is not valid, or `x-martian-project-id` is not a project id |
+| `401` | The edition's sign-in refuses the request |
+| `403` | The principal's role does not write |
+| `404` | `x-martian-project-id` names no project |
+| `409` | The project is archived |
+| `413` | The body is larger than 16 MiB (`MAX_BODY_BYTES`), as sent or decompressed |
+| `415` | Another `Content-Type` or `Content-Encoding` |
+
+A refusal's body is the `google.rpc.Status` OTLP asks for, in the request's encoding, carrying
+only its `message`: `{"message": "Requires member role"}` in JSON.
+
+`tests/evals/test_otlp.py` exports with the OpenTelemetry SDK's OTLP/HTTP exporter
+(`opentelemetry-exporter-otlp-proto-http`, a development dependency) to the local edition on a
+loopback port, each span in a request of its own, and reads the traces back through the Traces
+and Sessions routes in each attribute style. It also exports to a core whose sign-in takes
+bearer tokens, with and without one, and checks spans of one trace in several requests on both
+stores, partial success, the project header and each refusal. The core reads the protobuf
+messages with `opentelemetry-proto`, which `mlflow-skinny` installs.
 
 ## The in-process binding
 
@@ -925,7 +1009,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs
   into the same folder ([command-line runs](#command-line-runs)), and an application can record
-  its traces there with MLflow tracing ([below](#traces-from-an-application)). What another
+  its traces there with MLflow tracing or send them over OpenTelemetry
+  ([below](#traces-from-an-application)). What another
   process writes while the UI is open shows when a page reads again, since the UI gets no live
   event from it.
 - The default judge model is a local setting, `judge_model` in `settings.json` in the data folder
@@ -952,9 +1037,10 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   `session` is the bootstrap's `principal` with a `session_id`. Nothing checks the token. The
   route belongs to the local edition, not to the core: the Martian server answers the same call
   from its own sign-in.
-- Every path outside the API is a file of the built UI. The UI uses hash routes and relative
-  asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
-  the frontend commit it was built from.
+- The API is the core's `/v1/evals` routes, its `POST /v1/traces` for OpenTelemetry exporters,
+  and the session call. Every other path is a file of the built UI. The UI uses hash routes and
+  relative asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's
+  version and the frontend commit it was built from.
 - The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it. The container
@@ -966,14 +1052,17 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
 when no `--ui-dir` is given, the container settings below with their warning, and an application's
-traces ([below](#traces-from-an-application)).
+traces recorded with MLflow tracing ([below](#traces-from-an-application)).
 
 ### Traces from an application
 
+An application's traces show in **Traces**, and their conversations in **Sessions**, in either of
+two ways: MLflow tracing writes them straight into the data folder, as below, or any OpenTelemetry
+SDK sends them to the running `martian ui` ([over OpenTelemetry](#over-opentelemetry)).
+
 An application instrumented with MLflow tracing (`@mlflow.trace`, `mlflow.start_span` or an MLflow
-autolog integration) can record its traces straight into the data folder. `martian ui` then shows
-them in **Traces**, and their conversations in **Sessions**. MLflow's own client writes them into
-the store's database; no other service runs. Start `martian ui` once first, or record a
+autolog integration) can record its traces straight into the data folder. MLflow's own client
+writes them into the store's database; no other service runs. Start `martian ui` once first, or record a
 `martian evals run`, so the data folder and its default project exist. Then start the application
 with these settings in its environment:
 
@@ -1014,7 +1103,7 @@ def answer(message: str, conversation: str, user: str) -> str:
 - MLflow tracing sends traces in the background and sends the rest when the process exits;
   `mlflow.flush_trace_async_logging()` sends them sooner.
 - The database is a file on this machine, so this does not reach the container image or another
-  machine. An OpenTelemetry endpoint for those is MorningHQ/martian-notes#149.
+  machine. From those, send the traces [over OpenTelemetry](#over-opentelemetry).
 
 If the application names the experiment before the default project exists, MLflow creates the
 experiment itself, with its artifacts under the application's working folder, and the store does
@@ -1029,6 +1118,54 @@ python -c 'from mlflow import MlflowClient; c = MlflowClient(); c.rename_experim
 
 `tests/evals/test_local.py` runs such an application in a process of its own, with only these
 settings, and reads its traces, sessions and spans back through the local edition's routes.
+
+#### Over OpenTelemetry
+
+An application instrumented with an OpenTelemetry SDK, in any language, sends its traces to the
+running `martian ui` with the SDK's OTLP/HTTP exporter, at `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). Point the exporter at it with OpenTelemetry's
+own settings:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:7600/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+```
+
+| Setting | What it does |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The endpoint, whole. `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7600` says the same, since an exporter adds `/v1/traces` to it. With `--port`, use that port |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `http/protobuf` or `http/json`, for an SDK whose exporter would otherwise use gRPC, which is not served. Python's `opentelemetry-exporter-otlp-proto-http` sends protobuf whatever it says |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | Only for a project other than the default: `x-martian-project-id=<project id>`. No credentials: the local edition has no sign-in |
+
+In Python, with `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` installed:
+
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))  # reads the settings above
+trace.set_tracer_provider(provider)
+```
+
+- `martian ui` must be running while the application exports; an exporter that cannot reach it
+  drops the spans once its retries run out. A batch processor sends spans every few seconds and
+  the rest when the provider shuts down (`provider.shutdown()`, or `provider.force_flush()`
+  sooner).
+- Spans with OpenTelemetry GenAI, OpenInference or MLflow attributes, such as those an
+  instrumentation library writes, show their model, tokens, inputs and tool calls, and
+  `gen_ai.conversation.id` or `session.id` and `user.id` group them into sessions
+  ([trace conventions](#trace-conventions)).
+- A trace is `IN_PROGRESS` until its root span arrives, usually after its children.
+- To the container image, export to the published port. An application in another container on
+  the same Docker network reaches the server by the container's name, which must then be in
+  `MARTIAN_EVALS_ALLOWED_HOSTS`, or the `Host` check refuses it with `400`
+  ([below](#the-local-edition-in-a-container)).
+
+`tests/evals/test_otlp.py` exports with the Python SDK's exporter to the local edition on a
+loopback port and reads the traces back through the Traces and Sessions routes.
 
 ### The local edition in a container
 
@@ -1139,6 +1276,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_trace_conventions.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_write_routes.py`, `test_write_contract.py`, `test_worker.py`, `test_worker_process.py`,
-`test_worker_targets.py`, `test_worker_judges.py` and the store and record tests run the core
-without the backend. The `Evals core`
-job in CI runs them with the model tests, on Postgres as well as SQLite.
+`test_worker_targets.py`, `test_worker_judges.py`, `test_otlp.py` and the store and record
+tests run the core without the backend. The `Evals core` job in CI runs them with the model tests,
+on Postgres as well as SQLite.

@@ -24,11 +24,13 @@ feature declares ``dependencies=[Depends(require_entitlement(key))]``, and a wri
 the capability it needs with ``require_capability(name)``. Every route is in the shape of the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
-``projects``, ``views`` and ``drafts``.
+``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
+``POST /v1/traces``, which records an application's spans as traces through the store.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -36,7 +38,19 @@ from fastapi.responses import JSONResponse
 
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
-from martian.evals.server import datasets, drafts, launch, projects, reviews, runs, scoring, suites, traces, views
+from martian.evals.server import (
+    datasets,
+    drafts,
+    launch,
+    otlp,
+    projects,
+    reviews,
+    runs,
+    scoring,
+    suites,
+    traces,
+    views,
+)
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
 from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.dependencies import (
@@ -127,6 +141,8 @@ def create_app(
     app.state.martian_evals_entitlements = entitlements
     app.state.martian_evals_worker = worker
     app.state.martian_evals_judge_settings = judge_settings
+    # One OpenTelemetry trace write at a time, so that requests carrying spans of one trace merge in turn.
+    app.state.martian_evals_trace_writes = asyncio.Lock()
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
     for part in (
@@ -144,6 +160,7 @@ def create_app(
         views.router,
         drafts.router,
         runs.router,
+        otlp.router,
     ):
         app.include_router(part)
     return app

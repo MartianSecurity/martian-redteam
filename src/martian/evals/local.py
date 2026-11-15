@@ -16,7 +16,8 @@ unless the caller names another:
 open the folder, so that an application can then record traces into the project's experiment with
 MLflow tracing (``docs/evals-core.md`` gives the settings).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
+The API is under ``/v1``: the core's ``/v1/evals`` routes, its OpenTelemetry ``POST /v1/traces``,
+which takes the fixed principal's traces without credentials, and the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
 the built Evals UI, by default the one the wheel ships in ``martian/ui``. The server listens on
 127.0.0.1 and refuses a request whose ``Host`` header names another host, so a web page cannot
