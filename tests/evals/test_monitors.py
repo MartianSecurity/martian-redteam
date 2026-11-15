@@ -23,11 +23,12 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import create_engine, update
 
 import martian.evals.worker.monitor as monitor_module
 from martian.evals.judge_settings import MemoryJudgeSettings
-from martian.evals.model import Project, Run, Score, Span, Trace, TraceQuery
+from martian.evals.model import Project, Run, Score, ScorerVersion, Span, Trace, TraceQuery
 from martian.evals.records import Monitor, MonitorFilter
 from martian.evals.records.queue import SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
@@ -498,6 +499,18 @@ def test_a_monitor_refuses_what_it_cannot_score(records: SqlRecordStore, queue: 
             503,
             "This installation's worker does not run monitors",
         )
+
+
+def test_a_monitor_holds_no_custom_python_scorer(records: SqlRecordStore, queue: SqlWorkQueue) -> None:
+    # A custom scorer reads a case's inputs and expectations, which a production trace does not
+    # have, so a monitor refuses one in its record, whoever writes it, and its route names none.
+    custom = ScorerVersion(name="names_order", kind="code", type="python")
+    with pytest.raises(ValidationError, match="custom Python scorer names_order"):
+        Monitor(id="m1", project_id=DEFAULT_PROJECT, name="Live", scorers=[LENGTH, custom], sampling_rate=1.0)
+    core = Core(MemoryStore(), records, queue, FakeJudge(), lambda _p: ENTERPRISE)
+    with core.client:
+        create(core, 422, name="Live", sampling_rate=0.5, scorers=["names_order"])
+        assert core.call("GET", "/v1/evals/monitors", 200)["items"] == []
 
 
 def test_new_traces_are_scored_within_the_stated_delay(
