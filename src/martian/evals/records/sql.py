@@ -8,6 +8,11 @@ store migrates the database to the newest revision when it starts, unless ``migr
 Every statement filters on the organisation's space. On Postgres each transaction also sets that
 space for row-level security, which filters the same rows again and applies to the tables' owner;
 a role that bypasses row-level security, such as a superuser, is not held by that second guard.
+
+A write the database refuses, such as a value out of range or a duplicate key, raises
+``StoreError`` naming the method and the table, never a value written. The engine hides statement
+values from SQLAlchemy's errors and log lines, so any other database failure, such as a lost
+connection, raises SQLAlchemy's error without them.
 """
 
 from __future__ import annotations
@@ -21,9 +26,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, Table, create_engine, delete, func, insert, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
-from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
+from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
 from martian.evals.model import (
     Case,
     CaseResult,
@@ -77,11 +82,12 @@ def downgrade(engine: Engine, revision: str = "base") -> None:
 
 
 def engine_for(database_url: str, *, schema: str = "martian") -> Engine:
-    """An engine whose unqualified tables are in ``schema`` on Postgres, created if missing."""
+    """An engine whose unqualified tables are in ``schema`` on Postgres, created if missing. It
+    keeps statement values out of SQLAlchemy's errors and log lines: they are customer content."""
     if is_postgres(database_url):
         create_schema(database_url, check_schema(schema))
-        return create_engine(postgres_url(database_url, schema))
-    return create_engine(database_url, connect_args={"timeout": 30})
+        return create_engine(postgres_url(database_url, schema), hide_parameters=True)
+    return create_engine(database_url, connect_args={"timeout": 30}, hide_parameters=True)
 
 
 def _now() -> datetime:
@@ -122,13 +128,22 @@ class SqlRecordStore:
     # --- plumbing ----------------------------------------------------------------------------
 
     async def _run(self, principal: Principal, work: Callable[[Connection, str], T]) -> T:
+        """Run ``work`` in one transaction, on a thread. A write the database refuses becomes a
+        ``StoreError`` naming the method ``work`` belongs to (``database_refusal``)."""
         space = space_of(principal)
+        operation = operation_name(work)
 
         def transaction() -> T:
-            with self._engine.begin() as connection:
-                if self._postgres:
-                    connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
-                return work(connection, space)
+            try:
+                with self._engine.begin() as connection:
+                    if self._postgres:
+                        connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
+                    return work(connection, space)
+            except (DataError, IntegrityError) as error:
+                refused = database_refusal(operation, error)
+            # Raised outside the except clause, so that the database's error, which holds the
+            # values written, does not stay on it as its context.
+            raise refused
 
         return await asyncio.to_thread(transaction)
 
@@ -439,8 +454,10 @@ class SqlRecordStore:
                         )
                     )
             except IntegrityError:
-                raise StoreError("conflict", "that review was already replaced") from None
-            return saved, True
+                pass  # raised below, without the database's error, which holds the review
+            else:
+                return saved, True
+            raise StoreError("conflict", "that review was already replaced")
 
         saved, created = await self._run(principal, work)
         if created:
@@ -509,8 +526,10 @@ class SqlRecordStore:
                         )
                     )
             except IntegrityError:
-                raise StoreError("conflict", "another version of the suite was saved at the same time") from None
-            return saved, True
+                pass  # raised below, without the database's error, which holds the suite
+            else:
+                return saved, True
+            raise StoreError("conflict", "another version of the suite was saved at the same time")
 
         saved, created = await self._run(principal, work)
         if created:
