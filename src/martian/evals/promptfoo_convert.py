@@ -156,27 +156,40 @@ _CLOSENESS = (
     "perplexity",
     "perplexity-score",
 )
+_TOOL_CALLS = {
+    "is-valid-function-call": "tool_called with a schema argument match",
+    "is-valid-openai-function-call": "tool_called with a schema argument match",
+    "is-valid-openai-tools-call": "tool_called with a schema argument match",
+    "tool-call-f1": "tool_trajectory",
+    "trajectory:tool-used": "tool_called",
+    "trajectory:tool-args-match": "tool_called with an argument match",
+    "trajectory:tool-sequence": "tool_trajectory",
+    "trajectory:step-count": "step_count",
+}
 _CALL_DATA = (
-    "is-valid-function-call",
-    "is-valid-openai-function-call",
-    "is-valid-openai-tools-call",
-    "tool-call-f1",
     "finish-reason",
     "guardrails",
     "skill-used",
     "trace-span-count",
     "trace-span-duration",
     "trace-error-spans",
-    "trajectory:tool-used",
-    "trajectory:tool-args-match",
-    "trajectory:tool-sequence",
-    "trajectory:step-count",
 )
 
 UNSUPPORTED: dict[str, str] = {
     **dict.fromkeys(
-        ("javascript", "python", "ruby", "webhook"), "runs custom code, and a suite file's checks run none"
+        ("javascript", "python", "ruby", "webhook"),
+        "runs custom code, which a suite file's built-in checks do not; write the rule as a custom Python "
+        "scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads; `trace` too) "
+        "returning True or False, a number, or a pair of either with a reason, and add it with `type: python` "
+        "(`file:` and `function:`) by hand. Custom Python scorers come with the scorer library release; "
+        "this converter does not translate the code",
     ),
+    **{
+        kind: f"is promptfoo's tool-call assertion; the closest check is {check}, which reads the reply's or "
+        "the trace's turns and tool calls, but its match is not exactly promptfoo's, so this converter does not "
+        "map it; the tool-call checks come with the scorer library release, and then the rule is added by hand"
+        for kind, check in _TOOL_CALLS.items()
+    },
     **dict.fromkeys(
         _MODEL_GRADED,
         "is a promptfoo model-graded metric with its own grading prompt; the suite's judges are rubric, "
@@ -189,9 +202,7 @@ UNSUPPORTED: dict[str, str] = {
         ("contains-html", "is-html", "contains-sql", "is-sql", "contains-xml", "is-xml"),
         "checks a format no check on main reads",
     ),
-    **dict.fromkeys(
-        _CALL_DATA, "reads the provider's tool calls, trace or metadata, which a suite file's checks do not see"
-    ),
+    **dict.fromkeys(_CALL_DATA, "reads the provider's trace or metadata, which a suite file's checks do not see"),
     "is-refusal": "passes only a refusal; no check on main does (no_refusal passes the opposite)",
     "not-is-refusal": "is promptfoo's refusal test, which counts a reply as a refusal when it starts with one of "
     'its refusal phrases, such as "I\'m sorry", or holds one anywhere, such as "as an AI"; no_refusal reads '
