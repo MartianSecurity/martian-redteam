@@ -66,18 +66,21 @@ reports it on the pull request. Reference it as
 a [workflow](../examples/github-action/workflow.yml), a passing suite and a
 failing one that is the passing suite with two replies broken, and the
 comments they produce: [passed](../examples/github-action/comments/passed.md),
-[failed](../examples/github-action/comments/failed.md), and
+[failed](../examples/github-action/comments/failed.md),
 [compared](../examples/github-action/comments/compared.md), the failing suite
 compared with a result of the passing one, as a pull request that broke two
 of its cases would be compared with `main`: both newly fail a security check,
-so it fails although two changed cases are within noise.
+so it fails although two changed cases are within noise; and
+[matrix](../examples/github-action/comments/matrix.md), the
+[matrix example](../examples/evals/matrix/evals.yaml)'s two models and two
+prompts.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `suite` | required | The suite file, relative to the workspace |
 | `output` | `results/evals` | Folder for `results.jsonl`, `summary.json`, `junit.xml` and `verdicts.json`; one per suite |
 | `github-token` | the workflow token | Writes the comment |
-| `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request, such as a model matrix |
+| `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request. A suite's own [matrix](evals.md#a-matrix-of-prompts-and-models) needs none: its combinations share one comment and one baseline |
 | `comment-author` | `github-actions[bot]` | Login that writes the comment; change it only with another token |
 | `baseline-branch` | empty: off | Branch whose last result a pull request is compared with, usually the default branch; see [compared with the last result of main](#compared-with-the-last-result-of-main) |
 
@@ -106,7 +109,13 @@ so it fails although two changed cases are within noise.
   **Reliability** row under the pass rate and the
   [flaky cases](evals.md#reliability-and-flaky-cases),
   and up to 25 failed and 25 unfinished case
-  IDs with the checks that did not pass. Inputs, replies and judge reasons stay
+  IDs with the checks that did not pass. A suite with a
+  [matrix](evals.md#a-matrix-of-prompts-and-models) has one row per
+  combination instead, up to 25: its counts, pass rate and interval, its reliability
+  with repeats, its false refusals with a policy check, its comparison with a
+  baseline, and how it ended; then, for up to ten combinations, their cases
+  that went from pass to fail, failed or have no verdict, five of each by
+  name. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
   instead of repeating an earlier result. The same text goes to the job summary
@@ -185,6 +194,11 @@ request with the last result of `main`, case by case:
   attempts per case changed since `main` says so, because the label then
   measures that change too. `comparison.json` lists the security cases under
   `security_regressed`.
+- **A matrix.** The kept `verdicts.json` holds every combination's verdicts,
+  and each combination of a pull request is compared with the same
+  combination on `main`, by its id. A combination `main` has no result of,
+  such as one a pull request adds, says `no baseline yet` in its row and is
+  gated on its own.
 - **No baseline yet.** Until a push to `main` has kept a result for the suite,
   or after GitHub has evicted it (an entry unused for seven days, or beyond the
   repository's cache size), the comment says there is no baseline yet and the

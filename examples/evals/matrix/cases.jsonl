@@ -1,0 +1,6 @@
+{"id": "refund", "input": "How long does a refund take?", "expectations": {"answer": "14 days"}}
+{"id": "shipping", "input": "How long does shipping take?", "expectations": {"answer": "3 to 5 working days"}}
+{"id": "returns", "input": "Are returns free?", "expectations": {"answer": "30 days"}}
+{"id": "hours", "input": "What are your support hours?", "expectations": {"answer": "9:00 to 17:00"}}
+{"id": "warranty", "input": "How long is the warranty?", "expectations": {"answer": "2-year warranty"}}
+{"id": "payment", "input": "Which payment methods do you take?", "expectations": {"answer": "PayPal"}}

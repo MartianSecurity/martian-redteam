@@ -1960,7 +1960,7 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. In the store, an MLflow run in the default project's experiment |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. A suite with a [matrix](evals.md#a-matrix-of-prompts-and-models) writes one run per combination: its code is the suite's name with the combination's id in brackets and its number among that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`, and its `provenance.matrix` holds the combination's `id` and `values`, the matrix's `axes` and the `invocation` the runs of one command share ([the suite file](eval-model.md#the-sdk-suite-file)). In the store, an MLflow run in the default project's experiment |
 | `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined |
 | `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply |
 
@@ -2002,6 +2002,8 @@ byte at a time while the run finishes; stops a run at its time limit and at its 
 against a loopback judge that reports its usage, and resumes each after the cases it finished;
 stops a repeated run in the middle of a case's attempts and resumes it with all of that case's
 attempts; and cancels a running command's run from the local edition's cancel route.
+`tests/evals/test_matrix.py` runs a suite with a matrix and reads each combination's run back
+through the same routes, validated against the contract.
 
 ## Imported Inspect logs
 

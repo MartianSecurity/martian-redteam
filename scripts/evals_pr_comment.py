@@ -11,7 +11,9 @@ baseline branch, it also says how the run compares (comparison.json, written by
 `martian evals run --baseline`), names first each case that newly failed a security check, which
 fails the gate whatever the noise label, then each other case that went from pass to fail, with
 their failed checks and the reasons the SDK keeps only when they cannot quote the reply; or it
-says that there is no baseline yet.
+says that there is no baseline yet. A suite with a matrix gets one row per combination
+(matrix.json), each compared with the same combination of the baseline, then the cases of each
+combination that went from pass to fail, failed or have no verdict.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ DEFAULT_AUTHOR = "github-actions[bot]"
 MAX_ROWS = 25
 NOT_RUN = "not run: "
 """How junit.xml's error for a case the run stopped before starts (``martian.evals.runner.write_junit``)."""
+# Combinations of a matrix whose cases the comment names, each with up to five per list.
+MAX_DETAILED = 10
 PER_PAGE = 100
 READ_ONLY = (
     "The workflow token cannot write pull-request comments, so the result is in the job summary only. "
@@ -43,14 +47,29 @@ READ_ONLY = (
 
 
 @dataclass(frozen=True)
+class Combination:
+    """One combination of a matrix run: its entry in matrix.json and the latest record of each of
+    its cases. ``comparison`` is None when it was not compared with a baseline."""
+
+    id: str
+    gate: str
+    summary: dict[str, Any]
+    comparison: dict[str, Any] | None
+    cases: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Outcome:
-    """What one run left in its output folder. ``summary`` is None when the run wrote no results;
-    ``comparison`` is None when the run was not compared with a baseline."""
+    """What one run left in its output folder. ``summary`` is None when the run wrote no results
+    or ran a matrix, whose ``axes`` and ``combinations`` are then filled; ``comparison`` is None
+    when the run was not compared with a baseline."""
 
     exit_code: int
     summary: dict[str, Any] | None
     cases: list[dict[str, Any]] = field(default_factory=list)
     comparison: dict[str, Any] | None = None
+    axes: list[dict[str, Any]] = field(default_factory=list)
+    combinations: list[Combination] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -64,27 +83,48 @@ class Baseline:
 
 def load_outcome(folder: Path, exit_code: int) -> Outcome:
     """Read summary.json, the latest record of each case in this run from results.jsonl, and
-    comparison.json when the run had a baseline.
+    comparison.json when the run had a baseline; for a matrix run, matrix.json and the same of
+    each combination's folder.
 
     junit.xml lists exactly this run's cases in data order; results.jsonl can also hold records
     of cases that an earlier run in the same folder graded. A case a stopped run did not reach is
     in junit.xml as an error that starts ``not run:``, and its record in results.jsonl, if any, is
     an earlier run's, so it is left out: the summary counts it under ``not_run``. A run without a
-    baseline removes an earlier run's comparison.json.
+    baseline removes an earlier run's comparison.json, and a run without a matrix an earlier run's
+    matrix.json.
     """
+    matrix_path = folder / "matrix.json"
+    if matrix_path.is_file():
+        found = json.loads(matrix_path.read_text(encoding="utf-8"))
+        combinations = [
+            Combination(
+                str(entry["id"]),
+                str(entry["gate"]),
+                entry["summary"],
+                entry["comparison"],
+                _cases_of(folder / str(entry["folder"])),
+            )
+            for entry in found["combinations"]
+        ]
+        return Outcome(exit_code, None, axes=found["axes"], combinations=combinations)
     summary_path = folder / "summary.json"
     if not summary_path.is_file():
         return Outcome(exit_code, None)
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    compared = folder / "comparison.json"
+    comparison = json.loads(compared.read_text(encoding="utf-8")) if compared.is_file() else None
+    return Outcome(exit_code, summary, _cases_of(folder), comparison)
+
+
+def _cases_of(folder: Path) -> list[dict[str, Any]]:
+    """The latest record of each case of the run in ``folder``, in junit.xml's order."""
     latest: dict[str, dict[str, Any]] = {}
     for line in (folder / "results.jsonl").read_text(encoding="utf-8").splitlines():
         if line.strip():
             record = json.loads(line)
             latest[str(record["id"])] = record
     order = [str(case.get("name")) for case in ET.parse(folder / "junit.xml").getroot().iter("testcase") if _ran(case)]
-    compared = folder / "comparison.json"
-    comparison = json.loads(compared.read_text(encoding="utf-8")) if compared.is_file() else None
-    return Outcome(exit_code, summary, [latest[name] for name in order if name in latest], comparison)
+    return [latest[name] for name in order if name in latest]
 
 
 def _ran(case: ET.Element) -> bool:
@@ -137,8 +177,10 @@ def render(
     and the cases that went from pass to fail, or that there is no baseline yet.
 
     Tables stop at MAX_ROWS and cells at 60 characters, which keeps the body far below GitHub's
-    65,536-character limit for a comment.
+    65,536-character limit for a comment. A matrix run is rendered by :func:`_matrix`.
     """
+    if outcome.combinations:
+        return "\n".join([*_matrix(outcome, suite=suite, key=key, baseline=baseline), _footer(sha, run_url)]) + "\n"
     summary = outcome.summary
     comparison = outcome.comparison if summary is not None else None
     against = code(baseline.branch, cell=False) if baseline else "the baseline"
@@ -225,14 +267,156 @@ def render(
             lines += _table(heading, "Checks that failed", failed, _failed_checks)
         if errored:
             lines += _table("Cases without a verdict", "Reason", errored, _reason)
+    lines.append(_footer(sha, run_url))
+    return "\n".join(lines) + "\n"
+
+
+def _footer(sha: str | None, run_url: str | None) -> str:
     footer = []
     if sha and re.fullmatch(r"[0-9a-f]{7,64}", sha):
         footer.append(f"Commit `{sha[:7]}`")
     if run_url:
         footer.append(f"[Workflow run]({run_url})")
     footer.append("Updated on every push")
-    lines.append(" · ".join(footer))
-    return "\n".join(lines) + "\n"
+    return " · ".join(footer)
+
+
+RESULTS = {"passed": "passed", "failed": "failed", "error": "did not finish"}
+
+
+def _matrix(outcome: Outcome, *, suite: str, key: str, baseline: Baseline | None) -> list[str]:
+    """A matrix run: one row per combination with its counts, pass rate and interval, with repeats
+    its reliability, for a suite with a policy check its false refusals, compared with the same
+    combination of the baseline when it was, and how it ends; then, for each combination with a
+    case that went from pass to fail, failed or has no verdict, those cases by name."""
+    combinations = outcome.combinations
+    against = code(baseline.branch, cell=False) if baseline else "the baseline"
+    compared = [one for one in combinations if one.comparison is not None]
+    title = {0: "passed", 1: "failed"}.get(outcome.exit_code, "did not finish")
+    if compared and outcome.exit_code in (0, 1):
+        title += f" against {against}"
+    names = [code(axis["name"], cell=False) for axis in outcome.axes]
+    axes = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    first = combinations[0].summary
+    ended = {result: sum(one.gate == result for one in combinations) for result in RESULTS}
+    counted = ", ".join(f"{count} {RESULTS[result]}" for result, count in ended.items() if count)
+    lines = [
+        marker(key),
+        f"### Martian evals {title}",
+        "",
+        f"Suite {code(suite, 120, cell=False)}: {len(combinations)} combinations of {axes}, "
+        f"{first['cases']} cases each; {counted}.",
+        "",
+    ]
+    shown_against = baseline is not None or bool(compared)
+    if baseline is not None and not compared:
+        lines += [
+            f"**Compared with {against}: no baseline yet.** No result of {against} is saved for this suite, "
+            "so each combination is gated on its own and any failed case fails it. "
+            f"The next push to {against} saves one.",
+            "",
+        ]
+    elif compared:
+        lines += [
+            f"**Compared with {against}:** each combination is compared with the same combination there, case by "
+            "case (exact McNemar test), and fails on a change worse than noise, on a case that newly fails a "
+            "security check whatever the label, or on a failed case with no result to compare with. A "
+            f"combination with no result on {against} is gated on its own.",
+            "",
+        ]
+    repeated = first.get("repeats")
+    refusals = first.get("false_refusals")
+    header = "| Combination | Passed | Failed | Errors | Pass rate (95% CI) |"
+    rule = "| --- | ---: | ---: | ---: | ---: |"
+    if repeated:
+        header, rule = header + " Reliability (95% CI) |", rule + " ---: |"
+    if refusals is not None:
+        header, rule = header + " False refusals |", rule + " ---: |"
+    if shown_against:
+        header, rule = header + f" Compared with {against} |", rule + " --- |"
+    lines += [header + " Result |", rule + " --- |"]
+    for one in combinations[:MAX_ROWS]:
+        counts = one.summary
+        row = f"| {code(one.id, 120)} | {counts['passed']} | {counts['failed']} | {counts['errors']} | {rate(counts)} |"
+        if repeated:
+            row += f" {rate(counts['reliability'])} |"
+        if refusals is not None:
+            row += f" {_refused(counts['false_refusals'])} |"
+        if shown_against:
+            label = None if one.comparison is None else one.comparison["label"]
+            if one.comparison is None:
+                row += " no baseline yet |"
+            else:
+                row += f" {LABELS[label] if label else 'no case compared'} |"
+        lines.append(row + f" {RESULTS.get(one.gate, one.gate)} |")
+    if len(combinations) > MAX_ROWS:
+        lines.append(f"\n{len(combinations) - MAX_ROWS} more combinations are in matrix.json.")
+    notes = []
+    if first["groups"]:
+        notes.append(f"Intervals allow for {first['groups']} case {'group' if first['groups'] == 1 else 'groups'}.")
+    if repeated:
+        notes.append(_repeats(repeated) + " Reliability counts the cases that passed every attempt.")
+    if refusals is not None:
+        # A reply that refuses everything passes the policy checks, so the rate stands beside the
+        # pass rate; every combination has the same checks, so one says why it is not measured.
+        notes.append(
+            "False refusals count the benign cases that were refused."
+            if refusals["checks"]
+            else false_refusals(refusals)
+        )
+    lines += ["", *([" ".join(notes), ""] if notes else [])]
+    detailed = [one for one in combinations if _details(one)]
+    for one in detailed[:MAX_DETAILED]:
+        lines += [f"#### {code(one.id, 120, cell=False)}", "", *_details(one), ""]
+    if len(detailed) > MAX_DETAILED:
+        more = len(detailed) - MAX_DETAILED
+        lines += [f"{more} more combinations have cases that did not pass; each one's folder has its results.", ""]
+    return lines
+
+
+def _details(one: Combination) -> list[str]:
+    """The cases of one combination that newly failed a security check, that otherwise went from
+    pass to fail, failed or have no verdict, at most five of each by name, and its flaky cases. A
+    case named in one list is not named again in the next."""
+    lines = []
+    leaked = one.comparison["security_regressed"] if one.comparison is not None else []
+    shown = {case["id"] for case in leaked}
+    regressed = [case for case in one.comparison["regressed"] if case["id"] not in shown] if one.comparison else []
+    shown |= {case["id"] for case in regressed}
+    failed = [case for case in one.cases if case["passed"] is False and str(case["id"]) not in shown]
+    errored = [case for case in one.cases if case["passed"] is None]
+    if leaked:
+        security = _with_checks([(case["id"], list(case["checks"])) for case in leaked])
+        lines.append(f"Newly failed a security check, which fails the gate: {security}")
+    if regressed:
+        lines.append("From pass to fail: " + _with_checks([(case["id"], list(case["checks"])) for case in regressed]))
+    if failed:
+        heading = "Other failed cases" if shown else "Failed cases"
+        failing = [
+            (str(case["id"]), [n for n, c in case["checks"].items() if c.get("passed") is False]) for case in failed
+        ]
+        lines.append(f"{heading}: {_with_checks(failing)}")
+    if errored:
+        lines.append(f"Without a verdict: {_names([str(case['id']) for case in errored], cell=False)}")
+    if one.comparison is not None and (failures := one.comparison["unpaired_failures"]):
+        lines.append(f"Failed with no result to compare with, which fails the gate: {_names(failures, cell=False)}.")
+    if (reliable := one.summary.get("reliability")) and reliable["flaky"]:
+        lines.append(_flaky(reliable["flaky"]))
+    # One paragraph: the lines end as sentences.
+    return [" ".join(line if line.endswith(".") else line + "." for line in lines)] if lines else []
+
+
+def _refused(found: Mapping[str, Any]) -> str:
+    """One combination's false refusals in a cell: refused of benign, or not measured."""
+    if not found["benign"]:
+        return "not measured"
+    return f"{found['refused']} of {found['benign']} ({found['rate']:.1%})"
+
+
+def _with_checks(cases: list[tuple[str, list[str]]]) -> str:
+    """Case ids, each with the checks that failed it, at most five."""
+    shown = ", ".join(f"{code(case, cell=False)} ({_names(checks, cell=False)})" for case, checks in cases[:5])
+    return shown + (f" and {len(cases) - 5} more" if len(cases) > 5 else "")
 
 
 def false_refusals(found: dict[str, Any]) -> str:

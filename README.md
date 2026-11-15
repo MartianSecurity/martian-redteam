@@ -32,7 +32,8 @@ behind an API needs no Python file.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json`, `junit.xml` and
 `verdicts.json`, prints a summary table, can run each case several times, combine the attempts
-and report the share of cases that passed every attempt and the flaky ones, can compare itself
+and report the share of cases that passed every attempt and the flaky ones, can run every
+combination of several prompts, models or other values (`matrix`) with one row each, can compare itself
 case by case with an earlier run (`--baseline`), and can be stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.

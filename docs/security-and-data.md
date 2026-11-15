@@ -34,7 +34,8 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 Martian. Its outbound calls are the ones the suite file names:
 
 - **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
-  suite repeats its cases, carrying that case's input.
+  suite repeats its cases, carrying that case's input, and for each combination of the suite's
+  [matrix](evals.md#a-matrix-of-prompts-and-models) once more, with that combination's values.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
