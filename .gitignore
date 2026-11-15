@@ -8,6 +8,7 @@ build/
 dist/
 release-checksums.json
 release-image/
+release-sbom/
 *.egg-info/
 *.egg
 
