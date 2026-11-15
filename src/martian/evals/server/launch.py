@@ -15,7 +15,9 @@ read, and submits it to the worker. The worker calls the target later; the reque
   working on it any more (:class:`~martian.evals.worker.InterruptedRuns`).
 
 :func:`admit_run` is the admission itself, which the local edition's launch and run again share
-(:mod:`martian.evals.local_runs`).
+(:mod:`martian.evals.local_runs`). An edition's own launch may also name checks its worker installs,
+which the run grades each case with (:mod:`martian.evals.worker.hooks`); the contract's launch
+names none.
 
 A run, or a scoring job, that stopped at one of its limits (``stopped``) is resumed by
 :func:`resume_run` or :func:`resume_scoring`: queued again, optionally under new limits, so that
@@ -31,13 +33,13 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from martian.evals.model import DatasetVersion, Run, RunLimits, ScoringJob, StoreRef, Suite, Target
+from martian.evals.model import DatasetVersion, Run, RunLimits, ScorerVersion, ScoringJob, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.admission import ACTIVE, ensure_run_place, ensure_scoring_place
 from martian.evals.server.dependencies import (
@@ -59,6 +61,7 @@ from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
 from martian.evals.worker import InterruptedRuns, Work, Worker, execute
+from martian.evals.worker.hooks import is_installed
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -110,6 +113,7 @@ async def admit_run(
     max_cases: int,
     suite: Suite | None = None,
     provenance: Mapping[str, Any] | None = None,
+    checks: Sequence[ScorerVersion] = (),
 ) -> Run:
     """Record a queued run of ``target`` over the published ``dataset`` version and submit it to
     the worker, once the request is checked and the worker has pinned the target (``pin``). The
@@ -120,7 +124,13 @@ async def admit_run(
     version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
     ``provenance.suite``, which says whether the suite has a model judge), and adds its own
     ``provenance``. The run's limits, ``provenance.limits``, are the ones ``provenance`` gives,
-    else the suite's (``Suite.settings.limits``); without either, the worker's apply."""
+    else the suite's (``Suite.settings.limits``); without either, the worker's apply.
+
+    ``checks`` are checks the worker installs (:func:`~martian.evals.worker.hooks.installed_check`),
+    which the run keeps beside exact match in its ``scorers`` and grades each answered case with,
+    with the case's state from the worker's hooks. No route of the contract names one."""
+    if not all(is_installed(check) for check in checks):
+        raise ValueError("a run's checks are installed checks: code scorers of type installed")
     await ensure_run_place(store, records, principal, entitlements)
     provenance = dict(provenance or {})
     if suite is not None and suite.settings.limits is not None and execute.LIMITS_KEY not in provenance:
@@ -153,7 +163,7 @@ async def admit_run(
         dataset_name=dataset.name,
         dataset_digest=dataset.digest,
         target=target,
-        scorers=[builtin_scorer("exact_match")],
+        scorers=[builtin_scorer("exact_match"), *checks],
         max_cases=max_cases,
         provenance={**admitted, **provenance},
         requested_by=principal.user_id,

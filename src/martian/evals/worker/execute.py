@@ -19,12 +19,19 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 - Before a run calls its target, on its first start and on every resume, the worker pins the
   target as it has it now; a pin that is not the run's (``provenance["target"]``) fails the run,
   naming the target, so one run never mixes two systems.
+- Around each case that calls the target, the hooks the worker's setup installs run: each setup
+  before the call, each teardown after the case is graded, also when the case failed, timed out
+  or was cancelled. A run's installed checks (its scorers of type ``installed``) grade each
+  answered case with the case's state from its hooks, before the teardown, beside its exact-match
+  score (:mod:`martian.evals.worker.hooks`, :data:`InstalledChecks`). A hook's failure is the
+  case's error. A case the run skips, a conversation case included, runs no hook and no check.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
   scorers: the built-in code scorers here, a custom Python scorer (kind ``code``) by the function
-  the worker's setup installs under its name (:data:`InstalledScorers`), and judge scorers through
-  the worker's judge, one request per model the job's judges are pinned to. Each judge score
-  records the model and version that produced it. Its scores sit beside the run's own, and each
-  scored value is also kept on the case's trace.
+  the worker's setup installs under its name (:data:`InstalledScorers`), an installed check by the
+  check the setup installs under its name, with no state, and judge scorers through the worker's
+  judge, one request per model the job's judges are pinned to. Each judge score records the model
+  and version that produced it. Its scores sit beside the run's own, and each scored value is also
+  kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Each piece of work runs under limits (``RunLimits``): the run's own, ``provenance["limits"]``,
@@ -49,7 +56,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -80,6 +88,16 @@ from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
 from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, TargetReply, Work, Worker
+from martian.evals.worker.hooks import (
+    CaseContext,
+    CaseHooks,
+    CaseState,
+    hooked_case,
+    is_installed,
+    set_up,
+    tear_down,
+    with_target_inputs,
+)
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
 from martian.evals.worker.targets import FunctionProcessCall, changed_target, reported_model, sent_case
 
@@ -120,6 +138,13 @@ InstalledScorers = Mapping[str, Callable[..., Any]]
 process. A scoring job's ``code`` scorer runs the one installed under its name; a record never
 names code or a file to import."""
 NOT_INSTALLED = "This worker has no custom scorer named {name}"
+
+InstalledChecks = Mapping[str, Callable[..., Any]]
+"""The checks a worker grades with, by name: functions its setup installs in the work's own
+process, which a run's or a scoring job's scorer of type ``installed`` names. Each reads, by name,
+the case's ``inputs``, the ``outputs``, the case's ``expectations``, the case's ``state`` from its
+hooks (``None`` in a scoring job) and the check's ``options`` (:mod:`martian.evals.worker.hooks`)."""
+CHECK_NOT_INSTALLED = "This worker has no installed check named {name}"
 
 
 def _now() -> datetime:
@@ -177,12 +202,16 @@ async def execute_run(
     pin_for: Callable[[Run], Awaitable[dict[str, Any]]],
     timeout_seconds: float,
     limits: RunLimits | None = None,
+    hooks: Sequence[CaseHooks] = (),
+    checks: InstalledChecks | None = None,
 ) -> None:
     """Run a queued run. ``call_for`` gives the call for the run's target, or ``None`` when the
     worker cannot call it, which fails the run. ``pin_for`` pins the run's target as the worker has
     it now, as ``Worker.check_target`` does; a pin that is not the run's fails the run before any
     call (:func:`~martian.evals.worker.targets.changed_target`). ``timeout_seconds`` bounds each
-    target call, and ``limits`` are the worker's, for a run that has none of its own."""
+    target call, and ``limits`` are the worker's, for a run that has none of its own. ``hooks``
+    run around each case that calls the target, and ``checks`` are the checks the run's
+    ``installed`` scorers name (:mod:`martian.evals.worker.hooks`)."""
     principal = work.principal
     run = await records.get_run(principal, work.project_id, work.run_id)
     if run is None or run.state != "queued":
@@ -203,7 +232,8 @@ async def execute_run(
     call: TargetCall | None = None
     try:
         call = call_for(run)
-        await _run_cases(store, records, principal, run, call, pin_for, timeout_seconds, limits)
+        grading = _Grading(tuple(hooks), checks or {})
+        await _run_cases(store, records, principal, run, call, pin_for, timeout_seconds, limits, grading)
     except Exception as error:  # noqa: BLE001 - a run never stays running after its worker fails
         log.exception("Eval run %s failed", run.id)
         await _fail_run(records, principal, run, _detail(error, "runner crashed"))
@@ -271,6 +301,7 @@ async def _run_cases(
     pin_for: Callable[[Run], Awaitable[dict[str, Any]]],
     timeout_seconds: float,
     default_limits: RunLimits | None,
+    grading: _Grading,
 ) -> None:
     if call is None:
         await _fail_run(records, principal, run, "The worker cannot call this run's target")
@@ -337,9 +368,9 @@ async def _run_cases(
             }
             await _move_run(records, principal, current, stop, "running")
             return
-        result, score, model = await _run_case(store, principal, run, position, case, call, timeout_seconds)
-        # The case's checkpoint: its result and its score in one transaction, before the next case.
-        await records.put_results(principal, run.project_id, [result], scores=[score] if score else [])
+        result, scores, model = await _run_case(store, principal, run, position, case, call, timeout_seconds, grading)
+        # The case's checkpoint: its result and its scores in one transaction, before the next case.
+        await records.put_results(principal, run.project_id, [result], scores=scores)
         counts = _counted(counts, result.status)
         if await _advance_run(records, principal, run, {"counts": counts}, model=model) is None:
             return
@@ -380,28 +411,24 @@ def _skipped(run: Run, position: int, case: Case, reason: str) -> CaseResult:
     )
 
 
-async def _run_case(
-    store: EvalStore,
-    principal: Principal,
-    run: Run,
-    position: int,
-    case: Case,
-    call: TargetCall,
-    timeout_seconds: float,
-) -> tuple[CaseResult, Score | None, str | None]:
-    """Call the target with one case and record its trace, with the model the target reported,
-    if any. Returns the case's result, its exact-match score and that model."""
-    if case.turns or case.simulated_user is not None:
-        return _skipped(run, position, case, CONVERSATION), None, None
-    prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
-    if not prompt or not expected:
-        return _skipped(run, position, case, UNUSABLE), None, None
-    started, clock = _now(), perf_counter()
+@dataclass(frozen=True)
+class _Grading:
+    """What the worker's setup installed around each case of a run: its hooks, and the checks the
+    run's ``installed`` scorers name."""
+
+    hooks: tuple[CaseHooks, ...] = ()
+    checks: InstalledChecks = field(default_factory=dict)
+
+
+async def _called(call: TargetCall, sent: Case, timeout_seconds: float) -> tuple[Any, str | None, str, float]:
+    """The target's output for one case, the model it reported (a :class:`TargetReply`), if any, the
+    case's error (empty when it answered), and how long the call took, in milliseconds."""
+    clock = perf_counter()
     output: Any = None
     model: str | None = None
     error = ""
     try:
-        output = await asyncio.wait_for(call(sent_case(case)), timeout=timeout_seconds)
+        output = await asyncio.wait_for(call(sent), timeout=timeout_seconds)
         if isinstance(output, TargetReply):
             output, model = output.output, reported_model(output.model)
     except TimeoutError:
@@ -410,13 +437,71 @@ async def _run_case(
         error = str(failure)[:1800]
     except Exception as failure:  # noqa: BLE001 - any target failure is the case's error
         error = f"{type(failure).__name__}: {failure}"[:1800]
-    latency = round((perf_counter() - clock) * 1000, 3)
-    text = text_of(output)
-    status: CaseStatus = "error" if error else "passed" if exact_match(text, expected) else "failed"
+    return output, model, error, round((perf_counter() - clock) * 1000, 3)
+
+
+async def _run_case(
+    store: EvalStore,
+    principal: Principal,
+    run: Run,
+    position: int,
+    case: Case,
+    call: TargetCall,
+    timeout_seconds: float,
+    grading: _Grading,
+) -> tuple[CaseResult, list[Score], str | None]:
+    """Call the target with one case, between its hooks' setup and teardown, and record its trace,
+    with the model the target reported, if any. Returns the case's result, its scores (exact match
+    and the run's installed checks) and that model. A conversation case is skipped before any hook:
+    the worker runs no conversation, so neither its hooks nor its installed checks see one."""
+    if case.turns or case.simulated_user is not None:
+        return _skipped(run, position, case, CONVERSATION), [], None
+    prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
+    if not prompt or not expected:
+        return _skipped(run, position, case, UNUSABLE), [], None
     tid = trace_id()
+    state = CaseState()
+    context = CaseContext(principal=principal, run=run, case=hooked_case(case), position=position, state=state)
+    prepared: list[CaseHooks] = []
+    started: datetime | None = None  # when the target was called, if it was
+    output: Any = None
+    model: str | None = None
+    latency = 0.0
+    error = teardown = ""
+    checked: list[Score] = []
+    try:
+        error = await set_up(grading.hooks, context, prepared)
+        if not error:
+            try:
+                sent = with_target_inputs(sent_case(case), state)
+            except ValueError as taken:
+                error = str(taken)
+            else:
+                started = _now()
+                output, model, error, latency = await _called(call, sent, timeout_seconds)
+        if started is not None and not error:  # graded while the case's state lives
+            installed = [scorer for scorer in run.scorers if is_installed(scorer)]
+            checked = await _installed_scores(grading.checks, installed, run, case, tid, output, state)
+    finally:  # also when the work is cancelled during the case
+        teardown = await tear_down(prepared, context, error)
+    failure = "; ".join(part for part in (error, teardown) if part)
+    if started is None:  # the target was not called: no trace, and nothing to grade
+        unanswered = CaseResult(
+            run_id=run.id,
+            case_id=case.id,
+            position=position,
+            status="error",
+            inputs=case.inputs,
+            expectations=case.expectations,
+            error=failure,
+            finished_at=_now(),
+        )
+        return unanswered, [], None
+    text = text_of(output)
+    matched = exact_match(text, expected)
+    status: CaseStatus = "error" if failure else "passed" if matched else "failed"
     scores = []
     if not error:
-        matched = status == "passed"
         scores.append(
             Score(
                 run_id=run.id,
@@ -439,7 +524,7 @@ async def _run_case(
             id=tid,
             project_id=run.project_id,
             name=f"{run.code} {case.id}",
-            state="error" if error else "ok",
+            state="error" if failure else "ok",
             request_time=started,
             latency_ms=latency,
             request=prompt,
@@ -471,7 +556,7 @@ async def _run_case(
         inputs=case.inputs,
         expectations=case.expectations,
         output=output,
-        error=error,
+        error=failure,
         latency_ms=latency,
         finished_at=_now(),
         store=StoreRef(
@@ -481,8 +566,76 @@ async def _run_case(
             assessment_id=logged.store.assessment_id if logged else None,
         ),
     )
-    score = scores[0].model_copy(update={"store": logged.store}) if logged else None
-    return result, score, model
+    if logged:
+        scores = [scores[0].model_copy(update={"store": logged.store})]
+    for score in checked:  # each installed check's value is kept on the case's trace too
+        if score.value is not None:
+            logged_check = await store.log_score(principal, run.project_id, tid, score)
+            score = score.model_copy(update={"store": logged_check.store})
+        scores.append(score)
+    return result, scores, model
+
+
+async def _installed_scores(
+    checks: InstalledChecks,
+    scorers: list[ScorerVersion],
+    run: Run,
+    case: Case,
+    tid: str,
+    output: Any,
+    state: CaseState,
+) -> list[Score]:
+    """The scores of a run's installed checks for one answered case, given the case's state."""
+    found = []
+    for scorer in scorers:
+        given = _given(scorer, case.inputs, output, case.expectations, state)
+        value, rationale, error = await _installed_score(checks, scorer, given)
+        found.append(
+            Score(
+                run_id=run.id,
+                case_id=case.id,
+                trace_id=tid,
+                scorer=scorer.name,
+                scorer_version=scorer.version,
+                source="code",
+                source_id=scorer_source(scorer),
+                value=value,
+                passed=value if isinstance(value, bool) else None,
+                rationale=rationale,
+                error=error,
+                created_at=_now(),
+            )
+        )
+    return found
+
+
+def _given(
+    scorer: ScorerVersion, inputs: Mapping[str, Any], output: Any, expectations: Mapping[str, Any], state: Any
+) -> dict[str, Any]:
+    """Everything an installed check may read (``_custom.CHECK_ARGUMENTS``)."""
+    return {
+        "inputs": dict(inputs),
+        "outputs": output,
+        "expectations": dict(expectations),
+        "state": state,
+        "options": dict(scorer.parameters.get("options") or {}),
+    }
+
+
+async def _installed_score(
+    checks: InstalledChecks, scorer: ScorerVersion, given: Mapping[str, Any]
+) -> tuple[Value, str, str]:
+    """An installed check's value, reason and error, run on a thread as a custom scorer is; what it
+    raises or returns that it may not is the score's error."""
+    function = checks.get(scorer.name)
+    if function is None:
+        return None, "", CHECK_NOT_INSTALLED.format(name=scorer.name)
+    reads = _custom.arguments(function, _custom.CHECK_ARGUMENTS)
+    try:
+        value, reason = await asyncio.to_thread(_custom.call, function, {name: given[name] for name in reads})
+    except _custom.ScorerError as failure:
+        return None, "", str(failure)
+    return value, reason, ""
 
 
 # --- scoring jobs ---------------------------------------------------------------------------
@@ -496,9 +649,11 @@ async def execute_scoring(
     judge: Judge | None,
     scorers: InstalledScorers | None = None,
     limits: RunLimits | None = None,
+    checks: InstalledChecks | None = None,
 ) -> None:
     """Score a finished run with a queued scoring job. Without a judge, judge scores are errors;
-    a custom scorer the worker has not installed (``scorers``) is an error on each of its scores.
+    a custom scorer the worker has not installed (``scorers``) is an error on each of its scores,
+    and so is a check it has not installed (``checks``), which a scoring job runs with no state.
     The job runs under its run's limits, else ``limits``, the worker's."""
     principal, project = work.principal, work.project_id
     job = await _job(records, principal, project, work.run_id, work.job_id or "")
@@ -514,7 +669,7 @@ async def execute_scoring(
     except StoreError:
         return
     try:
-        await _score_results(store, records, principal, project, job, judge, scorers or {}, limits)
+        await _score_results(store, records, principal, project, job, judge, scorers or {}, checks or {}, limits)
     except Exception:  # noqa: BLE001 - a job never stays running after its worker fails
         log.exception("Scoring job %s failed", job.id)
         current = await _job(records, principal, project, job.run_id, job.id)
@@ -645,6 +800,7 @@ async def _score_results(
     job: ScoringJob,
     judge: Judge | None,
     installed: InstalledScorers,
+    checks: InstalledChecks,
     default_limits: RunLimits | None,
 ) -> None:
     run = await records.get_run(principal, project, job.run_id)
@@ -732,6 +888,9 @@ async def _score_results(
                 metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
             if not finished:
                 error = NO_OUTPUT
+            elif is_installed(scorer):  # the case's state ended with its run's teardown
+                given = _given(scorer, result.inputs, result.output, result.expectations, None)
+                value, rationale, error = await _installed_score(checks, scorer, given)
             elif scorer.kind == "code":
                 value, rationale, error = await _custom_score(installed, scorer, result)
             elif scorer.kind != "llm_judge":

@@ -111,6 +111,12 @@ Scorers run after the target replies, in the process that grades: the command's 
 file, and the work's process in the worker. A judge is given the input, the reply and its
 criteria, and never calls the target.
 
+An edition's [case hooks](evals-core.md#case-hooks-and-installed-checks-in-the-worker) run in the
+work's process too, and are given each case without its expectations or stored output, so they
+cannot hand the target its answers. What a hook adds to the target's inputs
+(`CaseState.target_inputs`) is the edition's to keep free of them; its other state reaches only the
+installed checks and the teardown, and neither is recorded.
+
 `tests/evals/test_grader_isolation.py` proves the function targets' part. Its target looks for the
 answers everywhere it can: in its arguments, in the suite file, the data file, the scorer's file,
 the results folder, MLflow's store and the local Evals UI's data folder, in its environment, in its
@@ -144,7 +150,7 @@ how long it runs or how much memory it takes.
 | --- | --- | --- |
 | A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts, where the run's function target cannot reach it ([above](#the-target-and-the-grader)), and in the `martian evals audit` process, which runs it on the [audit's replies](evals.md#audit-a-suite). Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process, on a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so a custom scorer never sees a project's production traces: the `Monitor` record refuses a scorer of kind `code` |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`), and an edition's case hooks and installed checks the same way (`WorkerServices.hooks`, `WorkerServices.checks`) | Only in each piece of work's own process: a custom scorer on a scoring job's saved outputs, an installed check on a run's answered cases and a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so neither sees a project's production traces: the `Monitor` record refuses a scorer of kind `code`, which both are |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -178,7 +184,9 @@ holds; beside the setup's store and record store, whose databases hold every org
 records; and with the same files and network. There is no time or memory limit: a scorer that
 never returns holds its scoring job, and one that ends its process fails the work ("The worker
 process ended before this work finished"). Installing a custom scorer on a server is deploying
-code into the worker, with the worker's privileges; review it as such.
+code into the worker, with the worker's privileges; review it as such. The same holds for an
+edition's case hooks and installed checks: they are the edition's code in each work's process, with
+no time limit, and a suite or a record names an installed check by name only.
 
 ## Telemetry
 

@@ -473,7 +473,8 @@ place of a target's, and the result is kept with that suite version.
 - **Not audited, and listed under `result.not_audited`.** The judges (`correctness`, `safety`,
   `policy` and registered judges): the core makes no model call in a request, so the audit does
   not ask them. A [custom Python scorer](#custom-scorers-in-the-worker), which runs in the worker,
-  not in the request. `response_length` when its policy sets no threshold.
+  not in the request, and an [installed check](#case-hooks-and-installed-checks-in-the-worker),
+  which only a worker that installs it runs. `response_length` when its policy sets no threshold.
 - **No target and no model is called**, so the audit runs in the request, on a thread of its own.
 - **The response** is the stored audit: `suite_version_id`, `suite_id`, `version`, `suite_digest`,
   `dataset` (`name` and `digest`), `flagged`, `actor_id` (who audited it, as **Users** under
@@ -568,7 +569,7 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_target},
   judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None,
-  private_paths=(), monitor_settle_seconds=20)` runs each piece of
+  private_paths=(), hooks=(), checks=None, monitor_settle_seconds=20)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -805,8 +806,9 @@ The new process:
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
    timeout, the HTTP targets' `credentials`, the registered agents' `executor`, the custom
    Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)), the `limits` of a
-   run that has none of its own, and the `private_paths` a function target cannot reach
-   ([targets](#targets)). `options` must be JSON;
+   run that has none of its own, the `private_paths` a function target cannot reach
+   ([targets](#targets)), and the case `hooks` and installed `checks` of an edition
+   ([case hooks](#case-hooks-and-installed-checks-in-the-worker)). `options` must be JSON;
 4. runs the work, and the HTTP or function target it arrived with, with an `InProcessWorker` for
    the work's organisation, and exits.
 
@@ -1188,6 +1190,93 @@ worker = ProcessWorker(worker_services, records, options={...})
 `tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
 values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
 through the core's routes, failing if the process that serves the API imports the scorer file.
+
+### Case hooks and installed checks in the worker
+
+An edition can prepare something before each case and clean it up afterwards, and grade a case
+with a check the open core does not ship. Both are installed on the worker, in the setup that builds
+its services, as custom scorers and an edition's target caller are: `WorkerServices.hooks` and
+`WorkerServices.checks`, or `InProcessWorker(hooks=[...], checks={name: function})`
+(`martian.evals.worker.hooks`). Editions use them for things such as a prepared environment for
+each case; the open edition has none and installs none, and neither does the local edition.
+
+```python
+class Prepared:  # a CaseHooks: async setup(context) and teardown(context, error)
+    async def setup(self, context: CaseContext) -> None:
+        handle = await prepare(context.run, context.case)          # the edition's own code
+        context.state.target_inputs["workspace_url"] = handle.url  # the target is given this input
+        context.state.values["handle"] = handle                    # the checks and teardown read this
+
+    async def teardown(self, context: CaseContext, error: str) -> None:
+        await context.state.values["handle"].close()
+
+
+def final_state(state, expectations):  # an installed check
+    return state.values["handle"].read() == expectations["final"], "compares what the case left"
+
+
+WorkerServices(store, records, hooks=(Prepared(),), checks={"final_state": final_state})
+```
+
+- **Around each case.** For each case a run calls its target for, every hook's `setup` runs in
+  order before the call, and the `teardown` of each hook whose setup returned runs after the case
+  is graded, in the opposite order. Teardown runs whether the case passed or failed, its target
+  raised or timed out, a later hook's setup raised, or the work was cancelled during the case; it
+  is given the case's error so far, empty when the target answered. A case the run skips calls no
+  target and runs no hook: one with no usable prompt or expected text, and a conversation case
+  (`Case.turns` or `Case.simulated_user`), which the worker does not run. Each call of a case's
+  target is set up afresh: the worker calls each case once ([the unit is the
+  case](#checkpoints-and-resuming)), and a case run again after its worker stopped or its run was
+  resumed is set up again. A scoring job, a monitor's pass and a schedule's turn run no hooks; the
+  run a schedule admits does, as any run.
+- **What a hook is given.** A `CaseContext`: the principal, the run, the case without its
+  expectations or stored output, its position, and its `CaseState`, new for each case. So the
+  expected answers never reach a hook, nor through it the target
+  ([the target and the grader](security-and-data.md#the-target-and-the-grader)).
+- **State.** `CaseState.target_inputs` are given to the target beside the case's own inputs, as any
+  input is: keyword arguments of a function, `{{inputs.NAME}}` in an HTTP target's body, the
+  `Case` a registered agent's executor receives. A name the case's inputs already have is the
+  case's error, and the target is not called. `CaseState.values` reach the checks and the
+  teardown, never the target. Neither is recorded: the case result, its trace and its span keep the
+  case's own inputs.
+- **A hook's failure is the case's error.** A setup that raises ends the setup there: the target is
+  not called, the case is `error` with `The case's setup failed: <type>: <message>` and has no trace
+  or score, and the hooks set up before it are torn down. A teardown that raises makes the case
+  `error` with `The case's teardown failed: <type>: <message>`, keeping its output, trace and
+  scores, and the other hooks are still torn down. The run goes on with the next case. Hooks have
+  no time limit and are not retried; an edition bounds its own.
+- **Installed checks.** A check is a plain function the setup installs by name, with the rules of a
+  [custom scorer](#custom-scorers-in-the-worker): it reads, by name, the case's `inputs`, the
+  `outputs`, the case's `expectations`, the case's `state` and the check's `options`, and returns
+  `True` or `False`, a number or `(value, reason)`; one that reads anything else is refused when the
+  worker is built, and one that raises or returns what it may not gives that score the error. A
+  scorer names it as `kind: code`, `type: installed`, its `name` and `parameters.options`
+  (`installed_check(name, options)`); a suite file writes it as `type: installed` with `name` and
+  `options` ([installed checks](evals.md#installed-checks)). Its score has source `code` and
+  `source_id` `installed:<name>`; a check the worker has not installed gives each of its scores
+  `This worker has no installed check named <name>`.
+- **Where a check runs.** A run's installed checks, the scorers of type `installed` it was admitted
+  with (`admit_run(..., checks=[...])`, which an edition's own launch passes; the contract's launch
+  names none), grade each case whose target answered, on a thread, after the call and before the
+  teardown, so they read the case's state while it lives. Their scores sit beside the exact-match
+  score in the case's checkpoint and on its trace; the case's status stays the exact match's. A
+  scoring job's installed checks grade the saved outputs with `state=None`: the case's state ended
+  with its teardown. No route of the frozen contract names an installed check, a schedule's run is
+  admitted with none, and a [monitor](#monitors) refuses one, as it refuses every `code` scorer.
+- **Conversations.** The worker skips a conversation case before any hook, with its reason, so
+  neither hooks nor a run's installed checks see one. `martian evals run`, which runs
+  conversations, installs neither and refuses a suite with an installed check. A scoring job's
+  installed check grades a conversation's saved result as a custom scorer does, its `outputs` the
+  conversation's messages, with `state=None`.
+
+`tests/evals/test_case_hooks.py` installs a test edition's hooks and checks: the hooks open a ledger
+for each case, which the agent writes to, and run around every case in order, also when the target
+raises or times out, when a setup or teardown raises, and when the work is cancelled during a case;
+an installed check grades each case from its open ledger; a conversation case is skipped with no
+hook or check; a scoring job's check gets no state; a monitor refuses an installed check; and
+`ProcessWorker` runs the setup's hooks and checks in each run's own process. It also loads and
+writes a suite file with an installed check, and shows that `martian evals run` refuses one, in a
+conversation suite too, and an audit lists it as not audited.
 
 ## Judge models
 
@@ -1983,7 +2072,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   either runs from ([the durable queue](#the-durable-queue)). Every target call has a time limit,
   and a run or scoring job stops at its time or judge token limit and resumes after what it
   finished ([limits](#limits-stopping-and-resuming)). The workers run the
-  [custom Python scorers](#custom-scorers-in-the-worker) their setup installs.
+  [custom Python scorers](#custom-scorers-in-the-worker), and the
+  [case hooks and installed checks](#case-hooks-and-installed-checks-in-the-worker), their setup
+  installs.
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
 - [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
