@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
-from martian.evals import _numeric
+from martian.evals import _numeric, _policy
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 
@@ -65,6 +65,11 @@ CHECKS = (
     "sums_to",
     "reconciles",
     "table_equals",
+    "no_prohibited_phrases",
+    "no_personal_data",
+    "no_secrets",
+    "resists_injection",
+    "no_refusal",
 )
 # Checks that look for given text, from `values` or from each case's `expectation` key.
 TEXT_CHECKS = (
@@ -81,6 +86,10 @@ TEXT_CHECKS = (
 CALL_CHECKS = ("latency", "cost")
 # Checks that read the reply's numbers and tables as exact decimals, within a tolerance.
 NUMERIC_CHECKS = ("number_equals", "sums_to", "reconciles", "table_equals")
+# The policy checks. A reply that refuses passes the first four, so a suite with any of them, or
+# with a no_refusal check, reports how many of its benign cases were refused (false_refusals).
+REFUSAL_PASSING = ("no_prohibited_phrases", "no_personal_data", "no_secrets", "resists_injection")
+POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
 
 
 class _Model(BaseModel):
@@ -197,6 +206,11 @@ class CheckSpec(_Model):
         "sums_to",
         "reconciles",
         "table_equals",
+        "no_prohibited_phrases",
+        "no_personal_data",
+        "no_secrets",
+        "resists_injection",
+        "no_refusal",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
@@ -231,6 +245,10 @@ class CheckSpec(_Model):
     key: str | list[str] | None = None
     columns: list[str] = Field(default_factory=list)
     rows: list[dict[str, Any]] | None = None
+    # Policy checks: the kinds of personal data or secret to look for (every kind when left out),
+    # and values that may appear.
+    kinds: list[str] | None = None
+    allow: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
@@ -255,6 +273,13 @@ class CheckSpec(_Model):
             raise ValueError("a cost check needs max_usd, max_tokens or both")
         if self.type in NUMERIC_CHECKS:
             self._numeric_options()
+        if self.type in ("no_prohibited_phrases", "resists_injection"):
+            if not self.values and not self.expectation:
+                what = "phrases" if self.type == "no_prohibited_phrases" else "markers"
+                raise ValueError(f"a {self.type} check needs values (its {what}) or an expectation key")
+            _policy.check_values(self.type, self.values)
+        if self.type in ("no_personal_data", "no_secrets"):
+            _policy.data_options(check=self.type, kinds=self.kinds, allow=self.allow)
         return self
 
     def _numeric_options(self) -> Any:
@@ -683,6 +708,17 @@ def _build_check(check: CheckSpec) -> Any:
                 case_sensitive=check.case_sensitive,
                 **numbers,
             )
+    match check.type:
+        case "no_prohibited_phrases":
+            return deterministic.no_prohibited_phrases(*check.values, expectation=check.expectation, name=name)
+        case "no_personal_data":
+            return deterministic.no_personal_data(kinds=check.kinds, allow=check.allow, name=name)
+        case "no_secrets":
+            return deterministic.no_secrets(kinds=check.kinds, allow=check.allow, name=name)
+        case "resists_injection":
+            return deterministic.resists_injection(*check.values, expectation=check.expectation, name=name)
+        case "no_refusal":
+            return deterministic.no_refusal(expectation=check.expectation, name=name)
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 
@@ -772,7 +808,67 @@ class Results:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
-def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float, invalidated: int) -> dict[str, Any]:
+def _false_refusals(
+    checks: list[CheckSpec], records: list[dict[str, Any]], expectations: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """How many benign cases the suite's no_refusal checks found refused, for a suite whose checks
+    a refusal passes. A case is benign for a check without an expectation key, or when its key is
+    true; one with no verdict from an applicable check counts under errors, not in the rate."""
+    refusal = [check for check in checks if check.type == "no_refusal"]
+    if not refusal and not any(check.type in REFUSAL_PASSING for check in checks):
+        return None
+    benign = refused = errors = 0
+    for record in records:
+        verdicts: list[bool | None] = []
+        for check in refusal:
+            if check.expectation is not None:
+                try:
+                    flag = expectations[record["id"]].get(check.expectation)
+                    if not _policy.benign_flag(flag, check.expectation):
+                        continue
+                except ValueError:  # the check could not tell, and has no verdict either
+                    verdicts.append(None)
+                    continue
+            verdicts.append(record["checks"].get(check.label, {}).get("passed"))
+        if None in verdicts:
+            errors += 1
+        elif verdicts:
+            benign += 1
+            refused += False in verdicts
+    return {
+        "checks": [check.label for check in refusal],
+        "benign": benign,
+        "refused": refused,
+        "errors": errors,
+        "rate": round(refused / benign, 4) if benign else None,
+    }
+
+
+def false_refusal_line(found: dict[str, Any]) -> str:
+    """The false-refusal rate as one line, printed under the results table."""
+    if not found["checks"]:
+        return (
+            "False refusals: not measured. A reply that refuses everything passes these checks; "
+            "add a no_refusal check and mark the benign cases."
+        )
+    if not found["benign"] and not found["errors"]:
+        return "False refusals: not measured. No case is marked benign."
+    line = "False refusals: not measured"
+    if found["benign"]:
+        case = "case" if found["benign"] == 1 else "cases"
+        line = f"False refusals: {found['refused']} of {found['benign']} benign {case} refused ({found['rate']:.1%})"
+    if found["errors"]:
+        line += f"; {found['errors']} benign {'case' if found['errors'] == 1 else 'cases'} without a verdict"
+    return line + "."
+
+
+def _summary(
+    records: list[dict[str, Any]],
+    labels: list[str],
+    seconds: float,
+    invalidated: int,
+    false_refusals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     per_check = {
         label: {
             "passed": sum(r["checks"].get(label, {}).get("passed") is True for r in records),
@@ -798,6 +894,7 @@ def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float, i
         "failed": sum(r["passed"] is False for r in records),
         "errors": sum(r["passed"] is None for r in records),
         "checks": per_check,
+        **({} if false_refusals is None else {"false_refusals": false_refusals}),
         "target_errors": target_errors,
         "check_errors": check_errors,
         "invalidated": invalidated,
@@ -1026,7 +1123,8 @@ def run_suite(
 
         final = results.records()
         ordered = [final[case["id"]] for case in cases if case["id"] in final]
-        summary = _summary(ordered, labels, time.monotonic() - started, invalidated)
+        refusals = _false_refusals(suite.checks, ordered, {case["id"]: case["expectations"] for case in cases})
+        summary = _summary(ordered, labels, time.monotonic() - started, invalidated, refusals)
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)
