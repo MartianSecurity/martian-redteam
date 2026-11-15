@@ -79,6 +79,7 @@ SUITE_FILE_FIELDS = {
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
+    "matrix": "Suite.matrix, as written: each axis a list of values or a mapping of names to values",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -235,6 +236,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
                 combine=file_suite.combine,
                 checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
             ),
+            "matrix": dict(file_suite.matrix),
         }
     except ValidationError as error:
         raise ConfigError(f"the suite does not fit the model: {_problems(error)}") from None
@@ -357,6 +359,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     file: dict[str, Any] = {"data": suite.dataset_location}
     if (target := _target_file(suite.target, settings)) is not None:
         file["target"] = target
+    if suite.matrix:
+        file["matrix"] = dict(suite.matrix)
     repeats = suite.repeats
     checks = [
         _check_file(position, scorer, repeats.checks.get(scorer.name)) for position, scorer in enumerate(suite.scorers)

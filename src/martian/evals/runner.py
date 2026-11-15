@@ -9,7 +9,9 @@ you configure, and MLflow's evaluation harness uses a local store in the output 
 point it at your own server. The run, its case results, scores and traces are also recorded in the
 local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
 a finished case is skipped while nothing that produced its verdict has changed. A suite can run each
-case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`).
+case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`),
+and a suite with a ``matrix`` runs once per combination of its prompts, models or other values
+(:mod:`martian.evals.matrix`), each combination in its own folder and recorded as its own run.
 Use ``martian ci`` when a result must be recorded on the platform.
 """
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -25,7 +28,8 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -33,13 +37,14 @@ from xml.sax.saxutils import quoteattr
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, model_validator
 
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals import _numeric, _policy
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
+from martian.evals.matrix import Combination, MatrixAxis, combinations
 from martian.evals.model import MAX_ATTEMPTS, CombineRule
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability
 from martian.evals.stats import proportion_interval
@@ -109,9 +114,14 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# In a URL target's body: {{input}}, {{inputs.NAME}} and {{uuid}} are filled in for each case.
+# In a URL target's body: {{input}}, {{inputs.NAME}} and {{uuid}} are filled in for each case, and
+# {{matrix.NAME}} for each combination of the suite's matrix.
 _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
-_PLACEHOLDER_NAME = re.compile(r"input|uuid|inputs\.[A-Za-z_][A-Za-z0-9_]*")
+_PLACEHOLDER_NAME = re.compile(r"input|uuid|(inputs|matrix)\.[A-Za-z_][A-Za-z0-9_]*")
+_MATRIX = "matrix."
+# The validation context key that holds the axes of the suite file's matrix (parse_suite), so a
+# URL target's {{matrix.NAME}} names one of them. A target validated without it has no matrix.
+MATRIX_AXES = "martian.matrix_axes"
 # In a URL target's url and header values: ${NAME} is read from the environment.
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -156,7 +166,7 @@ class TargetRef(_Model):
     timeout_seconds: float = Field(default=120, ge=1, le=600)
 
     @model_validator(mode="after")
-    def one_kind(self) -> TargetRef:
+    def one_kind(self, info: ValidationInfo) -> TargetRef:
         if (self.file is None) == (self.url is None):
             raise ValueError("a target needs a file or a url, not both")
         given = self.model_fields_set
@@ -174,9 +184,13 @@ class TargetRef(_Model):
         names = _placeholders(self.body)
         unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
         if unknown:
-            allowed = "{{input}}, {{inputs.NAME}} or {{uuid}}"
+            allowed = "{{input}}, {{inputs.NAME}}, {{matrix.NAME}} or {{uuid}}"
             raise ValueError(f"unknown body placeholder(s) {', '.join(unknown)}; use {allowed}")
-        if not any(name != "uuid" for name in names):
+        axes = (info.context or {}).get(MATRIX_AXES, ())
+        if strays := sorted({name for name in names if name.startswith(_MATRIX) and name[len(_MATRIX) :] not in axes}):
+            shown = ", ".join("{{" + name + "}}" for name in strays)
+            raise ValueError(f"{shown} names no axis of the suite file's matrix")
+        if not any(name == "input" or name.startswith("inputs.") for name in names):
             raise ValueError("a url target's body must use {{input}} or {{inputs.NAME}}, or every case sends the same")
         return self
 
@@ -356,6 +370,8 @@ class Suite(_Model):
     # not a security check (martian.evals.repeats).
     repeats: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
     combine: CombineRule = "all"
+    # Axes of values the suite runs every combination of (martian.evals.matrix).
+    matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -379,7 +395,28 @@ class Suite(_Model):
                 f"{', '.join(costs)} reads the token usage and cost the target's MLflow tracing records, and a "
                 "URL target's call records neither; use a function target or remove the check"
             )
+        if "matrix" in self.model_fields_set and not self.matrix:
+            raise ValueError("a matrix needs at least one axis; name its axes or remove it")
+        if self.matrix:
+            self._matrix_fits()
         return self
+
+    def _matrix_fits(self) -> None:
+        """A matrix runs every combination of its values against the target: a URL target's body
+        takes each axis as ``{{matrix.NAME}}``, and a function target each as a keyword argument."""
+        combinations(self.matrix)
+        if self.target is None:
+            raise ValueError(
+                "a matrix varies the target, and a suite without one grades the outputs stored in its cases; "
+                "name a target or remove the matrix"
+            )
+        if self.target.url is not None:
+            used = {name[len(_MATRIX) :] for name in _placeholders(self.target.body) if name.startswith(_MATRIX)}
+            if unused := [axis for axis in self.matrix if axis not in used]:
+                raise ValueError(
+                    f"target.body has no {{{{matrix.{unused[0]}}}}}, so every value of matrix.{unused[0]} sends the "
+                    "same request; use it in the body or remove the axis"
+                )
 
     def security_checks(self) -> list[str]:
         """The labels of the security checks, in suite order. Their attempts combine by ``all``
@@ -411,8 +448,9 @@ def parse_suite(text: str) -> Suite:
         raise ConfigError(f"could not read the suite file: {type(error).__name__}") from None
     if not isinstance(raw, dict):
         raise ConfigError("the suite file must be a YAML mapping")
+    axes = list(raw["matrix"]) if isinstance(raw.get("matrix"), dict) else []
     try:
-        return Suite.model_validate(raw)
+        return Suite.model_validate(raw, context={MATRIX_AXES: axes})
     except ValidationError as error:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in item['loc']) or 'suite'}: {item['msg']}"
@@ -518,13 +556,21 @@ def _status_reason(response: httpx.Response) -> str:
     return reason
 
 
-def _case_values(inputs: dict[str, Any], input_key: str) -> Callable[[str], Any]:
+def _case_values(
+    inputs: dict[str, Any], input_key: str, matrix: Mapping[str, Any] | None = None
+) -> Callable[[str], Any]:
     """What each body placeholder of one case stands for: ``{{input}}`` is the input named
-    ``input_key``, ``{{inputs.NAME}}`` the input named NAME, and ``{{uuid}}`` a new UUID."""
+    ``input_key``, ``{{inputs.NAME}}`` the input named NAME, ``{{matrix.NAME}}`` the value of the
+    axis NAME in ``matrix``, a combination's values, and ``{{uuid}}`` a new UUID."""
 
     def lookup(name: str) -> Any:
         if name == "uuid":
             return str(uuid.uuid4())
+        if name.startswith(_MATRIX):
+            axis = name[len(_MATRIX) :]
+            if matrix is None or axis not in matrix:
+                raise TargetCallError(f"the suite's matrix has no axis named {axis!r}")
+            return matrix[axis]
         key = input_key if name == "input" else name.removeprefix("inputs.")
         if key not in inputs:
             raise TargetCallError(f"the case has no input named {key!r}")
@@ -577,8 +623,10 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
     return reply
 
 
-def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
+def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any] | None = None) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
+    ``matrix``, one combination's values, fills the body's ``{{matrix.NAME}}``, as case text is
+    filled: inserted as data and never expanded itself.
 
     Errors name what went wrong but never the address, the headers or the response body. The
     returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
@@ -594,7 +642,7 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
     def send(inputs: dict[str, Any]) -> Any:
-        body = _fill(reference.body, _case_values(inputs, input_key))
+        body = _fill(reference.body, _case_values(inputs, input_key, matrix))
         try:
             with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body)
@@ -629,9 +677,8 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     return call
 
 
-def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
-    if reference.url is not None:
-        return _http_target(reference, input_key)
+def _load_function(reference: TargetRef, base: Path) -> Callable[..., Any]:
+    """A function target's function, its file imported once."""
     file = Path(reference.file or "")
     file = file if file.is_absolute() else (base / file)
     spec = importlib.util.spec_from_file_location("martian_evals_target", file)
@@ -647,6 +694,45 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
     if function is None or not callable(function):
         raise ConfigError(f"the target file has no function {reference.function!r}")
     return function
+
+
+def _with_arguments(function: Callable[..., Any], values: Mapping[str, Any]) -> Callable[..., Any]:
+    """``function`` called with each axis of one combination (``values``) as a keyword argument,
+    beside the case's inputs. The wrapper keeps the function's name, so the case's trace is named
+    as without a matrix, and a function MLflow already traces is not traced twice."""
+    if inspect.iscoroutinefunction(function):
+
+        async def waited(**inputs: Any) -> Any:
+            return await function(**inputs, **values)
+
+        call: Callable[..., Any] = waited
+    else:
+
+        def call(**inputs: Any) -> Any:
+            return function(**inputs, **values)
+
+    call.__name__ = getattr(function, "__name__", "target")
+    call.__qualname__ = getattr(function, "__qualname__", call.__name__)
+    if getattr(function, "__mlflow_traced__", False):
+        call.__mlflow_traced__ = True  # type: ignore[attr-defined]
+    return call
+
+
+def _targets(suite: Suite, base: Path, matrix: list[Combination]) -> list[Callable[..., Any] | None]:
+    """The target of each combination, in order, or of the suite once when it has no matrix. A
+    function target's file is imported once; a URL target's settings are read from the
+    environment for each, so a missing variable stops the run before any case."""
+    reference = suite.target
+    if reference is None:
+        return [None] * max(len(matrix), 1)
+    if reference.url is not None:
+        if not matrix:
+            return [_http_target(reference, suite.input_key)]
+        return [_http_target(reference, suite.input_key, combination.values) for combination in matrix]
+    function = _load_function(reference, base)
+    if not matrix:
+        return [function]
+    return [_with_arguments(function, combination.values) for combination in matrix]
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
@@ -783,9 +869,10 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _suite_fingerprint(suite: Suite, base: Path) -> str:
+def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | None = None) -> str:
     """Everything in the suite a verdict depends on: the checks and their criteria, the judge model
-    and its parameters, the target, and the SDK version that holds the judge prompts.
+    and its parameters, the target, the values of the combination of the suite's matrix that
+    ``matrix`` gives, and the SDK version that holds the judge prompts.
 
     Settings that change how a run is carried out but not what it grades (concurrency, batch size,
     output folder, retries and the rate-limit wait, timeout, the judge's headers, MLflow location)
@@ -796,7 +883,8 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
 
     With repeats, the attempts per case and the rule each check's attempts combine by count too.
     With one attempt every rule gives the same verdict, so neither counts and the fingerprint is
-    the one a suite without repeats has.
+    the one a suite without repeats has. Without a matrix the fingerprint is the one it was before
+    matrices existed.
     """
     target: dict[str, Any] | None = None
     if suite.target is not None:
@@ -820,6 +908,8 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
             "attempts": repeats["attempts"],
             "combine": {label: rule["combine"] for label, rule in repeats["checks"].items()},
         }
+    if matrix is not None:
+        definition["matrix"] = dict(matrix)
     return _digest(definition)
 
 
@@ -1049,6 +1139,10 @@ def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str, s
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+MATRIX_SUMMARY = "matrix.json"
+"""A matrix run's summary at the top of its output folder: one entry per combination."""
+
+
 def run_suite(
     path: str | Path,
     *,
@@ -1076,11 +1170,17 @@ def run_suite(
     runs, the run is compared with it case by case (:mod:`martian.evals.baseline`), and the
     comparison is written to comparison.json and returned under ``comparison``. Without one, a
     comparison.json left by an earlier run in the output folder is removed.
+
+    A suite with a ``matrix`` runs once per combination (:mod:`martian.evals.matrix`), each in the
+    folder of its id under the output folder, with that folder's files as above, recorded as its own
+    run and compared with the baseline's result of the same combination. It then writes
+    matrix.json, the summary of every combination (:func:`_matrix_summary`), and a verdicts.json
+    that holds every combination's verdicts, for a later run's baseline, and returns the matrix
+    summary with each combination's run under ``run``. A suite without a matrix removes a
+    matrix.json an earlier run left in the output folder.
     """
     from martian.evals import baseline as baselines
-    from martian.evals.local import data_folder
     from martian.evals.model import suite_digest
-    from martian.evals.run_record import GradedCase, RunRecorder
     from martian.evals.suite_file import load_suite_file
 
     earlier = baselines.load(baseline) if baseline is not None else None
@@ -1092,10 +1192,6 @@ def run_suite(
         suite = suite.model_copy(update={"repeats": repeats})
         model = model.model_copy(update={"repeats": model.repeats.model_copy(update={"attempts": repeats})})
         model = model.model_copy(update={"digest": suite_digest(model)})
-    repeated = suite.repeats > 1
-    numbers = range(1, suite.repeats + 1)
-    repeat_plan = suite.repeat_plan()
-    rules: dict[str, CombineRule] = {label: rule["combine"] for label, rule in repeat_plan["checks"].items()}
     cases: list[dict[str, Any]] = [
         {
             "id": case.id,
@@ -1113,16 +1209,172 @@ def run_suite(
         raise ConfigError("without a target, every case needs an `outputs` (or `output`) value to grade")
     if suite.target is not None and stored:
         raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
-    target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
+    matrix = combinations(suite.matrix)
+    if matrix and suite.target is not None and suite.target.file is not None:
+        for case in cases:
+            if clash := sorted(set(case["inputs"]) & set(suite.matrix)):
+                raise ConfigError(
+                    f"case {case['id']} has an input named {clash[0]}, and the function target also takes the "
+                    f"matrix's axis {clash[0]} as a keyword argument; rename the axis or the input"
+                )
+    targets = _targets(suite, base, matrix)
+    plan = _Plan(
+        path=Path(path),
+        base=base,
+        suite=suite,
+        model=model,
+        groups={case.id: case.tags[GROUP_TAG] for case in model_cases if GROUP_TAG in case.tags},
+        cases=cases,
+        total=total,
+        limit=limit,
+        scorers=_build_scorers(suite),
+        concurrency=concurrency,
+        resume=resume,
+        home=home,
+        source=None if baseline is None else str(baseline),
+    )
+    folder = Path(output) if output is not None else base / suite.output
+    say = progress or (lambda message: None)
+    if not matrix:
+        found, _ = _run_one(
+            plan,
+            folder=folder,
+            target=targets[0],
+            say=say,
+            earlier=None if earlier is None else baselines.result(earlier, None),
+        )
+        (folder / MATRIX_SUMMARY).unlink(missing_ok=True)
+        return found
+
+    from martian.evals import matrix as matrices
+
+    count = len(matrix)
+    say(f"{count} combinations of {_listed([axis['name'] for axis in matrices.axes(suite.matrix)])}")
+    invocation = str(uuid.uuid4())
+    started = time.monotonic()
+    ran: list[tuple[Combination, dict[str, Any]]] = []
+    verdicts: dict[str, dict[str, Any]] = {}
+    for position, (combination, target) in enumerate(zip(matrix, targets, strict=True), 1):
+
+        def told(message: str, prefix: str = f"{combination.id} ({position} of {count}): ") -> None:
+            say(prefix + message)
+
+        found, verdicts[combination.id] = _run_one(
+            plan,
+            folder=folder / combination.folder,
+            target=target,
+            say=told,
+            earlier=None if earlier is None else baselines.result(earlier, combination.id),
+            combination=combination,
+            provenance=matrices.provenance(combination, suite.matrix, invocation),
+        )
+        ran.append((combination, found))
+    summary = _matrix_summary(suite, ran, folder=folder, seconds=time.monotonic() - started)
+    (folder / MATRIX_SUMMARY).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    bundle = json.dumps(baselines.matrix_verdicts(verdicts), indent=2) + "\n"
+    (folder / baselines.VERDICTS).write_text(bundle, encoding="utf-8")
+    runs = [found["run"] for _, found in ran]
+    return summary | {
+        "combinations": [entry | {"run": run} for entry, run in zip(summary["combinations"], runs, strict=True)]
+    }
+
+
+def _listed(names: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def combination_gate(summary: Mapping[str, Any], comparison: Mapping[str, Any] | None) -> str:
+    """How one run of a suite, or one combination of its matrix, ends: ``error`` when a case has
+    no verdict, else the comparison's gate when it was compared with a baseline, else ``failed``
+    when a case failed and ``passed`` otherwise. ``martian evals run`` exits 2, 1 or 0 by it."""
+    if summary["errors"]:
+        return "error"
+    if comparison is not None:
+        return str(comparison["gate"])
+    return "failed" if summary["failed"] else "passed"
+
+
+def _matrix_summary(
+    suite: Suite, ran: list[tuple[Combination, dict[str, Any]]], *, folder: Path, seconds: float
+) -> dict[str, Any]:
+    """matrix.json: the matrix's ``axes`` (:func:`martian.evals.matrix.axes`), and one entry per
+    combination in order with its ``id``, its ``values`` (each axis's value name), its ``folder``
+    under the output folder, its ``gate`` (:func:`combination_gate`), its ``summary`` (its
+    summary.json) and its ``comparison`` (its comparison.json, or None when it was not compared)."""
+    from martian.evals import matrix as matrices
+
+    entries = []
+    for combination, found in ran:
+        comparison = found.get("comparison")
+        own = {key: value for key, value in found.items() if key not in ("run", "comparison")}
+        entries.append(
+            {
+                "id": combination.id,
+                "values": dict(combination.names),
+                "folder": combination.folder,
+                "gate": combination_gate(own, comparison),
+                "summary": own,
+                "comparison": comparison,
+            }
+        )
+    return {
+        "axes": matrices.axes(suite.matrix),
+        "combinations": entries,
+        "seconds_this_run": round(seconds, 1),
+        "output": str(folder),
+    }
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """What every combination of a run shares: the suite, its cases and checks, and the options."""
+
+    path: Path
+    base: Path
+    suite: Suite
+    model: Any  # martian.evals.model.Suite
+    groups: dict[str, str]
+    cases: list[dict[str, Any]]
+    total: int
+    limit: int | None
+    scorers: list[Any]
+    concurrency: int | None
+    resume: bool
+    home: str | Path | None
+    source: str | None
+
+
+def _run_one(
+    plan: _Plan,
+    *,
+    folder: Path,
+    target: Callable[..., Any] | None,
+    say: Callable[[str], None],
+    earlier: dict[str, Any] | None,
+    combination: Combination | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One run of the suite, or of one combination of its matrix, into ``folder``: its summary,
+    with its run and its comparison, and its verdicts. ``earlier`` is the baseline's verdicts of
+    this suite or combination, if the baseline has any."""
+    from martian.evals import baseline as baselines
+    from martian.evals.local import data_folder
+    from martian.evals.run_record import GradedCase, RunRecorder
+
+    suite, base, cases, path = plan.suite, plan.base, plan.cases, plan.path
+    repeated = suite.repeats > 1
+    numbers = range(1, suite.repeats + 1)
+    repeat_plan = suite.repeat_plan()
+    rules: dict[str, CombineRule] = {label: rule["combine"] for label, rule in repeat_plan["checks"].items()}
     failure_reason: Callable[[dict[str, Any]], str | None] | None = getattr(target, "failure_reason", None)
-    scorers = _build_scorers(suite)
+    scorers = plan.scorers
     labels = [check.label for check in suite.checks]
 
-    folder = Path(output) if output is not None else base / suite.output
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
-    with RunRecorder(data_folder(home), model) as recorder:
-        results = Results(folder, resume=resume)
-        suite_print = _suite_fingerprint(suite, base)
+    with RunRecorder(data_folder(plan.home), plan.model, matrix=provenance) as recorder:
+        results = Results(folder, resume=plan.resume)
+        suite_print = _suite_fingerprint(suite, base, None if combination is None else combination.values)
         prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
         positions = {case["id"]: position for position, case in enumerate(cases)}
         # An earlier verdict is reused only when it was produced by exactly this suite and case.
@@ -1130,7 +1382,6 @@ def run_suite(
         done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
         invalidated = len(finished) - len(done)
         todo = [case for case in cases if case["id"] not in done]
-        say = progress or (lambda message: None)
         each = f" of {suite.repeats} attempts each" if repeated else ""
         message = f"{len(cases)} cases{each}, {len(cases) - len(todo)} already done"
         if invalidated:
@@ -1207,8 +1458,8 @@ def run_suite(
 
         recorder.start(
             planned=len(cases),
-            total=total,
-            limit=limit,
+            total=plan.total,
+            limit=plan.limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
             repeats=repeat_plan if repeated else None,
         )
@@ -1218,12 +1469,12 @@ def run_suite(
         previous_experiment = active_experiment_id()
         restored = ("MLFLOW_GENAI_EVAL_MAX_WORKERS", "MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION", "MLFLOW_EXPERIMENT_ID")
         previous_env = {name: os.environ.get(name) for name in restored}
-        os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(concurrency or suite.concurrency)
+        os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(plan.concurrency or suite.concurrency)
         os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "true"  # otherwise the first case runs twice
         started = time.monotonic()
         try:
             mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")
-            mlflow.set_experiment(suite.mlflow.experiment or Path(path).stem)
+            mlflow.set_experiment(suite.mlflow.experiment or path.stem)
             for start in range(0, len(todo), suite.batch):
                 batch = todo[start : start + suite.batch]
                 data = []
@@ -1280,7 +1531,7 @@ def run_suite(
 
         final = results.records()
         ordered = [final[case["id"]] for case in cases if case["id"] in final]
-        groups = {case.id: case.tags[GROUP_TAG] for case in model_cases if GROUP_TAG in case.tags}
+        groups = plan.groups
         refusals = _false_refusals(suite.checks, ordered, {case["id"]: case["expectations"] for case in cases})
         summary = _summary(
             ordered,
@@ -1293,18 +1544,20 @@ def run_suite(
         )
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem, summary=summary)
+        # Each combination is its own testsuite, named after the suite and the combination.
+        name = path.stem if combination is None else f"{path.stem}[{combination.id}]"
+        write_junit(ordered, folder / "junit.xml", suite_name=name, summary=summary)
         found = _verdicts(suite, ordered, cases, repeat_plan if repeated else None)
         (folder / baselines.VERDICTS).write_text(json.dumps(found, indent=2) + "\n", encoding="utf-8")
         comparison = None
         if earlier is not None:
-            comparison = baselines.compare(earlier, found, source=str(baseline))
+            comparison = baselines.compare(earlier, found, source=plan.source or "")
             text = json.dumps(comparison, indent=2) + "\n"
             (folder / baselines.COMPARISON).write_text(text, encoding="utf-8")
         else:
             (folder / baselines.COMPARISON).unlink(missing_ok=True)
         recorder.finish()
-    return {**summary, "run": recorder.reference(), **({"comparison": comparison} if comparison else {})}
+    return {**summary, "run": recorder.reference(), **({"comparison": comparison} if comparison else {})}, found
 
 
 def _verdicts(

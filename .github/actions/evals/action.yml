@@ -36,7 +36,8 @@ inputs:
     description: >
       Names the comment this run keeps up to date. Empty uses the suite path.
       Give each job its own key when several jobs run the same suite on one
-      pull request, for example a model matrix.
+      pull request. A suite's own matrix needs no key: its combinations share
+      one comment and one baseline.
     required: false
     default: ""
   comment-author:
@@ -135,9 +136,10 @@ runs:
         MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
       run: |
         set -uo pipefail
-        # Every run that finishes rewrites these. Removing them first means a
-        # run that stops early cannot be reported, or kept, with an earlier result.
-        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json"
+        # Every run that finishes rewrites these: summary.json, or matrix.json
+        # for a suite with a matrix. Removing them first means a run that stops
+        # early cannot be reported, or kept, with an earlier result.
+        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/matrix.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json"
         baseline=()
         if [ "$MARTIAN_EVALS_BASELINE_MODE" = "compare" ] && [ -f "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json" ]; then
           baseline=(--baseline "$MARTIAN_EVALS_BASELINE_DIR")

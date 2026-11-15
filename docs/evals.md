@@ -81,8 +81,9 @@ target:
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
-  agents that keep a conversation per session. A value that is only a placeholder keeps its
-  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
+  agents that keep a conversation per session. `{{matrix.NAME}}` is the value of the axis NAME
+  of the suite's [matrix](#a-matrix-of-prompts-and-models). A value that is only a placeholder
+  keeps its type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -135,6 +136,7 @@ types a `name`.
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 | `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, a digest of each check's definition, and the names of the security checks: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
 | `comparison.json` | With `--baseline` only: the run compared with the baseline ([comparing with a baseline](#comparing-with-a-baseline)). A run without one removes an earlier run's |
+| `matrix.json` | A suite with a [matrix](#a-matrix-of-prompts-and-models) only: one entry per combination, whose own files are in a folder of its own. A run without a matrix removes an earlier run's |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
@@ -162,7 +164,8 @@ pull request with the last result of `main`. See
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
+combine by ([repeated attempts](#repeated-attempts)), the values of its combination of the
+[matrix](#a-matrix-of-prompts-and-models), and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
@@ -338,6 +341,87 @@ another failed. `martian.evals.repeats` computes both from the attempts' own ver
 | [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
 | The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
 
+## A matrix of prompts and models
+
+Trying three prompts on two models should not take six suite files. `matrix` names the values to
+try, and the suite runs once per combination, each combination a run of its own:
+
+```yaml
+target:
+  url: "${OPENAI_API_BASE}/chat/completions"
+  headers:
+    Authorization: "Bearer ${OPENAI_API_KEY}"
+  body:
+    model: "{{matrix.model}}"
+    messages:
+      - {role: system, content: "{{matrix.prompt}}"}
+      - {role: user, content: "{{input}}"}
+  response_path: choices.0.message.content
+matrix:
+  model: [gpt-4o-mini, claude-3-5-haiku]   # a list: each value is its own name
+  prompt:                                  # a mapping: a short name for each value
+    terse: "Answer in one sentence."
+    friendly: "Greet the customer, then answer."
+```
+
+[`examples/evals/matrix`](../examples/evals/matrix/evals.yaml) does the same with a function
+target that stands in for the model, so it runs with no key:
+`martian evals run examples/evals/matrix/evals.yaml` prints four rows, one per combination.
+
+- **Axes and values.** Each key of `matrix` is an axis, named by a letter or `_` and then
+  letters, digits and `_`, at most 40 characters. Its values are a list, each value naming itself
+  (text as written, a number as JSON writes it, `true` or `false`), or a mapping of names to
+  values, for values such as prompts that are too long to name a combination. A name is 1 to 64
+  letters, digits and `. _ : / @ + -`; a list value that is not such a name is refused with the
+  advice to use a mapping. A mapped value can be any value but null. A matrix has at most 100
+  combinations.
+- **Combinations.** Every combination of one value of each axis runs, the first axis outermost:
+  two models and two prompts are four runs, one after another. Each runs every case with the
+  suite's checks, `repeats`, `--limit` and `--concurrency`.
+- **Where the values go.** A URL target's `body` takes `{{matrix.NAME}}`, filled like the other
+  placeholders: a value that is a whole placeholder keeps its type, and a value is inserted as
+  data, so an `{{input}}` inside a prompt's text is sent as written. The body must use every axis,
+  and each `{{matrix.NAME}}` must name one. The `url` and headers take no matrix values. A
+  function target receives each axis as a keyword argument of the axis's name, beside the case's
+  inputs: `answer(message="...", model="gpt-4o-mini", prompt="Answer in one sentence.")`, a mapped
+  value as its value, not its name. A case with an input of an axis's name is refused, and so is
+  a matrix in a suite without a target, which grades stored outputs and has nothing to vary.
+- **Identity.** A combination's id is `axis=name` for each axis, in the axes' alphabetical
+  order, joined by commas: `model=gpt-4o-mini,prompt=terse`. It names the combination's folder,
+  run and row everywhere below. It depends on the names only, so reordering the axes keeps it,
+  and so does editing a mapped value's text: the next run of that combination is compared with
+  the last, and grades its cases again (below).
+
+| Where | What |
+| --- | --- |
+| `<output>/<id>/` | One folder per combination, named by its id with `/` and `:` written as `_`, holding what a run without a matrix writes: `results.jsonl`, `summary.json`, `junit.xml` (one testsuite, named `evals[<id>]` for `evals.yaml`), `verdicts.json`, `mlflow.db` and, with a baseline, `comparison.json` |
+| `<output>/matrix.json` | `axes`, each axis's `name` and its values' names in the file's order; `combinations`, in run order, each with its `id`, `values` (each axis's value name), `folder`, `gate` (`passed`, `failed` or `error`, below), `summary` (its `summary.json`) and `comparison` (its `comparison.json`, `null` when it was not compared); `seconds_this_run` and `output` |
+| `<output>/verdicts.json` | Every combination's `verdicts.json` under `combinations`, by id (format `martian-evals-matrix-verdicts/1`): what a later run of the matrix compares with |
+| The printed table | One row per combination: its counts and pass rate with its 95% interval, with repeats its reliability, and with `--baseline` its label and gate. Under it, each combination's flaky cases, false refusals, errors and comparison, each line starting with the combination's id |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
+| The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file |
+
+- **The gate.** A combination's `gate` is `error` when a case has no verdict; with a baseline,
+  its comparison's gate; otherwise `failed` when a case failed and `passed` when none did. The
+  command exits `2` when a combination's gate is `error`, else `1` when one is `failed`, else `0`.
+- **Resume** works per combination, from its own folder. A combination's values are part of what
+  its verdicts depend on, so editing one mapped prompt's text grades that prompt's combinations
+  again and reuses the others' results.
+- **Repeats** apply to every combination, with each one's reliability and flaky cases.
+- **The baseline.** `--baseline DIR` compares each combination with the result of the same id in
+  `DIR/verdicts.json` and gates it on that comparison
+  ([comparing with a baseline](#comparing-with-a-baseline)). A combination `DIR` has no result
+  of, such as one with a value added since, is not compared and is gated on its own, as is every
+  combination when `DIR` is a run of the suite before it had a matrix. A suite without a matrix
+  whose baseline is a matrix's is gated on its own the same way.
+- **One run per combination.** Each combination is its own `Run` of the
+  [shared model](eval-model.md#the-sdk-suite-file), so the evals core's routes and their typed
+  responses, Compare and the run page read it as any run, and two combinations compare as two
+  runs of the same data.
+- **A suite without a matrix** runs, writes and records exactly what it did before: no
+  `matrix.json`, no folder per combination, a run named `evals-<n>` with no `provenance.matrix`,
+  and the fingerprint and digest it had.
+
 ## Pass rates and confidence intervals
 
 A pass rate from a few dozen cases is uncertain: 8 of 10 and 80 of 100 are both 80%. The pass
@@ -480,6 +564,9 @@ martian evals run evals.yaml --output results/pr --baseline results/main
 - **A changed suite.** A check added, removed or redefined, or a different number of attempts per
   case, changes what a verdict means, so the label measures that change as well as the system's.
   The comparison names such changes rather than refusing to compare.
+- **A matrix.** Each combination is compared with the same combination of the baseline, and
+  one the baseline has no result of is gated on its own
+  ([a matrix of prompts and models](#a-matrix-of-prompts-and-models)).
 
 ### OpenAI-compatible endpoints
 

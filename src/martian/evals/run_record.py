@@ -18,6 +18,10 @@
   each attempt's trace is recorded with that attempt's verdicts. The case result's trace is its
   representative attempt's (:func:`martian.evals.repeats.representative`). Its scores are the
   attempts combined, which no one trace carries, so they name no trace.
+- A suite with a matrix records one run per combination (:mod:`martian.evals.matrix`). Its
+  ``provenance`` holds the combination under ``matrix`` (:func:`martian.evals.matrix.provenance`),
+  and its code is the suite's name with the combination's id in brackets and its number among
+  that combination's runs, such as ``evals[model=large,prompt=terse]-2``.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -86,7 +90,9 @@ class RunRecorder:
     changes anything in its output folder, so a data folder that cannot be opened stops the run
     first."""
 
-    def __init__(self, home: Path, suite: Suite) -> None:
+    def __init__(self, home: Path, suite: Suite, *, matrix: dict[str, Any] | None = None) -> None:
+        """``matrix`` is the run's combination of the suite's matrix, as ``provenance.matrix``
+        holds it, for a suite with a matrix."""
         from martian.evals.local import LocalEditionError, open_stores
 
         self._lock: RunLock | None = None
@@ -98,6 +104,7 @@ class RunRecorder:
             raise ConfigError(f"could not open the local data folder {home}: {type(error).__name__}") from None
         self.home = home
         self.suite = suite
+        self.matrix = matrix
         self.run: Run | None = None
         self._ended = False
         self._scorers = {scorer.name: scorer for scorer in suite.scorers}
@@ -133,6 +140,8 @@ class RunRecorder:
         }
         if repeats is not None:
             provenance["repeats"] = repeats
+        if self.matrix is not None:
+            provenance["matrix"] = self.matrix
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,
@@ -161,13 +170,20 @@ class RunRecorder:
         return self.run
 
     async def _code(self) -> str:
-        """The suite's name and its number among the suite's runs in the project."""
+        """The suite's name and its number among the suite's runs in the project; for a
+        combination of its matrix, the name with the combination's id in brackets and its number
+        among that combination's runs."""
+        combination = None if self.matrix is None else self.matrix["id"]
+        name = self.suite.name if combination is None else f"{self.suite.name}[{combination}]"
         count, cursor = 0, None
         while True:
             page = await self.records.list_runs(SINGLE_USER, DEFAULT_PROJECT, limit=500, cursor=cursor)
-            count += sum(run.suite_id == self.suite.id for run in page.items)
+            count += sum(
+                run.suite_id == self.suite.id and (run.provenance.get("matrix") or {}).get("id") == combination
+                for run in page.items
+            )
             if (cursor := page.next_cursor) is None:
-                return f"{self.suite.name}-{count + 1}"
+                return f"{name}-{count + 1}"
 
     def graded(self, cases: list[GradedCase]) -> None:
         """Record a batch of graded cases, with their traces, and the run's counts so far."""

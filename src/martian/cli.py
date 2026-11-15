@@ -154,6 +154,8 @@ def _run_suite(
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
         raise typer.Exit(code=2) from None
+    if "combinations" in summary:
+        raise typer.Exit(code=_print_matrix(console, path, summary, baseline=baseline))
     groups = summary["groups"]
     plan = summary.get("repeats")
     notes = [f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}"] if groups else []
@@ -212,6 +214,8 @@ def _run_suite(
     if comparison is not None:
         for line in _comparison_lines(comparison):
             console.print(line, markup=False, highlight=False, soft_wrap=True)
+    elif baseline is not None:
+        console.print(_NO_RESULT.format(where=baseline, what="this suite"), markup=False, highlight=False)
     files = "results.jsonl, summary.json, junit.xml, verdicts.json" + (", comparison.json" if comparison else "")
     console.print(f"Results: {summary['output']}/{files}")
     recorded = summary["run"]
@@ -228,6 +232,98 @@ def _run_suite(
     if comparison is not None:
         raise typer.Exit(code=1 if comparison["gate"] == "failed" else 0)
     raise typer.Exit(code=1 if summary["failed"] else 0)
+
+
+_NO_RESULT = "Compared with {where}: it holds no result of {what}, so it is gated on its own"
+_LABELS = {"better": "better", "worse": "worse, beyond noise", "within_noise": "within noise"}
+
+
+def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: Path | None) -> int:
+    """What ``martian evals run`` prints for a suite with a matrix: one row per combination, then
+    what each combination has to say, and the exit code: 2 when a combination has a case without a
+    verdict, else 1 when one failed its gate (:func:`martian.evals.runner.combination_gate`)."""
+    from rich.table import Table
+
+    from martian.evals.local import data_folder
+    from martian.evals.runner import false_refusal_line
+    from martian.evals.stats import rate_text
+
+    compared = baseline is not None
+    combinations = found["combinations"]
+    first = combinations[0]["summary"]
+    plan = first.get("repeats")
+    names = [axis["name"] for axis in found["axes"]]
+    axes = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    notes = ["One run per combination; each row counts that run's cases"]
+    if groups := first["groups"]:
+        notes.append(f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}")
+    if plan:
+        notes.append("Reliability counts the cases that passed every attempt")
+    table = Table(
+        title=f"{path.name}: {len(combinations)} combinations of {axes}, {first['cases']} cases each"
+        + (f", {plan['attempts']} attempts each" if plan else ""),
+        caption="; ".join(notes),
+    )
+    columns = ["Combination", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
+    columns += ["Reliability (95% CI)"] if plan else []
+    columns += ["Against the baseline", "Gate"] if compared else []
+    for column in columns:
+        # A combination's id is its identity: wrapped, never cut short.
+        table.add_column(column, overflow="fold" if column == "Combination" else "ellipsis")
+    for entry in combinations:
+        summary, comparison = entry["summary"], entry["comparison"]
+        row = [entry["id"], str(summary["passed"]), str(summary["failed"]), str(summary["errors"])]
+        row.append(rate_text(summary["pass_rate"], summary["confidence_95"]))
+        if plan:
+            reliable = summary["reliability"]
+            row.append(rate_text(reliable["pass_rate"], reliable["confidence_95"]))
+        if compared:
+            if comparison is None:
+                row.append("no result")
+            else:
+                row.append(_LABELS[comparison["label"]] if comparison["label"] else "no case compared")
+            row.append(entry["gate"])
+        table.add_row(*row)
+    console.print(table)
+    unit = "attempt(s)" if plan else "case(s)"
+    for entry in combinations:
+        summary, comparison = entry["summary"], entry["comparison"]
+        lines = []
+        if flaky := (summary.get("reliability") or {}).get("flaky"):
+            shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
+            lines.append(f"Flaky cases, whose verdict changed between attempts: {shown}")
+        if (refusals := summary.get("false_refusals")) is not None:
+            lines.append(false_refusal_line(refusals))
+        lines += [f"{count} {unit}: {reason}" for reason, count in list(summary["target_errors"].items())[:5]]
+        for label, reasons in summary["check_errors"].items():
+            lines += [f"{count} {unit}, {label}: {reason}" for reason, count in list(reasons.items())[:5]]
+        if comparison is not None:
+            lines += _comparison_lines(comparison)
+        elif compared:
+            lines.append(_NO_RESULT.format(where=baseline, what="this combination"))
+        for line in lines:
+            console.print(f"{entry['id']}: {line}", markup=False, highlight=False, soft_wrap=True)
+    console.print(
+        f"Results: {found['output']}/<combination>/results.jsonl, summary.json, junit.xml, verdicts.json"
+        + (", comparison.json" if compared else "")
+        + f"; every combination in {found['output']}/matrix.json and verdicts.json",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    recorded = combinations[0]["run"]
+    ui = (
+        "martian ui" if data_folder() == Path(recorded["data_dir"]) else f"martian ui --data-dir {recorded['data_dir']}"
+    )
+    console.print(
+        f"Each combination is a run in the local Evals UI, named after the suite and the combination, such as "
+        f"{recorded['code']}: {ui}",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    gates = {entry["gate"] for entry in combinations}
+    return 2 if "error" in gates else 1 if "failed" in gates else 0
 
 
 def _comparison_lines(found: dict[str, Any]) -> list[str]:
