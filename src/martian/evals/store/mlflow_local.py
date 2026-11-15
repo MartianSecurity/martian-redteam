@@ -17,6 +17,14 @@ How the shared model sits in MLflow:
   spans, with the same rule for span ids. A trace's session and user are the trace metadata keys
   MLflow tracing records them in, ``mlflow.trace.session`` and ``mlflow.trace.user``, so traces an
   application records with MLflow tracing group into sessions without Martian's help.
+- A trace's request and response are kept as MLflow tracing keeps them: whole as the inputs and
+  outputs of the trace's root span, which the binding writes and does not read back as one of the
+  trace's spans, and as MLflow's previews in ``trace_info``, shortened to
+  :data:`TRACE_PREVIEW_LENGTH` characters. The trace's own spans are that root span's children in
+  MLflow. A search reads only the previews, so its text filter matches only them, and the trace's
+  metadata says which were shortened (``REQUEST_PREVIEW_TRUNCATED``). A trace an earlier release
+  wrote keeps its request and response whole in ``martian.request`` and ``martian.response``
+  metadata instead.
 - A trace belongs to the run its ``martian.run_id`` tag names. A trace without the tag that MLflow
   tracing recorded while a run's MLflow run was active names that MLflow run in its
   ``mlflow.sourceRun`` metadata, and belongs to that run; one recorded inside an MLflow run that is
@@ -30,10 +38,13 @@ How the shared model sits in MLflow:
   at most :data:`LONGEST_ARTIFACT_ROOT` characters long, so that folder fits MLflow's
   ``runs.artifact_uri``.
 
-Text search over traces is applied in this process after MLflow's own filters, so a search reads
-every trace those filters match. A search for a run's traces is two MLflow searches, one on the
-tag and one on ``mlflow.sourceRun``. A session search reads the same traces and groups the first
-of them in this process.
+A trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow has:
+run, session, user, tags, ids, states and time. This process checks each trace MLflow returns
+against the whole query, which applies the text filter and a value MLflow's filter syntax cannot
+quote; a search with such a filter reads at most :data:`TRACE_SCAN_LIMIT` traces a call and
+returns what matched among them, with a cursor that reads on. A search for a run's traces is two
+MLflow searches, one on the tag and one on ``mlflow.sourceRun`` for untagged traces, merged in
+order. A session search reads its first traces the same way and groups them in this process.
 """
 
 from __future__ import annotations
@@ -42,8 +53,10 @@ import asyncio
 import hashlib
 import json
 import re
+from collections import deque
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import unquote, urlsplit
@@ -68,14 +81,25 @@ from mlflow.genai.label_schemas import InputCategorical, InputNumeric, InputPass
 
 from martian.evals._mlflow import (
     RUN_ARTIFACT_URI_LENGTH,
+    TRACE_PREVIEW_LENGTH,
     ServerWorkspaceContext,
     SpansLocation,
     TraceTagKey,
     WorkspaceSqlAlchemyStore,
     WorkspaceStore,
+    hide_sql_parameters,
     load_dataset_records,
+    trace_page_token,
 )
-from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
+from martian.evals._sql import (
+    check_schema,
+    create_schema,
+    database_cause,
+    database_refusal,
+    is_postgres,
+    operation_name,
+    postgres_url,
+)
 from martian.evals.model import (
     SESSION_TRACE_LIMIT,
     Case,
@@ -100,7 +124,13 @@ from martian.evals.model import (
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import (
+    REQUEST_PREVIEW_TRUNCATED,
+    RESPONSE_PREVIEW_TRUNCATED,
+    StoreError,
+    StoreStatus,
+    check_session_search,
+)
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -117,12 +147,29 @@ LONGEST_ARTIFACT_ROOT = RUN_ARTIFACT_URI_LENGTH - len(f"/{'0' * 32}/artifacts")
 """The longest artifact root the store takes on Postgres, 157 characters: a run's artifact folder,
 the root and ``/<MLflow run id>/artifacts``, must fit in MLflow's ``runs.artifact_uri``. SQLite does
 not enforce the column's length, so it takes any root."""
+TRACE_SPAN_KEY = "martian.trace_span"
+"""The attribute that marks a trace's root span, the one the binding writes to hold the trace's
+request and response whole."""
+TRACE_SCAN_LIMIT = 1000
+"""The most traces one ``search_traces`` or ``search_sessions`` call reads from MLflow. A search
+MLflow filters whole reads only the traces it returns. One with a filter only this process can
+apply, free text above all, stops after this many and returns what matched among them, with a
+cursor that reads on: a page may then hold fewer traces than its limit, or none."""
+_SCAN_CHUNK = 500
+"""Traces read from MLflow at a time by a search this process filters."""
+_CURSOR_OFFSET = re.compile(r"[0-9]{1,18}")
+"""One MLflow search's offset in a cursor: at most 18 of the digits 0-9, so it fits SQL's 64-bit
+``OFFSET`` and ``int()`` reads it as written."""
+_CURSOR_REFUSED = "cursor is not a next_cursor this store returned"
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
 _MLFLOW_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
 _SAFE_FILTER_VALUE = re.compile(r"^[^'`\\]*$")
 _QUESTION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,59}$")
+_LENGTH_REFUSAL = re.compile(r"'[A-Za-z0-9_.\[\]]+' exceeds the maximum length of \d+ characters")
+"""MLflow's refusal of a value over a length limit, which names the field, not the value."""
+_ERROR_CODE = re.compile(r"[A-Z_]+")
 _RUN_STATUS = {
     "queued": "SCHEDULED",
     "running": "RUNNING",
@@ -197,6 +244,7 @@ class MlflowStore:
         # MLflow's stores are untyped.
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]
+        hide_sql_parameters(self._store)
         self._ready: set[str] = set()
 
     # --- plumbing ----------------------------------------------------------------------------
@@ -216,14 +264,20 @@ class MlflowStore:
         return name
 
     async def _call(self, principal: Principal, work: Callable[[], T]) -> T:
+        """Run ``work`` in the principal's workspace, on a thread. An error MLflow raises becomes a
+        ``StoreError`` naming the method ``work`` belongs to (:func:`_store_error`)."""
         workspace = await asyncio.to_thread(self._workspace, principal)
+        operation = operation_name(work)
 
         def run() -> T:
             with ServerWorkspaceContext(workspace):
                 try:
                     return work()
                 except MlflowException as error:
-                    raise _store_error(error) from None
+                    refused = _store_error(error, operation)
+                # Raised outside the except clause, so that MLflow's error, and the database's
+                # under it, which hold the values written, do not stay on it as its context.
+                raise refused
 
         return await asyncio.to_thread(run)
 
@@ -510,7 +564,12 @@ class MlflowStore:
             if trace.run_id is not None:
                 self._mlflow_run(experiment.experiment_id, trace.run_id)
             mlflow_id = _mlflow_trace_id(trace.id)
-            metadata = dict(trace.metadata)
+            request_preview, request_shortened = _preview(trace.request)
+            response_preview, response_shortened = _preview(trace.response)
+            # The binding says which previews it shortened; a trace read back and recorded again
+            # brings the keys of the previews it had.
+            shortened = {REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED}
+            metadata = {key: value for key, value in trace.metadata.items() if key not in shortened}
             for key, value in (
                 (SESSION_KEY, trace.session_id),
                 (USER_KEY, trace.user_id),
@@ -520,8 +579,8 @@ class MlflowStore:
                     None if trace.tokens is None else json.dumps({"total_tokens": trace.tokens}),
                 ),
                 ("mlflow.trace.cost", None if trace.cost is None else json.dumps({"total_cost": trace.cost})),
-                ("martian.request", trace.request),
-                ("martian.response", trace.response),
+                (REQUEST_PREVIEW_TRUNCATED, "true" if request_shortened else None),
+                (RESPONSE_PREVIEW_TRUNCATED, "true" if response_shortened else None),
             ):
                 if value is not None:
                     metadata[key] = value
@@ -542,14 +601,22 @@ class MlflowStore:
                 request_time=_ms(trace.request_time or datetime.now(UTC)) or 0,
                 state=TraceState(_TRACE_STATE[trace.state]),
                 execution_duration=None if trace.latency_ms is None else int(trace.latency_ms),
-                request_preview=trace.request[:1000],
-                response_preview=trace.response[:1000],
+                request_preview=request_preview,
+                response_preview=response_preview,
                 trace_metadata=metadata,
                 tags=tags,
             )
             self._store.start_trace(info)
-            if trace.spans:
-                self._store.log_spans(experiment.experiment_id, [_mlflow_span(mlflow_id, s) for s in trace.spans])
+            root = _root_span(mlflow_id, trace, info.request_time)
+            spans = [_mlflow_span(mlflow_id, s, info.request_time, root.span_id) for s in trace.spans]
+            self._store.log_spans(experiment.experiment_id, [root, *spans])
+            if info.state in (TraceState.IN_PROGRESS, TraceState.STATE_UNSPECIFIED):
+                # MLflow gives a trace in either state the state of its root span. Written again,
+                # with the times MLflow took from the spans, the trace keeps its own.
+                spanned = self._store.get_trace_info(mlflow_id)
+                self._store.start_trace(
+                    replace(info, request_time=spanned.request_time, execution_duration=spanned.execution_duration)
+                )
 
         await self._call(principal, work)
         for score in trace.scores:
@@ -579,55 +646,93 @@ class MlflowStore:
                     found[mlflow_run.info.run_id] = run_id
         return found
 
-    def _matching(self, query: TraceQuery) -> list[Trace]:
-        """Every trace the query matches, in its order."""
-        experiment = self._experiment(query.project_id)
+    def _searches(self, experiment_id: str, query: TraceQuery) -> list[_Search]:
+        """The MLflow searches a query is, each marked whole when MLflow applies the whole query to
+        it, so that every trace it returns matches."""
+        whole = not query.text
         filters = []
         for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id)):
-            if value is not None and _SAFE_FILTER_VALUE.match(value):
-                filters.append(f"metadata.`{key}` = '{value}'")
+            if value is not None:
+                if _SAFE_FILTER_VALUE.match(value):
+                    filters.append(f"metadata.`{key}` = '{value}'")
+                else:
+                    whole = False
         for key, value in query.tags.items():
             if _SAFE_FILTER_VALUE.match(key) and _SAFE_FILTER_VALUE.match(value):
                 filters.append(f"tags.`{key}` = '{value}'")
+            else:
+                whole = False
+        if query.trace_ids:
+            listed = ", ".join(f"'{_mlflow_trace_id(trace_id)}'" for trace_id in sorted(set(query.trace_ids)))
+            filters.append(f"trace.request_id IN ({listed})")
+        if query.states:
+            listed = ", ".join(f"'{_TRACE_STATE[state]}'" for state in sorted(set(query.states)))
+            filters.append(f"trace.status IN ({listed})")
         if query.since is not None:
-            filters.append(f"trace.timestamp_ms >= {_ms(query.since)}")
+            filters.append(f"trace.timestamp_ms >= {_ms_at_or_after(query.since)}")
         if query.until is not None:
-            filters.append(f"trace.timestamp_ms < {_ms(query.until)}")
-        searches = [filters]
-        if query.run_id is not None and _SAFE_FILTER_VALUE.match(query.run_id):
-            # A run's traces are the ones tagged with it and the ones MLflow tracing recorded in
-            # its MLflow run; MLflow's filters have no OR, so each is a search of its own.
-            searches = [[*filters, f"tags.`martian.run_id` = '{query.run_id}'"]]
-            if (mlflow_run := self._find_mlflow_run(experiment.experiment_id, query.run_id)) is not None:
-                searches.append([*filters, f"metadata.`{SOURCE_RUN_KEY}` = '{mlflow_run.info.run_id}'"])
-        infos: dict[str, TraceInfo] = {}
-        for search in searches:
-            token = None
-            while True:
-                page, token = self._store.search_traces(
-                    locations=[experiment.experiment_id],
-                    filter_string=" AND ".join(search) or None,
-                    max_results=500,
-                    page_token=token,
-                )
-                infos.update((info.trace_id, info) for info in page)
-                if not token:
-                    break
-        runs = self._run_ids(experiment.experiment_id, list(infos.values()))
-        found = [
-            t for t in (_trace(info, query.project_id, runs=runs) for info in infos.values()) if _matches(t, query)
-        ]
-        epoch = datetime.min.replace(tzinfo=UTC)
-        found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
-        return found
+            filters.append(f"trace.timestamp_ms < {_ms_at_or_after(query.until)}")
+        if query.run_id is None or not _SAFE_FILTER_VALUE.match(query.run_id):
+            return [_Search(" AND ".join(filters) or None, whole=whole and query.run_id is None)]
+        # A run's traces are the ones tagged with it and the untagged ones MLflow tracing recorded
+        # in its MLflow run. MLflow's filters have no OR, so each is a search of its own; the
+        # second also finds untagged traces MLflow linked to the MLflow run some other way, which
+        # are not the run's, so it is never whole.
+        tagged = _Search(" AND ".join([*filters, f"tags.`martian.run_id` = '{query.run_id}'"]), whole=whole)
+        mlflow_run = self._find_mlflow_run(experiment_id, query.run_id)
+        if mlflow_run is None:
+            return [tagged, _Search(None, whole=True, done=True)]
+        source = f"metadata.`{SOURCE_RUN_KEY}` = '{mlflow_run.info.run_id}'"
+        return [tagged, _Search(" AND ".join([*filters, source, "tags.`martian.run_id` IS NULL"]), whole=False)]
+
+    def _scan(self, query: TraceQuery, want: int) -> tuple[list[Trace], str | None]:
+        """Up to ``want`` traces the query matches, in its order from its cursor on, and the
+        cursor after them, or ``None`` when no trace follows. MLflow pages each search by offset,
+        and a cursor holds each search's offset, joined by ``.``."""
+        experiment_id = self._experiment(query.project_id).experiment_id
+        searches = self._searches(experiment_id, query)
+        for search, offset in zip(searches, _cursor_offsets(query.cursor, len(searches)), strict=True):
+            search.offset = offset
+        # MLflow breaks a tie in time by its trace id, ascending, either way.
+        order_by = ["timestamp_ms ASC" if query.oldest_first else "timestamp_ms DESC"]
+
+        def key(info: TraceInfo) -> tuple[int, str]:
+            return (info.request_time if query.oldest_first else -info.request_time, info.trace_id)
+
+        found: list[Trace] = []
+        runs: dict[str, str] = {}
+        read = 0
+        while len(found) < want and read < TRACE_SCAN_LIMIT:
+            for search in searches:
+                if not search.rows and not search.done:
+                    # Every trace of a whole search matches, so it reads no more than are wanted.
+                    chunk = want - len(found) if search.whole else max(want, _SCAN_CHUNK)
+                    page, token = self._store.search_traces(
+                        locations=[experiment_id],
+                        filter_string=search.filter,
+                        max_results=min(chunk, TRACE_SCAN_LIMIT - read),
+                        order_by=order_by,
+                        page_token=trace_page_token(search.offset),
+                    )
+                    search.rows.extend(page)
+                    search.done = token is None
+                    runs.update(self._run_ids(experiment_id, page))
+            ready = [search for search in searches if search.rows]
+            if not ready:
+                break
+            search = min(ready, key=lambda s: key(s.rows[0]))
+            trace = _trace(search.rows.popleft(), query.project_id, runs=runs)
+            search.offset += 1
+            read += 1
+            if _matches(trace, query):
+                found.append(trace)
+        more = any(search.rows or not search.done for search in searches)
+        return found, ".".join(str(search.offset) for search in searches) if more else None
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         def work() -> Page[Trace]:
-            found = self._matching(query)
-            start = int(query.cursor) if query.cursor and query.cursor.isdigit() else 0
-            chunk = found[start : start + query.limit]
-            more = start + query.limit < len(found)
-            return Page[Trace](items=chunk, next_cursor=str(start + query.limit) if more else None)
+            found, cursor = self._scan(query, query.limit)
+            return Page[Trace](items=found, next_cursor=cursor)
 
         return await self._call(principal, work)
 
@@ -637,8 +742,8 @@ class MlflowStore:
         check_session_search(query, max_traces)
 
         def work() -> SessionSearch:
-            found = self._matching(query)
-            return sessions_from_traces(found[:max_traces], has_more=len(found) > max_traces, limit=max_traces)
+            found, cursor = self._scan(query, max_traces)
+            return sessions_from_traces(found, has_more=cursor is not None, limit=max_traces)
 
         return await self._call(principal, work)
 
@@ -649,10 +754,17 @@ class MlflowStore:
                 info = self._trace_info(experiment.experiment_id, trace_id)
             except StoreError:
                 return None
-            # A trace recorded without spans has no spans to wait for, so a partial read is complete.
+            # The binding writes a trace's spans with it, so a partial read is complete.
             full: MlflowTrace = self._store.get_trace(info.trace_id, allow_partial=True)
             runs = self._run_ids(experiment.experiment_id, [info])
-            return _trace(info, project_id, spans=[_span(s) for s in full.data.spans], runs=runs)
+            root = next((s for s in full.data.spans if s.get_attribute(TRACE_SPAN_KEY) is True), None)
+            # MLflow orders spans root first, then by start time. Below the trace's root span the
+            # trace's own spans without a parent are no roots there, so they are put first again.
+            spans = sorted((_span(s) for s in full.data.spans if s is not root), key=lambda s: s.parent_id is not None)
+            found = _trace(info, project_id, spans=spans, runs=runs)
+            if root is None:  # written by an earlier release, or by MLflow tracing itself
+                return found
+            return found.model_copy(update={"request": root.inputs, "response": root.outputs})
 
         return await self._call(principal, work)
 
@@ -954,13 +1066,22 @@ def _quoted(value: str) -> str:
     return value
 
 
-def _store_error(error: MlflowException) -> StoreError:
+def _store_error(error: MlflowException, operation: str) -> StoreError:
+    """The store's error for MLflow's: the operation and what was refused, never a value. A
+    database error under MLflow's is reported by its table and its code (:func:`database_refusal`).
+    MLflow's own message is passed on only when it is its length refusal, which names the field
+    and the limit; its other messages, and the database's, can quote what was written."""
     code = str(getattr(error, "error_code", ""))
     if "DOES_NOT_EXIST" in code or "NOT_FOUND" in code:
-        return StoreError("not_found", "not found")
+        return StoreError("not_found", f"{operation}: not found")
     if "ALREADY_EXISTS" in code:
-        return StoreError("conflict", "already exists")
-    return StoreError("invalid", error.message[:300])
+        return StoreError("conflict", f"{operation}: already exists")
+    if (cause := database_cause(error)) is not None:
+        return database_refusal(operation, cause)
+    if _LENGTH_REFUSAL.fullmatch(error.message):
+        return StoreError("invalid", f"{operation}: {error.message}")
+    said = f" ({code})" if _ERROR_CODE.fullmatch(code) else ""
+    return StoreError("invalid", f"{operation}: MLflow refused the request{said}")
 
 
 def _mlflow_trace_id(trace_id: str) -> str:
@@ -1007,7 +1128,47 @@ def _case(record: Any) -> tuple[int, Case]:
     )
 
 
-def _mlflow_span(trace_id: str, span: Span) -> MlflowSpan:
+def _preview(text: str) -> tuple[str, bool]:
+    """MLflow's preview of a request or a response, and whether it is shortened: the text itself
+    when it fits MLflow's preview columns, otherwise its start and ``...``, as MLflow tracing
+    shortens its own previews (``mlflow.tracing.utils.truncation``)."""
+    if len(text) <= TRACE_PREVIEW_LENGTH:
+        return text, False
+    return text[: TRACE_PREVIEW_LENGTH - 3] + "...", True
+
+
+def _root_span(trace_id: str, trace: Trace, trace_start_ms: int) -> MlflowSpan:
+    """The trace's root span, as MLflow tracing records one: its inputs are the trace's request
+    and its outputs its response, whole, and its status the trace's state. It starts at the trace's
+    request time and ends after its latency, or stays open without one, so it moves neither."""
+    start = trace_start_ms * 1_000_000
+    code = {"ok": "STATUS_CODE_OK", "error": "STATUS_CODE_ERROR"}.get(trace.state, "STATUS_CODE_UNSET")
+    return MlflowSpan.from_dict(
+        {
+            "trace_id": trace_id,
+            "span_id": _hex(f"{trace_id}/root", 16),
+            "parent_span_id": None,
+            "name": trace.name,
+            "start_time_unix_nano": start,
+            "end_time_unix_nano": None if trace.latency_ms is None else start + int(trace.latency_ms * 1_000_000),
+            "status": {"code": code, "message": ""},
+            "attributes": {
+                "mlflow.traceRequestId": json.dumps(trace_id),
+                "mlflow.spanType": json.dumps("UNKNOWN"),
+                # Serialized as MLflow tracing serializes inputs and outputs.
+                "mlflow.spanInputs": json.dumps(trace.request, ensure_ascii=False),
+                "mlflow.spanOutputs": json.dumps(trace.response, ensure_ascii=False),
+                TRACE_SPAN_KEY: json.dumps(True),
+            },
+            "events": [],
+        }
+    )
+
+
+def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int, root_id: str) -> MlflowSpan:
+    """The span in MLflow. A span without a parent is a child of the trace's root span there, and
+    reads back without one (``martian.parent_id``)."""
+
     def span_id(value: str) -> str:
         return value if _MLFLOW_SPAN_ID.match(value) else _hex(value, 16)
 
@@ -1025,12 +1186,13 @@ def _mlflow_span(trace_id: str, span: Span) -> MlflowSpan:
         **{key: json.dumps(value, default=str) for key, value in span.attributes.items()},
     }
     code = {"ok": "STATUS_CODE_OK", "error": "STATUS_CODE_ERROR"}.get(span.status, "STATUS_CODE_UNSET")
-    start = int((span.start_ms or 0) * 1_000_000)
+    # MLflow starts a trace at its earliest span, so a span with no start time starts with its trace.
+    start = int((trace_start_ms if span.start_ms is None else span.start_ms) * 1_000_000)
     return MlflowSpan.from_dict(
         {
             "trace_id": trace_id,
             "span_id": span_id(span.id),
-            "parent_span_id": span_id(span.parent_id) if span.parent_id else None,
+            "parent_span_id": span_id(span.parent_id) if span.parent_id else root_id,
             "name": span.name,
             "start_time_unix_nano": start,
             "end_time_unix_nano": int(span.end_ms * 1_000_000) if span.end_ms is not None else start,
@@ -1146,6 +1308,37 @@ def trace_from_mlflow(trace: MlflowTrace, project_id: str) -> Trace:
     """A trace MLflow recorded, such as one of its evaluation harness's, in the model, with its
     spans and its feedback assessments as scores. Its ``id`` is MLflow's trace id."""
     return _trace(trace.info, project_id, spans=[_span(span) for span in trace.data.spans])
+
+
+@dataclass
+class _Search:
+    """One MLflow search of a trace query: its filter, whether MLflow applies the whole query in it,
+    how many of its traces were read, and the ones read from MLflow but not yet looked at."""
+
+    filter: str | None
+    whole: bool
+    done: bool = False
+    offset: int = 0
+    rows: deque[TraceInfo] = field(default_factory=deque)
+
+
+def _cursor_offsets(cursor: str | None, searches: int) -> list[int]:
+    """Where each of a query's MLflow searches resumes: none without a cursor, else the offsets a
+    ``next_cursor`` holds, one per search. Any other cursor is refused as ``invalid``."""
+    if not cursor:
+        return [0] * searches
+    parts = cursor.split(".")
+    if len(parts) != searches or not all(_CURSOR_OFFSET.fullmatch(part) for part in parts):
+        raise StoreError("invalid", _CURSOR_REFUSED)
+    return [int(part) for part in parts]
+
+
+def _ms_at_or_after(when: datetime) -> int:
+    """The first whole millisecond at or after ``when``. MLflow keeps a trace's time in whole
+    milliseconds, so a trace is at or after ``when`` exactly when its milliseconds are at or after
+    this, and before ``when`` exactly when they are before it."""
+    since_epoch = (when if when.tzinfo is not None else when.astimezone(UTC)) - datetime(1970, 1, 1, tzinfo=UTC)
+    return -(-since_epoch // timedelta(milliseconds=1))
 
 
 def _matches(trace: Trace, query: TraceQuery) -> bool:
