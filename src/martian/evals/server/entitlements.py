@@ -6,8 +6,9 @@ feature and the role to allow the action.
 
 A free feature has no key: every edition serves it, and a free feature never becomes paid. A key
 exists for a feature that some edition leaves out, and every key is enforced by
-:func:`martian.evals.server.require_entitlement` on the routes that serve it. ``docs/evals-core.md``
-lists the keys and the routes.
+:func:`martian.evals.server.require_entitlement` on the routes that serve it. A limit key is
+enforced where the work it counts is admitted (:mod:`martian.evals.server.launch`).
+``docs/evals-core.md`` lists the keys, the limits and the routes.
 """
 
 from __future__ import annotations
@@ -37,9 +38,20 @@ FEATURES: Mapping[str, str] = MappingProxyType(
 - ``monitoring``: the Monitoring page: scoring jobs and their scorecards across runs.
 """
 
-LIMITS: Mapping[str, str] = MappingProxyType({})
-"""Every limit key, with what it counts. No edition sets a limit yet; a limit key is added with the
-code that enforces it."""
+LIMITS: Mapping[str, str] = MappingProxyType(
+    {
+        "concurrent_runs": "eval runs",
+        "concurrent_scoring_jobs": "scoring jobs",
+    }
+)
+"""Every limit key, with the name of what it counts. A limit key is added with the code that
+enforces it; an edition that sets no value for a key has no limit there.
+
+- ``concurrent_runs``: how many of an organisation's runs may be queued or running at once. A
+  launch, a run again or a resume beyond it is refused with ``409``.
+- ``concurrent_scoring_jobs``: how many of an organisation's scoring jobs of completed runs may be
+  queued or running at once. A scoring request or a resume beyond it is refused with ``409``.
+"""
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,8 @@ class Entitlements:
             raise ValueError(f"unknown feature keys: {sorted(unknown_features)}")
         if unknown_limits := self.limits.keys() - LIMITS.keys():
             raise ValueError(f"unknown limit keys: {sorted(unknown_limits)}")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in self.limits.values()):
+            raise ValueError("a limit is a whole number of at least 1; leave a key out for no limit")
 
     def allows(self, feature: str) -> bool:
         return feature in self.features
@@ -64,9 +78,17 @@ class Entitlements:
 
 PAID = frozenset({"review_queues", "monitoring"})
 
-COMMUNITY = Entitlements(edition="community")
-ENTERPRISE = Entitlements(edition="enterprise", features=PAID)
+COMMUNITY = Entitlements(
+    edition="community",
+    limits=MappingProxyType({"concurrent_runs": 1, "concurrent_scoring_jobs": 1}),
+)
+ENTERPRISE = Entitlements(
+    edition="enterprise",
+    features=PAID,
+    limits=MappingProxyType({"concurrent_runs": 5, "concurrent_scoring_jobs": 5}),
+)
 ON_PREMISES = Entitlements(edition="on_premises", features=PAID)
+"""An on-premises installation sets no limit: its own workers bound what runs at once."""
 
 EDITIONS: Mapping[Edition, Entitlements] = MappingProxyType(
     {"community": COMMUNITY, "enterprise": ENTERPRISE, "on_premises": ON_PREMISES}

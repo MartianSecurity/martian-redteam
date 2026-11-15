@@ -61,6 +61,26 @@ treat `results.jsonl`.
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
+`martian evals import promptfoo` records a promptfoo results file in the same folder: each row's
+prompt, vars, output and assertion reasons. It does not copy the file's `config` section, which
+promptfoo writes with best-effort redaction of provider settings; the run keeps only the config's
+`description` and the file's path and hash. An assertion's grading `provider` given as an
+object, with settings that may hold a key, is kept as its id only. `martian evals convert
+promptfoo` writes suite files and calls nothing: a converted suite calls only the `--target`
+function it names, never the config's providers.
+
+`martian evals import mlflow` copies an MLflow tracking store into the same folder. It opens the
+store so that it cannot write it (SQLite read-only, Postgres with read-only transactions) and never
+migrates it, and reads the trace files the store names on this machine only. A Postgres URL's
+password is not printed or stored: the report and each copied run's provenance keep the URL
+without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
+See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
+
+`martian evals export` writes everything the data folder holds into the folder it names: every
+case's inputs and outputs, traces with their spans, scores, reasons and reviews, and run
+artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
+
 ## Telemetry
 
 The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
@@ -100,7 +120,8 @@ loads nothing from another host.
 ## The local edition has no login
 
 `martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
-that reaches its port can read and change all of its data. On a laptop it listens on 127.0.0.1
+that reaches its port can read and change all of its data, and send it traces over OpenTelemetry
+(`POST /v1/traces`) without credentials. On a laptop it listens on 127.0.0.1
 and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
 and a web page cannot reach it through a name that resolves to the laptop. The container image
 listens on the container's interfaces, keeps the same `Host` check and prints a warning when it
