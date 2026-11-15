@@ -138,6 +138,15 @@ EVERY_FIELD_FUNCTION = {
         {"type": "contains", "values": ["hello"]},
         {"type": "cost", "max_usd": 0.02, "max_tokens": 4000},
         {"type": "tool_trajectory", "name": "trajectory", "expectation": "expected_tool_calls", "source": "trace"},
+        {
+            "type": "python",
+            "name": "own_rule",
+            "file": "scorers.py",
+            "function": "score",
+            "min_score": 0.5,
+            "max_score": 1,
+            "security": True,
+        },
     ],
 }
 
@@ -145,6 +154,7 @@ EVERY_FIELD_FUNCTION = {
 def write(folder: Path, suite: dict | str, *, name: str = "evals.yaml", cases=CASES) -> Path:
     (folder / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases), encoding="utf-8")
     (folder / "agent.py").write_text("def answer(message):\n    return message\n", encoding="utf-8")
+    (folder / "scorers.py").write_text("def score(outputs):\n    return 1\n", encoding="utf-8")
     path = folder / name
     path.write_text(suite if isinstance(suite, str) else yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
     return path
@@ -191,14 +201,14 @@ def round_trip(path: Path) -> str:
 
 def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
-    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS)
+    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
     used = set().union(*CHECK_OPTIONS.values()) | COMMON_CHECK_FIELDS
     assert used == {info.alias or name for name, info in runner.CheckSpec.model_fields.items()}
 
 
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
-    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
+    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
     groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS + runner.TOOL_CHECKS
     assert set(groups) <= set(runner.CHECKS)
     assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
@@ -527,7 +537,18 @@ def judge(name="rubric_judge", model="openai:/judge-model", **fields):
         ({"policies": [Policy(scorer="keeps_secret", threshold=0.9)]}, "no pass policies"),
         ({"dataset_location": None}, "names no data file"),
         ({"scorers": [judge(version="3")]}, "scorers.0: a suite file does not pin a scorer version"),
-        ({"scorers": [ScorerVersion(name="custom", kind="code", type="python")]}, "a code scorer cannot be written"),
+        (
+            {"scorers": [judge(), ScorerVersion(name="custom", kind="code", type="python")]},
+            "invalid suite file: .*a python check needs a file and a function",
+        ),
+        (
+            {"scorers": [ScorerVersion(name="custom", kind="code", type="javascript")]},
+            "scorers.0: a suite file's code scorers are python",
+        ),
+        (
+            {"scorers": [ScorerVersion(name="custom", kind="human", type="python")]},
+            "a human scorer cannot be written",
+        ),
         ({"scorers": [judge(), judge(name="other", model="openai:/other")]}, "one judge"),
         ({"scorers": [judge(criteria={"guidelines": ["x"]})]}, "rubric judges keep their criteria under rubric only"),
         (
