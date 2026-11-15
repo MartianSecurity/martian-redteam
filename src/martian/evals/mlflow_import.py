@@ -554,12 +554,12 @@ class _Reader:
             errors=statuses.count("error"),
             skipped=statuses.count("skipped"),
         )
-        scorers: dict[str, ScorerVersion] = {}
+        scorers: dict[tuple[str, ScoreSource], ScorerVersion] = {}
         for case in cases:
             for score in case.scores:
                 judge = score.source == "llm_judge"
                 scorers.setdefault(
-                    score.scorer,
+                    (score.scorer, score.source),
                     ScorerVersion(
                         name=score.scorer,
                         kind=score.source,
@@ -738,6 +738,14 @@ def assessment_score(assessment: Any, *, run_id: str | None = None) -> Score:
         metadata=metadata,
         created_at=_from_ms(assessment.create_time_ms),
     )
+
+
+def assessment_key(score: Score) -> tuple[str, ScoreSource, str | None]:
+    """Which MLflow assessment a copied score is: its name, its source and the source's own
+    assessment id (``metadata["mlflow_source.assessment_id"]``). A trace may hold a code scorer's,
+    a judge's and a person's feedback of one name, so a name alone does not say which."""
+    found = score.metadata.get(f"{SOURCE}assessment_id")
+    return score.scorer, score.source, found if isinstance(found, str) else None
 
 
 def verdict(value: Value) -> bool | None:
@@ -989,9 +997,9 @@ async def _cases(
             scores += case.scores
             continue
         saved = await _trace(store, principal, case.trace, report)
-        stored = {score.scorer: score.store for score in saved.scores}
+        stored = {assessment_key(score): score.store for score in saved.scores}
         scores += [
-            score.model_copy(update={"trace_id": saved.id, "store": stored.get(score.scorer, StoreRef())})
+            score.model_copy(update={"trace_id": saved.id, "store": stored.get(assessment_key(score), StoreRef())})
             for score in case.scores
         ]
         results.append(case.result.model_copy(update={"store": StoreRef(trace_id=saved.id)}))
@@ -1104,6 +1112,7 @@ __all__ = [
     "Plan",
     "Skipped",
     "SourceCheck",
+    "assessment_key",
     "assessment_score",
     "check_source",
     "copy_mlflow_store",

@@ -109,8 +109,8 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
         "projects": 1,
         "datasets": 1,
         "traces": 11,
-        "scores": 13,
-        "annotations": 2,
+        "scores": 14,
+        "annotations": 3,
         "expectations": 7,
         "runs": 2,
         "case results": 6,
@@ -192,7 +192,7 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
     }
     assert items["Where is my order?"]["output"] == "Your order ships in two days."
     work = client.get(f"/v1/evals/{baseline['id']}/workbench").json()
-    scores = {(a["item_id"], a["name"]): a["value"] for a in work["assessments"]}
+    scores = {(a["item_id"], a["name"]): a["value"] for a in work["assessments"] if a["source"] == "CODE"}
     order = items["Where is my order?"]["id"]
     assert (scores[(order, "exact_match")], scores[(order, "answer_length")]) == (False, 29)
     # The case's trace is the evaluation's, with its spans and assessments.
@@ -222,6 +222,38 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
         ("experiment", "Default (0)", "no traces or runs"),
         ("run", "prompt-tuning (support-bot)", "no traces; MLflow keeps its 1 parameter and 1 metric"),
     }
+
+
+def test_same_named_assessments_of_different_sources_are_each_their_own_score(written, tmp_path):
+    # One case of the baseline run has a code scorer's, a judge's and a person's feedback, all
+    # named exact_match: the code's and the judge's are the case's scores, the person's an
+    # annotation, and each score links to its own assessment in the data folder's store.
+    home = tmp_path / "evals-home"
+    report = import_mlflow_store(str(written / "mlflow.db"), home)
+    (run,) = [run for run in report.runs if run.code == "mlflow-baseline"]
+    assert sorted((s.name, s.kind) for s in run.scorers) == [
+        ("answer_length", "code"),
+        ("exact_match", "code"),
+        ("exact_match", "llm_judge"),
+    ]
+    client = local_ui(home)
+    baseline = next(run for run in client.get("/v1/evals").json() if run["run_code"] == "mlflow-baseline")
+    items = {item["prompt"]: item["id"] for item in client.get(f"/v1/evals/{baseline['id']}").json()["items"]}
+    order = items["Where is my order?"]
+    scores = [
+        a
+        for a in client.get(f"/v1/evals/{baseline['id']}/workbench").json()["assessments"]
+        if (a["item_id"], a["name"]) == (order, "exact_match")
+    ]
+    assert sorted((a["source"], a["value"]) for a in scores) == [("CODE", False), ("LLM_JUDGE", "yes")]
+    trace = client.get(f"/v1/evals/{baseline['id']}/items/{order}/trace").json()
+    stored = {
+        a["assessment_id"]: (a["source"]["source_type"], a["feedback"]["value"])
+        for a in trace["annotations"]
+        if a["assessment_name"] == "exact_match"
+    }
+    assert sorted(stored.values()) == [("CODE", False), ("HUMAN", False), ("LLM_JUDGE", "yes")]
+    assert {stored[a["native_id"]] for a in scores} == {("CODE", False), ("LLM_JUDGE", "yes")}
 
 
 def test_copying_again_copies_only_what_is_new(written, tmp_path):
@@ -427,7 +459,7 @@ def test_the_command_reports_what_was_copied_and_what_was_not(written, source, t
         "    run mlflow-baseline (completed): 3 cases: 1 passed, 2 failed, 0 errors, 0 without a verdict",
         "    run mlflow-candidate (completed): 3 cases: 2 passed, 1 failed, 0 errors, 0 without a verdict",
         "  dataset support-questions: 3 cases, version 1",
-        "  New: 1 project, 1 dataset, 11 traces, 13 scores, 2 annotations, 7 expectations, 2 runs, 6 case results",
+        "  New: 1 project, 1 dataset, 11 traces, 14 scores, 3 annotations, 7 expectations, 2 runs, 6 case results",
     ]
     assert lines[7:11] == [
         "Not copied:",
