@@ -27,7 +27,7 @@ from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
 from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
-from mlflow.store.tracking.dbmodels.models import SqlRun
+from mlflow.store.tracking.dbmodels.models import SqlRun, SqlTraceInfo
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
@@ -65,6 +65,7 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
     ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
+    ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.request_preview"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
@@ -83,6 +84,11 @@ MLFLOW_PYTEST_PLUGIN = "mlflow.pytest.plugin"
 RUN_ARTIFACT_URI_LENGTH: int = SqlRun.artifact_uri.type.length
 """The length of MLflow's ``runs.artifact_uri`` column, which keeps a run's artifact location:
 200 characters. Postgres enforces it; SQLite does not."""
+
+TRACE_PREVIEW_LENGTH: int = SqlTraceInfo.request_preview.type.length
+"""The length of MLflow's ``trace_info.request_preview`` column, and of ``response_preview`` beside
+it, which keep a trace's previews: 1,000 characters, the length MLflow tracing shortens its own
+previews to. Postgres enforces it; SQLite does not."""
 
 
 def active_experiment_id() -> str | None:
@@ -164,6 +170,7 @@ __all__ = [
     "MLFLOW_PYTEST_PLUGIN",
     "PRIVATE_DEPENDENCIES",
     "RUN_ARTIFACT_URI_LENGTH",
+    "TRACE_PREVIEW_LENGTH",
     "TYPE_ONLY",
     "WORKSPACE_HEADER_NAME",
     "AssessmentMetadataKey",

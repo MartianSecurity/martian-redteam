@@ -11,6 +11,12 @@ as orders of magnitude and as the shape of each curve, not as a server benchmark
 beyond 100,000 traces in one project, or beyond the rates in the tables, is extrapolated and
 says so.
 
+The binding measured here kept a trace's request and response whole in MLflow's trace metadata.
+It now keeps them whole in the trace's root span instead, as MLflow tracing does
+([how traces sit in MLflow](evals-core.md#the-in-process-binding)), which lifts the 8,000-character
+limit Postgres put on them. That layout has not been load-tested; [trace size](#trace-size) says
+what is known.
+
 ## Setup
 
 | | |
@@ -125,8 +131,10 @@ and about a minute at 100,000, the Sessions page with it, and the searching proc
 | 100,000 | 1,674 MB | 16.7 KB |
 
 At 100,000 traces: `spans` 926 MB, `trace_request_metadata` 346 MB, `trace_info` 274 MB,
-`trace_tags` 126 MB, each with its indexes and TOAST. The request and the response are each kept
-twice, as MLflow's previews and whole in trace metadata.
+`trace_tags` 126 MB, each with its indexes and TOAST. The request and the response were each kept
+twice, as MLflow's previews and whole in trace metadata. The binding now keeps them whole in the
+trace's root span, so that share moves from `trace_request_metadata` to `spans`, and every trace
+has one span more than it was given.
 
 ### Trace size
 
@@ -141,13 +149,15 @@ those of the request, the response and each span's input and output.
 | 50 | 1,000 | 79 | 128 | 19 | 98 KB |
 | 5 | 4,000 | 54 | 116 | 15 | 23 KB |
 | 5 | 7,900 | 86 | 148 | 17 | 37 KB |
-| 5 | 8,001 | refused | | | |
 
 Postgres compresses rows over about 2 KB, every span here among them, and the synthetic text
 comes from a small vocabulary, so it compresses better than real traffic would. Read every
 database size in this report as a lower bound, most of all for the larger fields.
-Of the 8,001-character traces, 195 of 200 were refused; the other 5 ended in a space, which
-Postgres drops.
+
+In the measured layout a request or a response over 8,000 characters was refused on Postgres.
+The binding now stores a trace whose request and response are 100,000 characters each on SQLite
+and Postgres (`tests/evals/test_store_mlflow.py`), and keeps only MLflow's 1,000-character
+previews of them in `trace_info`. Its write and read times and its size are not measured here.
 
 ## What limits what
 
@@ -169,10 +179,14 @@ Postgres drops.
 - **Writes are limited by Python CPU in the writing process**: about 20 to 25 traces a second
   per process, 50 a second sustained through four processes (p99 under 0.35 s) and 72 to 79 at
   saturation. Postgres spent 6 to 9 ms of CPU per 5-span trace.
-- **A request or a response over 8,000 characters is refused on Postgres** as `invalid`, because
-  the binding keeps them whole in MLflow's trace metadata (`varchar(8000)`). Nothing of the trace
-  is kept. The refusal names `record_trace` and MLflow's `trace_request_metadata` table, never
-  the request ([what store errors contain](security-and-data.md#what-store-errors-contain)).
+- **A request or a response has no length limit of its own.** The binding keeps them whole in
+  the trace's root span and shortens only MLflow's previews to 1,000 characters. A search returns
+  the previews, so its text filter does not see past them. MLflow's own `trace.text` filter
+  matches span content, where the whole text now is, but scans it without an index; the binding
+  does not use it, and it is not measured here. A value of the trace's own metadata
+  is still refused over 8,000 characters on Postgres (`varchar(8000)`), as `invalid`, naming
+  `record_trace` and MLflow's `trace_request_metadata` table, never the value
+  ([what store errors contain](security-and-data.md#what-store-errors-contain)).
 - **Storage is linear**: about 17 KB per trace of 5 spans and 1,000-character fields, more than
   half of it spans; about 1.7 GB per 100,000 traces. The store interface has no way to delete old
   traces.
@@ -194,7 +208,8 @@ For monitoring production traffic (MorningHQ/martian-notes#196) on this store as
 - **A sampler that reads new traces by time** (`since`) is not limited by project size in the
   measured range: a page of 50 of the newest 1,000 takes 11 to 39 ms, reading 1,000 traces about
   what the Sessions page takes, and reading one trace with its spans 11 to 80 ms.
-- **Requests and responses of at most 8,000 characters each** on Postgres.
+- **Requests and responses of any length**, at a write time and size per trace that this report
+  has measured only up to 7,900 characters.
 - **Plan for retention**: at 50 traces a second the store grows by about 4.3 million traces and
   about 70 GB a day (extrapolated from 17 KB a trace).
 
