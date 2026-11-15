@@ -15,10 +15,15 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   Its scores sit beside the run's own, and each scored value is also kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
+- Each finished case is checkpointed before the next one starts: a run's case result and its score
+  in one transaction (``put_results`` with ``scores``), and a scoring job's scores of one case in
+  one transaction. Work that runs again skips the cases already finished, so their target or
+  judge is not called again, and counts them as they were recorded.
 - Every move from one state to the next names the state it expects, so two workers never both take
   the same work. Work that fails part way is marked ``failed`` with the reason, never left running.
-  Work whose worker stopped part way is queued again by the queue's next worker (:func:`take_over`),
-  or failed when there is no queue to take it again (:func:`fail_unfinished`).
+  Work whose worker stopped part way is queued again by the queue's next worker, which resumes it
+  after its finished cases (:func:`take_over`), or failed when there is no queue to take it again
+  (:func:`fail_unfinished`).
 """
 
 from __future__ import annotations
@@ -116,8 +121,10 @@ async def execute_run(
             await store.finish_run(principal, run.project_id, run.id, state="cancelled", counts=run.counts)
         return
     try:
+        # A run taken again after its worker stopped keeps the time it first started.
+        started = run.started_at or _now()
         run = await records.update_run(
-            principal, run.model_copy(update={"state": "running", "started_at": _now()}), expected_state="queued"
+            principal, run.model_copy(update={"state": "running", "started_at": started}), expected_state="queued"
         )
     except StoreError:
         return  # another worker took it, or it was cancelled meanwhile
@@ -190,7 +197,12 @@ async def _run_cases(
         await _fail_run(records, principal, run, "Dataset identity changed; submit a new eval run")
         return
     cases, truncated = await active_cases(store, principal, dataset.id, limit=run.max_cases)
+    # The cases a worker that stopped part way already finished: their results are kept, their
+    # target is not called again, and they count as they are.
+    finished = await finished_cases(records, principal, run, cases)
     counts = Counts(cases=len(cases))
+    for result in finished.values():
+        counts = _counted(counts, result.status)
     native = await store.start_run(principal, run.model_copy(update={"counts": counts, "truncated": truncated}))
     stored = StoreRef(
         experiment_id=native.store.experiment_id, run_id=native.store.run_id, dataset_id=run.store.dataset_id
@@ -202,20 +214,23 @@ async def _run_cases(
         return
     run = moved
     for position, case in enumerate(cases):
+        if case.id in finished:
+            continue
         current = await records.get_run(principal, run.project_id, run.id)
         if current is None or current.state != "running":
             return
         if current.cancel_requested_at is not None:
             stopped = [
-                _skipped(run, offset, pending, STOPPED) for offset, pending in enumerate(cases[position:], position)
+                _skipped(run, offset, pending, STOPPED)
+                for offset, pending in enumerate(cases[position:], position)
+                if pending.id not in finished
             ]
             await records.put_results(principal, run.project_id, stopped)
             counts = counts.model_copy(update={"skipped": counts.skipped + len(stopped)})
             break
         result, score = await _run_case(store, principal, run, position, case, call, timeout_seconds)
-        await records.put_results(principal, run.project_id, [result])
-        if score is not None:
-            await records.put_scores(principal, run.project_id, [score])
+        # The case's checkpoint: its result and its score in one transaction, before the next case.
+        await records.put_results(principal, run.project_id, [result], scores=[score] if score else [])
         counts = _counted(counts, result.status)
         if await _advance_run(records, principal, run, {"counts": counts}) is None:
             return
@@ -225,6 +240,17 @@ async def _run_cases(
     state: RunState = "cancelled" if current.cancel_requested_at is not None else "completed"
     await store.finish_run(principal, run.project_id, run.id, state=state, counts=counts)
     await _move_run(records, principal, current, {"state": state, "counts": counts, "finished_at": _now()}, "running")
+
+
+async def finished_cases(
+    records: RecordStore, principal: Principal, run: Run, cases: list[Case]
+) -> dict[str, CaseResult]:
+    """The results already recorded for ``run``'s ``cases``, by case id: the cases a worker that
+    stopped part way finished, each recorded with its scores as it completed. A new run has none.
+    The run reads the dataset version it was admitted with, so its cases are the ones those
+    results are of."""
+    ids = {case.id for case in cases}
+    return {result.case_id: result for result in await all_results(records, principal, run) if result.case_id in ids}
 
 
 def _counted(counts: Counts, status: str) -> Counts:
@@ -473,7 +499,16 @@ async def _score_results(
     results = await all_results(records, principal, run) if run else []
     if run is None or run.state != "completed" or len(results) > MAX_SCORED_RESULTS:
         raise ValueError("Saved run must be complete and bounded")
-    moved = await _move_job(records, principal, project, job, {"total": len(results) * len(job.scorers)}, "running")
+    # The cases a worker that stopped part way already scored: each case's scores of the job are
+    # recorded in one transaction, so a case has all of them or none. They are not scored again.
+    earlier = [
+        score for score in await records.list_scores(principal, project, run.id) if score.scoring_job_id == job.id
+    ]
+    scored = {score.case_id for score in earlier}
+    succeeded = sum(s.value is not None and not s.error for s in earlier)
+    errors = sum(s.value is None or bool(s.error) for s in earlier)
+    progress = {"total": len(results) * len(job.scorers), "succeeded": succeeded, "errors": errors}
+    moved = await _move_job(records, principal, project, job, progress, "running")
     if moved is None:
         return
     job = moved
@@ -483,8 +518,9 @@ async def _score_results(
         if scorer.kind == "llm_judge":
             by_model.setdefault((scorer.model, scorer.endpoint), []).append(scorer)
     definition = job_config(job)["definition_digest"]
-    succeeded = errors = 0
     for result in results:
+        if result.case_id in scored:
+            continue
         current = await _job(records, principal, project, job.run_id, job.id)
         if current is None or current.state != "running":
             return
@@ -566,7 +602,7 @@ async def _score_results(
                 logged = await store.log_score(principal, project, result.store.trace_id, score)
                 score = score.model_copy(update={"store": logged.store})
             scores.append(score)
-        await records.put_scores(principal, project, scores)
+        await records.put_scores(principal, project, scores)  # the case's checkpoint, in one transaction
         succeeded += sum(s.value is not None and not s.error for s in scores)
         errors += sum(s.value is None or bool(s.error) for s in scores)
         if await _advance_job(records, principal, project, job, {"succeeded": succeeded, "errors": errors}) is None:
@@ -594,8 +630,9 @@ async def _score_results(
 async def take_over(records: RecordStore, work: Work) -> None:
     """Queue ``work`` again when the worker that was running it stopped before it finished, such as
     one whose process died: a run or scoring job still ``running`` becomes ``queued``, so the
-    worker taking it now runs it from the start. A run's cases are called again and replace the
-    results its first worker recorded (case-level checkpoints are MorningHQ/martian-notes#141).
+    worker taking it now runs it again. It resumes after the cases already finished: a run's cases
+    that have a result are not called again, and a scoring job's cases that have its scores are not
+    scored again. The case that was in flight has neither, so it runs again.
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
     A finished or queued record is left alone."""

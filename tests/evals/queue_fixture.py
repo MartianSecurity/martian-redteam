@@ -9,9 +9,10 @@ app that takes the queued work, or ``queue``, an API process that only queues it
 ``in-process``, the work as tasks of the serving process, or ``processes``, each piece in a
 process of its own (:func:`services` is that process's setup).
 
-The agent writes ``called-<case id>-<pid>`` in ``FOLDER`` when it is called, and answers as the
-write route tests' agent does once ``FOLDER/release`` exists, so a test can stop the server while
-a case is in flight.
+The agent writes ``called-<case id>-<pid>`` in ``FOLDER`` each time it is called, so a test counts
+the calls of each case, and answers as the write route tests' agent does once ``FOLDER/release``
+or ``FOLDER/release-<case id>`` exists, so a test can stop the server while a given case is in
+flight.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -43,11 +45,12 @@ def store_in(folder: Path) -> MlflowStore:
 
 
 def waiting_agent(folder: Path) -> TargetCall:
-    """The write route tests' agent, which answers each case only once ``folder/release`` exists."""
+    """The write route tests' agent, which answers each case only once ``folder/release`` or
+    ``folder/release-<case id>`` exists. Each call leaves a file of its own."""
 
     async def call(case: Case) -> str:
-        (folder / f"called-{case.id}-{os.getpid()}").touch()
-        while not (folder / "release").exists():
+        (folder / f"called-{case.id}-{os.getpid()}-{uuid.uuid4().hex}").touch()
+        while not ((folder / "release").exists() or (folder / f"release-{case.id}").exists()):
             await asyncio.sleep(0.05)
         return await agent(case)
 

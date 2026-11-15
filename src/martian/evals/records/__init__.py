@@ -86,8 +86,13 @@ class RecordStore(Protocol):
         ...
 
     # Case results and the scores the core gates on.
-    async def put_results(self, principal: Principal, project_id: str, results: list[CaseResult]) -> None:
-        """Store case results of existing runs, replacing earlier ones for the same case."""
+    async def put_results(
+        self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
+    ) -> None:
+        """Store case results of existing runs, replacing earlier ones for the same case, and
+        ``scores`` of those cases as :meth:`put_scores` stores them, all in one transaction: a case
+        has its result and its scores, or neither. A worker records each finished case so, and a
+        run it takes again resumes after the cases that have a result."""
         ...
 
     async def list_results(

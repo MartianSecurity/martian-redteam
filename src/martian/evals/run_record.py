@@ -225,10 +225,8 @@ class RunRecorder:
             self._statuses[result.case_id] = result.status
         if traced:
             await self.store.link_traces(SINGLE_USER, DEFAULT_PROJECT, self.run.id, traced)
-        if results:
-            await self.records.put_results(SINGLE_USER, DEFAULT_PROJECT, results)
-        if scores:
-            await self.records.put_scores(SINGLE_USER, DEFAULT_PROJECT, scores)
+        if results:  # each result with its scores, in one transaction
+            await self.records.put_results(SINGLE_USER, DEFAULT_PROJECT, results, scores=scores)
         self.run = await self.records.update_run(
             SINGLE_USER, self.run.model_copy(update={"counts": self._counts()}), expected_state="running"
         )

@@ -379,9 +379,11 @@ then calls `Worker.submit(Work(...))`:
 record before each case, so a cancel request reaches a worker in another process too, and move
 each record on only from the state it expects, so two workers never both take the same work. Work
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
-marked `failed` with its reason, never left running. Work whose worker stopped part way is queued
-again by the queue's next worker (`take_over`, [the durable queue](#the-durable-queue)), or marked
-`failed` where no queue takes it again (`fail_unfinished`).
+marked `failed` with its reason, never left running. Each finished case is checkpointed before the
+next one starts. Work whose worker stopped part way is queued again by the queue's next worker,
+which resumes it after the cases already finished (`take_over`, [checkpoints and
+resuming](#checkpoints-and-resuming)), or marked `failed` where no queue takes it again
+(`fail_unfinished`).
 
 A target is called once per case and returns its output ([targets](#targets)); a judge is an
 async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
@@ -576,12 +578,12 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   UTC: the hosts of workers that share a queue need clocks within a small part of the lease.
 - **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
   claimable again once the lease runs out. The next worker takes it again: a run or scoring job
-  still `running` is queued again and runs from the start (`take_over`). A run's cases are called
-  again and replace the results the first worker recorded; the traces the first worker recorded
-  stay in the store. A worker that is stopped (`stop()`, or a cancelled `serve()`) stops its work
-  and gives it back at once, without counting the attempt. After `max_attempts` claims the work is
-  `failed` with "The worker stopped before this work finished, too many times; it is not taken
-  again". Work that ends `failed` stays failed: nothing retries a target or a judge.
+  still `running` is queued again and resumes after the cases already finished (`take_over`,
+  [checkpoints](#checkpoints-and-resuming)). A worker that is stopped (`stop()`, or a cancelled
+  `serve()`) stops its work and gives it back at once, without counting the attempt; the next
+  worker resumes it the same way. After `max_attempts` claims the work is `failed` with "The
+  worker stopped before this work finished, too many times; it is not taken again". Work that
+  ends `failed` stays failed: nothing retries a target or a judge.
 - **Runs recorded outside the queue.** A process that records a run itself, as `martian evals run`
   does in the local edition, holds the run in the queue with a `recording` claim that it renews
   (`SqlWorkQueue.hold`). No worker runs one: once its lease runs out, the process recording it is
@@ -612,21 +614,63 @@ lease runs out, and given back without counting it. It takes over work whose wor
 work after its last attempt, gives back the work of a worker that is stopped, stops the work of a
 worker whose claim another took, cancels at once a run nothing holds, interrupts a recording whose
 process stopped renewing it, fails the run or scoring job of a submit that fails, and follows a
-run and a scoring job through their events. Then
-it serves the core in a process of its own (`tests/evals/queue_fixture.py`), launches a run, and
-stops that process with `SIGKILL` while the run is queued, and again while its first case is in
-flight: started again, the process takes the run once the lease runs out and completes it, and a
-run's own process has ended with the worker that started it. It does so with the work in the
-serving process and in a process per run on SQLite, and in the serving process on Postgres.
+run and a scoring job through their events. Then it serves the core in a process of its own
+(`tests/evals/queue_fixture.py`), launches a run, and stops that process with `SIGKILL` while the
+run is queued, and again once its first case has finished and its second is in flight; a newer
+version of the dataset is published meanwhile. Started again, the process takes the run once the
+lease runs out and completes it on the version it was admitted with, calling the target once more
+for the second case only, and a run's own process has ended with the worker that started it. It
+does so with the work in the serving process and in a process per run, on SQLite and on Postgres.
 
 What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#141 | Case-level checkpoints: work taken again resumes after the cases already done |
 | MorningHQ/martian-notes#144 | Limits, budgets and cancel |
 | MorningHQ/martian-notes#145 | More than one run at a time |
 | MorningHQ/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process (the backend part of MorningHQ/martian-notes#139) |
+
+#### Checkpoints and resuming
+
+Each finished case is checkpointed in the record store before the next case starts, so work taken
+again continues where it stopped instead of starting over:
+
+- **A run.** A case's result and its exact-match score are written in one transaction
+  (`RecordStore.put_results` with `scores`), so a case has both or neither. A run taken again reads
+  the results already recorded for it (`finished_cases`): those cases keep their result, their
+  target is not called again, and they count as recorded, whatever their status, an error or a
+  timeout included, since nothing retries a target. The worker calls the target only for the cases
+  with no result, and the run keeps the time it first started.
+- **A scoring job.** Its scores of one case, every scorer of the job, are written in one
+  transaction. A job taken again leaves out the cases that have its scores (its `scoring_job_id`),
+  so their judges are not asked again, and counts their scores into `succeeded` and `errors`.
+- **The same versions.** A run taken again reads the dataset version it was admitted with
+  (`store.dataset_id`, checked against `dataset_digest`), never a newer one, so the cases it skips
+  and the cases it calls are of one version. A scoring job keeps the scorers, the suite version
+  and the judge models it was recorded with, so a suite saved again meanwhile changes neither what
+  the job scores the rest of the run with nor which cases it reuses. Both are the record's own
+  pins, which nothing changes after admission. A suite file's resume into an output folder, which
+  reuses a verdict only while its fingerprint is unchanged
+  ([`docs/evals.md`](evals.md#run-a-suite-file-locally)), is separate and unchanged.
+- **The case in flight.** A case whose worker stopped during it has no result, so it runs again
+  and its target is called a second time; for a scoring job, its judges are asked again. The
+  worker records a case's trace after the target answers and before its result, so a worker that
+  stopped during the call left no trace of it. One that stopped in between leaves that trace in
+  the store, tagged with the run, with no result naming it; the result names the trace of the call
+  that finished. A scoring job's case scored part way can likewise leave the job's earlier
+  assessments of that case on its trace beside the new ones; the job's scores in the record store
+  hold one per scorer.
+- **The unit is the case.** The worker calls each case's target once, so a case's result is its
+  checkpoint.
+
+`tests/evals/record_contract.py` checks that a case's result and its scores are stored together or
+not at all. `tests/evals/test_worker_queue.py` takes over a run whose first worker recorded one
+case and calls the target only for the others, and stops a worker while its judge grades a scoring
+job's second case: the next worker judges that case again and not the first. Its restart test, in
+[the durable queue](#the-durable-queue), counts the target calls of each case. `martian ui`'s kill
+test does the same for a run in a process of its own ([runs whose process
+stopped](#runs-whose-process-stopped)), with newer versions of the dataset and the suite saved
+while the run is in flight.
 
 ### The worker's judge
 
@@ -929,6 +973,10 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   filter.
 - Updates that move a run or scoring job on name the state they expect, and draft and view edits
   name the revision they expect. A review chain never forks: a review is replaced at most once.
+- `put_results(..., scores=[...])` stores case results and their scores in one transaction, so a
+  case has both or neither: the worker's checkpoint of each finished case
+  ([checkpoints and resuming](#checkpoints-and-resuming)), and how `martian evals run` records each
+  batch.
 - A suite version records who saved it and when (`Suite.created_by`, `created_at`). A draft can be
   renamed or described (`edit_draft`) and removed with its cases (`delete_draft`).
 - A saved view (`SavedView` in `martian.evals.records`) is UI state, not evaluation content, so it
@@ -1227,12 +1275,14 @@ is held by what works on it: a claim on the run's entry in the queue, whose leas
 
 - **A run whose `martian ui` stopped**, however it stopped, a crash, a kill or a power cut
   included, stays in the queue, and its run's process ends with it. The next `martian ui` on the
-  folder takes the run again once its lease runs out and runs it from the start in a new process:
-  its cases are called again and replace the results recorded before. A `martian ui` stopped with
-  Ctrl+C gives its work back at once. A scoring job is taken again the same way. A run's suite
-  scoring job is queued once the run completes, or cancelled when it did not ("The run did not
-  complete, so its suite did not score it"), before the run leaves the queue, so a stop in between
-  does neither twice nor never.
+  folder takes the run again once its lease runs out and resumes it in a new process, on the
+  dataset version and suite version it was admitted with: the cases that have a result are not
+  called again, and the case that was in flight is ([checkpoints and
+  resuming](#checkpoints-and-resuming)). A `martian ui` stopped with Ctrl+C gives its work back at
+  once. A scoring job is taken again the same way and resumes after the cases it scored. A run's
+  suite scoring job is queued once the run completes, or cancelled when it did not ("The run did
+  not complete, so its suite did not score it"), before the run leaves the queue, so a stop in
+  between does neither twice nor never.
 - **A run whose `martian evals run` stopped** cannot be taken again: the run is that process's.
   Once its lease runs out, `martian ui`'s worker finishes it, `failed`, or `cancelled` when a stop
   had been asked, with the `error` "Interrupted: the process working on this run stopped before
@@ -1248,19 +1298,19 @@ is held by what works on it: a claim on the run's entry in the queue, whose leas
 
 What this does not do:
 
-- A run taken again runs from the start; resuming after the cases already done is
-  MorningHQ/martian-notes#141. The traces the first attempt recorded stay in the store.
 - Two servers on one data folder never run one piece of work at once, but each takes work as it
   comes. Keep one `martian ui` per data folder.
 - A lease is measured on the machine's clock. A data folder shared by machines whose clocks
   disagree by more than a few seconds is not supported, nor, as for SQLite, one on a network share.
 
-`tests/evals/test_local_runs.py` kills a `martian ui` while its run waits on its target, and checks
-that the run's process ended with it and that the restarted server takes the run again once its
-lease runs out, completes it and scores it with its suite; that a run another live process holds
-is left alone and counts against launches, and that cancelling it once that process is killed and
-its lease ran out finishes it; that runs not in the queue are finished at start; and that
-`martian evals run` holds its run while it records it.
+`tests/evals/test_local_runs.py` kills a `martian ui` while its run waits on its target for the
+second case, after newer versions of the dataset and the suite were saved, and checks that the
+run's process ended with it and that the restarted server takes the run again once its lease runs
+out, calls the target again for the second case only, completes the run on its own dataset version
+and scores it with its own suite version; that a run another live process holds is left alone and
+counts against launches, and that cancelling it once that process is killed and its lease ran out
+finishes it; that runs not in the queue are finished at start; and that `martian evals run` holds
+its run while it records it.
 
 ### The local edition in a container
 
