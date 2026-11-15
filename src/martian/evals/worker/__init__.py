@@ -58,18 +58,25 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Work:
-    """One piece of work: a queued run (``kind="run"``) or a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``). The record store holds everything else about it."""
+    """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
+    (``kind="scoring"``, with ``job_id``), or one pass of a monitor over its project's new traces
+    (``kind="monitor"``, with ``monitor_id`` and no run). The record store holds everything else
+    about it."""
 
-    kind: Literal["run", "scoring"]
+    kind: Literal["run", "scoring", "monitor"]
     principal: Principal
     project_id: str
-    run_id: str
+    run_id: str = ""
     job_id: str | None = None
+    monitor_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.kind == "scoring") != (self.job_id is not None):
             raise ValueError("scoring work names its job, and only scoring work does")
+        if (self.kind == "monitor") != (self.monitor_id is not None):
+            raise ValueError("monitor work names its monitor, and only monitor work does")
+        if (self.kind == "monitor") == bool(self.run_id):
+            raise ValueError("run and scoring work name their run, and monitor work names none")
 
 
 TargetCall = Callable[[Case], Awaitable[Any]]
@@ -241,9 +248,23 @@ class InterruptedRuns(Protocol):
         ...
 
 
+@runtime_checkable
+class RunsMonitors(Protocol):
+    """What a worker adds when it runs monitors: it takes a monitor's work (``kind="monitor"``)
+    again every ``monitor_seconds`` for as long as the monitor exists, as a :class:`QueueWorker`
+    does with the monitor's row in its queue. The routes that create and resume monitors need it;
+    a worker without it runs one pass per ``submit``."""
+
+    @property
+    def monitor_seconds(self) -> float:
+        """How long after a monitor's pass ends its next pass is due."""
+        ...
+
+
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
+from martian.evals.worker.monitor import execute_monitor, sampled  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
 
@@ -261,6 +282,7 @@ __all__ = [
     "ProcessWorker",
     "QueueWorker",
     "Runner",
+    "RunsMonitors",
     "TargetCall",
     "Verdict",
     "Work",
@@ -268,10 +290,12 @@ __all__ = [
     "WorkerServices",
     "agents_judge",
     "dump_work",
+    "execute_monitor",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",
     "load_work",
+    "sampled",
     "sdk_judge",
     "take_over",
 ]

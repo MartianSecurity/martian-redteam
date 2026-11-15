@@ -54,12 +54,14 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
-from martian.evals.records import SavedView
+from martian.evals.records import Monitor, MonitoredTrace, MonitorProgress, SavedView
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
     dataset_draft_cases,
     dataset_drafts,
+    monitored_traces,
+    monitors,
     reviews,
     runs,
     saved_views,
@@ -983,3 +985,243 @@ class SqlRecordStore:
 
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
+
+    # --- monitors ------------------------------------------------------------------------------
+
+    async def create_monitor(self, principal: Principal, project_id: str, monitor: Monitor) -> Monitor:
+        if monitor.project_id != project_id:
+            raise StoreError("invalid", "the monitor belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[Monitor, bool]:
+            if stored := self._one(connection, monitors, space, project_id, id=monitor.id):
+                return Monitor.model_validate(stored), False
+            now = _now()
+            saved = monitor.model_copy(
+                update={
+                    "revision": 1,
+                    "created_at": monitor.created_at or now,
+                    "updated_at": now,
+                    "active_since": monitor.active_since or monitor.created_at or now,
+                    "created_by": monitor.created_by or principal.user_id,
+                }
+            )
+            connection.execute(
+                insert(monitors).values(
+                    space=space,
+                    project_id=project_id,
+                    id=monitor.id,
+                    state=saved.state,
+                    revision=1,
+                    record=_json(saved),
+                    progress=_json(MonitorProgress()),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "monitor", project_id, monitor.id)
+        return saved
+
+    async def get_monitor(self, principal: Principal, project_id: str, monitor_id: str) -> Monitor | None:
+        def work(connection: Connection, space: str) -> Monitor | None:
+            stored = self._one(connection, monitors, space, project_id, id=monitor_id)
+            return Monitor.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_monitors(self, principal: Principal, project_id: str) -> list[Monitor]:
+        def work(connection: Connection, space: str) -> list[Monitor]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(monitors.c.record).where(monitors.c.space == space, monitors.c.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+            return sorted((Monitor.model_validate(r) for r in rows), key=lambda m: (m.name, m.id))
+
+        return await self._run(principal, work)
+
+    async def update_monitor(
+        self, principal: Principal, project_id: str, monitor: Monitor, *, expected_revision: int
+    ) -> Monitor:
+        def work(connection: Connection, space: str) -> Monitor:
+            stored = self._one(connection, monitors, space, project_id, id=monitor.id)
+            if stored is None:
+                raise StoreError("not_found", "monitor not found")
+            earlier = Monitor.model_validate(stored)
+            saved = monitor.model_copy(
+                update={
+                    "revision": expected_revision + 1,
+                    "created_at": earlier.created_at,
+                    "created_by": earlier.created_by,
+                    "updated_at": _now(),
+                }
+            )
+            changed = connection.execute(
+                update(monitors)
+                .where(
+                    monitors.c.space == space,
+                    monitors.c.project_id == project_id,
+                    monitors.c.id == monitor.id,
+                    monitors.c.revision == expected_revision,
+                )
+                .values(state=saved.state, revision=saved.revision, record=_json(saved))
+            ).rowcount
+            if changed == 0:
+                raise StoreError("conflict", "the monitor was changed by someone else; reload it")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "monitor", project_id, monitor.id)
+        return saved
+
+    async def delete_monitor(self, principal: Principal, project_id: str, monitor_id: str) -> None:
+        def work(connection: Connection, space: str) -> None:
+            if self._one(connection, monitors, space, project_id, id=monitor_id) is None:
+                raise StoreError("not_found", "monitor not found")
+            for table, key in ((monitored_traces, monitored_traces.c.monitor_id), (monitors, monitors.c.id)):
+                connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == monitor_id)
+                )
+
+        await self._run(principal, work)
+        self._emit(principal, "monitor", project_id, monitor_id)
+
+    async def monitor_progress(self, principal: Principal, project_id: str, monitor_id: str) -> MonitorProgress | None:
+        def work(connection: Connection, space: str) -> MonitorProgress | None:
+            stored = connection.execute(
+                select(monitors.c.progress).where(
+                    monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id
+                )
+            ).scalar_one_or_none()
+            return MonitorProgress.model_validate(stored) if stored is not None else None
+
+        return await self._run(principal, work)
+
+    async def set_monitor_progress(
+        self, principal: Principal, project_id: str, monitor_id: str, progress: MonitorProgress
+    ) -> None:
+        def work(connection: Connection, space: str) -> int:
+            return connection.execute(
+                update(monitors)
+                .where(monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id)
+                .values(progress=_json(progress))
+            ).rowcount
+
+        if await self._run(principal, work):
+            self._emit(principal, "monitor", project_id, monitor_id)
+
+    async def claim_monitored_trace(
+        self, principal: Principal, project_id: str, monitor_id: str, trace_id: str, *, pass_id: str
+    ) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            state = connection.execute(
+                select(monitors.c.state).where(
+                    monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id
+                )
+            ).scalar_one_or_none()
+            if state != "active":
+                return False
+            key = (
+                monitored_traces.c.space == space,
+                monitored_traces.c.project_id == project_id,
+                monitored_traces.c.monitor_id == monitor_id,
+                monitored_traces.c.trace_id == trace_id,
+            )
+            found = connection.execute(select(monitored_traces.c.state, monitored_traces.c.pass_id).where(*key)).first()
+            if found is None:
+                taken = MonitoredTrace(
+                    monitor_id=monitor_id, trace_id=trace_id, state="scoring", pass_id=pass_id, created_at=_now()
+                )
+                try:
+                    with connection.begin_nested():
+                        connection.execute(
+                            insert(monitored_traces).values(
+                                space=space,
+                                project_id=project_id,
+                                monitor_id=monitor_id,
+                                trace_id=trace_id,
+                                state="scoring",
+                                pass_id=pass_id,
+                                created_at=taken.created_at,
+                                record=_json(taken),
+                            )
+                        )
+                except IntegrityError:
+                    return False  # another pass took it at the same moment
+                return True
+            if found.state != "scoring":
+                return False
+            if found.pass_id == pass_id:
+                return True
+            # An earlier pass took it and stopped before storing its scores: this pass takes it over.
+            return bool(
+                connection.execute(
+                    update(monitored_traces)
+                    .where(*key, monitored_traces.c.state == "scoring", monitored_traces.c.pass_id == found.pass_id)
+                    .values(pass_id=pass_id)
+                ).rowcount
+            )
+
+        return await self._run(principal, work)
+
+    async def finish_monitored_trace(self, principal: Principal, project_id: str, trace: MonitoredTrace) -> None:
+        def work(connection: Connection, space: str) -> None:
+            stored = connection.execute(
+                select(monitored_traces.c.record).where(
+                    monitored_traces.c.space == space,
+                    monitored_traces.c.project_id == project_id,
+                    monitored_traces.c.monitor_id == trace.monitor_id,
+                    monitored_traces.c.trace_id == trace.trace_id,
+                )
+            ).scalar_one_or_none()
+            taken = MonitoredTrace.model_validate(stored).created_at if stored else None
+            created = taken or trace.created_at or _now()
+            saved = trace.model_copy(update={"created_at": created})
+            self._upsert(
+                connection,
+                monitored_traces,
+                {
+                    "space": space,
+                    "project_id": project_id,
+                    "monitor_id": trace.monitor_id,
+                    "trace_id": trace.trace_id,
+                    "state": trace.state,
+                    "pass_id": trace.pass_id,
+                    "created_at": created,
+                    "record": _json(saved),
+                },
+                ["space", "project_id", "monitor_id", "trace_id"],
+            )
+
+        await self._run(principal, work)
+
+    async def list_monitored_traces(
+        self, principal: Principal, project_id: str, monitor_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[MonitoredTrace]:
+        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        _bounds(offset, limit)
+
+        def work(connection: Connection, space: str) -> Page[MonitoredTrace]:
+            where = [
+                monitored_traces.c.space == space,
+                monitored_traces.c.project_id == project_id,
+                monitored_traces.c.monitor_id == monitor_id,
+            ]
+            total = connection.execute(select(func.count()).select_from(monitored_traces).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(monitored_traces.c.record)
+                    .where(*where)
+                    .order_by(monitored_traces.c.created_at.desc(), monitored_traces.c.trace_id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([MonitoredTrace.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)

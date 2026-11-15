@@ -42,6 +42,14 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
 - **Cancelling.** It tells the cancel route whether anything is working on a running run
   (:class:`~martian.evals.worker.InterruptedRuns`): a run no live claim holds is cancelled at once
   as interrupted, since no worker will reach its next case.
+- **Monitors.** A monitor's work stays in the queue for as long as the monitor exists
+  (:class:`~martian.evals.worker.RunsMonitors`). Each claim of it is one pass over the monitor's
+  new traces (:mod:`martian.evals.worker.monitor`), after which the worker gives the row back, due
+  ``monitor_seconds`` later, or at once when the pass stopped at its read bound with more to read
+  (:meth:`~martian.evals.records.queue.SqlWorkQueue.reschedule`). A paused monitor's passes do
+  nothing; a deleted monitor's row is removed at its next pass. A monitor whose worker stopped
+  during its pass ``max_attempts`` times is paused, with :data:`MONITOR_STOPPED_TOO_OFTEN` as its
+  progress's error.
 
 So restarting the API process loses no queued or running run, whether its worker runs in that
 process or in another. Progress events are the record store's (``records.events``), as with any
@@ -54,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from martian.evals.model import Run, Target
@@ -74,11 +83,17 @@ POLL_SECONDS = 1.0
 MAX_ATTEMPTS = 3
 CONCURRENCY = 1
 """How many pieces of work a worker runs at once unless it is given another number."""
+MONITOR_SECONDS = 10.0
+"""How long after a monitor's pass ends its next pass is due, unless the worker is given another."""
 STOPPED_TOO_OFTEN = "The worker stopped before this work finished, too many times; it is not taken again"
+MONITOR_STOPPED_TOO_OFTEN = "The worker stopped during this monitor's pass too many times; the monitor is paused"
 
 
 def entry_id(work: Work) -> str:
-    """The work's id in the queue: ``run:<run id>`` or ``scoring:<scoring job id>``."""
+    """The work's id in the queue: ``run:<run id>``, ``scoring:<scoring job id>`` or
+    ``monitor:<monitor id>``."""
+    if work.kind == "monitor":
+        return f"monitor:{work.monitor_id}"
     return f"scoring:{work.job_id}" if work.kind == "scoring" else f"run:{work.run_id}"
 
 
@@ -89,8 +104,9 @@ class QueueWorker:
     when it takes over work whose worker stopped. ``in_process`` serves the queue in this process
     while the app does. ``lease_seconds`` is how long a claim holds work without being renewed,
     ``poll_seconds`` how often an idle worker looks for work another process queued,
-    ``max_attempts`` how many workers may take one piece of work before it is failed, and
-    ``concurrency`` how many pieces this worker runs at once, of any organisations."""
+    ``max_attempts`` how many workers may take one piece of work before it is failed,
+    ``concurrency`` how many pieces this worker runs at once, of any organisations, and
+    ``monitor_seconds`` how long after a monitor's pass ends its next pass is due."""
 
     def __init__(
         self,
@@ -103,9 +119,13 @@ class QueueWorker:
         poll_seconds: float = POLL_SECONDS,
         max_attempts: int = MAX_ATTEMPTS,
         concurrency: int = CONCURRENCY,
+        monitor_seconds: float = MONITOR_SECONDS,
     ) -> None:
-        if lease_seconds <= 0 or poll_seconds <= 0 or max_attempts < 1 or concurrency < 1:
-            raise ValueError("lease_seconds and poll_seconds are positive, and max_attempts and concurrency at least 1")
+        if lease_seconds <= 0 or poll_seconds <= 0 or monitor_seconds <= 0 or max_attempts < 1 or concurrency < 1:
+            raise ValueError(
+                "lease_seconds, poll_seconds and monitor_seconds are positive, "
+                "and max_attempts and concurrency at least 1"
+            )
         self._queue = queue
         self._runner = runner
         self._records = records
@@ -114,6 +134,7 @@ class QueueWorker:
         self._poll = poll_seconds
         self._max_attempts = max_attempts
         self._concurrency = concurrency
+        self._monitor_seconds = monitor_seconds
         self._wake = asyncio.Event()
         self._serving: asyncio.Task[None] | None = None
 
@@ -125,6 +146,11 @@ class QueueWorker:
     def concurrency(self) -> int:
         """How many pieces of work this worker runs at once."""
         return self._concurrency
+
+    @property
+    def monitor_seconds(self) -> float:
+        """How long after a monitor's pass ends its next pass is due (``RunsMonitors``)."""
+        return self._monitor_seconds
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         return await self._runner.check_target(principal, target)
@@ -209,6 +235,11 @@ class QueueWorker:
             await self._interrupted(work)
             await self._queue.done(claim)
             return
+        if claim.attempt > self._max_attempts and work.kind == "monitor":
+            log.error("Monitor %s: its worker stopped %d times during a pass", work.monitor_id, claim.attempt - 1)
+            await self._pause(work)
+            await self._next_pass(claim, work)
+            return
         if claim.attempt > self._max_attempts:
             log.error("%s work on run %s: its worker stopped %d times", work.kind, work.run_id, claim.attempt - 1)
             await fail_unfinished(self._records, work, STOPPED_TOO_OFTEN)
@@ -222,8 +253,37 @@ class QueueWorker:
             await asyncio.gather(running, return_exceptions=True)
             await self._queue.release(claim)
             raise
-        if ended:
+        if ended and work.kind == "monitor":
+            await self._next_pass(claim, work)
+        elif ended:
             await self._queue.done(claim)
+
+    async def _next_pass(self, claim: Claim, work: Work) -> None:
+        """Give a monitor's row back for its next pass, due ``monitor_seconds`` from now, or at once
+        when its last pass stopped at its read bound; remove it once the monitor is gone."""
+        monitor_id = work.monitor_id or ""
+        monitor = await self._records.get_monitor(work.principal, work.project_id, monitor_id)
+        if monitor is None:
+            await self._queue.done(claim)
+            return
+        progress = await self._records.monitor_progress(work.principal, work.project_id, monitor_id)
+        behind = monitor.state == "active" and progress is not None and not progress.caught_up
+        due = datetime.now(UTC) + timedelta(seconds=0 if behind else self._monitor_seconds)
+        await self._queue.reschedule(claim, due)
+
+    async def _pause(self, work: Work) -> None:
+        """Pause a monitor whose worker stopped during its pass too many times, and say so."""
+        monitor_id = work.monitor_id or ""
+        monitor = await self._records.get_monitor(work.principal, work.project_id, monitor_id)
+        if monitor is None:
+            return
+        if monitor.state == "active":
+            with contextlib.suppress(StoreError):  # changed meanwhile: its next pass sees it as it is
+                paused = monitor.model_copy(update={"state": "paused"})
+                await self._records.update_monitor(
+                    work.principal, work.project_id, paused, expected_revision=monitor.revision
+                )
+        await fail_unfinished(self._records, work, MONITOR_STOPPED_TOO_OFTEN)
 
     async def _interrupted(self, work: Work) -> None:
         run = await self._records.get_run(work.principal, work.project_id, work.run_id)
@@ -268,6 +328,8 @@ __all__ = [
     "CONCURRENCY",
     "LEASE_SECONDS",
     "MAX_ATTEMPTS",
+    "MONITOR_SECONDS",
+    "MONITOR_STOPPED_TOO_OFTEN",
     "POLL_SECONDS",
     "STOPPED_TOO_OFTEN",
     "QueueWorker",

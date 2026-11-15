@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, and [monitors](#monitors), which score a project's live traces | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -99,8 +99,8 @@ sign-in has been checked:
 
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
 own routes this way: the review queue routes, the question library and answering a queue's item
-need `review_queues`, and `GET /v1/evals/monitoring` needs `monitoring`
-([write routes](#write-routes)). The Martian server gates its own routes the same way until it
+need `review_queues`, and `GET /v1/evals/monitoring` and every monitor route need `monitoring`
+([write routes](#write-routes), [monitors](#monitors)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
 MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
 `concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
@@ -424,7 +424,8 @@ All paths are under `/v1/evals`. How the core carries them out:
 
 Not served: the CI gate's routes (`/ci/...`, `/ci-sessions/...`), which stay with the server's CI
 gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overview`,
-`POST /quality-issues/search` and `/triage`, `POST /traces/export`).
+`POST /quality-issues/search` and `/triage`, `POST /traces/export`). Beside the contract, the core
+serves its own `/monitors` routes ([monitors](#monitors)).
 
 `tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
@@ -445,13 +446,14 @@ then calls `Worker.submit(Work(...))`:
 
 | Member | What it does |
 | --- | --- |
-| `Work` | `kind` (`run` or `scoring`), the `principal`, `project_id`, `run_id`, and `job_id` for scoring |
+| `Work` | `kind` (`run`, `scoring` or `monitor`), the `principal`, `project_id`, `run_id` for a run or scoring, `job_id` for scoring, and `monitor_id` for a monitor's pass ([monitors](#monitors)) |
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
 | `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
 | `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
 | `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `QueueWorker` and `LocalWorker` can ([the durable queue](#the-durable-queue)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
+| `RunsMonitors.monitor_seconds` | Optional, for a worker that takes a monitor's work again after each pass, as `QueueWorker` does: how long after a pass ends the next is due. The routes that create and resume a monitor need it ([monitors](#monitors)) |
 
 `execute_run` and `execute_scoring` are the work itself, for any worker to call. `execute_run`
 takes the worker's `call_for(run)`, the call for the run's target, and `pin_for(run)`, the
@@ -475,7 +477,8 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None, limits=None)` runs each piece of
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, limits=None,
+  monitor_settle_seconds=20)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -487,10 +490,11 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
   and so does the local edition's `LocalWorker` ([local runs](#local-runs)), because a run's
   MLflow state would otherwise be the server's.
 - `QueueWorker(queue, runner, records, in_process=False, lease_seconds=30, poll_seconds=1,
-  max_attempts=3, concurrency=1)` puts each piece of work in a durable queue in the record store's
-  database, and a worker takes it from there and runs it with `runner`, either of the two above,
-  `concurrency` pieces at once, so that a restart loses no queued or running work
-  ([the durable queue](#the-durable-queue)). The local edition's `LocalWorker` is one, served
+  max_attempts=3, concurrency=1, monitor_seconds=10)` puts each piece of work in a durable queue in
+  the record store's database, and a worker takes it from there and runs it with `runner`, either
+  of the two above, `concurrency` pieces at once, so that a restart loses no queued or running work
+  ([the durable queue](#the-durable-queue)), and takes each monitor's work again every
+  `monitor_seconds` ([monitors](#monitors)). The local edition's `LocalWorker` is one, served
   beside the app.
 
 ### Targets
@@ -690,7 +694,7 @@ runner's, so the routes do not change.
 
 The queue is `SqlWorkQueue(database_url, schema="martian", migrate=True)`
 (`martian.evals.records.queue`): the `martian_work_queue` table in the record store's database,
-SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with).
+SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with, and `0005` the `available_at` of a row given back for later).
 
 ```python
 from martian.evals.records.queue import SqlWorkQueue
@@ -713,6 +717,14 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
 - **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
   `dump_work` writes it, its principal included. Submitting the same work again while it is in
   the queue changes nothing. The row is removed once the work has ended.
+- **Monitors' rows come back.** A monitor's row, `monitor:<monitor id>`, stays in the queue for as
+  long as the monitor exists. Each claim of it is one pass ([monitors](#monitors)); when the pass
+  ends the worker gives the row back (`SqlWorkQueue.reschedule`) with no attempt counted, due
+  `monitor_seconds` later, or at once when the pass stopped at its read bound. No claim takes a
+  row before its `available_at`, it then waits behind the work queued before that time, and
+  `pending()`, which `drain()` waits on, leaves out rows not due yet. A deleted monitor's row is
+  removed at its next pass. A monitor whose worker stopped during its pass `max_attempts` times
+  is paused, saying so in its progress's `error`, instead of failed.
 - **Claims and leases.** A worker takes a row that is queued, or claimed by a lease that ran out,
   and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
   claim moves a row only while the row is still claimable, in one statement; on Postgres it also
@@ -1012,6 +1024,161 @@ Each judge runs on a model of its own, or on the default judge model when it nam
 built-in judge on the default, keeps a job's model when the default changes, refuses a key in an
 endpoint, and keeps the local edition's default in its data folder.
 
+## Monitors
+
+A monitor attaches judges and deterministic checks to a project's live traffic: the worker scores
+a sample of the project's new traces with them and stores each score on its trace. Monitors are
+part of the `monitoring` feature key, so every route below needs an edition that includes it
+(Enterprise, On-Premises; Community is `403`), and the routes that change a monitor need the
+`score` capability. The routes are the core's own (`martian.evals.server.monitors`); the server's
+frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/monitors` | The project's monitors (`project_id`, the default project without it) by name, each with its progress |
+| `POST /v1/evals/monitors` | Create a monitor (`201`) and hand its work to the worker |
+| `GET /v1/evals/monitors/{monitor_id}` | One monitor and its progress |
+| `POST /v1/evals/monitors/{monitor_id}/pause` | Stop it before its next trace |
+| `POST /v1/evals/monitors/{monitor_id}/resume` | Score again, the traces from now on; those recorded while it was paused are not scored |
+| `DELETE /v1/evals/monitors/{monitor_id}` | Remove it, its progress and its record of the traces it took (`204`); the scores it stored stay on their traces |
+
+```json
+{
+  "request_id": "0b9f3c4e-5d0a-4d8e-9a43-3f6d2b9e8c11",
+  "project_id": null,
+  "name": "Live safety",
+  "scorers": ["safety", "response_length"],
+  "judges": [{"name": "tone", "version": 2}],
+  "sampling_rate": 0.1,
+  "filter": {"state": "OK", "min_latency_ms": 500},
+  "max_judge_tokens_per_day": 200000,
+  "acknowledge_model_cost": true
+}
+```
+
+- **Scorers** are named as in a scoring request: the built-in ones by name (with `guidelines` for
+  `policy`) and registered judges by name and version, one to seven. A production trace has no
+  expected response, so `exact_match`, `contains_expected` and `correctness` are refused (`422`):
+  the checks are `valid_json` and `response_length`, the built-in judges `safety` and `policy`, and
+  a registered judge whose instructions name `{{ expectations }}` reads an empty expected
+  response. Each judge is pinned to its model when the monitor is created, its own or the default
+  judge model ([judge models](#judge-models)), as a scoring job's are. Judges need a worker with a
+  judge (`422`), `acknowledge_model_cost` and a `max_judge_tokens_per_day`.
+- **`sampling_rate`**, 0 to 1, is the share of matching traces scored. A trace is in when the first
+  8 bytes of the SHA-256 of its id, as a fraction of 2^64, are below the rate (`sampled` in
+  `martian.evals.worker.monitor`). It depends on the trace id alone: a trace is in or out the same
+  way on every pass, two monitors at one rate score the same traces, and a trace in at one rate is
+  in at every higher rate.
+- **`filter`** holds the trace search's filters, with their names: `q`, `state` (`OK`, `ERROR` or
+  empty), `session_id`, `user_id`, `min_latency_ms`, and `assessment` with `assessment_value`. The
+  time range, order and paging are the monitor's own. A trace still in progress and a trace of an
+  eval run are never scored.
+- **`max_judge_tokens_per_day`** caps its judges' tokens per UTC day ([below](#the-daily-cap)).
+- The monitor's id is derived from `request_id`: the same request again returns the same monitor,
+  and another one with that `request_id` is `409`. A project has at most 20 monitors (`409`), and an
+  archived project takes none (`409`). A worker that does not run monitors (`RunsMonitors`, which
+  `QueueWorker` is) refuses creating and resuming one with `503`, "This installation's worker does
+  not run monitors".
+
+A monitor in a response carries its definition, with each scorer's `name`, `kind`, `version`,
+`model` and `endpoint`, its `state` (`active` or `paused`), `revision`, `active_since` (when it was
+created or last resumed), and its `progress`: `watermark` (every trace with an earlier request time
+has been read), `day` and `judge_tokens`, `examined`, `sampled` (the traces taken), `scored` and
+`errors` (scores with a verdict and without), `capped`, `caught_up` (false when the last pass
+stopped at its read bound), `error` (why the last pass failed, else empty) and `last_pass_at`.
+
+### How the worker scores
+
+A monitor's work (`Work(kind="monitor")`) is a row of the durable queue that comes back after each
+pass ([the durable queue](#the-durable-queue)), so monitoring needs a `QueueWorker`, beside the app
+or in a worker process of its own; it runs on the worker's runner, in a process of the
+organisation's own with a `ProcessWorker`. A pass (`execute_monitor` in
+`martian.evals.worker.monitor`):
+
+1. **Reads new traces by time, and nothing else.** It calls `search_traces` with `since` its
+   watermark (at first its `active_since`), `until` now less `monitor_settle_seconds` (20 unless
+   the worker is given another), oldest first, and the filters the store applies (session, user,
+   text, state), in pages of 100, and applies the minimum latency and the assessment to each page
+   as the trace search does. It never reads a project from its first trace: this is the `since`
+   search the [load report](trace-store-limits.md#volume-ceiling-for-monitoring) measured, which
+   project size does not slow. A pass reads at most 1,000 traces (`READ_BOUND`); one that stops
+   there says so (`caught_up`), and its next pass is due at once.
+2. **Scores each sampled trace once.** It reads the monitor again, takes the trace
+   (`claim_monitored_trace`), reads it whole (`get_trace`), runs the checks itself and the judges
+   through the worker's judge, one request per model, with the trace's request as the prompt, its
+   response as the output and no expected text, and stores every score that has a value on the
+   trace as an assessment: the `scorer`, its `scorer_version`, `source`, `source_id`, and metadata
+   naming the monitor (`martian.monitor_id`) and, for a judge, its model and version as for a
+   scoring job ([judge models](#judge-models)). A score with no verdict is kept with the monitor's
+   record of the trace, not on the trace, as a scoring job keeps it only with the run.
+3. **Moves its watermark on** and saves its progress after each scored trace and each page.
+
+**The delay.** A trace is first read `monitor_settle_seconds` (20) after its request time, the
+time it has to be recorded, and a monitor's next pass is due `monitor_seconds` (10) after its last
+one ended, which an idle worker sees within its `poll_seconds` (1). So a new trace is scored within
+about 31 seconds of its request time, plus the time its pass takes, mostly its judge's, while the
+passes keep up. A trace recorded more than `monitor_settle_seconds` after its request time, such
+as a long agent run that MLflow tracing writes when it ends, has been passed by then and is not
+scored. `tests/evals/test_monitors.py` measures it with a fake judge, with settings of 0.5, 0.5 and
+0.05 seconds, whose bound is 1.05 seconds: each trace is scored about 0.6 seconds after its request
+time.
+
+**Once per trace.** `martian_monitored_traces` holds one row per monitor and trace, taken before
+the trace is scored and `scored` once its scores are stored, so a trace is scored by a monitor at
+most once, however often a pass reads it again (traces at its watermark's time are read again).
+A pass that stopped part way leaves the trace `scoring`; the next pass takes it over and stores
+only the scores the trace has no assessment of from this monitor yet. One pass of a monitor runs
+at a time, under the queue's claim.
+
+#### The daily cap
+
+Judge tokens are what the judge reports (`JudgeResult.tokens`), input and output together, as for a
+run's limits ([limits](#limits-stopping-and-resuming)), counted per UTC day in the monitor's
+progress; checks use none. After each scored trace, once the day's tokens reach
+`max_judge_tokens_per_day`, or a judge reports no usage so the cap cannot be kept, the monitor stops
+scoring until the next UTC midnight: the rest of the day's traces are passed over unread and never
+scored, and its progress says so:
+
+```json
+{
+  "limit": "max_judge_tokens_per_day", "value": 40, "used": 45, "until": "2026-11-16T00:00:00Z",
+  "message": "Stopped until 2026-11-16T00:00:00Z at its daily judge token cap (max_judge_tokens_per_day 40) after 45 tokens; traces until then are not scored"
+}
+```
+
+The trace that reaches the cap is scored, so a day can go over by one trace's judgment. The next
+day the count starts afresh, from that day's traffic.
+
+**Pausing, deleting and failing.** The monitor is read again before each sampled trace, and taking
+a trace fails once it is paused or gone, so a pass stops before its next trace. A paused monitor's
+passes do nothing; resuming moves `active_since` to then. A pass that fails part way says so in its
+progress's `error` and the next goes on from its watermark; a worker that stopped during a pass
+three times (`max_attempts`) pauses the monitor, with "The worker stopped during this monitor's
+pass too many times; the monitor is paused" as its `error`.
+
+`tests/evals/test_monitors.py` checks the sampling rate over 4,000 fixed trace ids and that the
+same ids are sampled every time; scores 200 traces at a rate of 0.3 and finds exactly the sampled
+ones scored, each once, and the same again when it reads them all again; applies a filter; reads
+only by time from `active_since`, never older traffic, 100 traces a pass at a bound of 100; stops
+at a cap of 40 tokens after the trace that reached it, says so, scores nothing more that day and
+scores the next day's traffic; stops when a judge reports no tokens; takes over a trace whose
+pass failed part way without storing a score twice; stops a pass when the monitor is paused;
+refuses a Community edition, a viewer, scorers that need an expected response, judges without a
+cap and a worker that does not run monitors; measures the delay through the routes and the queue
+on `MlflowStore`, with the scores as assessments; pauses, resumes and deletes a monitor through
+the queue on SQLite and Postgres; and pauses a monitor whose worker stopped too often. The record
+contract checks the monitor records, and the queue contract a row given back for later, on both
+databases.
+
+What builds on it:
+
+| Issue | Change |
+| --- | --- |
+| MorningHQ/martian-notes#197 | Scheduled regression runs |
+| MorningHQ/martian-notes#198 | Thresholds on monitor scores and alerts |
+| MorningHQ/martian-notes#199 | Monitors and their trends on the Monitoring page |
+| MorningHQ/martian-notes#200 | Evaluating again when a model changes |
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
@@ -1049,6 +1216,9 @@ endpoint, and keeps the local edition's default in its data folder.
   finished ([limits](#limits-stopping-and-resuming)).
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
+- [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
+  rate, a trace filter and a daily judge token cap, scored by the queue's worker in passes over the
+  new traces and stored on each trace.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -1475,6 +1645,15 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 - The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
   database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
   method: only a `QueueWorker` uses it.
+- [Monitors](#monitors) (`Monitor`, `MonitorFilter`, `MonitorProgress` and `MonitoredTrace` in
+  `martian.evals.records`) are the core's own records, not part of the shared model. Migration
+  `0005` adds `martian_monitors`, one row per monitor holding the monitor as its routes write it
+  and its progress as the worker writes it, in separate columns so neither overwrites the other,
+  and `martian_monitored_traces`, one row per trace a monitor took, keyed by monitor and trace.
+  `create_monitor`, `get_monitor`, `list_monitors`, `update_monitor` (naming the revision it
+  read) and `delete_monitor` keep the monitors; `monitor_progress` and `set_monitor_progress` the
+  progress; `claim_monitored_trace`, `finish_monitored_trace` and `list_monitored_traces` the
+  traces taken.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed: its
   `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
   `scoring_job`, its `run_id` too, which reading the job takes.
@@ -2316,6 +2495,7 @@ an export holds, resuming, and what the receiving store assigns are in
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
+| Monitors in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
@@ -2323,6 +2503,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
 `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
-`test_worker_concurrency.py`, `test_no_outbound.py` and the store and record tests run the core
-without the backend. The `Evals core` job in CI runs them with the model tests, on Postgres as
-well as SQLite.
+`test_worker_concurrency.py`, `test_monitors.py`, `test_no_outbound.py` and the store and record
+tests run the core without the backend. The `Evals core` job in CI runs them with the model
+tests, on Postgres as well as SQLite.
