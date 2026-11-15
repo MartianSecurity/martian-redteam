@@ -803,46 +803,87 @@ report, on the Judges page, with `POST /v1/evals/judge-calibrations` on the eval
 the SDK. No model is called.
 
 - **What can be calibrated.** A registered judge version, or a built-in model judge
-  (`correctness`, `safety` or `policy`, version `v1`). Only a measured report is saved: 30 or more
+  (`correctness` or `safety`, version `v1`). Only a measured report is saved: 30 or more
   labelled items of a judge whose verdicts are compared. Fewer items, or a free-text judge, is
-  refused. A suite file's judge is a check of that file, not a judge version the core registers,
-  so it has no calibration; use `results_agreement` on its results.
-- **What it holds.** The version's report as the agreement route gives it, the number of
-  labelled items, when it was saved and who saved it, and the model the version ran on then: its
-  own, the default judge model for a judge that names none, or its panel's members. Every calibration is kept; the
-  newest of a judge version is its calibration.
+  refused. The built-in `policy` judge takes its guidelines from each scoring request, so
+  `policy` `v1` has no one definition to calibrate: saving one is refused, and its scores name no
+  calibration; register the policy as a judge to calibrate it. A suite file's judge is a check of
+  that file, not a judge version the core registers, so it has no calibration; use
+  `results_agreement` on its results.
+- **What it holds.** The version's report as the agreement route gives it; the labelled items it
+  rests on (`items`), each a case result or a trace with its label and the verdict compared with
+  it; when it was saved and who saved it; the model the version ran on then: its own, the default
+  judge model for a judge that names none, or its panel's members; and `definition`, the digest
+  of what the version meant then. Every calibration is kept; the newest of a judge version is its
+  calibration.
+- **What a version means.** Its `definition` is a digest of everything that defines it apart
+  from its model: its kind and type, its parameters and criteria (a registered judge's
+  instructions, kind, options and range), and for a built-in judge the rubric the core's judge
+  grades it by. A registered version cannot be edited, so a new prompt or rubric is a new version,
+  which starts with no calibration. A built-in judge's rubric can change with a release of the SDK
+  while its version stays `v1`, and the digest is how its calibration notices. The judge's own
+  prompt around the rubric (`martian.judge.version` on each score, `response-rubrics-v1` for the
+  SDK judge) is not part of it.
 - **Checked or unchecked.** A judge version is `checked` while it runs on the model its newest
-  calibration was measured on. Otherwise it is `unchecked`: `none` when it has no calibration,
-  `model_changed` when the model it runs on changed since, such as a judge that names no model
-  after the default judge model changed. A new version of a judge, with a new prompt, rubric or
-  model, starts with no calibration.
+  calibration was measured on and has the definition it had then. Otherwise it is `unchecked`,
+  with the reason: `none` when it has no calibration; `model_changed` when the model it runs on
+  changed since, such as a judge that names no model after the default judge model changed;
+  `definition_changed` when what it means changed since. A judge's own model and a panel's
+  members are part of its version, so changing them makes a new version, which starts with no
+  calibration. The model is compared as the core pins it: a judge that names none, with no
+  default judge model either, runs on the worker judge's own model, which the core does not see,
+  and a provider's new snapshot behind the same model name is recorded on each score
+  (`martian.judge.model_version`) but not compared.
+- **Re-checked on request.** A re-check grades again exactly the labelled items the version's
+  newest calibration rests on, with the version as it runs now, compares the new verdicts with
+  the same labels and, when that is measured, saves the result as the version's newest
+  calibration, which names the one it re-checked (`recheck_of`). Each item is a model call, so a
+  re-check is asked for explicitly, with the cost acknowledged: `POST /v1/evals/judge-rechecks`
+  on the evals core, which the worker carries out, or `recheck_calibration` from the SDK.
 - **Scores name the calibration that applied.** Every judge score of a scoring job records the
   calibration that applied when it was made in its metadata, the assessment's `provenance`, as
-  `martian.calibration_id`: the judge version's newest calibration when the job started, if it was
-  measured on the model the job runs the judge on, else `none`. A suite-file run's judge scores
-  name `none`. A later calibration does not change what an earlier score names.
+  `martian.calibration_id`: the judge version's newest calibration when the job started, if it
+  checks the version as the job runs it (on the same model, with the same definition), else
+  `none`. A suite-file run's judge scores name `none`. A later calibration does not change what
+  an earlier score names.
 - **A panel is calibrated as one judge.** A judge version graded by a
   [panel](#a-panel-of-judges) has one calibration, of the panel's verdicts, which records the
   panel's members (`panel`) in place of a model. It checks the version while the version runs on
-  exactly those members, and the panel's scores name it. The members are not calibrated one by
-  one: the verdict a score holds and a gate uses is the panel's, and the members read the same
+  exactly those members, and the panel's scores name it. A re-check grades each item on each
+  member and the strict majority decides, as in a scoring job. The members are not calibrated one
+  by one: the verdict a score holds and a gate uses is the panel's, and the members read the same
   reply and can share blind spots, so their own error rates do not give the panel's.
 
 ```python
-from martian.evals.calibration import save_calibration
+from martian.evals.calibration import recheck_calibration, save_calibration
 
 # The judge's current report in the local edition's data folder, saved as its calibration.
 calibration = save_calibration("polite_tone", 2)          # data_dir=..., project_id=... to choose
 print(calibration.id, calibration.labelled, calibration.model, calibration.report["agreement"])
+
+# After the default judge model changed: grade the same labelled items again on the new model.
+recheck = recheck_calibration("polite_tone", 2, acknowledge_model_cost=True)
+print(recheck.state, recheck.graded, recheck.errors, recheck.result_id or recheck.error)
 ```
 
-`save_calibration` works on the local edition's data folder (`--data-dir`, `MARTIAN_EVALS_HOME`
-or `~/.martian/evals`) as its single user, and reads the default judge model from the folder's
-`settings.json`. A refusal raises `StoreError`: `not_found` for a judge version the project does
-not have, `invalid` for a report that is not measured. A `request_id` makes a repeated call return
-the same calibration. [The evals core](evals-core.md#read-routes) lists each judge version's
-calibration and status, and serves one calibration by the id a score names. The Martian server does
-not serve these routes yet.
+`save_calibration` and `recheck_calibration` work on the local edition's data folder
+(`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`) as its single user, and read the
+default judge model from the folder's `settings.json`. A refusal raises `StoreError`:
+`not_found` for a judge version the project does not have, or a re-check of one with no
+calibration; `invalid` for a report that is not measured, the `policy` judge, or a re-check
+without `acknowledge_model_cost`; `conflict` for a re-check of a version whose last one is still
+queued or running. `recheck_calibration` grades the items in the calling process with the SDK
+judge, on the provider's key in that process's environment, and returns the re-check:
+`completed`, with `result_id` naming the new calibration, or `failed`, with the reason in
+`error` and the calibration as it was, such as when fewer than 30 items got a verdict to compare.
+A `request_id` makes a repeated call return the same calibration or re-check.
+[The evals core](evals-core.md#read-routes) lists each judge version's calibration and status,
+serves one calibration by the id a score names, and [re-checks one](evals-core.md#write-routes).
+The Martian server does not serve these routes yet.
+
+Re-checking on a schedule, such as every judge whose model changed or every week, is an
+Enterprise feature of the Martian server and console, not part of the core: a schedule calls
+`POST /v1/evals/judge-rechecks` for each judge version it re-checks.
 
 ## Use
 

@@ -17,6 +17,7 @@ from martian.evals.calibration import (
     NO_CALIBRATION,
     applied_calibration,
     calibration_state,
+    judge_definition,
     newest,
     save_calibration,
 )
@@ -38,6 +39,15 @@ JUDGED = [i % 4 != 0 for i in range(MINIMUM_LABELLED)]
 LABELLED = [i % 5 != 0 for i in range(MINIMUM_LABELLED)]
 
 
+TONE = ScorerVersion(name="polite_tone", kind="llm_judge", type="instructions", version="2",
+                     criteria={"instructions": "Is {{ outputs }} polite?", "kind": "boolean"})  # fmt: skip
+
+
+def on(model: str | None, endpoint: str | None = None, **changes) -> ScorerVersion:
+    """The judge version ``TONE`` as it runs on ``model`` at ``endpoint``."""
+    return TONE.model_copy(update={"model": model, "endpoint": endpoint, **changes})
+
+
 def calibration(id: str, version: str = "2", *, model: str | None = "openai:/judge", minutes: int = 0):
     return JudgeCalibration(
         id=id,
@@ -45,6 +55,7 @@ def calibration(id: str, version: str = "2", *, model: str | None = "openai:/jud
         judge="polite_tone",
         version=version,
         model=model,
+        definition=judge_definition(TONE),
         labelled=MINIMUM_LABELLED,
         created_at=T0.replace(minute=minutes),
     )
@@ -52,13 +63,13 @@ def calibration(id: str, version: str = "2", *, model: str | None = "openai:/jud
 
 def test_a_judge_version_is_checked_only_by_a_calibration_measured_on_the_model_it_runs_on():
     saved = calibration("c1")
-    assert calibration_state(None, "openai:/judge", None) == ("unchecked", "none")
-    assert calibration_state(saved, "openai:/judge", None) == ("checked", None)
-    assert calibration_state(saved, "openai:/other", None) == ("unchecked", "model_changed")
-    assert calibration_state(saved, "openai:/judge", "http://localhost:4000/v1") == ("unchecked", "model_changed")
-    assert applied_calibration(saved, "openai:/judge", None) == "c1"
-    assert applied_calibration(saved, "openai:/other", None) == NO_CALIBRATION
-    assert applied_calibration(None, None, None) == NO_CALIBRATION
+    assert calibration_state(None, on("openai:/judge")) == ("unchecked", "none")
+    assert calibration_state(saved, on("openai:/judge")) == ("checked", None)
+    assert calibration_state(saved, on("openai:/other")) == ("unchecked", "model_changed")
+    assert calibration_state(saved, on("openai:/judge", "http://localhost:4000/v1")) == ("unchecked", "model_changed")
+    assert applied_calibration(saved, on("openai:/judge")) == "c1"
+    assert applied_calibration(saved, on("openai:/other")) == NO_CALIBRATION
+    assert applied_calibration(None, on(None)) == NO_CALIBRATION
     # Listed newest first, as the record store lists them: the first of each version is its newest.
     found = newest([calibration("c3", minutes=3), calibration("c2", "1", minutes=2), calibration("c1", minutes=1)])
     assert {key: c.id for key, c in found.items()} == {("polite_tone", "2"): "c3", ("polite_tone", "1"): "c2"}

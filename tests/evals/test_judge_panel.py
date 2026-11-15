@@ -36,7 +36,7 @@ from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.store import MemoryStore
 from martian.evals.suite_file import load_suite_file
 from martian.evals.worker import JudgeError, JudgeRequest, JudgeResult, Verdict
-from tests.evals.test_calibration import calibration
+from tests.evals.test_calibration import calibration, on
 from tests.evals.test_worker_judges import KEY, REPORTED, Loopback, rubrics_of
 from tests.evals.write_fixture import Served, request_id, serve
 
@@ -448,9 +448,9 @@ def test_a_panel_is_reported_and_calibrated_as_one_judge(core):
 def test_a_panel_calibration_checks_only_the_members_it_was_measured_on():
     measured = [PanelMember(model="openai:/a"), PanelMember(model="openai:/b")]
     found = calibration("c1", model=None).model_copy(update={"panel": measured})
-    assert calibration_state(found, None, None, measured) == ("checked", None)
+    assert calibration_state(found, on(None, panel=measured)) == ("checked", None)
     other = [PanelMember(model="openai:/a"), PanelMember(model="openai:/c")]
-    assert calibration_state(found, None, None, other) == ("unchecked", "model_changed")
+    assert calibration_state(found, on(None, panel=other)) == ("unchecked", "model_changed")
     # A single judge's calibration does not check a panel, nor a panel's a single judge.
-    assert calibration_state(calibration("c2", model=None), None, None, measured) == ("unchecked", "model_changed")
-    assert calibration_state(found, None, None) == ("unchecked", "model_changed")
+    assert calibration_state(calibration("c2", model=None), on(None, panel=measured)) == ("unchecked", "model_changed")
+    assert calibration_state(found, on(None)) == ("unchecked", "model_changed")

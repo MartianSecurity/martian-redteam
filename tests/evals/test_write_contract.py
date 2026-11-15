@@ -79,6 +79,8 @@ OWN_NAMES |= {
 # Registering a judge graded by a panel of judge models (MorningHQ/martian-notes#187), which the
 # contract's POST /judges has no field for.
 OWN_NAMES |= {("post", "/v1/evals/judge-panels")}
+# Re-checking a judge version's calibration (MorningHQ/martian-notes#188).
+OWN_NAMES |= {("post", "/v1/evals/judge-rechecks"), ("get", "/v1/evals/judge-rechecks/{recheck_id}")}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),

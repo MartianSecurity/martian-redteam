@@ -1,10 +1,12 @@
 """The worker interface: what the evals core hands its long-running work to.
 
-A write route that starts work records it first, as a queued ``Run`` or ``ScoringJob`` in the
-record store, and then calls :meth:`Worker.submit` with a :class:`Work` naming it. The worker does
-the work later, outside the request: it calls the target once per case, runs the scorers and
-judges, and writes case results, traces and scores through the store and the record store. The API
-process never calls a target or a model while answering a request.
+A write route that starts work records it first, as a queued ``Run``, ``ScoringJob`` or
+``CalibrationRecheck`` in the record store, and then calls :meth:`Worker.submit` with a
+:class:`Work` naming it. The worker does the work later, outside the request: it calls the target
+once per case, runs the scorers and judges, grades a calibration's labelled items again
+(:mod:`martian.evals.worker.recheck`), and writes case results, traces, scores and calibrations
+through the store and the record store. The API process never calls a target or a model while
+answering a request.
 
 The interface is deliberately small, so the editions and the issues that follow can each supply
 their own worker without changing the routes:
@@ -58,18 +60,22 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Work:
-    """One piece of work: a queued run (``kind="run"``) or a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``). The record store holds everything else about it."""
+    """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
+    (``kind="scoring"``, with ``job_id``), or a queued re-check of a judge version's calibration
+    (``kind="recheck"``, with the re-check's id as ``job_id`` and no ``run_id``). The record store
+    holds everything else about it."""
 
-    kind: Literal["run", "scoring"]
+    kind: Literal["run", "scoring", "recheck"]
     principal: Principal
     project_id: str
     run_id: str
     job_id: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.kind == "scoring") != (self.job_id is not None):
-            raise ValueError("scoring work names its job, and only scoring work does")
+        if (self.kind != "run") != (self.job_id is not None):
+            raise ValueError("scoring work names its job, as re-check work does, and run work names none")
+        if (self.kind == "recheck") != (not self.run_id):
+            raise ValueError("re-check work names no run, and other work names its run")
 
 
 TargetCall = Callable[[Case], Awaitable[Any]]
@@ -246,6 +252,7 @@ from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
+from martian.evals.worker.recheck import execute_recheck  # noqa: E402
 
 __all__ = [
     "AgentExecutor",
@@ -268,6 +275,7 @@ __all__ = [
     "WorkerServices",
     "agents_judge",
     "dump_work",
+    "execute_recheck",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",

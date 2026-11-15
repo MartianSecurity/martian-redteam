@@ -16,7 +16,7 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   scorers: code scorers here, judge scorers through the worker's judge, one request per model the
   job's judges are pinned to. Each judge score records the model and version that produced it,
   and the judge version's calibration that applied (``martian.evals.calibration``): its newest
-  when the job starts, if measured on the model the job runs it on. Its scores sit beside the
+  when the job starts, if it checks the version as the job runs it. Its scores sit beside the
   run's own, and each scored value is also kept on the case's trace.
 - A judge graded by a panel is in the request of each of its members' models, so each member
   grades it on its own, and its score is decided by the strict majority of the members that gave
@@ -631,11 +631,11 @@ async def _score_results(
             for seat in seats(scorer):
                 by_model.setdefault(seat, []).append(scorer)
     definition = job_config(job)["definition_digest"]
-    # The calibration each judge version had when the job started, if it checks the model the job
-    # runs the judge on, or the members of its panel.
+    # The calibration each judge version had when the job started, if it checks the version as the
+    # job runs it: on the model the job runs it on, or its panel's members, and as it is defined now.
     calibrations = await latest_calibrations(records, principal, project)
     applied = {
-        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s.model, s.endpoint, s.panel)
+        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s)
         for s in job.scorers
         if s.kind == "llm_judge"
     }
@@ -766,11 +766,24 @@ async def take_over(records: RecordStore, work: Work) -> None:
     one whose process died: a run or scoring job still ``running`` becomes ``queued``, so the
     worker taking it now runs it again. It resumes after the cases already finished: a run's cases
     that have a result are not called again, and a scoring job's cases that have its scores are not
-    scored again. The case that was in flight has neither, so it runs again.
+    scored again. The case that was in flight has neither, so it runs again. A re-check keeps no
+    checkpoint, so it starts again from its first item.
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
     A finished or queued record is left alone."""
     principal, project = work.principal, work.project_id
+    if work.kind == "recheck":
+        recheck = await records.get_recheck(principal, project, work.job_id or "")
+        if recheck is not None and recheck.state == "running":
+            changes = {"state": "queued", "graded": 0, "errors": 0}
+            try:
+                await records.update_recheck(
+                    principal, project, recheck.model_copy(update=changes), expected_state="running"
+                )
+            except StoreError as error:
+                if error.kind != "conflict":
+                    raise
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state == "running":
@@ -795,8 +808,8 @@ async def interrupt(records: RecordStore, principal: Principal, run: Run, state:
 async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> None:
     """``worker.submit(work)``, for a route that has just recorded the work ``queued``. If the worker
     refuses it or fails, the record is marked ``failed`` with :data:`NOT_ACCEPTED` and the error is
-    raised again, so a failed submit never leaves a run or scoring job queued, which would block
-    the next launch or scoring request."""
+    raised again, so a failed submit never leaves a run, scoring job or re-check queued, which
+    would block the next launch, scoring request or re-check."""
     try:
         await worker.submit(work)
     except Exception:
@@ -806,10 +819,21 @@ async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> No
 
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
-    as a run's process that exited early: a run or scoring job still queued or running becomes
-    ``failed``. A finished record is left alone."""
+    as a run's process that exited early: a run, scoring job or re-check still queued or running
+    becomes ``failed``. A finished record is left alone."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "recheck":
+        recheck = await records.get_recheck(principal, project, work.job_id or "")
+        if recheck is not None and recheck.state in ("queued", "running"):
+            try:
+                await records.update_recheck(
+                    principal, project, recheck.model_copy(update=changes), expected_state=recheck.state
+                )
+            except StoreError as error:
+                if error.kind != "conflict":
+                    raise
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state in ("queued", "running"):

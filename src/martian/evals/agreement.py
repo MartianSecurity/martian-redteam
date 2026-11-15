@@ -322,12 +322,22 @@ def compare(
 
 
 @dataclass(frozen=True)
+class Pair:
+    """One compared item of a judge version's report: the item, the judge's verdict on it and the
+    label people gave it."""
+
+    item: Item
+    verdict: Value
+    label: Value
+
+
+@dataclass(frozen=True)
 class JudgeAgreement:
     """One judge version's verdicts against people's labels. ``judged`` counts the items it gave a
     verdict, ``incomparable`` those whose label is of another kind than its verdicts, and
-    ``agreement.labelled`` those compared. ``models`` are the models its verdicts name: for a
-    panel's verdicts (``panel``), its members' models. A panel is reported as one judge, since its
-    verdict is the panel's (``martian.evals.panel``)."""
+    ``agreement.labelled`` those compared, which ``pairs`` holds in item order. ``models`` are the
+    models its verdicts name: for a panel's verdicts (``panel``), its members' models. A panel is
+    reported as one judge, since its verdict is the panel's (``martian.evals.panel``)."""
 
     judge: str
     version: str
@@ -336,6 +346,7 @@ class JudgeAgreement:
     incomparable: int
     agreement: Agreement
     panel: bool = False
+    pairs: tuple[Pair, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """The report as the evals core serves it, with the reference side named ``human``."""
@@ -450,14 +461,14 @@ def judge_agreement(
         name, version = key
         judged = grouped[key]
         kind = (kinds or {}).get(key) or _inferred([v.value for _, v in judged])
-        pairs: list[tuple[Value, Value]] = []
+        pairs: list[Pair] = []
         incomparable = 0
-        for item, verdict in judged:
+        for item, verdict in sorted(judged, key=lambda each: each[0]):
             label = by_criterion.get((item, name))
             if label is None:
                 continue
             if comparable(kind, verdict.value) and comparable(kind, label.value):
-                pairs.append((verdict.value, label.value))
+                pairs.append(Pair(item, verdict.value, label.value))
             else:
                 incomparable += 1
         reports.append(
@@ -467,8 +478,9 @@ def judge_agreement(
                 models=tuple(sorted({model for _, v in judged for model in _models(v) if model})),
                 judged=len(judged),
                 incomparable=incomparable,
-                agreement=compare(pairs, kind, minimum=minimum),
+                agreement=compare([(p.verdict, p.label) for p in pairs], kind, minimum=minimum),
                 panel=any(is_panel(v.metadata) for _, v in judged),
+                pairs=tuple(pairs),
             )
         )
     return reports
@@ -740,6 +752,7 @@ __all__ = [
     "JudgeAgreement",
     "Kind",
     "Method",
+    "Pair",
     "QueueAgreement",
     "ReviewerAgreement",
     "Status",

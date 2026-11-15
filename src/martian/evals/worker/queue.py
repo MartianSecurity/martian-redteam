@@ -27,7 +27,8 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
 - **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
   claimable again once the lease runs out, and the next worker takes it again: a run or scoring
   job still ``running`` is queued again and resumes after the cases already finished, whose
-  target or judge is not called again (:func:`take_over`). A worker that
+  target or judge is not called again (:func:`take_over`); a re-check of a calibration, which
+  keeps no checkpoint, starts again from its first item. A worker that
   is stopped (``stop``, or a cancelled ``serve``) stops its work and gives it back at once, without
   counting the attempt. A ``ProcessWorker``'s run process ends with the worker that started it.
   After ``max_attempts`` claims, the work is ``failed`` with :data:`STOPPED_TOO_OFTEN`, not taken
@@ -78,8 +79,9 @@ STOPPED_TOO_OFTEN = "The worker stopped before this work finished, too many time
 
 
 def entry_id(work: Work) -> str:
-    """The work's id in the queue: ``run:<run id>`` or ``scoring:<scoring job id>``."""
-    return f"scoring:{work.job_id}" if work.kind == "scoring" else f"run:{work.run_id}"
+    """The work's id in the queue: ``run:<run id>``, ``scoring:<scoring job id>`` or
+    ``recheck:<re-check id>``."""
+    return f"{work.kind}:{work.job_id}" if work.kind != "run" else f"run:{work.run_id}"
 
 
 class QueueWorker:
@@ -210,7 +212,8 @@ class QueueWorker:
             await self._queue.done(claim)
             return
         if claim.attempt > self._max_attempts:
-            log.error("%s work on run %s: its worker stopped %d times", work.kind, work.run_id, claim.attempt - 1)
+            named = work.run_id or work.job_id  # a re-check names no run
+            log.error("%s work on %s: its worker stopped %d times", work.kind, named, claim.attempt - 1)
             await fail_unfinished(self._records, work, STOPPED_TOO_OFTEN)
             await self._queue.done(claim)
             return

@@ -44,6 +44,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from martian.evals.agreement import (
     KINDS,
     MINIMUM_LABELLED,
+    JudgeAgreement,
     Kind,
     judge_agreement,
     question_agreement,
@@ -135,6 +136,20 @@ async def _registered(
     return found
 
 
+async def agreement_reports(
+    store: EvalStore, records: RecordStore, principal: Principal, key: str, name: str | None = None
+) -> tuple[list[JudgeAgreement], int, bool]:
+    """Each judge version's report of a project that exists, by its store id, or of one judge's
+    versions, with the items each compared, and how many traces were read and whether there were
+    more."""
+    verdicts, reviews, case_traces = await _from_records(records, principal, key)
+    traced, annotations, examined, truncated = await _from_traces(store, principal, key, case_traces)
+    kinds = await _registered(store, principal, key, name)
+    found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
+    reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
+    return reports, examined, truncated
+
+
 async def queue_reviews(
     store: EvalStore, records: RecordStore, principal: Principal, key: str
 ) -> tuple[list[ReviewQueue], list[Review]]:
@@ -155,11 +170,7 @@ async def project_agreement(
     """The agreement report of a project that exists, by its store id, or of one judge's versions,
     as the route answers it. A judge version's calibration is its item of this report
     (``martian.evals.server.calibration``)."""
-    verdicts, reviews, case_traces = await _from_records(records, principal, key)
-    traced, annotations, examined, truncated = await _from_traces(store, principal, key, case_traces)
-    kinds = await _registered(store, principal, key, name)
-    found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
-    reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
+    reports, examined, truncated = await agreement_reports(store, records, principal, key, name)
     judges = {r.judge for r in reports}
     queues, chains = await queue_reviews(store, records, principal, key)
     between = [q for q in question_agreement(chains, queues) if q.question in judges]
@@ -223,4 +234,4 @@ async def reviewer_agreement_report(
     }
 
 
-__all__ = ["TRACE_LIMIT", "explorer", "is_label", "project_agreement", "queue_reviews"]
+__all__ = ["TRACE_LIMIT", "agreement_reports", "explorer", "is_label", "project_agreement", "queue_reviews"]
