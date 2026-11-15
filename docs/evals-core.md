@@ -606,15 +606,22 @@ when no `--ui-dir` is given, and the container settings below with their warning
 ### The local edition in a container
 
 The repository's `Dockerfile` builds the local edition as an image, for one user who runs it on a
-small server rather than a laptop. It runs the same `martian ui`: the wheel built from the
-checkout with the `evals` extra, with its dependencies at the versions `uv.lock` pins, on
-`python:3.12-slim`. Both base images are pinned by digest. The server runs as the user `martian`
-(uid 10001), with the data folder in `/data`, a volume, and without opening a browser.
+small server rather than a laptop. It runs the same `martian ui`: the one wheel in `dist/`, with
+the `evals` extra and its dependencies at the versions `uv.lock` pins, on `python:3.12-slim`. The
+image installs that wheel and never builds the package. Both base images are pinned by digest.
+The server runs as the user `martian` (uid 10001), with the data folder in `/data`, a volume, and
+without opening a browser.
 
 ```bash
+rm -rf dist && uv build --wheel
 docker build -t martian-evals .
 docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data martian-evals
 ```
+
+A release builds the image from the wheel it publishes, checks that both hold the same SDK
+version and Evals UI, and publishes it as `ghcr.io/morninghq/martian-evals:<version>`
+([releasing](releasing.md#the-local-editions-image)). To run a published version instead of a
+local build, give that name as the image, the last argument of `docker run`.
 
 Then open http://127.0.0.1:7600/ on the server. The `martian-evals` volume holds `mlflow.db`,
 `artifacts/` and `martian.db`, so the data outlives `docker stop` and `docker start`, and a new
@@ -651,9 +658,8 @@ it does not keep out a program that reaches the port, which is why the port must
 
 `tests/test_container_image.py` checks that the `Dockerfile` pins its base images, runs as a user
 other than root and sets the variable `martian ui` reads, and that `.dockerignore` lets in every
-file the build copies. CI does not build the image. Nothing
-publishes it to a registry yet: MorningHQ/martian-notes#223 builds the package and the image from
-one tagged release.
+file the build copies and no source to build the package from. CI does not build the image; the
+release workflow does, and `scripts/check_image.py` checks it there.
 
 ## Command-line runs
 
@@ -701,7 +707,6 @@ cannot be opened.
 | A durable worker, and one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
-| Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

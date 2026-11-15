@@ -37,3 +37,13 @@ def test_the_build_context_holds_what_the_build_copies():
     sources = re.findall(r"^COPY (?!--from)(.+) \S+$", DOCKERFILE, flags=re.MULTILINE)
     copied = {path for line in sources for path in line.split()}
     assert copied and copied <= admitted, copied - admitted
+
+
+def test_the_image_installs_the_wheel_in_dist_and_cannot_build_the_package():
+    # The release publishes the image with the wheel it checked; a build of the checkout here would
+    # put a second build in the image. The context holds no source to build from.
+    ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert sorted(line for line in ignore if line.startswith("!")) == ["!dist/*.whl", "!pyproject.toml", "!uv.lock"]
+    instructions = "\n".join(line for line in DOCKERFILE.splitlines() if not line.lstrip().startswith("#"))
+    assert "COPY dist/*.whl /dist/" in instructions
+    assert not re.search(r"\b(?:uv|pip|python -m) build\b|hatch", instructions)

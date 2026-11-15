@@ -27,7 +27,9 @@ public and compatibility namespaces outside the checkout, exercise the CLIs and
 serve the packaged Evals UI with `martian ui`, after checking it is the pinned
 build ([the Evals UI in the wheel](releasing.md#the-evals-ui-in-the-wheel)).
 The generated `release-checksums.json` identifies artifacts; it is an output,
-not a source file. See [release preparation](releasing.md) for tag and publisher
+not a source file. The release workflow also builds the local edition's image from
+the wheel and requires `scripts/check_image.py` to find the wheel's SDK version and Evals UI in it
+([the local edition's image](releasing.md#the-local-editions-image)). See [release preparation](releasing.md) for tag and publisher
 requirements. A tag build cannot publish without an explicit publishing dispatch.
 
 ## Actual single-key qualification

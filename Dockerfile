@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1
-#
-# The local edition (`martian ui`) for one user on a small server: the wheel built from this
-# checkout with the `evals` extra, its dependencies at the versions uv.lock pins, the data folder
-# in /data. See docs/evals-core.md#the-local-edition-in-a-container.
+# The local edition (`martian ui`) for one user on a small server: the wheel in dist/ with the
+# `evals` extra, its dependencies at the versions uv.lock pins, the data folder in /data. The image
+# installs that wheel and never builds the package itself, so a release's image holds the wheel the
+# release checked and publishes. See docs/evals-core.md#the-local-edition-in-a-container.
 #
 # It has no login. Publish its port on 127.0.0.1 only and never expose it to a public network.
 #
+#   rm -rf dist && uv build --wheel
 #   docker build -t martian-evals .
 #   docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data martian-evals
 
@@ -17,14 +17,15 @@ FROM ${PYTHON_IMAGE} AS build
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_DOWNLOADS=never UV_NO_CACHE=1
 WORKDIR /src
-COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
-COPY src ./src
-RUN uv build --wheel --out-dir /dist \
- && uv export --locked --no-dev --extra evals --no-emit-project --no-header --output-file /dist/requirements.txt \
+COPY pyproject.toml uv.lock ./
+COPY dist/*.whl /dist/
+RUN set -eu; set -- /dist/*.whl; \
+    if [ "$#" -ne 1 ]; then echo "dist/ must hold exactly one wheel; it holds $#: $*" >&2; exit 1; fi; \
+    uv export --locked --no-dev --extra evals --no-emit-project --no-header --output-file /tmp/requirements.txt \
  && uv venv --python /usr/local/bin/python3.12 /opt/martian \
  && uv pip install --python /opt/martian/bin/python --no-deps --require-hashes --compile-bytecode \
-      --requirements /dist/requirements.txt \
- && uv pip install --python /opt/martian/bin/python --no-deps --compile-bytecode /dist/martian_sdk-*.whl \
+      --requirements /tmp/requirements.txt \
+ && uv pip install --python /opt/martian/bin/python --no-deps --compile-bytecode "$1" \
  && uv pip check --python /opt/martian/bin/python
 
 FROM ${PYTHON_IMAGE}

@@ -24,9 +24,12 @@ uv run --all-extras pytest -q
 uv build
 uv run --all-extras twine check --strict dist/*
 uv run --all-extras python scripts/check_release.py --install
+docker build -t ghcr.io/morninghq/martian-evals:<version> .
+uv run --all-extras python scripts/check_image.py --image ghcr.io/morninghq/martian-evals:<version>
 ```
 
-The guard requires one wheel and one sdist, matching versions, Apache-2.0
+The last two build [the local edition's image](#the-local-editions-image) from the wheel in
+`dist/` and check it. `check_release.py` requires one wheel and one sdist, matching versions, Apache-2.0
 metadata and license files, Python 3.12+, both modules, typed markers, CLI
 entry points, the documented extras and the pinned Evals UI
 ([below](#the-evals-ui-in-the-wheel)). It rejects repository/direct-URL
@@ -46,9 +49,48 @@ documentation, build configuration (with the `Dockerfile` and `.dockerignore`), 
 license/notice; no task-owned credentials, raw live logs, local MLflow stores or browser auth
 state are bundled.
 
-The `Dockerfile` builds the local edition's image from the checkout and `uv.lock`
-([evals core](evals-core.md#the-local-edition-in-a-container)). No workflow builds or publishes
-it yet; MorningHQ/martian-notes#223 publishes it with the package from one tagged release.
+## The local edition's image
+
+One tagged release produces the distributions and the image of the local edition
+([evals core](evals-core.md#the-local-edition-in-a-container)), and the image holds the wheel the
+release publishes to PyPI:
+
+- **Built from the wheel.** The `Dockerfile` installs the one wheel in `dist/` with the `evals`
+  extra and the dependencies `uv.lock` pins. It never builds the package: `.dockerignore` lets in
+  only `pyproject.toml`, `uv.lock` and `dist/*.whl`, so the image cannot hold a second build of
+  the checkout. The release builds it after `check_release.py` has checked that wheel, as
+  `ghcr.io/morninghq/martian-evals:<version>`, labelled with the version and the source commit.
+- **The version check.** `scripts/check_image.py` compares the wheel in `dist/` with the image.
+  It runs the image's Python, which reads the installed `martian-sdk` version and every file of
+  the UI that `martian ui` serves, and requires the SDK version and the UI's version, commit,
+  `dirty` flag and digest (`ui_digest`, as for the pin) to equal the wheel's. It then starts the
+  image as it ships, with its port on 127.0.0.1, and requires `/` to be the Evals UI and
+  `/ui-version.json` the wheel's stamp. It writes `image-release.json`: the image, its ID, the
+  SDK version and the UI. Any difference stops the release.
+- **Kept, then pushed.** The build job saves the checked image with `docker save` and keeps it
+  with `image-release.json` as the `evals-image` artifact. The `publish-image` job loads that
+  file, refuses it unless its ID is the one checked, and pushes it. Nothing in that job builds an
+  image, so the registry gets the bytes that were checked. It pushes the version tag only; no
+  `latest` tag is moved.
+
+| Job | Permissions | Environment | What it does |
+| --- | --- | --- | --- |
+| `build` | `contents: read` | None | Checks, builds and keeps the distributions and the image; publishes nothing |
+| `publish` | `id-token: write` (OIDC for PyPI Trusted Publishing) | `pypi` | Uploads the two distributions to PyPI |
+| `publish-image` | `packages: write` (the job's `GITHUB_TOKEN` pushes to GitHub Container Registry) | `ghcr` | Pushes the checked image, after `publish` succeeded |
+
+No registry password or long-lived token is stored. **The owner approves the first real
+publish.** Before dispatching a release with `publish: true` for a version that ships the image:
+
+1. Create the `ghcr` environment under the repository's settings, with required reviewers and
+   deployments limited to `main`. GitHub creates an environment a job names when it does not
+   exist, without protection, so create it first.
+2. Let the organisation's package settings allow the repository to create the container package.
+   The first push creates `ghcr.io/morninghq/martian-evals`, linked to this repository by its
+   `org.opencontainers.image.source` label, and private like the repository. Make it public at
+   the open-source launch.
+3. Settle the UI's licence ([below](#the-evals-ui-in-the-wheel)); the image ships the same UI as
+   the wheel.
 
 ## The Evals UI in the wheel
 
@@ -126,23 +168,25 @@ Publication is explicitly dispatched from reviewed `main`; any configured
 reviewer gate still applies. Do not silently weaken controls or treat a past
 plan limitation as permanent authorization. The workflow filename/environment
 must match the publisher. No PyPI password or long-lived API token belongs in
-GitHub secrets. Only the isolated publish job has `id-token: write`.
+GitHub secrets. Only the isolated publish job has `id-token: write`, and only `publish-image`
+has `packages: write`.
 
 After the implementation is reviewed/committed and real model qualification
 passes, a maintainer can create an immutable `v<version>` tag matching the canonical
 version. The workflow checks out the fully qualified `refs/tags/<tag>`, verifies
 the peeled tag commit equals HEAD and belongs to `origin/main`, and records
 the source commit in its summary. A branch with the same name is not a release.
-A tag push builds/checks and retains distributions; it does **not**
+A tag push builds/checks and retains the distributions and the image; it does **not**
 publish. To publish the reviewed tag, explicitly dispatch **SDK release** with
-that tag and `publish: true` **from `main`**, satisfying the `pypi` environment's protection.
-The workflow rebuilds/validates the tag, clean-installs both artifacts and
-publishes them through SHA-pinned `pypa/gh-action-pypi-publish`. Actual publication
-requires an explicit release request.
+that tag and `publish: true` **from `main`**, satisfying the `pypi` and `ghcr` environments'
+protection. The workflow rebuilds/validates the tag, clean-installs both artifacts, builds and
+checks the image, publishes the distributions through SHA-pinned `pypa/gh-action-pypi-publish`
+and then pushes the checked image. Actual publication requires an explicit release request.
 
 Check PyPI's receipt/version and independently install the published package
 before announcing it. Create the matching GitHub release at that immutable tag
-with the same publishing run's wheel, sdist, and checksum manifest. Verify asset
+with the same publishing run's wheel, sdist, and checksum manifest, and name the image digest
+the `publish-image` job's summary records. Verify asset
 digests after upload. Do not rebuild a different set of files for GitHub.
 The legacy metadata-only `martian-evals-kit` package
 requires a matching available SDK version; publish its compatibility update

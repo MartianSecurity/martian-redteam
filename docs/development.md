@@ -21,7 +21,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
-| `Dockerfile` | The local edition as an image for one user on a small server: the wheel built from the checkout with the `evals` extra and the dependencies `uv.lock` pins ([evals core](evals-core.md#the-local-edition-in-a-container)) |
+| `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |

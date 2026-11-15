@@ -131,7 +131,7 @@ next to each one creates it.
 | `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views), portable to SQLite and Postgres | Exists |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
 | `src/martian/evals/run_record.py` | `martian evals run` recording each suite-file run through the store and the record store, so `martian ui` shows it ([command-line runs](evals-core.md#command-line-runs)) | Exists |
-| `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; publishing it from a tagged release is MorningHQ/martian-notes#223 |
+| `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; a release builds it from the wheel it publishes and pushes it to GitHub Container Registry ([releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists with an in-process worker; a durable queue is MorningHQ/martian-notes#139, one process per run #140 |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MorningHQ/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
 
