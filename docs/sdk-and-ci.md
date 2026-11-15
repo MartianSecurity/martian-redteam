@@ -150,9 +150,10 @@ is serial. Do not also include the same redteam assessment as a pytest test.
 A suite file's run (`martian evals run evals.yaml`) is local and gated on its
 own exit code. With `--baseline DIR` it compares its cases with
 the earlier run in `DIR` by their `verdicts.json` and gates on the comparison:
-it fails on a change worse than noise or on a failed case with no result in
-the baseline, not on cases that failed in both runs or on a few that changed
-within noise ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+it fails on a change worse than noise, on any case that newly fails a
+security check, or on a failed case with no result in the baseline, not on
+cases that failed in both runs or on a few that changed within noise on other
+checks ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
 The [evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps
 `main`'s `verdicts.json` in the Actions cache and passes it on each pull
 request. The pytest gate and `martian ci` have no baseline.
