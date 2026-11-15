@@ -69,6 +69,7 @@ from martian.evals.outbox import save_queue_item
 from martian.evals.records import (
     RECORD_METHODS,
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     EmailChannel,
     JudgeCalibration,
@@ -303,6 +304,10 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         created_by=principal.user_id,
         created_at=T0,
     )
+    # Its reviewers answer blind: each without the others' answers until they have given theirs.
+    await records.add_blind_queue(
+        principal, project, BlindQueue(id=queue.id, run_id=run_id, created_by=principal.user_id)
+    )
     await store.create_queue(principal, project, queue, traced[:2])
     pending = Review(
         id=str(uuid.uuid4()),
@@ -322,6 +327,7 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
             "comment": "Fine.",
             "reviewer": principal.user_id,
             "previous_id": pending.id,
+            "blind": True,
             "created_at": T0 + timedelta(hours=3),
         }
     )
@@ -1071,9 +1077,9 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    # An export of the third format, before judge calibrations and their re-checks were in it.
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 3}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 3; this SDK reads version 4"):
+    # An export of the fourth format, before blind review queues were in it.
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 4}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 4; this SDK reads version 5"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")

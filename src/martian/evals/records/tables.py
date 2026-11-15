@@ -314,6 +314,19 @@ calibration_rechecks = Table(
     Index("ix_martian_calibration_rechecks_judge", "space", "project_id", "judge", "created_at"),
 )
 
+# Review queues with blind double review (migration 0014): one row per queue, never changed.
+blind_queues = Table(
+    "martian_blind_queues",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("run_id", String(ID), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_blind_queues_run", "space", "project_id", "run_id"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -327,6 +340,7 @@ TABLES = (
     work_queue,
     judge_calibrations,
     calibration_rechecks,
+    blind_queues,
     monitors,
     monitored_traces,
     thresholds,

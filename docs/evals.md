@@ -1199,10 +1199,17 @@ who answered shared ones. An answer of another kind than the question's is count
 - **How many items it rests on.** Below 30 shared items (`minimum`, `MINIMUM_LABELLED`) the
   `status` is `too_few`: the counts, and `agreed` for pass/fail and categories, are given, and
   `method` and every rate, interval and coefficient are `null`, as for a judge.
-- **What it does not say.** The core does not hide one reviewer's answer from the next, so a second
-  reviewer may see the first answer before giving theirs, which makes people look more alike than
-  they are. The local edition (`martian ui`) is Community, with no review queues, and has one
-  user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
+- **Blind answers.** In an ordinary queue a second reviewer may read the first answer before giving
+  theirs, which makes people look more alike than they are. A queue with
+  [blind double review](#blind-double-review) hides it, and records each reviewer's first answer
+  to an item as given blind (`blind` on the review). A blind queue's report compares each
+  reviewer's answer given blind, not one they gave after reading the others, and says so with
+  `blind: true`. Across queues, a question that a blind queue asks is compared on the blind
+  queues' blind answers only, with `blind: true`; a question no blind queue asks is compared on
+  every queue's answers, with `blind: false`. The judge report's `reviewer_agreement` is the
+  latter, so a judge's ceiling rests on blind answers once any queue asks its question blind.
+- **Who has one.** The local edition (`martian ui`) is Community, with no review queues, and has
+  one user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
   organisation's members does.
 - **Per queue and per question.** The route reports each queue with a report per question, and
   each question across every queue that asks it, its kind the newest such queue's. The judge
@@ -1213,14 +1220,44 @@ who answered shared ones. An answer of another kind than the question's is count
 from martian.evals.agreement import queue_agreement, question_agreement
 
 # reviews: every link of each review chain (records.list_reviews(..., current_only=False));
-# queues: the ReviewQueue objects they answer.
-for report in queue_agreement(reviews, queues):
+# queues: the ReviewQueue objects they answer; blind: the ids of the blind queues among them
+# ({q.id for q in records.list_blind_queues(...)}).
+for report in queue_agreement(reviews, queues, blind=blind):
     for found in report.questions:
-        print(report.name, found.question, found.status, found.shared, found.method, found.kappa)
+        print(report.name, found.question, found.blind, found.status, found.shared, found.method, found.kappa)
 ```
 
 `compare_reviewers` compares answers given as one mapping of reviewer to answer per item, and
 `fleiss_kappa` and `intraclass_correlation` are the coefficients for more than two reviewers.
+
+### Blind double review
+
+When people can read each other's answers, their agreement goes up for the wrong reason. A review
+queue with blind double review keeps each reviewer from reading the other reviewers' answers to an
+item until they have given their own (`martian.evals.server.blind`). It is created with the evals
+core's own route `POST /v1/evals/blind-review-queues`, which takes the body of
+`POST /v1/evals/review-queues` and needs the same `review_queues` key and `createReviewQueues`;
+a queue is blind from the start and stays so. Every queue the routes answer with has `blind`.
+
+- **Hidden until answered.** An item is a case result and one of the queue's questions. A reader
+  with no complete answer of their own to it reads only its queue's pending review and their own
+  reviews of it, on every route that returns reviews or what they leave: `GET /v1/evals/reviews`, a
+  run's workbench (its review history, current reviews and the human scores among its
+  assessments), a conversation run's turns, and a judge calibration's labelled items, whose
+  `label` they get as `null`. Once they have answered, they read every answer to it.
+- **Answering.** The review drawer sends the review it showed as `previous_id`, as for any queue;
+  in a blind queue the answer is added after the item's newest review, which may be another
+  reviewer's, so the item keeps one chain and its current review is still the newest answer.
+- **Not on the trace.** A blind queue's answers are not copied to the case's trace as feedback:
+  every trace read and search, a trace export and the MLflow UI would show them to anyone. They
+  stay in the record store, with the run's scores.
+- **Given blind.** A reviewer's first complete answer to an item is recorded with `blind: true`;
+  any later answer of theirs, given once they could read the others', and every answer in a queue
+  that is not blind, has `blind: false`. Reviews carry `blind` on every route.
+- **What it does not hide.** A queue's progress (how many items have answers) and the agreement
+  reports, which give counts over items rather than an item's answers. The record store keeps the
+  queue's blind mode (`BlindQueue`, migration `0014`), not the queue's store, so every store
+  binding keeps it, and a [data export](data-export.md) carries it.
 
 ### Calibration
 

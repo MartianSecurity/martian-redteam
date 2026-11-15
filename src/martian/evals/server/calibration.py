@@ -27,6 +27,9 @@ the server's contract does not have.
   is the route a schedule of re-checks calls; the core keeps no schedule.
 - ``GET /v1/evals/judge-rechecks/{recheck_id}`` is one re-check: its state, counts, error and the
   calibration it saved.
+- A calibration's labelled items are people's answers. An item of a review queue with blind double
+  review that the reader has not answered themselves has its ``label`` as ``null``, as the review
+  routes hide it (:mod:`martian.evals.server.blind`).
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
@@ -53,6 +56,7 @@ from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import ScorerVersion
 from martian.evals.records import CalibrationRecheck, JudgeCalibration, LabelledItem, RecordStore
 from martian.evals.server.agreement import agreement_reports
+from martian.evals.server.blind import hidden_of_runs
 from martian.evals.server.dependencies import (
     JudgeSettingsDep,
     PrincipalDep,
@@ -110,7 +114,24 @@ def recheck_id_for(request_id: str) -> str:
     return str(derived_id("judge-recheck", request_id))
 
 
-def calibration_out(calibration: JudgeCalibration) -> dict[str, Any]:
+def _item_out(item: LabelledItem, judge: str, hidden: set[tuple[str, str, str]]) -> dict[str, Any]:
+    found = item.model_dump(mode="json")
+    if item.run_id is not None and (item.run_id, item.case_id or "", judge) in hidden:
+        found["label"] = None
+    return found
+
+
+async def hidden_labels(
+    records: RecordStore, principal: Principal, key: str, calibrations: list[JudgeCalibration]
+) -> set[tuple[str, str, str]]:
+    """The labelled items of the calibrations whose label the principal may not read: answers in a
+    blind queue to an item they have not answered, by run, case and question."""
+    runs = {item.run_id for calibration in calibrations for item in calibration.items if item.run_id}
+    return await hidden_of_runs(records, principal, key, runs) if runs else set()
+
+
+def calibration_out(calibration: JudgeCalibration, hidden: set[tuple[str, str, str]] | None = None) -> dict[str, Any]:
+    """A calibration as the routes answer it, without the labels in ``hidden``."""
     return {
         "id": calibration.id,
         "project_id": project_out(calibration.project_id),
@@ -121,7 +142,7 @@ def calibration_out(calibration: JudgeCalibration) -> dict[str, Any]:
         "panel": [member.model_dump(mode="json") for member in calibration.panel],
         "definition": calibration.definition,
         "labelled": calibration.labelled,
-        "items": [item.model_dump(mode="json") for item in calibration.items],
+        "items": [_item_out(item, calibration.judge, hidden or set()) for item in calibration.items],
         "traces_examined": calibration.traces_examined,
         "traces_truncated": calibration.traces_truncated,
         "report": calibration.report,
@@ -326,6 +347,7 @@ async def judge_calibrations(
         versions = await judge_versions(store, principal, key, name)
     pinned = await with_models(settings, principal, versions)
     newest = await latest_calibrations(records, principal, key, judge=name)
+    hidden = await hidden_labels(records, principal, key, list(newest.values()))
     items = []
     for scorer in pinned:
         latest = newest.get((scorer.name, scorer.version))
@@ -339,7 +361,7 @@ async def judge_calibrations(
                 "panel": [member.model_dump(mode="json") for member in scorer.panel],
                 "status": status,
                 "reason": reason,
-                "calibration": calibration_out(latest) if latest else None,
+                "calibration": calibration_out(latest, hidden) if latest else None,
             }
         )
     return {"project_id": project_out(key), "minimum": MINIMUM_LABELLED, "items": items}
@@ -368,7 +390,7 @@ async def save_judge_calibration(
         body.version,
         calibration_id=calibration_id_for(str(body.request_id)),
     )
-    return calibration_out(saved)
+    return calibration_out(saved, await hidden_labels(records, principal, project_key(body.project_id), [saved]))
 
 
 @explorer.get("/judge-calibrations/{calibration_id}", response_model=None)
@@ -378,10 +400,11 @@ async def judge_calibration(
     records: RecordsDep,
     project_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    found = await records.get_calibration(principal, project_key(project_id), str(calibration_id))
+    key = project_key(project_id)
+    found = await records.get_calibration(principal, key, str(calibration_id))
     if found is None:
         raise HTTPException(404, "Not found")
-    return calibration_out(found)
+    return calibration_out(found, await hidden_labels(records, principal, key, [found]))
 
 
 @explorer.post(

@@ -25,6 +25,14 @@ from fastapi import APIRouter, HTTPException, Query
 
 from martian.evals.model import CaseResult, Project, ReviewQueue, Run, Score, ScoringJob, Trace
 from martian.evals.records import RecordStore
+from martian.evals.server.blind import (
+    blind_queue_ids,
+    hidden_items,
+    hidden_of_run,
+    queue_with,
+    visible_reviews,
+    visible_scores,
+)
 from martian.evals.server.capabilities import highest_role
 from martian.evals.server.dependencies import AgentNames, AgentNamesDep, PrincipalDep, RecordsDep, StoreDep
 from martian.evals.server.principal import Principal
@@ -41,7 +49,6 @@ from martian.evals.server.projection import (
     mlflow_assessment,
     project_key,
     public_job,
-    queue_out,
     reader_provenance,
     reliability_out,
     result_id,
@@ -320,7 +327,10 @@ async def turns(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, rec
     run = await find_run(store, records, principal, run_id)
     results = [result for result in await run_results(records, principal, run) if result.turns]
     scores: dict[str | None, list[Score]] = {}
-    for score in await records.list_scores(principal, run.project_id, run.id) if results else []:
+    hidden = await hidden_of_run(records, principal, run.project_id, run.id) if results else set()
+    for score in (
+        visible_scores(await records.list_scores(principal, run.project_id, run.id), hidden) if results else []
+    ):
         scores.setdefault(score.case_id, []).append(score)
     return {"run_id": run.id, "items": [conversation_out(result, scores.get(result.case_id, [])) for result in results]}
 
@@ -355,7 +365,14 @@ async def workbench(
         selected = job_rows[0]
     config = job_config(selected) if selected else None
 
-    scores = [Assessment.of(s) for s in await records.list_scores(principal, run.project_id, run.id)]
+    # In a blind queue, the reviews and human scores of an item the principal has not answered are
+    # other people's answers they may not read yet (martian.evals.server.blind).
+    blind = await blind_queue_ids(records, principal, run.project_id, run.id)
+    chains = await records.list_reviews(principal, run.project_id, run.id, current_only=False)
+    hidden = hidden_items(chains, blind, principal.user_id)
+    scores = [
+        Assessment.of(s) for s in visible_scores(await records.list_scores(principal, run.project_id, run.id), hidden)
+    ]
     if item_id is not None:
         shown = [s for s in scores if s.item_id == item_id]
     else:
@@ -366,7 +383,7 @@ async def workbench(
     selected_scores = [s for s in scores if selected and s.job_id == selected.id]
 
     reviews = _newest(
-        [ReviewRow.of(r) for r in await records.list_reviews(principal, run.project_id, run.id, current_only=False)],
+        [ReviewRow.of(r) for r in visible_reviews(chains, hidden, principal.user_id)],
         lambda r: (r.created_at or EPOCH, r.id),
     )
     history = [r for r in reviews if item_id is None or r.item_id == item_id]
@@ -404,7 +421,7 @@ async def workbench(
                 "role": highest_role(principal.roles),
             }
         ],
-        "queues": [queue_out(q) for q in queues],
+        "queues": [queue_with(q, blind) for q in queues],
         "selected_job": public_job(selected) if selected else None,
         "pagination": {"jobs": jobs_pagination, "assessments": scores_pagination, "reviews": reviews_pagination},
         "truncated": False,
