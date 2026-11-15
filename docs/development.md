@@ -24,6 +24,10 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
 | `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run in a process of its own that holds a lock on the run |
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
+| `src/martian/evals/inspect_import.py` | Inspect AI `.eval` and `.json` logs read against Inspect's log schema and recorded in the data folder as runs, the same way |
+| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results |
+| `src/martian/evals/data_export.py` | An organisation's data exported through the store and the record store as JSON Lines files with a manifest, resumed after an interruption, and imported into a fresh install ([data export](data-export.md)) |
+| `src/martian/evals/mlflow_import.py` | An MLflow tracking store's schema revision checked, the store read without writing, and its experiments, traces, datasets, assessments and evaluation runs copied into an organisation |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `scripts/sbom.py`, `scripts/licence-policy.json` | The release's CycloneDX bills of materials for the wheel and the image, and the licence check against the allowed list ([releasing](releasing.md#bills-of-materials-and-the-licence-check)) |
@@ -34,7 +38,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
 | `src/martian_redteam/catalog/` | IDs only |
-| `tests/fixtures/` | Recorded `/runs/wait` graph state |
+| `tests/fixtures/` | Recorded `/runs/wait` graph state; Inspect AI logs and the task that wrote them (`inspect/`); the script that writes a test MLflow tracking store with MLflow itself (`mlflow/write_store.py`) |
 | `docs/` | Architecture and contracts |
 
 ## Commands
@@ -180,9 +184,10 @@ run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 `mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
 test module that runs MLflow itself: the store binding (`test_store_mlflow.py`) and its errors
 (`test_store_errors.py`), the judge transport and the judges built on it, the private-import
-guard (`test_mlflow_private.py`), the pytest kit, the suite runner, and the setting that turns
-MLflow's telemetry off (`test_no_outbound.py`). `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
-the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
+guard (`test_mlflow_private.py`), the pytest kit, the suite runner, the MLflow store copy
+(`test_mlflow_import.py`, which has the release under test write the store it copies), and the
+setting that turns MLflow's telemetry off (`test_no_outbound.py`).
+`tests/evals/test_mlflow_compat.py` adds the MLflow behaviour the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
 the store giving MLflow only ids of MLflow's own form, and the upgrade path.
 `scripts/mlflow_compat.py` lists the modules and runs them on any release:
 

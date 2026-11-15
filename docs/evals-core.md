@@ -685,6 +685,16 @@ endpoint, and keeps the local edition's default in its data folder.
   [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
+- `martian evals import inspect` records Inspect AI logs there as runs:
+  [imported Inspect logs](#imported-inspect-logs).
+- `martian evals import promptfoo` records promptfoo results there as runs, and
+  `martian evals convert promptfoo` writes a promptfoo config as suite files:
+  [promptfoo results and configs](#promptfoo-results-and-configs).
+- `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
+  check: [copied MLflow stores](#copied-mlflow-stores).
+- `martian evals export` writes everything an organisation holds as JSON Lines files with a
+  manifest, and `martian evals import martian` loads them into a fresh install:
+  [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own route for the attempts of repeated cases, with the run's reliability and its
   flaky cases.
@@ -728,7 +738,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
   search filters and paging, sessions and users, traces in each attribute style mapped with their
-  attributes kept, scores kept with their trace, versioned scorers,
+  attributes kept, scores kept with their trace, the times given to traces and scores kept as
+  given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -1004,7 +1015,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
     gives as `native.id`). A trace recorded inside an MLflow run that is not a run's, such as one
     an application starts with `mlflow.start_run()`, belongs to no run.
-  - A score is a feedback assessment, and a registered scorer an MLflow scorer.
+  - A score is a feedback assessment, created at the score's `created_at` when it has one, and a
+    registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts, `martian/run.json` among them, are files in the run's folder,
@@ -1152,9 +1164,15 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   holds an empty file per process working on a run, which that process holds an OS lock on
   ([runs whose process stopped](#runs-whose-process-stopped)).
   `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
-  and an application can record its traces there with MLflow tracing or send them over
-  OpenTelemetry ([below](#traces-from-an-application)). What another process writes while the UI
-  is open shows when a page reads again, since the UI gets no live event from it.
+  `martian evals import inspect` writes Inspect AI logs there as runs
+  ([imported Inspect logs](#imported-inspect-logs)), `martian evals import promptfoo` writes
+  promptfoo results there as runs ([promptfoo results and configs](#promptfoo-results-and-configs)),
+  `martian evals import mlflow` copies an MLflow tracking store there
+  ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
+  ([data export](#data-export)), and an application can record its traces there with MLflow
+  tracing or send them over OpenTelemetry ([below](#traces-from-an-application)). What another
+  process writes while the UI is open shows when a page reads again, since the UI gets no live
+  event from it.
 - The worker is `LocalWorker` (`martian.evals.local_runs`): each run started in the UI runs in a
   process of its own against a local target, scored by its suite with the SDK judge, and a
   finished one runs again with the same settings ([local runs](#local-runs)).
@@ -1593,6 +1611,309 @@ edition's routes: Runs and the run detail against the contract, a case's trace a
 trace search, Compare of two runs with its label (within noise for the same deterministic
 system twice, worse for a seeded regression), a run that repeats its cases and its attempts, its
 reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot be opened.
+
+## Imported Inspect logs
+
+`martian evals import inspect` records the logs [Inspect AI](https://inspect.aisi.org.uk/) writes
+as runs in the local edition's data folder (`martian.evals.inspect_import`), so `martian ui` opens
+them in Runs and the run detail, compares two of them case by case, shows each case's messages and
+tool calls as a trace, and takes reviews of them. Inspect has no server, permissions or run
+comparison of its own.
+
+```bash
+martian evals import inspect logs/*.eval                 # each log Inspect wrote to logs/
+martian evals import inspect run.json --data-dir ./evals-data
+```
+
+It reads both of Inspect's formats, `.eval` and `.json`, against Inspect's published log schema
+(log format version 2), without Inspect installed; the `zstandard` package in `martian-sdk[evals]`
+reads the Zstandard entries of an `.eval` log. The data folder is `--data-dir`, else
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui`. Each log is one run, written
+through the store and the record store as `SINGLE_USER`, in the default project; the
+[eval model](eval-model.md#inspect-ai-logs) maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, a `stored` target, the state of the log (`success` is `completed`), Inspect's times, and a scorer for each score name. The code is `inspect-`, the task's name and the run's number among that task's imported runs, such as `inspect-my_task-2`. `provenance["inspect"]` keeps the log's path, its SHA-256 and format, the eval id, task, model and status, and Inspect's results with each scorer's metrics |
+| `CaseResult` | One per sample and epoch: the input, the target as `expected_response`, the completion, the sample's error and time |
+| `Score` | One per Inspect score value, the value kept exactly; a dict or list value is one per entry, named `<scorer>/<key>`. Inspect's `C` and `true` pass and `I`, `P`, `N` and `false` fail; numbers have no verdict. Unscored (NaN) is a score with no value and an error. A scorer that called a model is an `llm_judge` with that model as its source |
+| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments |
+
+- A case's status follows its scores: `error` when the sample failed, `failed` when a score fails,
+  else `error` when one is unscored, `passed` when one passes, and `skipped` when none gives a
+  verdict. Two imported runs compare when they cover the same samples; a sample's first epoch has
+  its own id as its case id, so runs with different numbers of epochs pair on it.
+- Every log is read before anything is written, so a file that is not a finished Inspect log
+  (a log still `started`, another format version, one with no samples, a damaged archive) stops
+  the command with exit code `2` and writes nothing. A data folder that cannot be opened does
+  the same.
+- The run is `running` while its cases are written; an import that stops early leaves it
+  `failed`, with `error` naming the exception's type, or `cancelled` when interrupted.
+- Importing the same log again makes another run. The log is not changed or copied: the run
+  names it.
+
+`tests/evals/test_inspect_import.py` imports two real Inspect logs from `tests/fixtures/inspect/`
+(one on GLM 5 in the JSON format, one with two epochs on Inspect's mock model in the `.eval`
+format; `fixture_task.py` there wrote them) and reads them back through the local edition's
+routes: every score against the log, Inspect's metrics recomputed from them, the run and its
+trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
+inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+
+## promptfoo results and configs
+
+A team that tried [promptfoo](https://www.promptfoo.dev/) brings its results and its configs, with
+promptfoo not installed and not a dependency. `martian evals import promptfoo` records a results
+file as runs in the local edition's data folder (`martian.evals.promptfoo_import`), and
+`martian evals convert promptfoo` writes a config as suite files for `martian evals run`
+(`martian.evals.promptfoo_convert`). Neither runs promptfoo or calls its providers.
+
+```bash
+martian evals import promptfoo results.json                    # as `promptfoo eval -o results.json` wrote it
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
+  --judge-model openai:/gpt-4.1-mini --output suite               # llm-rubric as the rubric judge
+```
+
+[`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
+configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
+the results promptfoo writes for that config with its two providers, also written by hand.
+
+### Imported results
+
+The importer reads promptfoo's JSON output file (`evalId`, `results`, `config`, `shareableUrl`,
+`metadata`) whose `results` is an `EvaluateSummary` of version 3, the shape promptfoo's
+[configuration reference](https://www.promptfoo.dev/docs/configuration/reference/#evaluation-outputs)
+gives and promptfoo 0.125 writes. Version 2, with its results table, and the `.jsonl`, `.csv` and
+other output formats are refused. Each provider in the file is one run, written as
+`martian evals import inspect` writes its runs; the [eval model](eval-model.md#promptfoo-results)
+maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, state `completed`, a `stored` target, and a scorer for each assertion type. The model's `Target` has no name, so the provider names the run: its code is `promptfoo-`, the provider's label (else its id) and the run's number among that provider's imported runs, such as `promptfoo-mini-2`, and `provenance["promptfoo"]["provider"]` holds its id and label. The provenance also keeps the file's path and SHA-256, the eval id, the timestamp, the description, the prompts' metrics and promptfoo's stats |
+| `CaseResult` | One per result row (a test, once per prompt and repeat), with case id `test <n>`, `test <n>, prompt <m>` when the eval has several prompts, and ` (repeat <k>)` for a later repeat. Its inputs are the rendered prompt and the vars, its expectations the test's assertions, its output the provider's, and its latency promptfoo's |
+| `Score` | One per assertion promptfoo graded, named after the assertion's type (`icontains`, a second one `icontains (2)`, one inside an `assert-set` `assert-set/regex`). The value and the verdict are the assertion's pass, as a suite file's checks record theirs, so Quality shows each assertion's pass rate; promptfoo's numeric score is `metadata["promptfoo.score"]` and its reason the rationale. Model-graded types (`llm-rubric`, `factuality`, `g-eval` and the others) and red team graders have source `llm_judge` |
+| `Trace` | One span, the provider call, with the prompt, the output, the vars, token use and cost, carrying the case's scores |
+
+- A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
+  grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
+  `threshold` counts as promptfoo counted it.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Every file is read before anything is written, so a file that is not promptfoo results, one
+  of another version, one without rows, or one that has a provider's case twice or two providers
+  with one label stops the command with exit code `2` and writes nothing.
+- The file's `config` section is not copied into the run, only its `description`.
+
+### Converted configs
+
+The converter reads `prompts`, `providers`, `tests` with `vars` and `assert`, and `defaultTest`,
+and writes the suite files where the features map:
+
+- Each test, once per prompt, is a case. The prompt rendered with the test's vars is the input
+  `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
+  `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
+  Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
+  promptfoo. Case ids are the ones the importer gives the same tests' results.
+- `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
+  them. `{{ name }}` in an assertion's value is filled from the test's vars.
+- A suite file applies every check to every case, and promptfoo asserts per test, so tests that
+  need the same checks share a suite: `evals.yaml` and `cases.jsonl`, then `evals-2.yaml`,
+  `cases-2.jsonl` and output folder `results-2` for the next group, and so on. Two tests share a
+  check when they assert the same type the same number of times with the same options; a text
+  check's values and a rubric that differ between them are read from each case's expectations.
+- `--target FILE.py[:FUNCTION]` is the target, called as `FUNCTION(prompt=..., vars=...)` (the
+  function defaults to `target`), and written relative to the suite file. Without it, each
+  test's `providerOutput` is the stored reply the suite grades, and a test without one is not
+  converted.
+- `--judge-model` is the rubric judge's model for `llm-rubric`; without it, `llm-rubric` does not
+  convert. promptfoo's grading `provider` is not read.
+- A folder that already has one of the files to write stops the command with exit code `2` before
+  anything is written, and so does a config with nothing that converts.
+
+Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+the rubric judge). An assertion converts only when its check decides the way promptfoo does;
+everything else is listed:
+
+| promptfoo assertion | Suite check |
+| --- | --- |
+| `contains`, `contains-all` | `contains`, `case_sensitive: true` |
+| `icontains`, `icontains-all` | `contains` |
+| `contains-any`, `icontains-any` | `contains`, `any_of: true` (and `case_sensitive: true` for `contains-any`) |
+| `not-contains`, `not-contains-any` | `not_contains`, `case_sensitive: true` |
+| `not-icontains`, `not-icontains-any` | `not_contains` |
+| `regex`, `not-regex` | `matches`, `not_matches`: the pattern as written, read by Python's `re` (a pattern Python cannot read is listed) |
+| `equals`, `not-equals` (text, a number or a boolean) | `matches`, `not_matches` on `\A<text>\Z` |
+| `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
+| `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
+| `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+| `latency` with a `threshold` above 0, and `--target` | `latency`, `max_ms` the threshold: the target's call took at most that many milliseconds |
+| `cost` with a `threshold` above 0, and `--target` | `cost`, `max_usd` the threshold: the target's call cost at most that many US dollars |
+
+Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
+`-any` or `-all` type given as text is split on commas, as promptfoo splits it. `latency` and
+`cost` pass at the threshold, as promptfoo's do, and a call with no figure to compare is an error
+in both. promptfoo times and prices its provider's call; the checks read the trace MLflow records
+for the target's call, so `cost` needs the target's model calls traced with their token use (a
+target that makes none, such as `examples/promptfoo/agent.py`, gives the check an error, where
+promptfoo takes a cost the provider reports itself). A `threshold` is the limit of these two, not
+a score threshold.
+
+| Listed, not converted | Why |
+| --- | --- |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
+| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
+| `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
+| `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
+| `promptfoo:redteam:pii` and its variants | A model judges whether the reply discloses personal data, names, addresses and records included, and allows what the user gave or the purpose permits. `no_personal_data` finds email addresses and phone, card, IBAN and national id numbers by their form, with no context; add it by hand to use it |
+| `promptfoo:redteam:indirect-prompt-injection` | A model judges whether the reply followed the injected instructions, the assertion's value. `resists_injection` looks for a marker that only following them produces, which a config does not name; add it by hand with one |
+| Other red team graders | Graded by a model with their own prompts |
+| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
+| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
+| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
+
+`not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
+value as written, as promptfoo does. `no_prohibited_phrases`, added by hand, also matches a phrase
+through case, spacing and disguises.
+
+Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
+verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
+`threshold` (except on `latency` and `cost`), `rubricPrompt`, `normalizeUnicode`, `config` and
+unknown options would, so the assertion is listed and not converted, as is one whose value is a `file://` reference or uses
+Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
+`providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
+var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
+providers, prompts that are not text or `.txt` and `.md` files, `tests` or `defaultTest` in a
+file, `scenarios` and every other top-level field are listed. The command prints the list, and
+each suite file holds it as comments at its top, with the tests it covers.
+
+`tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
+through the local edition's routes: both providers' runs, their cases and verdicts, every
+assertion's pass and score against the file, the provenance, a trace, and Compare of the two
+providers; it also covers repeated and nested assertions, grader errors, and the files the command
+refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
+file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
+stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
+and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
+convert is listed.
+
+## Copied MLflow stores
+
+`martian evals import mlflow` copies what a team kept in MLflow into the local edition's data
+folder (`martian.evals.mlflow_import`), so `martian ui` shows it: each experiment as a project,
+its traces with their spans, sessions and users, the evaluation datasets, every assessment, and
+each evaluation run with its cases, which Compare pairs case by case.
+
+```bash
+martian evals import mlflow ./mlflow.db                          # a SQLite tracking store
+martian evals import mlflow 'postgresql://user:password@host/mlflow' --data-dir ./evals-data
+martian evals import mlflow ./mlflow.db --experiment support-bot --dry-run
+```
+
+| Option | What it does |
+| --- | --- |
+| The source | The tracking store: its SQLite database file (`mlflow.db`), or a `sqlite:///` or `postgresql://` URL (read with psycopg; install `martian-sdk[postgres]`). The traces' artifact folder is wherever the store names it |
+| `--data-dir` | The data folder, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui` |
+| `--experiment` | Copy only this experiment, by name or id; repeat for more. Default: every active experiment |
+| `--dry-run` | Check and read the store and report what would be copied, writing nothing |
+
+The version check comes first, before anything else is read. MLflow keeps its schema revision in
+the store's `alembic_version` table, and `mlflow-skinny` 3.18.0 reads one revision, the head of its
+own migrations (`schema_head()` in `martian.evals._mlflow`):
+
+- The same revision: the store is read.
+- An older revision, one an older MLflow wrote: refused. Reading it would mean migrating it, and the
+  import never changes the store it reads, because an older MLflow cannot open a migrated store
+  (a store 3.18.0 opened, 3.16.1 can no longer open). The message says how to copy it anyway: copy
+  the database, upgrade the copy with `mlflow db upgrade <the copy's URL>` on mlflow-skinny 3.18.0,
+  and import the copy.
+- A revision 3.18.0 does not know, which a newer MLflow wrote: refused. A martian-sdk release whose
+  MLflow knows the revision imports it.
+- A database with no schema revision, more than one, or without every table its revision has; a
+  store with experiments in MLflow workspaces other than `default`; a folder (MLflow's file
+  store); an MLflow server's URL: refused.
+
+A refused store stops the command with exit code `2` before the data folder is opened, so nothing
+is written. The store is read over a connection that cannot write: SQLite opened read-only with
+`query_only` on, Postgres with every transaction read-only. Every object is read and mapped before
+anything is written.
+
+**Copy, not attach.** The issue asked to attach to or copy from a store; the import copies.
+Attaching, the core's store reading the team's database in place, would not work as it is and
+would put the team's store at risk:
+
+- The in-process binding expects its own layout: a workspace per organisation, projects as
+  tagged experiments, runs as MLflow runs holding `martian/run.json`, datasets tagged
+  `martian.dataset.*`. MLflow's own experiments, runs and datasets are none of these.
+- Runs, case results and the scores the core gates on live in the record store, not in MLflow, so
+  an attached store would still need its runs copied.
+- Opening the database with the SDK's MLflow migrates an older one in place, after which the
+  team's MLflow cannot open it, and refuses a newer one. Writes from the UI (annotations, reviews,
+  scoring) would land in the team's database.
+- The core's ids differ from MLflow's: runs and projects are UUIDs.
+
+A copy reads the store once, at one schema revision, never writes it, and puts everything in the
+core's own forms, so the data folder is an ordinary one: it keeps working when the team upgrades or
+retires its MLflow. Copying the same store again copies only what is new: ids are derived from
+MLflow's (the trace id, the run id as a UUID, the record id, a project id from the experiment's id
+and creation time), and what an earlier copy wrote is left as it is and reported as there already.
+Read-only attach is feasible later as a separate read-only store binding over a store at the
+pinned revision, mapping as the copy does on every read, but it would have to derive runs and
+case results on each read, refuse every write route, and stop working whenever the team moves its
+MLflow to another revision.
+
+What maps where ([the eval model](eval-model.md#mlflow-tracking-stores) lists every field):
+
+| MLflow | What the copy writes |
+| --- | --- |
+| Experiment | A project with the experiment's name; MLflow's `Default` experiment is the default project. The organisation's limit of 25 projects besides the default one is checked before anything is written |
+| Trace | A trace in the experiment's project, under MLflow's trace id, with its spans, session, user, tags and metadata |
+| Assessment | A score on its trace. A person's feedback and every expectation are annotations, as the UI records them; a judge's or code's feedback is a score. Values are kept, a dict or list as its JSON text; `yes` and `no` are verdicts |
+| Evaluation dataset | A dataset version in the default project, a case per record under the record's id |
+| Run with traces | A run with MLflow's run id as a UUID and code `mlflow-<run name>`: a case per trace, the case's id the record with the same inputs, its scores the run's judge and code feedback. Its MLflow metrics, parameters and dataset are in its provenance |
+
+The command prints what each experiment, run and dataset became, the counts written and the counts
+there already, and what was not copied and why: deleted experiments and runs, runs without traces
+(parameters and metrics only) or still running, assessments a later one overrides, records without
+inputs, traces whose spans are in an artifact store that is not a file on this machine, and the
+registered scorers, labeling schemas, review queues, logged models and registered models or
+prompts the core has no place for.
+
+- `copy_mlflow_store(plan, store, records, principal)` copies into any organisation's store and
+  record store; the command copies into the local edition's, as `SINGLE_USER`.
+- A run is `running` while its cases are written; a copy that stops early leaves it `failed`, or
+  `cancelled` when interrupted, and a later copy leaves it so.
+- The hosted MLflow server's REST API is not read; copy from the database the server keeps (its
+  `--backend-store-uri`). Neither is MLflow's file store.
+- A copied assessment is a new assessment in the data folder's store, dated by the copy; its
+  MLflow creation time is `metadata["mlflow_source.created_at"]`, and a run's scores in the
+  record store keep it as `created_at`.
+
+`tests/evals/test_mlflow_import.py` has mlflow-skinny write a real tracking store
+(`tests/fixtures/mlflow/write_store.py`: traces in two sessions, a person's feedback, an
+expectation, a judge's feedback, a corrected assessment, an evaluation dataset, two
+`mlflow.genai.evaluate` runs, a run without traces and a deleted experiment), copies it and reads
+it back through the local edition's routes: projects, traces, sessions, spans, annotations, the
+dataset, both runs with their cases and scores, their provenance and Compare. It checks the
+source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
+artifact file are read from there, that an older, unknown or missing schema revision, a missing
+table, workspaces and files that are not stores are refused with nothing written, the project
+limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
+Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
+
+## Data export
+
+`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals import martian <folder>` loads an export into a data folder that holds no data
+yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
+interrupted export resumes when it is run again into the same folder. An install that runs the
+core in its own process calls `export_data` and `import_data` with its store, record store and the
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
+an export holds, resuming, and what the receiving store assigns are in
+[data export](data-export.md).
 
 ## Not built yet
 
