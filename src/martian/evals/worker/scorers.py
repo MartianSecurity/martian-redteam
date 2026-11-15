@@ -36,9 +36,12 @@ def is_builtin(scorer: ScorerVersion) -> bool:
 
 
 def scorer_source(scorer: ScorerVersion) -> str:
-    """The ``source_id`` of a code score, and of a judge score that has no verdict."""
+    """The ``source_id`` of a code score, and of a judge score that has no verdict. A custom
+    Python scorer's is ``python:<name>``: the worker's setup installs the function under that name."""
     if is_builtin(scorer):
         return f"martian.{scorer.name}:{BUILTIN_VERSION}"
+    if scorer.kind == "code":
+        return f"python:{scorer.name}"
     return f"{scorer.name}@{scorer.version}"
 
 
