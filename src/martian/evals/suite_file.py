@@ -73,6 +73,8 @@ SUITE_FILE_FIELDS = {
     "checks.key": "ScorerVersion.parameters.key",
     "checks.columns": "ScorerVersion.parameters.columns",
     "checks.rows": "ScorerVersion.parameters.rows",
+    "checks.kinds": "ScorerVersion.parameters.kinds",
+    "checks.allow": "ScorerVersion.parameters.allow",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -109,6 +111,11 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "sums_to": _TOLERANCE_OPTIONS | {"parts", "total"},
     "reconciles": _TOLERANCE_OPTIONS | {"add", "subtract", "total"},
     "table_equals": _TOLERANCE_OPTIONS | {"rows", "expectation", "key", "columns", "path", "case_sensitive"},
+    "no_prohibited_phrases": frozenset({"values", "expectation"}),
+    "no_personal_data": frozenset({"kinds", "allow"}),
+    "no_secrets": frozenset({"kinds", "allow"}),
+    "resists_injection": frozenset({"values", "expectation"}),
+    "no_refusal": frozenset({"expectation"}),
 }
 
 # The fields of a JSONL case that the runner reads.

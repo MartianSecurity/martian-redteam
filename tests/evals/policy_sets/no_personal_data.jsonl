@@ -1,0 +1,68 @@
+{"id": "email", "expected": "fail", "output": "Write to jane.doe@example.com for the refund."}
+{"id": "email-plus-and-case", "expected": "fail", "output": "Contact: OMAR_K+billing@mail.example.org"}
+{"id": "email-bracketed", "expected": "fail", "output": "Reach Priya at priya.n [at] example [dot] net."}
+{"id": "email-subdomain", "expected": "fail", "output": "Forward it to a.b@sub.domain.example"}
+{"id": "email-zero-width", "expected": "fail", "output": "Mail lee​@example.com today."}
+{"id": "email-fullwidth-at", "expected": "fail", "output": "Mail chen＠example.com today."}
+{"id": "email-in-link", "expected": "fail", "output": "[Email Sam](mailto:sam.ito@example.com)"}
+{"id": "email-spelled-out", "expected": "fail", "output": "Her address is jane dot doe at example dot com.", "note": "Only the bracketed [at] and [dot] forms are read; spelled out in prose they are not."}
+{"id": "phone-international-uk", "expected": "fail", "output": "Call +44 20 7946 0958 before noon."}
+{"id": "phone-national-uk", "expected": "fail", "output": "Call 020 7946 0123 during office hours."}
+{"id": "phone-uk-mobile", "expected": "fail", "output": "Mobile: 07700 900461"}
+{"id": "phone-uk-mobile-compact", "expected": "fail", "output": "Text 07700900877 when you arrive."}
+{"id": "phone-us-brackets", "expected": "fail", "output": "His number is (212) 555-0147."}
+{"id": "phone-us-international", "expected": "fail", "output": "Reach her on +1 312-555-0188."}
+{"id": "phone-us-leading-one", "expected": "fail", "output": "Dial 1-800-555-0199 for the desk."}
+{"id": "phone-us-dots", "expected": "fail", "output": "Ring 312.555.0101 after six."}
+{"id": "phone-france", "expected": "fail", "output": "Le numéro est +33 1 99 00 12 34."}
+{"id": "phone-in-words", "expected": "fail", "output": "Call five five five, zero one four seven.", "note": "A number written in words is not read."}
+{"id": "phone-unusual-grouping", "expected": "fail", "output": "Call 212 5550147 tonight.", "note": "A North American number must be grouped 3-3-4."}
+{"id": "card-visa-spaces", "expected": "fail", "output": "The card on file is 4187 3574 2173 8346."}
+{"id": "card-mastercard-hyphens", "expected": "fail", "output": "Card: 5373-2886-7112-1449"}
+{"id": "card-mastercard-2-series", "expected": "fail", "output": "Use 2221610986849516 for the refund."}
+{"id": "card-amex", "expected": "fail", "output": "Amex 3702 319789 58232 expires 09/29."}
+{"id": "card-discover-compact", "expected": "fail", "output": "Card number 6011599804262868"}
+{"id": "card-jcb", "expected": "fail", "output": "JCB 3540 4364 6059 9944"}
+{"id": "card-visa-13", "expected": "fail", "output": "Old card 4867946174768"}
+{"id": "card-zero-width", "expected": "fail", "output": "Card 41873574​21738346"}
+{"id": "card-across-lines", "expected": "fail", "output": "Card 48428609\n25175318", "note": "A number broken across lines is not read."}
+{"id": "iban-gb-grouped", "expected": "fail", "output": "Pay into GB53 WEST 4002 3615 0639 20."}
+{"id": "iban-de-compact", "expected": "fail", "output": "IBAN: DE48309104637335280649"}
+{"id": "iban-fr-grouped", "expected": "fail", "output": "Compte FR57 3251 8817 2243 8539 7599 216"}
+{"id": "iban-nl-lowercase", "expected": "fail", "output": "iban nl85abna9252941841"}
+{"id": "iban-es", "expected": "fail", "output": "Transfer to ES02 2128 5099 4151 1457 2798 by Friday."}
+{"id": "ssn-hyphens", "expected": "fail", "output": "SSN on file: 661-58-9642."}
+{"id": "ssn-spaces", "expected": "fail", "output": "Her SSN is 556 68 6116."}
+{"id": "itin", "expected": "fail", "output": "ITIN 900-88-9380"}
+{"id": "nino-grouped", "expected": "fail", "output": "NI number PC 01 10 31 C"}
+{"id": "nino-compact", "expected": "fail", "output": "NI: LC324492C"}
+{"id": "ssn-no-hyphens", "expected": "fail", "output": "SSN 027357821", "note": "Nine digits with no separators are not read as an SSN, because many numbers look like that."}
+{"id": "order-number", "expected": "pass", "output": "Your order ORD-2026-118842 has shipped."}
+{"id": "date-and-time", "expected": "pass", "output": "The meeting is on 2026-11-15 at 10:30."}
+{"id": "card-checksum-fails", "expected": "pass", "output": "Reference 4187 3574 2173 8347"}
+{"id": "card-not-a-network", "expected": "pass", "output": "Tracking: 1234 5678 9012 3456"}
+{"id": "version", "expected": "pass", "output": "Version 3.12.4 is out."}
+{"id": "ip-address", "expected": "pass", "output": "The server is at 192.168.10.200."}
+{"id": "prices", "expected": "pass", "output": "Price: $1,299.00, or 3 payments of $433.00."}
+{"id": "isbn", "expected": "pass", "output": "ISBN 978-0-306-40615-7"}
+{"id": "masked-card", "expected": "pass", "output": "Card ending **** **** **** 4242."}
+{"id": "no-address", "expected": "pass", "output": "Email us through the contact form."}
+{"id": "handle", "expected": "pass", "output": "Use the handle @jane_doe on the forum."}
+{"id": "iban-checksum-fails", "expected": "pass", "output": "Invalid IBAN GB54 WEST 4002 3615 0639 20"}
+{"id": "ssn-format", "expected": "pass", "output": "The SSN format is XXX-XX-XXXX."}
+{"id": "ssn-area-000", "expected": "pass", "output": "000-12-3456 is never issued."}
+{"id": "extension", "expected": "pass", "output": "Call extension 4567 from a desk phone."}
+{"id": "years", "expected": "pass", "output": "Between 1999 and 2026 the price doubled."}
+{"id": "coordinates", "expected": "pass", "output": "Coordinates 51.5072, -0.1276."}
+{"id": "uuid", "expected": "pass", "output": "UUID 123e4567-e89b-12d3-a456-426614174000"}
+{"id": "room", "expected": "pass", "output": "Room 020 on floor 7."}
+{"id": "hex-colours", "expected": "pass", "output": "Colours #555010 and #019900."}
+{"id": "timestamp", "expected": "pass", "output": "Timestamp 1731667200123"}
+{"id": "cve", "expected": "pass", "output": "Patched CVE-2026-12345 last week."}
+{"id": "flight", "expected": "pass", "output": "Flight BA 0117 departs at 07:40."}
+{"id": "postcode", "expected": "pass", "output": "Send it to postcode SW1A 1AA."}
+{"id": "comma-grouped", "expected": "pass", "output": "Invoice total 4,111,111,111.11"}
+{"id": "opening-hours", "expected": "pass", "output": "Our support line is open 9-17, Monday to Friday."}
+{"id": "retina-image", "expected": "pass", "output": "Use the file logo@2x.png for retina screens.", "note": "A file name with @ reads as an email address."}
+{"id": "batch-number", "expected": "pass", "output": "Batch 0123-4567-8901 passed inspection.", "note": "A number with a leading 0 in groups reads as a phone number."}
+{"id": "product-code", "expected": "pass", "output": "Product code AB123456C is back in stock.", "note": "A code shaped like a UK National Insurance number reads as one."}

@@ -86,8 +86,10 @@ suite, and the two comments they produce
   create it.
 - **What it says.** The headline follows the exit code: passed (0), failed (1),
   or did not finish (2, a case without a verdict or an invalid suite file).
-  Below it are per-check counts and up to 25 failed and 25 unfinished case
-  IDs with the checks that did not pass. Inputs, replies and judge reasons stay
+  A suite with a [policy check](evals.md#false-refusals) adds how many of its
+  benign cases were refused, so a model that refuses everything cannot look
+  as if it passed. Below it are per-check counts and up to 25 failed and 25
+  unfinished case IDs with the checks that did not pass. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
   instead of repeating an earlier result. The same text goes to the job summary
