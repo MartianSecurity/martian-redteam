@@ -112,6 +112,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
+- `tests/evals/test_no_outbound.py` runs `martian evals run`, `martian ui` and the core with a
+  process worker as subprocesses under `tests/evals/outbound_guard/sitecustomize.py`, which every
+  Python process with that folder on `PYTHONPATH` loads at start. The guard refuses and records
+  every connection and name lookup for an address other than loopback, and records MLflow's
+  telemetry client if it starts; the test fails on any record. Its processes get a clean
+  environment, because MLflow turns its telemetry off by itself under CI or pytest variables
+  ([telemetry](security-and-data.md#telemetry)). The child processes import
+  `tests/evals/no_outbound_fixture.py`, so run it from the repository root.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
 - `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
@@ -158,7 +166,8 @@ run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 `mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
 test module that runs MLflow itself: the store binding (`test_store_mlflow.py`), the judge
 transport and the judges built on it, the private-import guard (`test_mlflow_private.py`), the
-pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
+pytest kit, the suite runner, and the setting that turns MLflow's telemetry off
+(`test_no_outbound.py`). `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
 the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
 the store giving MLflow only ids of MLflow's own form, and the upgrade path.
 `scripts/mlflow_compat.py` lists the modules and runs them on any release:
