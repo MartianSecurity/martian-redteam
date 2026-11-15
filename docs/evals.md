@@ -769,7 +769,7 @@ its set and fails unless this table gives the same numbers.
 ## Mistakes that raise instead of passing silently
 
 `martian.evals.evaluate` refuses three situations that would otherwise produce a wrong
-result without any warning:
+result without any warning, and stops a prediction function that hangs:
 
 - **A scorer named like an expectation key** (for example a scorer called `rubric` with
   `expectations.rubric`) raises `ValueError` before anything runs. MLflow writes both to a
@@ -778,6 +778,14 @@ result without any warning:
 - **A prediction function that is not traced** is traced for you. MLflow records per-row
   results only for traced calls, and the plugin skips MLflow's own probing call so that the
   first case is not run twice.
+- **A prediction function that does not return** is stopped by a time limit on each call,
+  `target_timeout_seconds` (default 120 seconds, the same default as a suite file's
+  `target.timeout_seconds`). The function runs on a thread of its own; one that has not returned by
+  then is that case's error, `the target did not answer within target.timeout_seconds`, and the
+  evaluation goes on, so a hung agent cannot hang the test session. The gate then fails closed on
+  that case, as it does for any error. Python cannot stop a thread: the hung function keeps running
+  in the background until it returns or the process ends. Pass `target_timeout_seconds=` to
+  `evaluate(...)` to change the limit.
 - **An evaluation with no per-row results**, or fewer rows than cases, raises
   `EvaluationError`. MLflow leaves a row out when it cannot read back that row's trace, which
   can happen when many workers write to a local store at once. `martian evals run` does not

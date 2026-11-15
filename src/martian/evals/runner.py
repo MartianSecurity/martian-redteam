@@ -122,6 +122,11 @@ def _placeholders(value: Any) -> list[str]:
     return []
 
 
+DEFAULT_TARGET_TIMEOUT_SECONDS = 120
+"""The time limit of one target call when nothing sets it: a suite file's ``target.timeout_seconds``
+and the pytest gate's ``target_timeout_seconds``."""
+
+
 class TargetCallError(RuntimeError):
     """A URL target call failed. The message is the SDK's own wording: it names what went wrong
     and never holds the address, a header, a credential or anything the server sent back."""
@@ -149,7 +154,7 @@ class TargetRef(_Model):
     headers: dict[str, str] = Field(default_factory=dict)
     body: dict[str, Any] | None = None
     response_path: str | None = None
-    timeout_seconds: float = Field(default=120, ge=1, le=600)
+    timeout_seconds: float = Field(default=DEFAULT_TARGET_TIMEOUT_SECONDS, ge=1, le=600)
 
     @model_validator(mode="after")
     def one_kind(self) -> TargetRef:
