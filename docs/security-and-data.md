@@ -39,15 +39,35 @@ Martian. Its outbound calls are the ones the suite file names:
   endpoint that is not on your own machine or network.
 - **Header values** can reference `${NAME}`, read from the environment when the suite loads.
   Only the names appear in the suite file. The values are sent to the target and are not
-  written to `results.jsonl`, `summary.json`, `junit.xml` or the MLflow trace. They are not
-  expanded in the request body, and text inside a case is never expanded.
+  written to `results.jsonl`, `summary.json`, `junit.xml`, the MLflow trace or the local Evals
+  UI's data folder. They are not
+  expanded in the request body, and text inside a case is never expanded. Loading a suite file
+  into the [shared eval model](eval-model.md#the-sdk-suite-file), as a store keeps it, keeps the
+  URL and header values as written, with `${NAME}` unexpanded, so the environment's values are
+  never stored. A literal value is stored as it is: keep credentials in the environment.
 - **An LLM judge** receives the case's input, the reply and your criteria at the provider you
   configure.
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
 
+Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
+`MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
+verdicts and reasons as `results.jsonl` holds them, its trace with the target's spans, and the
+target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
+treat `results.jsonl`.
+
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
+
+## The local edition has no login
+
+`martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
+that reaches its port can read and change all of its data. On a laptop it listens on 127.0.0.1
+and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
+and a web page cannot reach it through a name that resolves to the laptop. The container image
+listens on the container's interfaces, keeps the same `Host` check and prints a warning when it
+starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through an SSH tunnel.
+Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).
 
 ## Runtime reporting data boundary
 
@@ -94,6 +114,30 @@ The SDK accepts only typed operation results. It does not filter attack text or 
 - `persist-credentials: false` on checkout
 - Contents-read permission on the example workflow
 - No `continue-on-error` on the assessment step
+
+## MLflow trace-id path traversal
+
+The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes below.
+
+- **The advisory.** CVE-2026-53995 ([GHSA-wqmh-qccw-pqwf](https://github.com/advisories/GHSA-wqmh-qccw-pqwf),
+  high) covers MLflow's file-based tracking store only. A trace id such as `../../x` sent to
+  `POST /api/3.0/mlflow/traces` made `FileStore.start_trace` write trace files outside the
+  experiment's folder. The advisory names 3.17.2 as the first fixed release, but its fix
+  ([mlflow#26842](https://github.com/mlflow/mlflow/pull/26842),
+  [mlflow#26979](https://github.com/mlflow/mlflow/pull/26979)) is not in 3.17.2; it ships in 3.18.0.
+- **Not exposed: the SDK uses SQL stores.** The in-process store, the pytest kit and the suite
+  runner use SQLite or Postgres, never the file store. A suite file's `mlflow.tracking_uri` can
+  name a file store, but then MLflow tracing in the customer's own process chooses the trace ids.
+- **The SQL-store twin.** Up to 3.17.2 the SQL store also accepted any trace id and wrote it into
+  the trace's artifact location, so `../../x` pointed the trace at a folder outside its
+  experiment. 3.18.0 refuses such an id
+  ([mlflow#27311](https://github.com/mlflow/mlflow/pull/27311)); the advisory does not mention it.
+  `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
+  (`tr-` and 32 hex digits) and derives one from any other id.
+  `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
+- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+  not the file store. Only Backend holds credentials for it, and Backend sends only derived
+  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
 
 ## Licence, attribution and vulnerability reports
 

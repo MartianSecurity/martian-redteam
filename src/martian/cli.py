@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -47,6 +49,16 @@ def run_evals(
     fresh: Annotated[
         bool, typer.Option("--fresh", help="Suite file only: discard earlier results instead of resuming.")
     ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="Suite file only: the local Evals UI's data folder to record the run in, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -61,10 +73,15 @@ def run_evals(
         if len(ctx.args) != 1 or require_redteam:
             typer.echo("Give one suite file and no pytest options: martian evals run evals.yaml", err=True)
             raise typer.Exit(code=2)
-        _run_suite(Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh)
+        _run_suite(
+            Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh, home=data_dir
+        )
         return
-    if output is not None or concurrency is not None or limit is not None or fresh:
-        typer.echo("--output, --concurrency, --limit and --fresh apply to a suite file (evals.yaml) only.", err=True)
+    if output is not None or concurrency is not None or limit is not None or fresh or data_dir is not None:
+        typer.echo(
+            "--output, --concurrency, --limit, --fresh and --data-dir apply to a suite file (evals.yaml) only.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     import pytest
 
@@ -73,18 +90,27 @@ def run_evals(
     raise typer.Exit(code=int(code))
 
 
-def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool) -> None:
+def _run_suite(
+    path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool, home: Path | None
+) -> None:
     from rich.console import Console
     from rich.table import Table
 
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
+    from martian.evals.local import data_folder
     from martian.evals.runner import run_suite
 
     console = Console()
     try:
         summary = run_suite(
-            path, output=output, concurrency=concurrency, limit=limit, resume=not fresh, progress=console.print
+            path,
+            output=output,
+            concurrency=concurrency,
+            limit=limit,
+            resume=not fresh,
+            progress=console.print,
+            home=home,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -99,7 +125,92 @@ def _run_suite(path: Path, *, output: Path | None, concurrency: int | None, limi
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
+    recorded = summary["run"]
+    ui = (
+        "martian ui" if data_folder() == Path(recorded["data_dir"]) else f"martian ui --data-dir {recorded['data_dir']}"
+    )
+    # One line, never wrapped, so the command can be copied.
+    console.print(
+        f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
+    )
     raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
+
+
+@app.command("ui")
+def run_ui(
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="The port to listen on.")] = 7600,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            envvar="MARTIAN_EVALS_HOME",
+            file_okay=False,
+            show_default=False,
+            help="Folder for the local store and its artifacts. Default: ~/.martian/evals.",
+        ),
+    ] = None,
+    ui_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--ui-dir",
+            envvar="MARTIAN_EVALS_UI_DIR",
+            file_okay=False,
+            show_default=False,
+            help="Folder of a built Evals UI (index.html and assets/). Default: the one in this package.",
+        ),
+    ] = None,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the UI in the default browser.")] = True,
+) -> None:
+    """Open the Evals UI on this machine: one user, no login, everything stored locally on SQLite."""
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
+        typer.echo("The local Evals UI needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import (
+        ALLOWED_HOSTS_ENV,
+        BIND_ENV,
+        LocalEditionError,
+        create_local_app,
+        data_folder,
+        host_names,
+        listen_address,
+        packaged_ui,
+        serve,
+    )
+
+    home = data_folder(data_dir)
+    ui = (ui_dir or packaged_ui()).expanduser().resolve()
+    try:
+        # The container image's settings (see BIND_ENV); unset, the server stays on 127.0.0.1.
+        host = listen_address(os.environ.get(BIND_ENV))
+        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)))
+        serve(
+            local,
+            host=host,
+            port=port,
+            open_browser=open_browser,
+            announce=lambda url: _announce_ui(url, host=host, port=port, home=home),
+        )
+    except LocalEditionError as error:
+        typer.echo(f"martian ui: {error}", err=True)
+        if ui_dir is None and not (ui / "index.html").is_file():
+            typer.echo(
+                "This install of martian-sdk has lost the Evals UI it ships: reinstall it, or pass --ui-dir "
+                "with a built UI, such as the dist-evals folder that `npm run build:evals` writes in the frontend.",
+                err=True,
+            )
+        raise typer.Exit(code=2) from None
+
+
+def _announce_ui(url: str, *, host: str, port: int, home: Path) -> None:
+    """What ``martian ui`` prints once it listens. Off loopback, as in the container image, it
+    gives the address it listens on and the warning that there is no login."""
+    from martian.evals.local import EXPOSURE_WARNING
+
+    if ipaddress.IPv4Address(host).is_loopback:
+        typer.echo(f"Martian Evals is at {url} (data in {home}). Press Ctrl+C to stop.")
+        return
+    typer.echo(f"Martian Evals is listening on {host}:{port} (data in {home}). Press Ctrl+C to stop.")
+    typer.echo(EXPOSURE_WARNING, err=True)
 
 
 @app.command("ci")

@@ -110,8 +110,9 @@ class DatasetDraft(_Object):
 
 
 class Target(_Object):
-    """The thing under test. Header values and credentials are never part of the model, only the
-    names of the headers an HTTP target sends."""
+    """The thing under test. An HTTP target's ``url`` and ``headers`` are kept as the suite file
+    writes them, with ``${NAME}`` references unexpanded: the values a run reads from the
+    environment are never part of the model."""
 
     kind: TargetKind
     file: str | None = None
@@ -119,19 +120,19 @@ class Target(_Object):
     url: str | None = None
     body: dict[str, Any] | None = None
     response_path: str | None = None
-    header_names: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = None
 
     @model_validator(mode="after")
     def fields_for_kind(self) -> Target:
         given = {
-            name for name in ("file", "function", "url", "body", "response_path", "agent_id") if getattr(self, name)
+            name
+            for name in ("file", "function", "url", "body", "response_path", "headers", "agent_id")
+            if getattr(self, name)
         }
-        if self.header_names:
-            given.add("header_names")
         allowed = {
             "function": {"file", "function"},
-            "http": {"url", "body", "response_path", "header_names"},
+            "http": {"url", "body", "response_path", "headers"},
             "agent": {"agent_id"},
             "stored": set(),
         }[self.kind]
@@ -164,18 +165,42 @@ class Policy(_Object):
     minimum_coverage: float = Field(default=1, ge=0, le=1)
 
 
+class RunSettings(_Object):
+    """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
+    default. A case result's fingerprint leaves these out, so changing one keeps earlier results."""
+
+    concurrency: int | None = Field(default=None, ge=1)
+    batch: int | None = Field(default=None, ge=1)
+    target_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    judge_max_retries: int | None = Field(default=None, ge=0)
+    judge_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    output: str | None = None
+    mlflow_tracking_uri: str | None = None
+    mlflow_experiment: str | None = None
+
+
 class Suite(_Object):
-    """A dataset, a target and scorers, run together. A new version for every change."""
+    """A dataset, a target and scorers, run together. A new version for every change.
+
+    ``dataset_location`` is where the cases are read from: a suite file's ``data`` path, as written
+    there. ``input_key`` names the input that judges grade against and that a plain-text case
+    input fills.
+    """
 
     id: Identifier
     name: str = Field(min_length=1, max_length=120)
     version: int = Field(default=1, ge=1)
     dataset_name: str | None = None
     dataset_digest: Digest | None = None
+    dataset_location: str | None = None
+    input_key: str = Field(default="message", min_length=1)
     target: Target | None = None
     scorers: list[ScorerVersion] = Field(min_length=1)
     policies: list[Policy] = Field(default_factory=list)
+    settings: RunSettings = RunSettings()
     digest: Digest
+    created_at: datetime | None = None
+    created_by: str | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -185,6 +210,13 @@ class Suite(_Object):
         if unknown := sorted({policy.scorer for policy in self.policies} - set(names)):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
         return self
+
+
+def suite_digest(suite: Suite) -> str:
+    """The digest of a suite's definition: every field but ``id``, ``version``, ``digest`` and who
+    saved the version when. Run settings count, so a store that keeps one version per digest never
+    drops a change to them."""
+    return digest(suite.model_dump(mode="json", exclude={"id", "version", "digest", "created_at", "created_by"}))
 
 
 class Counts(_Object):
@@ -219,6 +251,8 @@ class Run(_Object):
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the run. Whoever executes it stops before its next case."""
     store: StoreRef = StoreRef()
 
 
@@ -268,11 +302,15 @@ class Score(_Object):
 
 
 class ScoringJob(_Object):
-    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them."""
+    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them.
+    A job that applies a saved suite names its version and carries the suite's policies."""
 
     id: Identifier
     run_id: Identifier
     scorers: list[ScorerVersion] = Field(min_length=1)
+    policies: list[Policy] = Field(default_factory=list)
+    suite_id: str | None = None
+    suite_version: int | None = Field(default=None, ge=1)
     state: RunState
     total: int = Field(default=0, ge=0)
     succeeded: int = Field(default=0, ge=0)
@@ -281,6 +319,8 @@ class ScoringJob(_Object):
     requested_by: str | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the job. Whoever executes it stops before its next case."""
 
 
 class ReviewQuestion(_Object):
@@ -380,6 +420,7 @@ class TraceQuery(_Object):
     project_id: Identifier
     run_id: str | None = None
     session_id: str | None = None
+    user_id: str | None = None
     trace_ids: list[Identifier] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=500)
     states: list[TraceState] = Field(default_factory=list)
@@ -398,6 +439,66 @@ class Page[T](BaseModel):
 
     items: list[T]
     next_cursor: str | None = None
+
+
+SESSION_TRACE_LIMIT = 1000
+"""The most traces one session search groups."""
+
+
+class Session(_Object):
+    """One conversation: the traces that share a session id, each one a turn. Built from traces,
+    never stored. ``preview`` is the request of the session's last trace in the order the
+    search read them, so its first turn when newest first."""
+
+    id: str = Field(min_length=1)
+    turns: int = Field(ge=1)
+    errors: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    last_at: datetime | None = None
+    preview: str = ""
+    tokens: int | None = Field(default=None, ge=0)
+
+
+class SessionSearch(_Object):
+    """The sessions among the first ``limit`` traces a query matches, in the order of each
+    session's first trace in the query's order. ``has_more`` says more traces matched, so counts
+    may be incomplete; ``ungrouped`` counts the traces read that have no session id."""
+
+    items: list[Session]
+    has_more: bool = False
+    traces_examined: int = Field(ge=0)
+    ungrouped: int = Field(ge=0)
+    limit: int = Field(default=SESSION_TRACE_LIMIT, ge=1)
+
+
+def sessions_from_traces(traces: list[Trace], *, has_more: bool, limit: int = SESSION_TRACE_LIMIT) -> SessionSearch:
+    """Group traces, in the order a search returned them, into sessions by ``session_id``."""
+    groups: dict[str, list[Trace]] = {}
+    for trace in traces:
+        if trace.session_id:
+            groups.setdefault(trace.session_id, []).append(trace)
+    items = []
+    for session_id, turns in groups.items():
+        times = [t.request_time for t in turns if t.request_time is not None]
+        tokens = [t.tokens for t in turns if t.tokens is not None]
+        items.append(
+            Session(
+                id=session_id,
+                turns=len(turns),
+                errors=sum(t.state == "error" for t in turns),
+                started_at=min(times, default=None),
+                last_at=max(times, default=None),
+                preview=turns[-1].request,
+                tokens=sum(tokens) if tokens else None,
+            )
+        )
+    return SessionSearch(
+        items=items,
+        has_more=has_more,
+        traces_examined=len(traces),
+        ungrouped=sum(not t.session_id for t in traces),
+        limit=limit,
+    )
 
 
 class QueueItem(_Object):
@@ -467,9 +568,12 @@ def from_results_record(
 
 __all__ = [
     "MODEL_VERSION",
+    "SESSION_TRACE_LIMIT",
     "DatasetDraft",
     "Page",
     "QueueItem",
+    "Session",
+    "SessionSearch",
     "Span",
     "Trace",
     "TraceQuery",
@@ -486,6 +590,7 @@ __all__ = [
     "ReviewQuestion",
     "ReviewQueue",
     "Run",
+    "RunSettings",
     "Score",
     "ScorerVersion",
     "ScoringJob",
@@ -495,4 +600,6 @@ __all__ = [
     "case_status",
     "digest",
     "from_results_record",
+    "sessions_from_traces",
+    "suite_digest",
 ]
