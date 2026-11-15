@@ -20,7 +20,16 @@ from martian.evals.model import Case, Project
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Entitlements, Principal, create_app
 from martian.evals.store import EvalStore
-from martian.evals.worker import InProcessWorker, Judge, JudgeRequest, JudgeResult, Verdict, Work
+from martian.evals.worker import (
+    AgentExecutor,
+    Credentials,
+    InProcessWorker,
+    Judge,
+    JudgeRequest,
+    JudgeResult,
+    Verdict,
+    Work,
+)
 
 AGENT = str(uuid.UUID(int=7))
 ANSWERS = {"How do I reset my password?": "Use the reset link on the sign-in page."}
@@ -109,6 +118,9 @@ def serve(
     principal: Principal = SINGLE_USER,
     judge_with: Judge = judge,
     judge_settings: JudgeSettings | None = None,
+    credentials: Credentials | None = None,
+    executor: AgentExecutor | None = None,
+    target_timeout_seconds: float = 2,
 ) -> tuple[TestClient, Served]:
     """The core with a dataset published for ``principal``, who makes the requests until
     ``act_as`` names another. Use the client as a context manager, so the worker's tasks run
@@ -121,7 +133,9 @@ def serve(
         organisation_id=principal.organisation_id,
         targets=targets or {AGENT: agent},
         judge=judge_with if with_judge else None,
-        target_timeout_seconds=2,
+        target_timeout_seconds=target_timeout_seconds,
+        credentials=credentials,
+        executor=executor,
     )
     holder: dict[str, Principal] = {"current": principal}
     options: dict[str, Any] = {} if entitlements is None else {"entitlements": entitlements}

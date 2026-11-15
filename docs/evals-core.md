@@ -13,7 +13,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the agents it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the targets it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 
 ```python
@@ -249,7 +249,7 @@ contract:
 
 | Routes | What they do | Module |
 | --- | --- | --- |
-| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a registered agent over a published dataset and hand it to the worker; stop it | `launch` |
+| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
 | `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on | `suites` |
@@ -272,12 +272,13 @@ All paths are under `/v1/evals`. How the core carries them out:
   it can call the target (`Worker.check_target`), records a `queued` run with the published
   dataset version it will read and the target's pin in `provenance.target`, and submits it. A
   scoring request records a `queued` scoring job and submits it. Both answer `202` at once.
-- **Runs.** A launch names a registered agent (`agent_id`) and a published dataset; an agent the
-  worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One run at
-  a time per organisation (`409` "An eval run is already in progress"). Run codes count up from
-  `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with no
-  usable prompt or expected text, calls the target once per case with no retry, grades each output
-  by exact match and records a trace per called case.
+- **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
+  target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
+  id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One
+  run at a time per organisation (`409` "An eval run is already in progress"). Run codes count up
+  from `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with
+  no usable prompt or expected text, calls the target once per case with no retry, grades each
+  output by exact match and records a trace per called case.
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
@@ -333,8 +334,8 @@ gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overv
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
 deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
-operation of the contract but the ones above. `tests/evals/test_worker.py` and
-`test_worker_process.py` cover the worker.
+operation of the contract but the ones above. `tests/evals/test_worker.py`,
+`test_worker_process.py` and `test_worker_targets.py` cover the worker.
 
 ## The worker
 
@@ -355,22 +356,78 @@ each record on only from the state it expects, so two workers never both take th
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
 marked `failed` with its reason, never left running.
 
-A target is an async function from a `Case` to its output (`TargetCall`); a judge is an async
-function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to apply, and
-the `model` and `endpoint` they are pinned to) to a `JudgeResult` (the `model` it used, the
-`model_version` the provider reported, and a verdict per scorer). A scoring job sends one request
-per model its judges are pinned to ([judge models](#judge-models)). There are two workers:
+A target is called once per case and returns its output ([targets](#targets)); a judge is an
+async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
+apply, and the `model` and `endpoint` they are pinned to) to a `JudgeResult` (the `model` it used,
+the `model_version` the provider reported, and a verdict per scorer). A scoring job sends one
+request per model its judges are pinned to ([judge models](#judge-models)). There are two workers:
 
-- `InProcessWorker(store, records, organisation_id=None, targets={agent_id: call}, judge=None,
-  target_timeout_seconds=120)` runs each piece of work as a task of the calling process's event
-  loop. It runs one organisation's work, `organisation_id` (`None` is the single local user), and
-  raises `ValueError` from `check_target` and `submit` for any other's. It serves the local
-  edition and tests, and runs the work inside each of `ProcessWorker`'s processes. `drain()` waits
-  for the work submitted so far. Work is lost with the process: a run interrupted by a restart
-  stays `running` until the durable queue.
-- `ProcessWorker(setup, records, agents=[agent_id], judges=False, options={...})` runs each piece
-  of work in a new process of its own, which exits when the work is done. An installation that
-  serves organisations uses it.
+- `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None)` runs each piece of
+  work as a task of the calling process's event loop. It runs one organisation's work,
+  `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
+  and `submit` for any other's. It serves the local edition and tests, and runs the work inside
+  each of `ProcessWorker`'s processes. `drain()` waits for the work submitted so far. Work is lost
+  with the process: a run interrupted by a restart stays `running` until the durable queue.
+- `ProcessWorker(setup, records, agents=[target_id], judges=False, options={...},
+  targets={target_id: http_target}, executor=None)` runs each piece of work in a new process of
+  its own, which exits when the work is done. An installation that serves organisations uses it.
+
+### Targets
+
+A run names its target by id, the launch request's `agent_id`. The worker knows each id as one
+of these (`martian.evals.worker.targets`):
+
+| Target | Given as | Called |
+| --- | --- | --- |
+| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process |
+| An HTTP target | The shared model's `Target(kind="http")` in `targets` | By the worker itself, with no martian-agents service |
+| A registered agent | An id the worker's `AgentExecutor` admits | Through martian-agents, with leased credentials |
+
+The worker asks the executor only for ids it does not know itself; without an executor it calls
+no registered agent, so an install with no martian-agents service runs functions and HTTP targets.
+
+- **HTTP targets** follow a suite file's URL target, with the same code: the worker POSTs `body`
+  to `url` once per case, with no retry, no redirect and no proxy from the environment.
+  `{{input}}` in the body is the case's prompt (the text a registered agent is sent),
+  `{{inputs.NAME}}` an input and `{{uuid}}` a new UUID; the output is the response's text, or the
+  value at `response_path`. A response that is not 2xx is the case's error, naming the setting to
+  check: `the target returned HTTP 401; check the credentials in target.headers`, `HTTP 404; check
+  target.url`, `HTTP 400` or `422; check target.body`. So are an unreachable endpoint (`the target
+  could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
+  These errors never repeat the address, a header or the response. A call that outlasts the
+  worker's `target_timeout_seconds` is `item timed out`.
+- **Credentials.** `${NAME}` in an HTTP target's `url` or a header value is filled in by the
+  worker's `Credentials`, a function `(principal, target_id, name) -> str | None` asked in the
+  process that calls the target, each time it calls it. Neither the launch request nor a record
+  carries a credential: the run keeps the target's id, and `provenance.target` keeps
+  `{"kind": "http", "agent_id", "digest"}`, a digest of the target as written with `${NAME}`
+  unexpanded. A worker with no credentials, or one that has no value for a name, fails each case
+  with the setting that holds it (`target.headers.Authorization needs the credential
+  MARTIAN_TARGET_KEY`) and sends nothing. The local edition's credentials are the keys it keeps
+  for its targets (`LocalTargets.key`, MorningHQ/martian-notes#116); a per-organisation key store
+  is MorningHQ/martian-notes#135.
+- **Registered agents** need leased credentials, so they stay on the martian-agents path. An
+  `AgentExecutor` has `check(principal, agent_id)`, which admits the agent and returns its pin
+  (`provenance.target`), or raises `StoreError` (`not_found`), and `call(principal, run, case,
+  timeout_seconds=...)`, which calls the agent once. On the Martian server, admission pins the
+  agent's approved connection and each call carries a short-lived target lease that martian-agents
+  exchanges for the credential (`app/evals_targets.py` in MorningHQ/MartianBackend), so the worker
+  never holds it. The server implements the executor when it mounts the core
+  (MorningHQ/martian-notes#102).
+
+`ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
+gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
+the HTTP targets as written with its work, and calls them with its setup's `credentials`; it calls
+registered agents with its setup's `executor`. `targets` is read at each check and each run, so it
+may be a live view of targets the user defines.
+
+`tests/evals/test_worker_targets.py` launches runs through the launch route against a small HTTP
+server on loopback: once per case with the worker's credential, a non-2xx response, a timeout, a
+missing credential and an unreachable endpoint, each with no retry. It runs one in its own process
+with `ProcessWorker` and no martian-agents at all, and runs a registered agent through a fake
+martian-agents executor, in process and in a process of its own, without the HTTP path. The key
+and the leases appear in no record.
 
 ### One process per run
 
@@ -402,14 +459,16 @@ process:
 2. exits with status 2 if its `MLFLOW_WORKSPACE` is not the work's organisation's;
 3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
    function, named by its import path so that the new process can import it, and returns
-   `WorkerServices`: the store, the record store, the targets by agent id, the judge and the
-   target timeout. `options` must be JSON;
-4. runs the work with an `InProcessWorker` for the work's organisation, and exits.
+   `WorkerServices`: the store, the record store, the targets by id, the judge, the target
+   timeout, the HTTP targets' `credentials` and the registered agents' `executor`. `options` must
+   be JSON;
+4. runs the work, and the HTTP targets it arrived with, with an `InProcessWorker` for the work's
+   organisation, and exits.
 
 Whatever the setup or the work selects in MLflow inside that process, such as a tracking URI, an
-experiment or a judge's traces, stays with that organisation. `agents` are the agent ids the
-setup's targets call, which `check_target` accepts, and `judges` says whether the setup gives a
-judge. When a process exits with an error, the worker marks its run or scoring job `failed` with
+experiment or a judge's traces, stays with that organisation. `agents` are the ids of the
+functions the setup's targets call, which `check_target` accepts, and `judges` says whether the
+setup gives a judge. When a process exits with an error, the worker marks its run or scoring job `failed` with
 "The worker process ended before this work finished" if it is still queued or running
 (`fail_unfinished`). `drain()` waits for every process started so far. There is no limit yet on
 how many processes run at once.
@@ -426,7 +485,6 @@ What builds on it:
 | Issue | Change |
 | --- | --- |
 | MorningHQ/martian-notes#139 | A durable job queue: `submit` enqueues, and each `Work` taken from the queue gets a process of its own |
-| MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
 | MorningHQ/martian-notes#133 | The SDK judge as the worker's judge, built by the setup in each run's process, on the model and endpoint each request names |
 | MorningHQ/martian-notes#135 | A key store for each organisation's provider keys |
 | MorningHQ/martian-notes#116 | Run and run again from the local UI |
@@ -896,12 +954,12 @@ cannot be opened.
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | A durable worker | MorningHQ/martian-notes#139 |
-| HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
+| The SDK judge in the worker | MorningHQ/martian-notes#133 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py`, `test_worker_process.py` and the store and record tests run the core without
+`test_worker.py`, `test_worker_process.py`, `test_worker_targets.py` and the store and record tests run the core without
 the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.
