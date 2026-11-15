@@ -28,6 +28,10 @@ pass, :func:`execute_monitor`:
   traffic until then is not scored, and its progress says so (``capped``).
 - **Stops when it is paused or deleted.** The monitor is read again before each sampled trace,
   and taking a trace fails once it is paused or gone.
+- **Then judges its thresholds.** After the pass, each threshold on the monitor's scores is
+  evaluated over its window (:mod:`martian.evals.thresholds`), and the due alerts of the
+  monitor's thresholds are delivered (:mod:`martian.evals.alerts`). A paused monitor's thresholds
+  are not evaluated, since it scores nothing, but their due alerts are still delivered.
 """
 
 from __future__ import annotations
@@ -39,10 +43,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
+from martian.evals.alerts import AlertSender
 from martian.evals.model import Score, ScorerVersion, Trace, TraceQuery
 from martian.evals.records import Monitor, MonitoredTrace, MonitorFilter, MonitorProgress, RecordStore
 from martian.evals.server.projection import TRACE_STATE_BACK
 from martian.evals.store import EvalStore
+from martian.evals.thresholds import MonitorSource, evaluate_thresholds
 
 # The package defines these before it imports this module.
 from martian.evals.worker import Judge, JudgeRequest, JudgeResult, Work
@@ -146,23 +152,44 @@ async def execute_monitor(
     judge: Judge | None,
     settle_seconds: float = SETTLE_SECONDS,
     read_bound: int = READ_BOUND,
+    alerts: AlertSender | None = None,
 ) -> None:
-    """One pass of the monitor ``work`` names. A paused or deleted monitor's pass does nothing. A
-    pass that fails part way says so in the monitor's progress, and the next pass goes on from its
-    watermark."""
+    """One pass of the monitor ``work`` names, then its thresholds. A deleted monitor's pass does
+    nothing, and a paused monitor's only delivers its thresholds' due alerts. A pass that fails
+    part way says so in the monitor's progress, and the next pass goes on from its watermark.
+    ``alerts`` delivers the alerts; without it nothing is sent."""
     principal, project, monitor_id = work.principal, work.project_id, work.monitor_id or ""
     monitor = await records.get_monitor(principal, project, monitor_id)
-    if monitor is None or monitor.state != "active":
+    if monitor is None:
         return
-    progress = await records.monitor_progress(principal, project, monitor_id) or MonitorProgress()
+    active = monitor.state == "active"
+    if active:
+        progress = await records.monitor_progress(principal, project, monitor_id) or MonitorProgress()
+        try:
+            await _pass(store, records, judge, principal, monitor, progress, settle_seconds, read_bound)
+        except Exception:  # noqa: BLE001 - a failed pass is the monitor's error, and the next pass goes on
+            log.exception("A pass of monitor %s failed", monitor_id)
+            latest = await records.monitor_progress(principal, project, monitor_id)
+            if latest is not None:
+                failed = latest.model_copy(update={"error": PASS_FAILED, "last_pass_at": _now()})
+                await records.set_monitor_progress(principal, project, monitor_id, failed)
     try:
-        await _pass(store, records, judge, principal, monitor, progress, settle_seconds, read_bound)
-    except Exception:  # noqa: BLE001 - a failed pass is the monitor's error, and the next pass goes on
-        log.exception("A pass of monitor %s failed", monitor_id)
-        latest = await records.monitor_progress(principal, project, monitor_id)
-        if latest is not None:
-            failed = latest.model_copy(update={"error": PASS_FAILED, "last_pass_at": _now()})
-            await records.set_monitor_progress(principal, project, monitor_id, failed)
+        await monitor_thresholds(records, principal, monitor, evaluate=active, alerts=alerts or AlertSender())
+    except Exception:  # noqa: BLE001 - the next pass evaluates and delivers again; the monitor goes on
+        log.exception("The thresholds of monitor %s were not evaluated or their alerts not delivered", monitor_id)
+
+
+async def monitor_thresholds(
+    records: RecordStore, principal: Principal, monitor: Monitor, *, evaluate: bool, alerts: AlertSender
+) -> None:
+    """Evaluate the thresholds on ``monitor``'s scores when ``evaluate``, then deliver their due
+    alerts, those just raised and those an earlier attempt left to retry."""
+    found = await records.list_thresholds(principal, monitor.project_id, source_kind="monitor", source_id=monitor.id)
+    if not found:
+        return
+    if evaluate:
+        await evaluate_thresholds(records, principal, monitor.project_id, found, MonitorSource(records))
+    await alerts.deliver_due(records, principal, monitor.project_id, [t.id for t in found])
 
 
 async def _pass(
@@ -336,6 +363,7 @@ __all__ = [
     "SETTLE_SECONDS",
     "execute_monitor",
     "matches",
+    "monitor_thresholds",
     "sampled",
     "store_query",
 ]

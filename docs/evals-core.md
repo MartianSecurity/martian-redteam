@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, and [monitors](#monitors), which score a project's live traces | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, and [thresholds](#thresholds-and-alerts) on their scores, which send alerts | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -99,8 +99,9 @@ sign-in has been checked:
 
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
 own routes this way: the review queue routes, the question library and answering a queue's item
-need `review_queues`, and `GET /v1/evals/monitoring` and every monitor route need `monitoring`
-([write routes](#write-routes), [monitors](#monitors)). The Martian server gates its own routes the same way until it
+need `review_queues`, and `GET /v1/evals/monitoring` and every monitor and threshold route need
+`monitoring` ([write routes](#write-routes), [monitors](#monitors),
+[thresholds](#thresholds-and-alerts)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
 MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
 `concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
@@ -1166,6 +1167,8 @@ organisation's own with a `ProcessWorker`. A pass (`execute_monitor` in
    scoring job ([judge models](#judge-models)). A score with no verdict is kept with the monitor's
    record of the trace, not on the trace, as a scoring job keeps it only with the run.
 3. **Moves its watermark on** and saves its progress after each scored trace and each page.
+4. **Judges its thresholds** and delivers their due alerts
+   ([thresholds and alerts](#thresholds-and-alerts)). A paused monitor's pass only delivers.
 
 **The delay.** A trace is first read `monitor_settle_seconds` (20) after its request time, the
 time it has to be recorded, and a monitor's next pass is due `monitor_seconds` (10) after its last
@@ -1205,7 +1208,8 @@ day the count starts afresh, from that day's traffic.
 
 **Pausing, deleting and failing.** The monitor is read again before each sampled trace, and taking
 a trace fails once it is paused or gone, so a pass stops before its next trace. A paused monitor's
-passes do nothing; resuming moves `active_since` to then. A pass that fails part way says so in its
+passes score nothing and only deliver its thresholds' due alerts; resuming moves `active_since` to
+then. A pass that fails part way says so in its
 progress's `error` and the next goes on from its watermark; a worker that stopped during a pass
 three times (`max_attempts`) pauses the monitor, with "The worker stopped during this monitor's
 pass too many times; the monitor is paused" as its `error`.
@@ -1228,10 +1232,242 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#197 | Scheduled regression runs |
-| MorningHQ/martian-notes#198 | Thresholds on monitor scores and alerts |
-| MorningHQ/martian-notes#199 | Monitors and their trends on the Monitoring page |
+| MorningHQ/martian-notes#197 | Scheduled regression runs, whose gate results become a second [threshold](#thresholds-and-alerts) source |
+| MorningHQ/martian-notes#199 | Monitors, their thresholds and their trends on the Monitoring page |
 | MorningHQ/martian-notes#200 | Evaluating again when a model changes |
+
+## Thresholds and alerts
+
+A threshold watches one scorer of a [monitor](#monitors): it is healthy while the scorer's pass
+rate, or its mean score, over a window is at least, or at most, a value. The worker judges it after
+each of the monitor's passes and sends one alert when it breaches and one when it recovers, by
+signed webhook, by email, or both. Thresholds are part of the `monitoring` feature key, so every
+route needs an edition that includes it (`403` on Community), and the routes that change one need
+the `score` capability. The routes are the core's own (`martian.evals.server.thresholds`); the
+server's frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/thresholds` | The project's thresholds (`project_id`, the default project without it), by name, each with its status; `monitor_id` keeps those on one monitor |
+| `POST /v1/evals/thresholds` | Create a threshold (`201`) |
+| `GET /v1/evals/thresholds/{threshold_id}` | One threshold and its status |
+| `GET /v1/evals/thresholds/{threshold_id}/alerts` | Its alerts, newest first, with their delivery (`limit`, `cursor`) |
+| `DELETE /v1/evals/thresholds/{threshold_id}` | Remove it, its secret and its alerts (`204`) |
+
+```json
+{
+  "request_id": "6a1d0c1e-3c0f-4b55-9a6e-1f3b8f2a7d10",
+  "name": "Live safety pass rate",
+  "source": {"kind": "monitor", "monitor_id": "0e0c1d7a-3f1b-5b8e-9c2d-7a6f5e4d3c2b", "scorer": "safety"},
+  "measure": "pass_rate",
+  "direction": "at_least",
+  "value": 0.9,
+  "window_seconds": 3600,
+  "min_count": 30,
+  "webhook": {"url": "https://alerts.example.com/martian", "secret": "a-long-random-secret-of-yours"},
+  "email": {"to": ["oncall@example.com"]}
+}
+```
+
+- **`source`** names the monitor and one of its scorers. A deleted monitor takes its thresholds
+  and their alerts with it.
+- **`measure`**: `pass_rate` counts the scorer's boolean scores (`valid_json`, `safety`, `policy`,
+  and registered judges that answer yes or no); `mean` averages its numeric ones
+  (`response_length`, and judges that answer with a number). A score without a verdict counts for
+  neither. A built-in scorer takes the measure it has (`422` otherwise).
+- **`direction`** and **`value`**: healthy while the measure is `at_least` (the default) or
+  `at_most` the value. A pass rate's value is strictly between 0 and 1: no interval can clear 0
+  or 1, so such a threshold could never be decided.
+- **`window_seconds`**, 60 seconds to 30 days (3600 by default): the scores of the traces the
+  monitor took for scoring in that time before the evaluation. One evaluation reads at most the
+  newest 5,000 (`THRESHOLD_WINDOW_BOUND`), and says so (`truncated`).
+- **`min_count`**, at least 1 (30 by default; at least 2 for a mean): with fewer scores in the
+  window there is no verdict.
+- **`webhook`** and **`email`** are where its alerts go. Each needs a worker that sends that
+  channel; an installation sends neither until it is configured
+  ([sending alerts](#sending-alerts)), and asking for one before then is `422`. With neither, the
+  threshold still changes state, and its status shows it.
+- The id is derived from `request_id`: the same request again returns the same threshold, and
+  another one with that `request_id` is `409`. A project has at most 50 thresholds (`409`), and an
+  archived project takes none (`409`). A threshold cannot be changed; delete it and create another.
+
+### How a threshold is judged
+
+Each evaluation computes the measure over the window and its 95% interval with
+`martian.evals.stats`, the same intervals the scorecards report
+([pass rates and confidence intervals](evals.md#pass-rates-and-confidence-intervals)): Wilson for
+a pass rate and Student t for a mean, ungrouped, since a trace carries no group.
+
+**It alerts on the interval, not the point estimate.** A window of sampled traffic is a sample,
+and its rate moves from one evaluation to the next with no change in quality. At the point
+estimate, a monitor whose real pass rate sits at its threshold would breach and recover on about
+half its evaluations, and one a little above it, 93% against 90% over windows of 200, would still
+dip below about one time in twenty. So the verdict is:
+
+| Verdict | When (for `at_least`; the reverse for `at_most`) | Effect |
+| --- | --- | --- |
+| `breach` | The whole interval is below the value: its upper bound is less than it | State `breached` |
+| `healthy` | The whole interval is at or above the value: its lower bound is at least it | State `ok` |
+| `undecided` | The interval holds the value | State unchanged |
+| `insufficient` | Fewer than `min_count` scores, or no interval | State unchanged |
+
+Against 90%, 85 of 100 (interval 77–91%) is `undecided`, 80 of 100 (71–87%) a `breach`, and 97 of
+100 (92–99%) `healthy`. A source that is really at the value breaches by chance in at most 2.5% of
+windows, and the windows of successive evaluations overlap, so it does so far less often in turn.
+The cost is a slower call where the interval is wide, and near a high value a threshold breaches
+sooner than it recovers: against `at_least 0.9`, one failure and nothing else is already a breach
+(0 of 1 is 0–79%), which is what `min_count` is for, while 35 passes and nothing else are needed
+before it is healthy (35 of 35 is 90–100%).
+
+**The state machine.** A threshold's state is `unknown` until a verdict first decides it, then
+`ok` or `breached`. The `undecided` band, the interval's width either side of the value, is its
+hysteresis: once breached, the rate must climb until its whole interval clears the value, and noise
+inside the band changes nothing. A change to `breached` raises one breach alert per channel, a
+change from `breached` to `ok` one recovery alert per channel, and the first change from `unknown`
+to `ok` none. The status in a response is `state`, `sequence` (the number of its changes), `since`
+and `last`, the latest evaluation: `at`, `window_start`, `count`, `estimate`, `interval`,
+`verdict` and `truncated`.
+
+**Exactly one alert per change.** The status lives in the record store, and an evaluation writes a
+change of state and its alerts in one transaction that holds only while the stored `sequence` is
+still the one it read (`set_threshold_status`). So however often, and by however many workers, the
+same window is evaluated, a change is written once and its alerts once; a worker that restarts
+reads the state it left and raises nothing again, and alerts it had not delivered are delivered by
+the next pass. An alert's id is derived from the threshold, the change's `sequence` and the
+channel.
+
+`evaluate_thresholds` (`martian.evals.thresholds`) takes its scores from a `Source`, which finds
+each threshold's window. `MonitorSource` reads a monitor's scored traces
+(`scored_monitored_traces`), once per monitor for the widest window. Scheduled regression runs
+(MorningHQ/martian-notes#197) add a second source, `kind: "gate"`, whose windows are their gate
+results as booleans, judged by the same state machine, and whichever merges second renumbers its
+record-store migration.
+
+### Sending alerts
+
+An alert's body is JSON:
+
+```json
+{
+  "id": "0b6f5f3e-0d2a-5a8e-8d7c-1c9b2a3d4e5f",
+  "type": "threshold.breached",
+  "created_at": "2026-11-15T10:42:10Z",
+  "sequence": 2,
+  "threshold": {
+    "id": "…", "name": "Live safety pass rate", "project_id": null,
+    "source": {"kind": "monitor", "monitor_id": "…", "scorer": "safety"},
+    "measure": "pass_rate", "direction": "at_least", "value": 0.9, "window_seconds": 3600, "min_count": 30
+  },
+  "observation": {
+    "at": "2026-11-15T10:42:10Z", "window_start": "2026-11-15T09:42:10Z", "count": 80,
+    "estimate": 0.5, "interval": [0.393, 0.607], "verdict": "breach", "truncated": false, "confidence": 0.95
+  }
+}
+```
+
+`type` is `threshold.breached` or `threshold.recovered`. It carries the threshold and the counts,
+never a trace, a prompt or a response.
+
+**Webhooks.** Each alert is one `POST` of that body to the threshold's URL with these headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Martian-Alert-Id` | The alert's id, the same on every attempt |
+| `X-Martian-Timestamp` | The attempt's time, in whole seconds since 1970 (UTC) |
+| `X-Martian-Signature` | `v1=` and the hex HMAC-SHA256, keyed with the threshold's secret, of the timestamp, a full stop and the body's bytes |
+
+A receiver keeps the secret it gave when it created the threshold, recomputes the HMAC over the
+`X-Martian-Timestamp` header and the raw body exactly as received (before any JSON parsing),
+compares in constant time, and refuses a timestamp more than five minutes from its clock, so a
+captured request cannot be replayed later. With the standard library only:
+
+```python
+import hashlib
+import hmac
+import time
+
+
+def verify_martian_webhook(secret: str, body: bytes, timestamp: str, signature: str) -> bool:
+    """Whether a request is a Martian alert: ``body`` is the raw request body, ``timestamp`` the
+    X-Martian-Timestamp header and ``signature`` the X-Martian-Signature header."""
+    if not timestamp.isdigit() or abs(time.time() - int(timestamp)) > 300:
+        return False
+    digest = hmac.new(secret.encode("utf-8"), timestamp.encode("ascii") + b"." + body, hashlib.sha256)
+    return hmac.compare_digest("v1=" + digest.hexdigest(), signature)
+```
+
+`martian.evals.alerts.verify(secret, body, timestamp, signature)` is the same check for a receiver
+that has the SDK. A 2xx answer is a delivery; anything else, or no answer within the timeout, is a
+failed attempt. A receiver that may see an alert twice drops a repeat by `X-Martian-Alert-Id`
+(below). The URL is `https`, or `http` only to `localhost`, holds no user name or password, and
+redirects from it are not followed.
+
+**Email** is a plain-text message through the installation's SMTP server, to the threshold's
+recipients (one to ten addresses), with the subject `[Martian] <threshold name>: breached` or
+`recovered`, the measure, its interval and the window in the text, and the alert's id as
+`X-Martian-Alert-Id`.
+
+**Retries.** A failed attempt is tried again 30 seconds later, then after twice as long each time
+up to an hour: eight attempts over about 64 minutes, after which the alert is `failed`.
+Delivery runs at the end of each pass of the monitor, its due alerts one at a time, so an attempt
+is due at the first pass after its time. An alert is taken before it is sent, so two deliveries
+never send it at once. A worker that stops after a receiver accepted an alert and before it
+recorded the delivery sends it again when it is next due: delivery is at least once, and the alert
+id is how a receiver tells. `GET .../alerts` shows each alert's `state` (`pending`, `delivered`
+or `failed`), `attempts`, `next_attempt_at`, `delivered_at` and `last_error`, which names a status
+or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`) and never an address, a body or a
+secret.
+
+**Configuring an installation.** Alerts are sent by the worker, so it is the worker that is
+configured, with `AlertSettings` (`martian.evals.alerts`). Its default sends nothing, so an
+on-premises install makes no outbound call for alerts until its operator sets a channel:
+
+```python
+from martian.evals.alerts import AlertSettings, EmailSettings, WebhookSettings
+from martian.evals.worker import InProcessWorker
+
+alerts = AlertSettings(
+    webhook=WebhookSettings(),  # private_addresses=True for a receiver inside your network
+    email=EmailSettings(
+        host="smtp.example.com", port=587, security="starttls",
+        username="martian-alerts", password=smtp_password, sender="martian@example.com",
+    ),
+)
+runner = InProcessWorker(store, records, judge=judge, alerts=alerts)
+```
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `webhook` | None: no webhooks | `WebhookSettings(private_addresses=False, timeout_seconds=10)`. Before each attempt the host is resolved, and a loopback, private, link-local or reserved address is refused unless `private_addresses` |
+| `email` | None: no email | `EmailSettings(host, sender, port=587, security="starttls", username=None, password=None, timeout_seconds=10)`; `security` is `starttls`, `ssl` or `none` (a relay on the machine or its network). The password is never shown in a repr or a log line |
+| `retry_seconds`, `max_retry_seconds`, `max_attempts` | 30, 3600, 8 | The backoff above |
+
+A worker with a `ProcessWorker` runner gives the settings to each process through its setup
+(`WorkerServices(alerts=...)`) and names the channels it sends with
+`ProcessWorker(..., alert_channels=("webhook", "email"))`, which the routes check. Which channels
+a worker sends is `SendsAlerts` (`martian.evals.worker`), which `InProcessWorker`, `ProcessWorker`
+and `QueueWorker` implement. The local edition is Community and runs no monitors, so it sends no
+alerts. What leaves the installation, and where the secret is kept, is in
+[security and data](security-and-data.md#threshold-alerts).
+
+`tests/evals/test_thresholds.py` checks that 85 of 100 against 90% is undecided and 80 of 100 a
+breach, and the same for a mean; that at a real rate of 93% the point estimate would have alerted
+again and again over 300 windows of 200 scores while the interval raises nothing, and that a drop
+to 80% and a return to 97% raise one breach and one recovery; that six evaluations of a breach
+send one webhook, scores that leave the interval holding the value change nothing, and a recovery
+sends one; that a breach recorded before a worker stopped is delivered once by the next worker,
+and three restarts send nothing more; that a second source drives the same state machine; that a
+delivered signature verifies with the code above, copied out of this page, and fails for a changed
+body, secret or timestamp; that failed deliveries are retried after 0.3 and then 0.6 seconds at a
+`retry_seconds` of 0.3 and a cap of 0.6, and given up after `max_attempts`, logged by status
+without the address; that email goes through a fake SMTP server with its subject, recipients and
+alert id; that default settings send nothing and connect to nothing, and that webhooks without
+`private_addresses` refuse the loopback receiver before any call; that a breach through the routes
+and the queue sends one signed webhook over several passes, and that no route answer, log line or
+alert holds the secret; and the routes' entitlement, role, validation, idempotency and deletion
+with the monitor. A loopback webhook receiver and a fake SMTP server stand in for the receivers.
+The record contract checks the threshold records, their conditioned changes of state and the
+taking of due alerts on SQLite and Postgres.
 
 ## What exists
 
@@ -1274,6 +1510,10 @@ What builds on it:
 - [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
   rate, a trace filter and a daily judge token cap, scored by the queue's worker in passes over the
   new traces and stored on each trace.
+- [Thresholds and alerts](#thresholds-and-alerts): a pass rate or mean of a monitor's scorer over a
+  window, judged on its 95% interval once it has enough scores, with a persisted state machine
+  that sends one alert per breach and one per recovery by signed webhook or email, retried with
+  backoff, and nothing unless the installation is configured to send it.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -1659,8 +1899,8 @@ written by one MLflow release reads back the same on the next.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
-page's saved views.
+on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
+page's saved views, monitors and thresholds.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -1708,7 +1948,17 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   `create_monitor`, `get_monitor`, `list_monitors`, `update_monitor` (naming the revision it
   read) and `delete_monitor` keep the monitors; `monitor_progress` and `set_monitor_progress` the
   progress; `claim_monitored_trace`, `finish_monitored_trace` and `list_monitored_traces` the
-  traces taken.
+  traces taken, and `scored_monitored_traces` the window a threshold reads.
+- [Thresholds](#thresholds-and-alerts) (`Threshold`, `ThresholdStatus`, `Observation` and `Alert`
+  in `martian.evals.records`) are the core's own records too. Migration `0006` adds
+  `martian_thresholds`, one row per threshold with the threshold as its route writes it, its
+  status as its evaluations write it, the `sequence` a change of state is conditioned on, and its
+  webhook's secret in a column of its own that only `threshold_secret` reads; and
+  `martian_threshold_alerts`, one row per alert, keyed by an id derived from the change and the
+  channel. `create_threshold`, `get_threshold`, `list_thresholds` and `delete_threshold` keep the
+  thresholds; `threshold_status` and `set_threshold_status` (a change of state with its alerts, in
+  one transaction, while the sequence is the one read) the status; `take_due_alerts`,
+  `finish_alert` and `list_alerts` the alerts.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed: its
   `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
   `scoring_job`, its `run_id` too, which reading the job takes.
@@ -2550,7 +2800,9 @@ an export holds, resuming, and what the receiving store assigns are in
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
-| Monitors in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
+| Monitors and their thresholds in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
+| Thresholds on scheduled runs' gate results, a second threshold source | MorningHQ/martian-notes#197 |
+| Changing a threshold or its webhook secret in place, rather than deleting it and creating another | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
@@ -2558,6 +2810,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
 `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
-`test_worker_concurrency.py`, `test_monitors.py`, `test_no_outbound.py` and the store and record
+`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_no_outbound.py` and the store and record
 tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.

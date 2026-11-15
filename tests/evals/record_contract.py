@@ -21,7 +21,19 @@ from martian.evals.model import (
     Suite,
     digest,
 )
-from martian.evals.records import EventsLost, Monitor, MonitoredTrace, MonitorProgress, RecordStore, SavedView
+from martian.evals.records import (
+    Alert,
+    EventsLost,
+    Monitor,
+    MonitoredTrace,
+    MonitorProgress,
+    MonitorScores,
+    RecordStore,
+    SavedView,
+    Threshold,
+    ThresholdStatus,
+    WebhookChannel,
+)
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -33,6 +45,21 @@ JUDGE = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", mode
 
 def monitor(monitor_id: str, *, name: str = "Safety") -> Monitor:
     return Monitor(id=monitor_id, project_id="p1", name=name, scorers=[JUDGE], sampling_rate=0.5)
+
+
+def threshold(threshold_id: str, *, name: str = "Safety rate", webhook: bool = True) -> Threshold:
+    return Threshold(
+        id=threshold_id,
+        project_id="p1",
+        name=name,
+        source=MonitorScores(monitor_id="m1", scorer="rubric_judge"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.9,
+        window_seconds=3600,
+        min_count=20,
+        webhook=WebhookChannel(url="https://alerts.example/hook") if webhook else None,
+    )
 
 
 def run(run_id: str, *, minutes: int = 0, state: str = "running") -> Run:
@@ -347,6 +374,82 @@ class RecordContract:
         assert (await records.list_monitored_traces(ORG_B, "p1", "m1")).items == []
         await records.delete_monitor(ORG_A, "p1", "m1")
         assert (await records.list_monitored_traces(ORG_A, "p1", "m1")).items == []
+
+    async def test_a_monitors_window_is_its_scored_traces_by_when_it_took_them(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        before = datetime.now(UTC)
+        for number in range(4):
+            trace_id = f"tr-{number}"
+            assert await records.claim_monitored_trace(ORG_A, "p1", "m1", trace_id, pass_id="p")
+            if number != 2:  # tr-2 is still being scored
+                score = Score(trace_id=trace_id, scorer="safety", source="llm_judge", value=number % 2 == 0)
+                await records.finish_monitored_trace(
+                    ORG_A,
+                    "p1",
+                    MonitoredTrace(monitor_id="m1", trace_id=trace_id, state="scored", pass_id="p", scores=[score]),
+                )
+            await asyncio.sleep(0.01)
+        after = datetime.now(UTC) + timedelta(seconds=1)
+        window = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=10)
+        assert [t.trace_id for t in window] == ["tr-3", "tr-1", "tr-0"]
+        newest = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=2)
+        assert [t.trace_id for t in newest] == ["tr-3", "tr-1"]
+        assert await records.scored_monitored_traces(ORG_A, "p1", "m1", since=after, until=after, limit=10) == []
+        assert await records.scored_monitored_traces(ORG_B, "p1", "m1", since=before, until=after, limit=10) == []
+        await refused("invalid", records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=0))
+
+    async def test_a_threshold_changes_state_once_and_keeps_its_secret_apart(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        made = await records.create_threshold(ORG_A, "p1", threshold("t1"), webhook_secret="s3cret-s3cret-s3cret")
+        assert (made.created_by, made.created_at is not None) == ("user-a", True)
+        assert (
+            await records.create_threshold(ORG_A, "p1", threshold("t1", name="Other"), webhook_secret="x" * 16) == made
+        )
+        await records.create_threshold(ORG_A, "p1", threshold("t0", name="A first", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t0", "t1"]
+        on_m1 = await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m1")
+        assert [t.id for t in on_m1] == ["t0", "t1"]
+        assert await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m2") == []
+        # The secret is kept beside the threshold, not in it, and only one method reads it back.
+        assert "s3cret" not in made.model_dump_json()
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
+        await refused("invalid", records.create_threshold(ORG_A, "p1", threshold("t2"), webhook_secret=None))
+        assert await records.threshold_status(ORG_A, "p1", "t1") == ThresholdStatus()
+
+        # A change of state and its alerts are written together, once, conditioned on the sequence.
+        breached = ThresholdStatus(state="breached", sequence=1, since=T0)
+        alert = Alert(id="a1", threshold_id="t1", channel="webhook", event="breached", sequence=1, payload={"n": 1})
+        assert await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert not await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert await records.threshold_status(ORG_A, "p1", "t1") == breached
+        [stored] = (await records.list_alerts(ORG_A, "p1", "t1")).items
+        assert (stored.id, stored.state, stored.created_at is not None) == ("a1", "pending", True)
+        assert stored.next_attempt_at is not None
+
+        # A due alert is taken by one delivery until it is held no longer, then recorded.
+        now = datetime.now(UTC) + timedelta(seconds=1)
+        hold = now + timedelta(minutes=2)
+        [taken] = await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold)
+        assert taken.next_attempt_at == hold
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold) == []
+        assert await records.take_due_alerts(ORG_B, "p1", ["t1"], now=hold, hold_until=hold) == []
+        delivered = taken.model_copy(update={"state": "delivered", "attempts": 1, "next_attempt_at": None})
+        await records.finish_alert(ORG_A, "p1", delivered)
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=hold, hold_until=hold) == []
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == [delivered]
+
+        # Another organisation sees none of it; deleting the threshold removes its alerts.
+        assert await records.get_threshold(ORG_B, "p1", "t1") is None
+        assert await records.threshold_secret(ORG_B, "p1", "t1") is None
+        assert not await records.set_threshold_status(ORG_B, "p1", "t1", breached, expected_sequence=1)
+        await records.delete_threshold(ORG_A, "p1", "t1")
+        assert await records.get_threshold(ORG_A, "p1", "t1") is None
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == []
+        await refused("not_found", records.delete_threshold(ORG_A, "p1", "t1"))
+        # Deleting the monitor deletes the thresholds on its scores.
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.list_thresholds(ORG_A, "p1") == []
 
     async def test_changes_reach_listeners_of_the_same_organisation_only(self, records: RecordStore) -> None:
         mine, theirs = records.events.subscribe(ORG_A), records.events.subscribe(ORG_B)

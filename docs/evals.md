@@ -593,6 +593,40 @@ curl -X POST "$EVALS_CORE/v1/evals/monitors" -H 'Content-Type: application/json'
 The local edition (`martian ui`) is Community, so it runs no monitors. How the worker scores,
 the routes and the progress a monitor reports are in [monitors](evals-core.md#monitors).
 
+### Alert when scores drop
+
+A threshold on a monitor's scorer sends an alert when the scorer's pass rate, or mean score, over
+a window breaks it, and another when it recovers:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/thresholds" -H 'Content-Type: application/json' -d '{
+  "request_id": "6a1d0c1e-3c0f-4b55-9a6e-1f3b8f2a7d10", "name": "Live safety pass rate",
+  "source": {"monitor_id": "'"$MONITOR_ID"'", "scorer": "safety"},
+  "measure": "pass_rate", "direction": "at_least", "value": 0.9,
+  "window_seconds": 3600, "min_count": 30,
+  "webhook": {"url": "https://alerts.example.com/martian", "secret": "'"$WEBHOOK_SECRET"'"}}'
+```
+
+- **It judges the interval, not the rate alone.** Once the window holds `min_count` scores, the
+  threshold breaches when the whole 95% interval of the pass rate (Wilson) or mean (Student t) is
+  on the wrong side of `value`, and recovers when the whole interval is back on the right side;
+  while the interval holds the value nothing changes. So sampling noise does not raise alerts, and
+  85 of 100 against 90% waits for more evidence where 80 of 100 breaches.
+- **One alert per change.** A breach sends one alert to each channel, and a recovery one. The
+  state is kept in the record store, so a worker that restarts does not send it again.
+- **Webhooks are signed.** Each request carries `X-Martian-Timestamp` and `X-Martian-Signature`,
+  `v1=` and the HMAC-SHA256 of the timestamp, a full stop and the raw body, keyed with your
+  secret. Verify it as [thresholds and alerts](evals-core.md#sending-alerts) shows, or with
+  `martian.evals.alerts.verify`. The secret is never shown again by any route.
+- **Email** goes to `"email": {"to": [...]}` through the installation's SMTP server.
+- **Nothing is sent unless the installation sends it**: its worker is configured with webhook or
+  SMTP settings, and until then a threshold with a channel is refused (`422`). Failed deliveries
+  are retried with backoff for about an hour; `GET .../thresholds/{id}/alerts` shows each one's
+  delivery.
+
+The routes, the payload, the retry schedule and the settings are in
+[thresholds and alerts](evals-core.md#thresholds-and-alerts).
+
 ## Use
 
 `martian.evals.evaluate(...)` provides the same MLflow prediction/scorer/result
