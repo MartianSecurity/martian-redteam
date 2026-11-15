@@ -236,6 +236,22 @@ def test_an_unreachable_target_is_each_cases_error_naming_the_setting(records):
     ] * CALLED_CASES
 
 
+def test_a_launch_of_a_target_the_worker_refuses_names_the_setting_and_records_no_run(records):
+    store, principal = MemoryStore(), member("org-a")
+    asyncio.run(publish(store, principal))
+    # A ProcessWorker reads its targets at each check, so a live view can hold one it refuses.
+    function = Target(kind="function", file="agent.py", function="target")
+    worker = ProcessWorker(http_services, records, targets={HTTP_TARGET: function})
+    app = create_app(store=store, records=records, principal=lambda: principal, worker=worker)
+    with TestClient(app) as client:
+        refused = client.post("/v1/evals", json={"agent_id": HTTP_TARGET, "dataset_name": "support-faq"})
+        assert (refused.status_code, refused.json()["detail"]) == (
+            422,
+            f"the worker calls a Target itself only when it is an http target; check targets['{HTTP_TARGET}']",
+        )
+        assert client.get("/v1/evals").json() == []
+
+
 def test_registered_agents_run_through_martian_agents_and_never_over_direct_http(records, endpoint, tmp_path):
     martian_agents = FakeMartianAgents(tmp_path)
     client, core = serve(

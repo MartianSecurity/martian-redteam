@@ -30,6 +30,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
+from martian.evals._digits import ascii_digits
 from martian.evals.manifests import all_cases as stored_cases
 from martian.evals.manifests import manifest_for, matches
 from martian.evals.model import Case, DatasetDraft, digest
@@ -291,7 +292,7 @@ async def _limit_body(request: Request) -> None:
     """Refuse an oversized upload from its Content-Length before the body is read."""
     length = request.headers.get("content-length")
     # JSON string escaping can grow a 20 MiB file; allow headroom, parse_upload enforces the limit.
-    if length and length.isdigit() and int(length) > MAX_UPLOAD_BYTES * 2:
+    if length and ascii_digits(length) and int(length) > MAX_UPLOAD_BYTES * 2:
         raise HTTPException(413, "Uploads are limited to 20 MiB")
 
 

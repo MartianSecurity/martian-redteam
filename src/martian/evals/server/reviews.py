@@ -13,7 +13,9 @@ question and annotation routes of ``app/api/evals_explorer.py`` (MorningHQ/Marti
 - Store writes happen in the request: the store is the core's own, not a telemetry export, so the
   server's background sync tasks have no counterpart here.
 - The core knows no organisation membership: an assignee is any user id, and only a role that may
-  assign reviews can give another person's work to someone.
+  assign reviews can give another person's work to someone. The principal is compared, and a
+  human score's source recorded, by the API's name for them (``projection.user_out``), the id
+  the bootstrap gives, so the local user's own id is an assignee the routes accept.
 - The store keeps one definition per question name, so the library has version 1 of each question.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
@@ -54,7 +56,7 @@ from martian.evals.server.projection import (
     queue_out,
     result_id,
     score_id,
-    user_uuid,
+    user_out,
 )
 from martian.evals.server.runs import (
     find_run,
@@ -190,7 +192,7 @@ async def review(
         raise HTTPException(409, "Keep the existing review question and queue audit chain")
     if (str(body.previous_id) if body.previous_id else None) != (previous.id if previous else None):
         raise HTTPException(409, "Review changed; reload before saving")
-    me = str(user_uuid(principal.user_id))
+    me = user_out(principal.user_id)
     if not allows(principal, "assignReviews") and (
         (body.assignee_id is not None and str(body.assignee_id) != me)
         or (previous is not None and previous.assignee is not None and previous.assignee != me)
@@ -207,7 +209,7 @@ async def review(
             trace_id=result.store.trace_id,
             scorer=criterion,
             source="human",
-            source_id=principal.user_id,
+            source_id=me,
             value=body.value,
             passed=body.value if isinstance(body.value, bool) else None,
             rationale=body.comment,
@@ -258,7 +260,7 @@ async def reviews(
     key = project_key(project_id)
     if queue_id is not None and await _find_queue(store, principal, str(queue_id)) is None:
         raise HTTPException(404, "Not found")
-    me = str(user_uuid(principal.user_id))
+    me = user_out(principal.user_id)
     needle = q.casefold()
     rows: list[tuple[Review, Run, CaseResult]] = []
     for run in await project_runs(records, principal, key):
@@ -360,7 +362,7 @@ async def create_queue(
     await writable_key(store, principal, run.project_id)
     if run.state != "completed":
         raise HTTPException(409, "Review a completed run")
-    me = str(user_uuid(principal.user_id))
+    me = user_out(principal.user_id)
     if body.assignee_id is not None and str(body.assignee_id) != me and not allows(principal, "assignReviews"):
         raise HTTPException(403, "Only administrators can assign another reviewer")
     if len(cases) != len(body.item_ids):
@@ -546,13 +548,9 @@ async def create_trace_annotation(
     trace = await store.get_trace(principal, key, trace_id)
     if trace is None:
         raise HTTPException(404, "Trace not found")
-    marker = str(body.request_id)
+    marker, me = str(body.request_id), user_out(principal.user_id)
     found = next(
-        (
-            s
-            for s in trace.scores
-            if s.metadata.get("martian.request_id") == marker and s.source_id == principal.user_id
-        ),
+        (s for s in trace.scores if s.metadata.get("martian.request_id") == marker and s.source_id == me),
         None,
     )
     if found is None:
@@ -564,7 +562,7 @@ async def create_trace_annotation(
                 trace_id=trace_id,
                 scorer=body.name,
                 source="human",
-                source_id=principal.user_id,
+                source_id=me,
                 value=body.value,
                 passed=body.value if isinstance(body.value, bool) else None,
                 rationale=body.rationale,

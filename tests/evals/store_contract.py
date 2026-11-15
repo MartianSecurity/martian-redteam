@@ -176,6 +176,18 @@ class StoreContract:
         assert full is not None and full.spans == [span] and full.session_id == "sess"
         assert await store.get_trace(ORG_A, "p1", "missing") is None
 
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; int() refuses
+    # more than 4,300 digits.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 5000, id="5000-nines")])
+    async def test_a_trace_cursor_the_store_did_not_return_is_refused(
+        self, store: EvalStore, project: Project, cursor: str
+    ) -> None:
+        await store.record_trace(ORG_A, trace("t1"))
+        with pytest.raises(StoreError) as caught:
+            await store.search_traces(ORG_A, TraceQuery(project_id="p1", cursor=cursor))
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+
     async def test_latency_and_verdicts_filter_and_order_before_paging(
         self, store: EvalStore, project: Project
     ) -> None:

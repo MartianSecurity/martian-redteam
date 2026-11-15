@@ -42,6 +42,12 @@ def current_worker(request: Request) -> Worker:
     return worker
 
 
+def optional_worker(request: Request) -> Worker | None:
+    """The edition's worker, or ``None`` when there is none, for a route that works without one."""
+    worker: Worker | None = request.app.state.martian_evals_worker
+    return worker
+
+
 def current_judge_settings(request: Request) -> JudgeSettings | None:
     """Where the edition keeps the default judge model, or ``None`` when it keeps none."""
     settings: JudgeSettings | None = request.app.state.martian_evals_judge_settings
@@ -114,5 +120,6 @@ EntitlementsDep = Annotated[Entitlements, Depends(current_entitlements)]
 StoreDep = Annotated[EvalStore, Depends(current_store)]
 RecordsDep = Annotated[RecordStore, Depends(current_records)]
 WorkerDep = Annotated[Worker, Depends(current_worker)]
+OptionalWorkerDep = Annotated[Worker | None, Depends(optional_worker)]
 JudgeSettingsDep = Annotated[JudgeSettings | None, Depends(current_judge_settings)]
 AgentNamesDep = Annotated[AgentNames | None, Depends(current_agent_names)]

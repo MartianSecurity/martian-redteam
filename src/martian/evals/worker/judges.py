@@ -42,6 +42,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import ValidationError
 
+from martian.evals._digits import ascii_digits
 from martian.evals._judge_transport import DEFAULT_RATE_LIMIT_WAIT_SECONDS, MODEL_VERSION_KEY
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION, _response_judge
 from martian.evals.model import ScorerVersion
@@ -229,7 +230,7 @@ def _definition(scorer: ScorerVersion) -> dict[str, Any]:
     """A registered judge as Agents takes it, or :class:`_Ungradable`."""
     criteria = scorer.criteria
     operation = criteria.get("operation_id")
-    if scorer.type != REGISTERED or not scorer.version.isdigit() or not isinstance(operation, str) or not operation:
+    if scorer.type != REGISTERED or not ascii_digits(scorer.version) or not isinstance(operation, str) or not operation:
         raise _Ungradable(f"The Agents judge does not grade judges of type {scorer.type}")
     definition = {
         name: criteria[name]
