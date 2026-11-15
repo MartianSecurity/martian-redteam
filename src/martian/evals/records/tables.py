@@ -64,6 +64,9 @@ scores = Table(
     Column("scorer", String(ID), primary_key=True),
     # Empty for a run's own scores; a scoring job's scores sit beside them, never replacing them.
     Column("scoring_job_id", String(ID), primary_key=True),
+    # The score's source (migration 0012): a person's answer named like a check or a judge sits
+    # beside that scorer's score, never replacing it.
+    Column("source", String(16), primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
 )
