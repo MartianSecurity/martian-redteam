@@ -10,7 +10,8 @@ names the field instead of dropping it: a check option that does not apply to it
 no check uses, a data row field the runner does not read, or a suite the file cannot hold, such as
 an agent target, pass policies or two judge models. ``martian evals run`` loads its suite through
 :func:`load_suite_file`, so it refuses the same fields. Header values stay as written, ``${NAME}``
-unexpanded.
+unexpanded. A ``python`` check is a ``code`` scorer whose parameters name its file and function;
+neither loading nor writing imports that file.
 """
 
 from __future__ import annotations
@@ -56,7 +57,10 @@ SUITE_FILE_FIELDS = {
     "judge.rate_limit_wait_seconds": "RunSettings.judge_rate_limit_wait_seconds",
     "judge.headers": "RunSettings.judge_headers, values as written",
     "checks": "Suite.scorers, in order",
-    "checks.type": "ScorerVersion.type; kind llm_judge for the LLM judges (runner.JUDGES), check otherwise",
+    "checks.type": (
+        "ScorerVersion.type; kind llm_judge for the LLM judges (runner.JUDGES), code for a python check "
+        "(runner.CODE_CHECKS), check otherwise"
+    ),
     "checks.name": "ScorerVersion.name (the check's label)",
     "checks.rubric": "ScorerVersion.criteria.rubric",
     "checks.guidelines": "ScorerVersion.criteria.guidelines",
@@ -87,6 +91,19 @@ SUITE_FILE_FIELDS = {
     "checks.rows": "ScorerVersion.parameters.rows",
     "checks.kinds": "ScorerVersion.parameters.kinds",
     "checks.allow": "ScorerVersion.parameters.allow",
+    "checks.calls": "ScorerVersion.parameters.calls, as written",
+    "checks.arguments_match": "ScorerVersion.parameters.arguments_match",
+    "checks.order": "ScorerVersion.parameters.order",
+    "checks.source": "ScorerVersion.parameters.source",
+    "checks.min_calls": "ScorerVersion.parameters.min_calls",
+    "checks.max_calls": "ScorerVersion.parameters.max_calls",
+    "checks.min_turns": "ScorerVersion.parameters.min_turns",
+    "checks.max_turns": "ScorerVersion.parameters.max_turns",
+    "checks.file": "ScorerVersion.parameters.file, as written, relative to the suite file",
+    "checks.function": "ScorerVersion.parameters.function",
+    "checks.min_score": "ScorerVersion.parameters.min_score",
+    "checks.max_score": "ScorerVersion.parameters.max_score",
+    "checks.security": "ScorerVersion.parameters.security",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
@@ -114,6 +131,7 @@ COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
 # Loading refuses the others.
 _TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
 _TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
+_CALL_OPTIONS = frozenset({"calls", "expectation", "arguments_match", "source"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
@@ -146,6 +164,12 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "no_secrets": frozenset({"kinds", "allow"}),
     "resists_injection": frozenset({"values", "expectation"}),
     "no_refusal": frozenset({"expectation"}),
+    "tool_called": _CALL_OPTIONS | {"min_calls", "max_calls"},
+    "tool_not_called": _CALL_OPTIONS,
+    "tool_trajectory": _CALL_OPTIONS | {"order"},
+    "step_count": frozenset({"min_turns", "max_turns", "min_calls", "max_calls", "source"}),
+    # A team's own Python function; the file is imported only when a run starts.
+    "python": frozenset({"file", "function", "min_score", "max_score", "security"}),
 }
 
 # The fields of a JSONL case that the runner reads.
@@ -297,7 +321,10 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
             criteria={} if criterion is None else {check.type: criterion},
         )
     return ScorerVersion(
-        name=check.label, kind="check", type=check.type, parameters={key: options[key] for key in sorted(options)}
+        name=check.label,
+        kind="code" if check.type in runner.CODE_CHECKS else "check",
+        type=check.type,
+        parameters={key: options[key] for key in sorted(options)},
     )
 
 
@@ -477,9 +504,10 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         if set(scorer.criteria) - {scorer.type}:
             raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {scorer.type} only")
         options = dict(scorer.criteria)
-    elif scorer.kind == "check":
-        if scorer.type not in runner.CHECKS:
-            raise ConfigError(f"{where}: a suite file's checks are {', '.join(runner.CHECKS)}")
+    elif scorer.kind in ("check", "code"):
+        types = runner.CHECKS if scorer.kind == "check" else runner.CODE_CHECKS
+        if scorer.type not in types:
+            raise ConfigError(f"{where}: a suite file's {scorer.kind} scorers are {', '.join(types)}")
         if scorer.criteria:
             raise ConfigError(f"{where}: {scorer.type} checks have no criteria")
         if unknown := sorted(set(scorer.parameters) - CHECK_OPTIONS[scorer.type]):

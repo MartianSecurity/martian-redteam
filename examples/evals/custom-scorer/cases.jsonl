@@ -1,0 +1,3 @@
+{"id": "refunds-what-was-paid", "input": "Order A-1001 arrived broken. Can I get my money back?", "output": "{\"refund\": 25.0, \"reason\": \"DAMAGED\"}", "expectations": {"order_total": 25.0}}
+{"id": "refunds-ten-times-over", "input": "Order A-1002 arrived broken. Can I get my money back?", "output": "{\"refund\": 250.0, \"reason\": \"DAMAGED\"}", "expectations": {"order_total": 25.0}}
+{"id": "no-reason-code", "input": "Order A-1003 was late. Can I have something back?", "output": "{\"refund\": 5.0, \"reason\": \"goodwill\"}", "expectations": {"order_total": 40.0}}

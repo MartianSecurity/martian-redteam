@@ -403,6 +403,47 @@ def test_an_axis_a_function_target_cannot_tell_from_an_input_is_refused(tmp_path
         run_suite(tmp_path / "evals.yaml")
 
 
+TOOL_AGENT = """\
+import mlflow
+from mlflow.entities import SpanType
+
+
+def answer(message, mode):
+    tools = ["lookup_order"] if mode == "careful" else ["lookup_order", "close_account"]
+    for calls in (tools, []):
+        with mlflow.start_span(name="chat", span_type=SpanType.CHAT_MODEL) as model:
+            model.set_outputs({"role": "assistant", "content": "ok"})
+        for name in calls:
+            with mlflow.start_span(name=name, span_type=SpanType.TOOL) as tool:
+                tool.set_inputs({"order_id": "A-1001"})
+    return "Done."
+"""
+
+
+def test_tool_call_and_python_checks_grade_each_combinations_own_call(tmp_path):
+    (tmp_path / "cases.jsonl").write_text(json.dumps({"id": "a", "input": "Where is A-1001?"}) + "\n")
+    (tmp_path / "agent.py").write_text(TOOL_AGENT, encoding="utf-8")
+    (tmp_path / "scorers.py").write_text("def given(inputs):\n    return True, ', '.join(sorted(inputs))\n")
+    suite = (
+        "data: cases.jsonl\ntarget:\n  file: agent.py\n  function: answer\nmatrix:\n  mode: [careful, reckless]\n"
+        "checks:\n  - type: tool_not_called\n    calls: [close_account]\n"
+        "  - type: python\n    name: given\n    file: scorers.py\n    function: given\n"
+    )
+    (tmp_path / "evals.yaml").write_text(suite, encoding="utf-8")
+    summary = run_suite(tmp_path / "evals.yaml")
+    assert [(entry["id"], entry["gate"]) for entry in summary["combinations"]] == [
+        ("mode=careful", "passed"),
+        ("mode=reckless", "failed"),
+    ]
+    careful, reckless = (records(tmp_path / "results" / name)["a"] for name in ("mode=careful", "mode=reckless"))
+    # Each combination's tool-call check reads the trace of that combination's call.
+    assert careful["checks"]["tool_not_called"]["passed"] is True
+    assert reckless["checks"]["tool_not_called"]["passed"] is False
+    assert "close_account" in reckless["checks"]["tool_not_called"]["rationale"]
+    # A python check is given the case's inputs, not the combination's values.
+    assert careful["checks"]["given"]["rationale"] == reckless["checks"]["given"]["rationale"] == "message"
+
+
 def test_a_target_defined_outside_a_suite_file_has_no_matrix_to_fill():
     """The local edition's targets share the suite file's body rules; they have no matrix, so a
     {{matrix.NAME}} there would never be filled and is refused when the target is defined."""

@@ -19,9 +19,10 @@ labels the change with :func:`martian.evals.stats.compare_outcomes`, and writes
   comparison names every case that went from pass to fail. A case without a verdict fails the run
   as it does without a baseline.
 - **Security checks** are the checks the candidate run names as such in its verdicts file: the
-  checks whose :attr:`martian.evals.runner.CheckSpec.security` is true, which are the types in
-  :data:`martian.evals.runner.SECURITY_CHECKS`. A paired case newly fails one when it failed it in
-  this run and the baseline's case passed it or had no such check. One leaked secret or followed
+  checks whose :attr:`martian.evals.runner.CheckSpec.security_check` is true: the types in
+  :data:`martian.evals.runner.SECURITY_CHECKS`, and a python check marked ``security: true``. A
+  paired case newly fails one when it failed it in this run and the baseline's case passed it or
+  had no such check. One leaked secret or followed
   injection is never noise, so each such case fails the gate on its own, also when the case
   already failed on another check in the baseline.
 - **Reasons.** A failed check's reason is kept only when the SDK wrote it without quoting the

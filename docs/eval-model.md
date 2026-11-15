@@ -41,7 +41,7 @@ rejects unknown fields.
 | `DatasetVersion` | An immutable set of cases: `name`, optional `version`, `digest`, `case_count`, `source` (`file`, `draft`, `global`, `upload`, `traces`) and `location` | Evaluation dataset |
 | `DatasetDraft` | An editable working copy of a dataset: `name`, `revision` (raised by every edit), `state` (`editing` or `published`), `case_count`, and the `published_digest` of the version publishing created | none (Martian table) |
 | `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
-| `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`. Never a key | Registered scorer |
+| `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`; `check`, a built-in check; `code`, a team's own Python function, type `python`; `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`. Never a key | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
 | `Prompt`, `PromptVersion` | A named prompt (`name`: 1 to 64 letters, digits and `. _ -`; `description`; who created it when) and its versions: `version`, counting up from 1, the `text` exactly as written (at most 100,000 characters), its `digest` (`prompt_digest`: SHA-256 of the text as UTF-8), the commit `message`, and who added it when (`created_by`, `created_at`). A version never changes. A prompt belongs to an organisation, not a project ([prompt versions](evals.md#prompt-versions)) | Prompt and prompt version of MLflow's prompt registry |
 | `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds` (each target call, whatever the target), `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder, the MLflow location, the run's `limits`, and `cache` (`CacheSettings`: `folder` as written, `ttl_seconds`, `functions`), set when the suite turns the [cache of model calls](evals.md#a-cache-of-model-calls) on. Unset means the runner's default. Unset `limits` and `cache` are left out when the settings are written, so a suite without them keeps its digest | none |
@@ -84,7 +84,7 @@ and its data give them again on the next load.
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds`, for a function or an HTTP target |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`, `calls`, `arguments_match`, `order`, `source`, `min_calls`, `max_calls`, `min_turns`, `max_turns`). A [`python` check](evals.md#custom-python-checks) is `kind: code`, type `python`, with `file` (as written, relative to the suite file), `function`, `min_score`, `max_score` and `security` in `parameters`: the model names the code and never holds it, and neither loading nor writing imports the file. A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same, and a tool-call check's `calls` keep theirs: a tool's name, an object with `name` and `arguments`, and in `tool_trajectory` a list for the calls of one model turn. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
 | `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
 | `matrix` | `Suite.matrix`, as written: each axis a list of values or a mapping of names to values. `martian.evals.matrix.combinations` expands it; the URL target's `{{matrix.NAME}}` stays in `Target.body` unfilled |
@@ -109,14 +109,21 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
 - anything `martian evals run` refuses, such as an unknown field, a `json_schema` keyword the
   check cannot apply, a `latency` or `cost` check with no target to measure, or a numeric or
   table option the check cannot read, such as a `value` that is not a number, a `rel_tolerance`
-  of 1 or more, a path with an empty step, or `rows` with two rows of one key, or a policy check
+  of 1 or more, a path with an empty step, or `rows` with two rows of one key, a policy check
   option it cannot use, such as an unknown `kinds` entry, a phrase with no letter or digit, or a
-  marker shorter than four letters or digits
-  ([deterministic checks](evals.md#deterministic-checks)).
+  marker shorter than four letters or digits, or a tool-call check option it cannot use, such as
+  a call with no name, a pattern that does not compile, a list of parallel calls in an
+  `any_order` trajectory, `source: trace` with no target, or a URL target without
+  `source: reply` ([deterministic checks](evals.md#deterministic-checks),
+  [tool calls](evals.md#tool-calls-and-trajectories)), or a `python` check without a `file` and a
+  `function`, or with a `min_score` above its `max_score`. Whether the function can be called is
+  checked when a run starts, since that needs the file imported
+  ([custom Python checks](evals.md#custom-python-checks)).
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
 grades stored outputs, which is a `stored` target), an `agent` target, `policies` (in a file, a
-case passes when every check passes it), `code` or `human` scorers, a pinned scorer `version`,
+case passes when every check passes it), `human` scorers, `code` scorers other than a python check
+with its `file` and `function`, a pinned scorer `version`,
 `llm_judge` scorers with different models or parameters (a file has one judge), run settings
 for a target or judge the suite does not have (a time limit for stored outputs, a judge token limit
 with no `llm_judge` scorer), and a suite with no `dataset_location`.

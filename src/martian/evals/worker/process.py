@@ -28,6 +28,11 @@ with the HTTP target its run names, as written. Its credentials come from the se
 ``credentials``, in that process. A process that exits with an error leaves no work queued or
 running: the worker marks it ``failed``.
 
+Custom Python scorers are the setup's too (``WorkerServices.scorers``): the setup imports them in
+the work's process, so their code never runs in the process that serves the API. That process
+imports the setup's *module*, to check that a new process can import the setup, so the setup
+imports a scorer's module inside the function, not at the top of its own module.
+
 Under a :class:`~martian.evals.worker.queue.QueueWorker`, which calls :meth:`ProcessWorker.run`,
 the run's process ends with the process that started it, the one holding the work's claim in the
 queue: it keeps the read end of a pipe from that process open as its standard input, and exits
@@ -57,7 +62,7 @@ from martian.evals.server.principal import Principal
 from martian.evals.store import EvalStore
 from martian.evals.store.mlflow_local import workspace_name
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
-from martian.evals.worker.execute import fail_unfinished
+from martian.evals.worker.execute import InstalledScorers, fail_unfinished
 from martian.evals.worker.inprocess import InProcessWorker
 from martian.evals.worker.targets import http_target, target_pin
 
@@ -84,7 +89,8 @@ class WorkerServices:
     """What a run's process runs its work with, built in that process by the worker's setup: the
     store and the record store, the targets it calls itself by id, the judge, if any, the time
     limit of each target call, the credentials of HTTP targets, the executor of registered agents,
-    if any, and the limits of a run that has none of its own."""
+    if any, the custom Python scorers it runs, by name, imported by the setup in this process, and
+    the limits of a run that has none of its own."""
 
     store: EvalStore
     records: RecordStore
@@ -93,6 +99,7 @@ class WorkerServices:
     target_timeout_seconds: float = 120.0
     credentials: Credentials | None = None
     executor: AgentExecutor | None = None
+    scorers: InstalledScorers = field(default_factory=dict)
     limits: RunLimits | None = None
 
 
@@ -284,6 +291,7 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         target_timeout_seconds=services.target_timeout_seconds,
         credentials=services.credentials,
         executor=services.executor,
+        scorers=services.scorers,
         limits=services.limits,
     )
     await worker.submit(work)
