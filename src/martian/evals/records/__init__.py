@@ -11,8 +11,9 @@ target; also what publishing each dataset version wrote, and the outbox of store
 delivered.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
-(``martian.evals.records.queue``). Projects live in MLflow, as experiments.
-CI gate sessions stay with the server's CI gate.
+(``martian.evals.records.queue``). A server that admits a launched run by rules of its own gives the
+store a ``RunAdmission`` (``martian.evals.records.admission``). Projects live in MLflow, as
+experiments. CI gate sessions stay with the server's CI gate.
 
 Every method takes the request's principal first, and the store keeps each organisation's
 records apart. A refused request raises ``martian.evals.store.StoreError``.
@@ -47,6 +48,7 @@ from martian.evals.model import (
     Target,
     Value,
 )
+from martian.evals.records.admission import LAUNCHED, RunAdmission
 from martian.evals.records.events import Event, EventBus, EventsLost, InProcessEvents, Subscription
 from martian.evals.slots import timing
 
@@ -1140,6 +1142,7 @@ RECORD_METHODS = frozenset(
 )
 
 __all__ = [
+    "LAUNCHED",
     "RECORD_METHODS",
     "THRESHOLD_WINDOW_BOUND",
     "Alert",
@@ -1164,6 +1167,7 @@ __all__ = [
     "Observation",
     "RecheckState",
     "RecordStore",
+    "RunAdmission",
     "SavedView",
     "Schedule",
     "ScheduleGates",
