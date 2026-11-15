@@ -91,6 +91,7 @@ def test_a_small_run_measures_every_phase(tmp_path, monkeypatch, capsys) -> None
         "window": 12,
         "text": 1,
         "text_all": 1,
+        "mlflow_text": 1,
         "sessions": 3,
         "get": 1,
     }

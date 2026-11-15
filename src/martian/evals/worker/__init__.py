@@ -1,10 +1,12 @@
 """The worker interface: what the evals core hands its long-running work to.
 
-A write route that starts work records it first, as a queued ``Run`` or ``ScoringJob`` in the
-record store, and then calls :meth:`Worker.submit` with a :class:`Work` naming it. The worker does
-the work later, outside the request: it calls the target once per case, runs the scorers and
-judges, and writes case results, traces and scores through the store and the record store. The API
-process never calls a target or a model while answering a request.
+A write route that starts work records it first, as a queued ``Run``, ``ScoringJob`` or
+``CalibrationRecheck`` in the record store, and then calls :meth:`Worker.submit` with a
+:class:`Work` naming it. The worker does the work later, outside the request: it calls the target
+once per case, runs the scorers and judges, grades a calibration's labelled items again
+(:mod:`martian.evals.worker.recheck`), and writes case results, traces, scores and calibrations
+through the store and the record store. The API process never calls a target or a model while
+answering a request.
 
 The interface is deliberately small, so the editions and the issues that follow can each supply
 their own worker without changing the routes:
@@ -64,12 +66,13 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class Work:
     """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``), one pass of a monitor over its project's new traces
-    (``kind="monitor"``, with ``monitor_id`` and no run), or one turn of a schedule, which admits
-    its run when a slot is due (``kind="schedule"``, with ``schedule_id`` and no run). The record
-    store holds everything else about it."""
+    (``kind="scoring"``, with ``job_id``), a queued re-check of a judge version's calibration
+    (``kind="recheck"``, with the re-check's id as ``job_id`` and no ``run_id``), one pass of a
+    monitor over its project's new traces (``kind="monitor"``, with ``monitor_id`` and no run), or
+    one turn of a schedule, which admits its run when a slot is due (``kind="schedule"``, with
+    ``schedule_id`` and no run). The record store holds everything else about it."""
 
-    kind: Literal["run", "scoring", "monitor", "schedule"]
+    kind: Literal["run", "scoring", "recheck", "monitor", "schedule"]
     principal: Principal
     project_id: str
     run_id: str = ""
@@ -78,14 +81,16 @@ class Work:
     schedule_id: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.kind == "scoring") != (self.job_id is not None):
-            raise ValueError("scoring work names its job, and only scoring work does")
+        if (self.kind in ("scoring", "recheck")) != (self.job_id is not None):
+            raise ValueError("scoring work names its job, as re-check work does, and other work names none")
         if (self.kind == "monitor") != (self.monitor_id is not None):
             raise ValueError("monitor work names its monitor, and only monitor work does")
         if (self.kind == "schedule") != (self.schedule_id is not None):
             raise ValueError("schedule work names its schedule, and only schedule work does")
-        if (self.kind in ("monitor", "schedule")) == bool(self.run_id):
-            raise ValueError("run and scoring work name their run, and monitor and schedule work name none")
+        if (self.kind in ("recheck", "monitor", "schedule")) == bool(self.run_id):
+            raise ValueError(
+                "re-check work names no run, nor does monitor or schedule work; run and scoring work name theirs"
+            )
 
 
 @dataclass(frozen=True)
@@ -319,6 +324,7 @@ from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judg
 from martian.evals.worker.monitor import execute_monitor, sampled  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
+from martian.evals.worker.recheck import execute_recheck  # noqa: E402
 from martian.evals.worker.schedule import ScheduleServices  # noqa: E402
 
 __all__ = [
@@ -349,6 +355,7 @@ __all__ = [
     "alert_channels",
     "dump_work",
     "execute_monitor",
+    "execute_recheck",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",

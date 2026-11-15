@@ -15,7 +15,10 @@ from starlette.requests import Request
 
 from martian.evals import _digits
 from martian.evals._json_schema import check_schema
+from martian.evals.agreement import judge_agreement
 from martian.evals.mlflow_import import _Reader
+from martian.evals.model import Score
+from martian.evals.panel import member_sources
 from martian.evals.server import otlp
 from martian.evals.trace_conventions import _listed, map_attributes
 
@@ -79,6 +82,34 @@ def test_an_mlflow_experiment_id_of_other_digits_sorts_first_and_does_not_raise(
     store = SimpleNamespace(search_experiments=lambda **_: page)
     ordered = _Reader(store, None, None)._experiments()  # type: ignore[arg-type]
     assert [e.experiment_id for e in ordered] == [bad, "1", "2"]
+
+
+@pytest.mark.parametrize("bad", BAD)
+def test_a_judge_version_of_other_digits_is_reported_after_the_numbered_ones_and_does_not_raise(bad):
+    # A score's scorer_version is whatever the application that recorded it wrote, as on live traces.
+    verdicts = [
+        Score(trace_id=f"tr-{n}", scorer="polite_tone", scorer_version=version, source="llm_judge", value=True)
+        for n, version in enumerate(["10", bad, "2"])
+    ]
+    reports = judge_agreement(verdicts, [])
+    assert [report.version for report in reports] == ["2", "10", bad]
+
+
+@pytest.mark.parametrize("bad", BAD)
+def test_a_panel_size_of_other_digits_names_no_members_and_does_not_raise(bad):
+    members = {"martian.panel.1.model": "openai:/a", "martian.panel.2.model": "openai:/b"}
+    assert member_sources({"martian.panel.size": "2", **members}) == ["openai:/a", "openai:/b"]
+    assert member_sources({"martian.panel.size": bad, **members}) == []
+    # As a live trace's judge score, which an application writes, in the judge agreement report.
+    score = Score(
+        trace_id="tr-1",
+        scorer="polite_tone",
+        scorer_version="1",
+        source="llm_judge",
+        value=True,
+        metadata={"martian.panel.size": bad, **members},
+    )
+    assert [report.models for report in judge_agreement([score], [])] == [()]
 
 
 def test_only_the_digits_0_to_9_count():
