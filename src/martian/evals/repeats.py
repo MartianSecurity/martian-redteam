@@ -15,6 +15,16 @@ combined, passes it, as with one attempt.
 
 A check that names no rule of its own takes ``all`` when it is a security check, and the suite's
 rule otherwise (:func:`rule_for`). The suite's rule is ``all`` unless the suite names another.
+
+Over a case's attempts' own verdicts (each attempt passes when every check passed it):
+
+- :func:`passed_every_attempt` is the case's reliability verdict: whether it passed on every
+  attempt, by the same reading of attempts without a verdict as ``all``. The share of cases that
+  did is the run's reliability, sometimes called pass^k for k attempts. When every check
+  combines by ``all`` a case passes only when it passed every attempt, so the reliability is the
+  pass rate but for attempts without a verdict; under ``majority`` or ``any`` it can be lower.
+- :func:`flaky` says whether the case's verdict changed between attempts: one attempt passed and
+  another failed. An attempt without a verdict counts neither way.
 """
 
 from __future__ import annotations
@@ -93,6 +103,33 @@ def plan(attempts: int, suite: CombineRule, checks: Sequence[tuple[str, CombineR
     return {"attempts": attempts, "combine": suite, "checks": rules}
 
 
+def passed_every_attempt(verdicts: Sequence[bool | None]) -> bool | None:
+    """Whether a case passed on every attempt, from its attempts' verdicts: None when an attempt
+    without a verdict leaves it open, as under ``all``."""
+    return combine(verdicts, "all")
+
+
+def flaky(verdicts: Sequence[bool | None]) -> bool:
+    """Whether a case's verdict changed between attempts: at least one attempt passed and at least
+    one failed. An attempt without a verdict counts neither way."""
+    return any(verdict is True for verdict in verdicts) and any(verdict is False for verdict in verdicts)
+
+
+def reliability(cases: Sequence[tuple[str, Sequence[bool | None]]]) -> dict[str, Any]:
+    """The run's reliability counts and its flaky cases, from each case's id and its attempts'
+    verdicts in case order: ``passed`` (cases that passed every attempt), ``failed`` (cases that
+    failed an attempt), ``errors`` (cases left open) and ``flaky``, the ids of the cases whose
+    verdict changed between attempts. The share and its interval are the caller's, since the
+    runner allows for case groups and the evals core does not."""
+    verdicts = [passed_every_attempt(attempts) for _, attempts in cases]
+    return {
+        "passed": sum(verdict is True for verdict in verdicts),
+        "failed": sum(verdict is False for verdict in verdicts),
+        "errors": sum(verdict is None for verdict in verdicts),
+        "flaky": [case_id for case_id, attempts in cases if flaky(attempts)],
+    }
+
+
 def combine_attempts(attempts: Sequence[Mapping[str, Any]], rules: Mapping[str, CombineRule]) -> dict[str, Any]:
     """One case's verdict, check verdicts, reply and target error from its attempts' records
     (``passed``, ``checks``, ``output`` and ``error`` each). Each check's verdicts combine by its
@@ -114,4 +151,16 @@ def combine_attempts(attempts: Sequence[Mapping[str, Any]], rules: Mapping[str, 
     return {"passed": verdict, "checks": checks, "output": chosen["output"], "error": chosen["error"]}
 
 
-__all__ = ["RULES", "RuleSource", "combine", "combine_attempts", "describe", "plan", "representative", "rule_for"]
+__all__ = [
+    "RULES",
+    "RuleSource",
+    "combine",
+    "combine_attempts",
+    "describe",
+    "flaky",
+    "passed_every_attempt",
+    "plan",
+    "reliability",
+    "representative",
+    "rule_for",
+]

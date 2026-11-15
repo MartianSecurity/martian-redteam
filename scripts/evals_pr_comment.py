@@ -125,6 +125,12 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
         lines.append(
             f"| **All checks** | {summary['passed']} | {summary['failed']} | {summary['errors']} | {rate(summary)} |"
         )
+        # With repeats, the share of cases that passed every attempt, under the pass rate.
+        if reliable := summary.get("reliability"):
+            lines.append(
+                f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
+                f"{reliable['errors']} | {rate(reliable)} |"
+            )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
         if summary["groups"]:
@@ -132,6 +138,8 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
         if repeats := summary.get("repeats"):
             lines.append(f"\n{_repeats(repeats)}")
+        if reliable:
+            lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
         failed = [case for case in outcome.cases if case["passed"] is False]
         errored = [case for case in outcome.cases if case["passed"] is None]
@@ -168,6 +176,16 @@ def _repeats(repeats: Mapping[str, Any]) -> str:
     return (
         f"Each case ran {repeats['attempts']} times, and the counts are of cases: each check's attempts "
         f"combine by its rule, {rules}."
+    )
+
+
+def _flaky(names: list[str]) -> str:
+    """What reliability counts, and the cases whose verdict changed between attempts."""
+    meaning = "Reliability counts the cases that passed every attempt."
+    if not names:
+        return f"{meaning} No flaky cases: no case's verdict changed between attempts."
+    return f"{meaning} Flaky cases, whose verdict changed between attempts: {_names(names, cell=False)}" + (
+        "; summary.json lists every one." if len(names) > 5 else "."
     )
 
 

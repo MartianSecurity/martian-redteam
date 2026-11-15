@@ -184,7 +184,7 @@ The core adds one read route of its own, which the server's contract does not ha
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
-| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). A case that ran once has no attempts | Records |
+| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -212,7 +212,10 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   digest (or store dataset).
 - **Repeated cases.** A case result of a run that repeats its cases is one item, with the status
   of its attempts combined; the contract's `EvalItemOut` has no place for attempts, so they are
-  served by the attempts route above. The item's trace is the attempt that shows its reply, and
+  served by the attempts route above. So are the run's reliability and each case's `flaky`: the
+  run routes' responses, `EvalRunOut` and `EvalRunDetailOut`, are typed in the frozen contract,
+  and a field there would need a new contract version on the server. The run's
+  `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
   its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
   comparison pairs these combined statuses.
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
@@ -647,7 +650,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
-  and the core's own route for the attempts of repeated cases.
+  and the core's own route for the attempts of repeated cases, with the run's reliability and its
+  flaky cases.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
@@ -1062,8 +1066,8 @@ default project:
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
 trace search, Compare of two runs with its label (within noise for the same deterministic
-system twice, worse for a seeded regression), a run that repeats its cases and its attempts, a
-resumed run, a run that stops early, and a data folder that cannot be opened.
+system twice, worse for a seeded regression), a run that repeats its cases and its attempts, its
+reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot be opened.
 
 ## Not built yet
 

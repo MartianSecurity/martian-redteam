@@ -39,7 +39,7 @@ from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals.model import MAX_ATTEMPTS, CombineRule
-from martian.evals.repeats import combine_attempts, plan
+from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability
 from martian.evals.stats import proportion_interval
 
 JUDGES = ("rubric", "guidelines", "conditions")
@@ -650,8 +650,9 @@ def _summary(
     """The run's counts and pass rates. A record is one case: with repeats its verdicts are its
     attempts combined, so the pass rates and their intervals count cases, never attempts. With
     ``repeats`` (the suite's :meth:`Suite.repeat_plan`, when it runs each case more than once) the
-    summary also states the plan and counts the attempts, and the target and check errors are
-    counted over attempts, where they happened."""
+    summary also states the plan and counts the attempts, the target and check errors are counted
+    over attempts, where they happened, and ``reliability`` is the share of cases that passed every
+    attempt, with its interval and the flaky cases (:func:`martian.evals.repeats.reliability`)."""
     repeated = repeats is not None
     per_check = {}
     for label in labels:
@@ -680,7 +681,15 @@ def _summary(
     }
     if repeated:
         tried = [attempt["passed"] for r in records for attempt in r["attempts"]]
-        summary |= {"repeats": repeats, "attempts": {"total": len(tried), **_counts(tried)}}
+        each = [(str(r["id"]), [attempt["passed"] for attempt in r["attempts"]]) for r in records]
+        reliable = reliability(each)
+        flaky_cases = reliable.pop("flaky")
+        verdicts = [(case_id, passed_every_attempt(attempts)) for case_id, attempts in each]
+        summary |= {
+            "repeats": repeats,
+            "attempts": {"total": len(tried), **_counts(tried)},
+            "reliability": {**reliable, **_pass_rate(verdicts, groups), "flaky": flaky_cases},
+        }
     return summary | {
         "checks": per_check,
         "target_errors": target_errors,

@@ -14,7 +14,7 @@ from martian.config import ConfigError
 from martian.evals.local import create_local_app
 from martian.evals.runner import load_cases, load_suite, run_suite
 from martian.evals.state import STATE
-from martian.evals.stats import proportion_interval, wilson
+from martian.evals.stats import proportion_interval, rate_text, wilson
 from martian.evals.suite_file import load_suite_file
 from tests.evals.evals_contract import validate_response
 
@@ -897,12 +897,64 @@ def test_an_attempt_without_a_verdict_leaves_all_open_and_any_passed(tmp_path, r
     # Target failures are counted where they happened: once per failed attempt.
     assert summary["target_errors"] == {"the target call failed": 2}
     assert summary["attempts"] == {"total": 10, "passed": 8, "failed": 0, "errors": 2}
+    # Whether a case passed every attempt is open when one has no verdict, and no attempt failed,
+    # so neither case is flaky.
+    assert summary["reliability"] == {
+        "passed": 0,
+        "failed": 0,
+        "errors": 2,
+        "pass_rate": None,
+        "confidence_95": None,
+        "flaky": [],
+    }
     for record in results_of(tmp_path).values():
         assert [attempt["error"] for attempt in record["attempts"]].count("the target call failed") == 1
         assert record["error"] == (None if passed else "the target call failed")
     result = CliRunner().invoke(app, ["evals", "run", str(tmp_path / "evals.yaml"), "--fresh"])
     assert result.exit_code == (0 if passed else 2)
     assert "2 attempt(s): the target call failed" in result.output
+
+
+# The key goes wrong on one call in three; the hint never does.
+KEY_ONLY = 'return "Sure. It is piano." if message == "What is the key?" else "I cannot share it."'
+
+
+def test_reliability_counts_the_cases_that_passed_every_attempt_and_lists_the_flaky_ones(tmp_path):
+    suite = flaky_suite(tmp_path, failure=KEY_ONLY, repeats="repeats: 3\n", extra="combine: any\n")
+    summary = run_suite(suite)
+    # Under any both cases pass, though only the hint passed every attempt: capability is not
+    # reliability.
+    assert (summary["passed"], summary["pass_rate"]) == (2, 1.0)
+    assert summary["reliability"] == {
+        "passed": 1,
+        "failed": 1,
+        "errors": 0,
+        "pass_rate": 0.5,
+        "confidence_95": list(wilson(1, 2)),
+        "flaky": ["key"],
+    }
+
+    result = CliRunner().invoke(app, ["evals", "run", str(suite), "--fresh"])
+    assert result.exit_code == 0
+    reliability_row = next(line for line in result.output.splitlines() if "Reliability" in line)
+    assert "every attempt" in reliability_row and rate_text(0.5, wilson(1, 2)) in reliability_row
+    assert "Flaky cases, whose verdict changed between attempts: key" in result.output
+
+    # The core's attempts route has the same reliability, marks the flaky case, and lists only
+    # flaky cases when asked; the run detail stays the contract's.
+    client = local_ui(tmp_path)
+    run_id = summary["run"]["id"]
+    validate_response("get", "/v1/evals/{run_id}", client.get(f"/v1/evals/{run_id}").json())
+    found = client.get(f"/v1/evals/{run_id}/attempts").json()
+    assert found["reliability"] == summary["reliability"]
+    assert {item["dataset_item_id"]: item["flaky"] for item in found["items"]} == {"key": True, "hint": False}
+    only = client.get(f"/v1/evals/{run_id}/attempts", params={"flaky": True}).json()
+    assert [item["dataset_item_id"] for item in only["items"]] == ["key"]
+    assert only["reliability"] == found["reliability"]
+
+    # With no flaky case the command says so.
+    calm = CliRunner().invoke(app, ["evals", "run", str(flaky_suite(tmp_path, repeats="repeats: 2\n")), "--fresh"])
+    assert calm.exit_code == 0 and "No flaky cases: no case's verdict changed between attempts" in calm.output
 
 
 def test_repeats_and_rules_decide_whether_a_resumed_run_reuses_a_verdict(tmp_path):
@@ -991,7 +1043,8 @@ def test_a_repeated_run_shows_every_attempt_in_the_core_routes(tmp_path):
 def test_a_run_without_repeats_reads_exactly_as_before(tmp_path):
     write_jsonl(tmp_path)
     summary = run_suite(write_suite(tmp_path))
-    assert not {"repeats", "attempts"} & set(summary) and "attempts" not in summary["checks"]["no_leak"]
+    assert not {"repeats", "attempts", "reliability"} & set(summary)
+    assert "attempts" not in summary["checks"]["no_leak"]
     assert all(set(record) == set(results_of(tmp_path)["safe"]) for record in results_of(tmp_path).values())
     assert "attempts" not in results_of(tmp_path)["safe"]
     client = local_ui(tmp_path)
@@ -999,6 +1052,9 @@ def test_a_run_without_repeats_reads_exactly_as_before(tmp_path):
     assert "repeats" not in client.get(f"/v1/evals/{run_id}").json()["provenance"]
     found = client.get(f"/v1/evals/{run_id}/attempts").json()
     assert found["repeats"] is None and [item["attempts"] for item in found["items"]] == [[], [], []]
+    # Reliability is not measured, and no case is flaky.
+    assert found["reliability"] is None and not any(item["flaky"] for item in found["items"])
+    assert client.get(f"/v1/evals/{run_id}/attempts", params={"flaky": True}).json()["items"] == []
 
 
 def test_the_command_takes_a_repeat_count_and_prints_each_checks_rule(tmp_path):

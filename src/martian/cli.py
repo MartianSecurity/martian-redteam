@@ -146,7 +146,8 @@ def _run_suite(
     if plan:
         notes.append(
             "Counts are of cases. Each check combines its attempts by its own rule (check), all for a "
-            "security check (security), or the suite's rule (suite)"
+            "security check (security), or the suite's rule (suite). Reliability counts the cases that "
+            "passed every attempt"
         )
     table = Table(
         title=f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else ""),
@@ -155,7 +156,10 @@ def _run_suite(
     columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
     for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
-    for name, counts in [*summary["checks"].items(), ("All checks", summary)]:
+    # With repeats, the share of cases that passed every attempt sits under the pass rate.
+    reliable = summary.get("reliability")
+    totals = [("All checks", summary), *([("Reliability", reliable)] if reliable else [])]
+    for name, counts in [*summary["checks"].items(), *totals]:
         row = [
             name,
             str(counts["passed"]),
@@ -163,11 +167,25 @@ def _run_suite(
             str(counts["errors"]),
             rate_text(counts["pass_rate"], counts["confidence_95"]),
         ]
-        if plan:
-            rule = plan["checks"].get(name)
-            row.append(f"{rule['combine']} ({rule['from']})" if rule else "every check")
-        table.add_row(*row, style="bold" if counts is summary else None)
+        if plan and counts is reliable:
+            row.append("every attempt")
+        elif plan and counts is summary:
+            row.append("every check")
+        elif plan:
+            rule = plan["checks"][name]
+            row.append(f"{rule['combine']} ({rule['from']})")
+        table.add_row(*row, style="bold" if counts is summary or counts is reliable else None)
     console.print(table)
+    if reliable:
+        flaky = reliable["flaky"]
+        shown = ", ".join(flaky[:5]) + (f" and {len(flaky) - 5} more" if len(flaky) > 5 else "")
+        console.print(
+            f"Flaky cases, whose verdict changed between attempts: {shown}"
+            if flaky
+            else "No flaky cases: no case's verdict changed between attempts",
+            markup=False,
+            highlight=False,
+        )
     unit = "attempt(s)" if plan else "case(s)"
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} {unit}: {reason}", markup=False, highlight=False)

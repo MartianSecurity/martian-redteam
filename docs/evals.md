@@ -126,14 +126,15 @@ and give repeated check types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). With repeats, also `repeats` and `attempts` |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). With repeats, also `repeats`, `attempts` and `reliability` |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
-interval, such as `67% (20–94%)`, with repeats the rule each check's attempts combined by, and
-the reasons cases had no verdict. It exits `0` when every case passed, `1` when a case failed,
+interval, such as `67% (20–94%)`, with repeats the rule each check's attempts combined by and
+the [reliability](#reliability-and-flaky-cases) and flaky cases, and the reasons cases had no
+verdict. It exits `0` when every case passed, `1` when a case failed,
 and `2` when a case has no verdict or the suite file is invalid.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh` and
@@ -280,14 +281,43 @@ Every attempt is recorded:
 | Where | What |
 | --- | --- |
 | `results.jsonl` | The case's `passed` and `checks` are the attempts combined, and each check's `rationale` says how the attempts went and what its rule asks, such as `4 of 5 attempts passed, 1 failed (all: every attempt must pass)`. `attempts` lists every attempt in order: its `number`, `passed`, `checks` (each with its own verdict, rationale and error), `output` and `error`. The case's `output` and `error` are those of its first attempt with the case's verdict, else of its first attempt: under `all`, a failed case shows an attempt that failed |
-| `summary.json` | `repeats`: the attempts of each case (`attempts`), the suite's rule (`combine`), and each check's rule with where it came from (`checks.<label>.combine` and `from`: `check`, `security` or `suite`). `attempts`: the attempts' own counts, `total`, `passed`, `failed` and `errors`, and the same per check under `checks.<label>.attempts`. `target_errors` and `check_errors` count attempts |
+| `summary.json` | `repeats`: the attempts of each case (`attempts`), the suite's rule (`combine`), and each check's rule with where it came from (`checks.<label>.combine` and `from`: `check`, `security` or `suite`). `attempts`: the attempts' own counts, `total`, `passed`, `failed` and `errors`, and the same per check under `checks.<label>.attempts`. `reliability`: the [reliability and the flaky cases](#reliability-and-flaky-cases). `target_errors` and `check_errors` count attempts |
 | `junit.xml` | The `repeats` property and each check's rule, `check.<label>.combine` |
-| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The attempts of each case and each check's rule |
-| The local Evals UI's data folder | The case result holds every attempt, each with its own trace, named `<run> <case> attempt <n>` and carrying that attempt's verdicts; the case's trace is that of the attempt that shows its reply. The run's `provenance` holds `repeats` as `summary.json` has it. [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) returns both. The Evals UI's pages do not show attempts yet |
+| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The attempts of each case, each check's rule, the reliability under the pass rate, and the flaky cases |
+| The local Evals UI's data folder | The case result holds every attempt, each with its own trace, named `<run> <case> attempt <n>` and carrying that attempt's verdicts; the case's trace is that of the attempt that shows its reply. The run's `provenance` holds `repeats` as `summary.json` has it. [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) returns both, with the reliability and each case's `flaky` |
 
-A run without repeats writes and records exactly what it did before: no `attempts`, no `repeats`.
-The share of cases that pass every attempt, and the cases whose verdict changes between attempts,
-are not reported yet (MorningHQ/martian-notes#183).
+A run without repeats writes and records exactly what it did before: no `attempts`, no `repeats`,
+no `reliability`.
+
+### Reliability and flaky cases
+
+The pass rate says how often the system gets a case right under each check's rule; reliability
+says how often it gets a case right every time. **Reliability**, sometimes called pass^k for k
+attempts, is the share of cases that passed on every attempt, an attempt passing when every check
+passed it. A case is **flaky** when its verdict changed between attempts: one attempt passed and
+another failed. `martian.evals.repeats` computes both from the attempts' own verdicts:
+
+- **Not a rule.** Reliability does not change how a case's verdict combines, the exit code or the
+  gate. When every check combines by `all`, a case passes only when it passed every attempt, so
+  the reliability is the pass rate but for attempts without a verdict; under `majority` or `any`
+  it can be lower. A flaky case fails under `all` and can pass under `any`.
+- **Attempts without a verdict.** Whether a case passed every attempt is read as under `all`: one
+  failed attempt settles it, and an attempt without a verdict otherwise leaves it open, so the
+  case counts in `errors`. An attempt without a verdict makes no case flaky.
+- **Its interval** is the pass rate's: Wilson over the cases with a reliability verdict, allowing
+  for case groups in `summary.json` and treating cases as independent in the evals core
+  ([pass rates and intervals](#pass-rates-and-confidence-intervals)).
+- **Only with repeats.** A run without repeats measures no reliability: `summary.json`, the
+  printed table and the pull-request comment leave it out, the core's attempts route answers
+  `reliability: null`, and the Evals UI's run page says **Not measured**.
+
+| Where | What |
+| --- | --- |
+| `summary.json` | `reliability`: `passed` (cases that passed every attempt), `failed` (cases that failed an attempt), `errors` (cases left open), `pass_rate` and `confidence_95`, and `flaky`, the ids of the flaky cases in data order |
+| The printed table | A **Reliability** row under **All checks**, combined by `every attempt`, then the flaky cases, at most five by name, or `No flaky cases` |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
+| [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
+| The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
 
 ## Pass rates and confidence intervals
 
@@ -329,8 +359,8 @@ rather than the ungrouped `50% (21–79%)`.
 
 | Where | Interval |
 | --- | --- |
-| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | Wilson for each check's pass rate and the run's, grouped when the data names groups |
-| The evals core's scorecards (run detail, Compare, Monitoring) | `confidence_95`, Wilson, for a boolean scorer's pass rate; `mean_confidence_95`, Student t, for a numeric scorer's mean ([read routes](evals-core.md#read-routes)) |
+| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | Wilson for each check's pass rate, the run's and, with repeats, its [reliability](#reliability-and-flaky-cases), grouped when the data names groups |
+| The evals core's scorecards (run detail, Compare, Monitoring) and its attempts route | `confidence_95`, Wilson, for a boolean scorer's pass rate and for a repeated run's reliability; `mean_confidence_95`, Student t, for a numeric scorer's mean ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Runs, run detail, Compare and Overview | Wilson from the counts each response carries, ungrouped |
 
 Case results do not carry a case's group, so the core and the Evals UI treat every case as
