@@ -720,7 +720,9 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     metrics.
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
     tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
-    metadata keys, [above](#sessions-and-users).
+    metadata keys, [above](#sessions-and-users). MLflow needs every span's start time and starts
+    a trace at its earliest span, so a span with no start time is written at its trace's request
+    time and reads back with no times; it never moves the trace's request time or latency.
   - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
     a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
