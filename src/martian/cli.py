@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import ipaddress
+import json
+import math
 import os
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -14,6 +16,9 @@ from martian import __version__
 from martian._errors import concise_problems
 from martian.config import MartianConfig
 from martian_redteam.cli import app as redteam_app
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -260,27 +265,54 @@ def _run_suite(
             "security check (security), or the suite's rule (suite). Reliability counts the cases that "
             "passed every attempt"
         )
-    title = f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else "")
+    talks = summary.get("conversations")
+    if talks:
+        notes.append(
+            f"{talks['cases']} of the cases {'is a conversation' if talks['cases'] == 1 else 'are conversations'}: "
+            "each counts once, passing when each turn check passed every turn it grades and each conversation "
+            "check passed. Turns counts the conversations' turns"
+        )
+    simulated = summary.get("simulator")
+    if simulated:
+        notes.append(
+            f"{simulated['cases']} {'conversation has' if simulated['cases'] == 1 else 'conversations have'} a "
+            f"simulated user, played by {simulated['model']}: Simulated counts their verdicts, and goal_reached "
+            "is whether each reached its goal"
+        )
+    title = (
+        f"{path.name}: {summary['cases']} cases"
+        + (f", {simulated['cases']} simulated" if simulated else "")
+        + (f", {plan['attempts']} attempts each" if plan else "")
+    )
     if summary["not_run"]:
         title += f", {summary['not_run']} not run"
     table = Table(title=title, caption="; ".join(notes) or None)
     columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
     for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
-    # With repeats, the share of cases that passed every attempt sits under the pass rate.
+    # With repeats, the share of cases that passed every attempt sits under the pass rate; with
+    # simulated users, the verdicts of the cases a model played the user of.
     reliable = summary.get("reliability")
-    totals = [("All checks", summary), *([("Reliability", reliable)] if reliable else [])]
-    for name, counts in [*summary["checks"].items(), *totals]:
+    turns = talks["turns"] if talks else None
+    totals = [
+        ("All checks", summary),
+        *([("Reliability", reliable)] if reliable else []),
+        *([("Simulated", simulated)] if simulated else []),
+    ]
+    for name, counts in [*summary["checks"].items(), *totals, *([("Turns", turns)] if turns else [])]:
         row = [
             name,
             str(counts["passed"]),
             str(counts["failed"]),
             str(counts["errors"]),
-            rate_text(counts["pass_rate"], counts["confidence_95"]),
+            # Turns are parts of their conversations, so their share has no interval of its own.
+            "—" if counts is turns else rate_text(counts["pass_rate"], counts["confidence_95"]),
         ]
-        if plan and counts is reliable:
+        if plan and counts is turns:
+            row.append("each turn")
+        elif plan and counts is reliable:
             row.append("every attempt")
-        elif plan and counts is summary:
+        elif plan and (counts is summary or counts is simulated):
             row.append("every check")
         elif plan:
             rule = plan["checks"][name]
@@ -775,8 +807,274 @@ def import_martian(
         typer.echo(f"Import stopped: {error.detail}. Import into a fresh data folder again.", err=True)
         raise typer.Exit(code=2) from None
     typer.echo(f"Imported into {home}: {_export_counts(summary.manifest['files'])}.")
+    if summary.paused:
+        typer.echo(
+            f"Monitors and schedules come back paused (active in the export: {len(summary.paused)}): "
+            "resume each to start it again."
+        )
+    if summary.needs_secret:
+        typer.echo(
+            f"Webhook secrets are never exported (thresholds with a webhook: {len(summary.needs_secret)}): give each "
+            "its secret again with POST /v1/evals/thresholds/{id}/secret before its alerts are signed."
+        )
     ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
     typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@evals_app.command("personas")
+def build_personas(
+    transcripts: Annotated[
+        Path | None,
+        typer.Argument(
+            dir_okay=False,
+            show_default=False,
+            help='A JSON Lines file of conversations, one per line: {"id": ..., "messages": [...]}.',
+        ),
+    ] = None,
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model", help="The model that reads each conversation, as for simulator.model: openai:/<model>."
+        ),
+    ] = "",
+    output: Annotated[Path, typer.Option("--output", "-o", dir_okay=False, help="The data file to write.")] = Path(
+        "personas.jsonl"
+    ),
+    session: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--session", help="Read this session's traces from the local Evals UI's data folder instead; repeatable."
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="With --session: the data folder. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns", min=1, max=100, help="Each persona's turn budget. Default: the messages its user sent."
+        ),
+    ] = None,
+) -> None:
+    """Build simulated users from real conversations: a data file of goal and persona cases.
+
+    martian evals personas transcripts.jsonl --model openai:/<model> -o personas.jsonl
+    martian evals personas --session <id> --model openai:/<model> -o personas.jsonl
+
+    Personal data that the no_personal_data check finds is removed before the model reads a
+    conversation and from everything written. Names and street addresses are not found: read the
+    file before you share it.
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Building personas needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.config import ConfigError
+    from martian.evals._policy import personal_data_text
+    from martian.evals.local import data_folder
+    from martian.evals.personas import build_personas as build
+    from martian.evals.personas import read_transcripts, transcripts_from_store, write_personas
+
+    if (transcripts is None) == (not session) or not model:
+        typer.echo("Give --model, and a transcripts file or --session, not both.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        found = (
+            read_transcripts(transcripts)
+            if transcripts
+            else transcripts_from_store(data_folder(data_dir), session or [])
+        )
+        built = build(found, model=model, max_turns=max_turns)
+        written = write_personas(built, output)
+    except (ConfigError, ValueError) as error:
+        typer.echo(f"Building personas failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    plural = "persona" if len(built.cases) == 1 else "personas"
+    typer.echo(f"Wrote {len(built.cases)} {plural} to {written}.")
+    typer.echo(
+        f"Personal data removed: {personal_data_text(built.removed)} (the kinds no_personal_data finds: email "
+        "addresses, phone numbers, card numbers, IBANs and national IDs). Names and street addresses are not "
+        "found: read the file before you share it."
+    )
+
+
+@evals_app.command("fidelity")
+def check_fidelity(
+    transcripts: Annotated[
+        Path | None,
+        typer.Argument(
+            dir_okay=False,
+            show_default=False,
+            help='The real conversations, as for personas: {"id": ..., "messages": [...], "goal_reached": ...}.',
+        ),
+    ] = None,
+    results: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--results",
+            file_okay=False,
+            show_default=False,
+            help="The output folder of a martian evals run with simulated users; repeatable.",
+        ),
+    ] = None,
+    session: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--session", help="Read this session's traces from the local Evals UI's data folder instead; repeatable."
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="With --session: the data folder. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+    output: Annotated[Path, typer.Option("--output", "-o", dir_okay=False, help="The report to write.")] = Path(
+        "fidelity.json"
+    ),
+) -> None:
+    """Compare simulated conversations with real ones: turns, corrections and goal reached.
+
+    martian evals fidelity transcripts.jsonl --results results -o fidelity.json
+    martian evals fidelity --session <id> --results results -o fidelity.json
+
+    One report per simulator setup (its model, parameters, version and persona source) among the
+    output folders. Corrections and the outcome of an unlabelled real conversation are found by
+    fixed rules; see docs/evals.md, Simulator fidelity. Calls no model.
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("The fidelity report needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from rich.console import Console
+
+    from martian.config import ConfigError
+    from martian.evals import fidelity
+    from martian.evals.local import data_folder
+    from martian.evals.personas import read_transcripts, transcripts_from_store
+
+    if (transcripts is None) == (not session) or not results:
+        typer.echo("Give --results, and a transcripts file or --session, not both.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        found = (
+            read_transcripts(transcripts)
+            if transcripts
+            else transcripts_from_store(data_folder(data_dir), session or [])
+        )
+        source = fidelity.transcripts_source(transcripts) if transcripts else fidelity.sessions_source(session or [])
+        report = fidelity.fidelity_report(
+            [fidelity.read_simulated(folder) for folder in results], fidelity.real_conversations(found), source
+        )
+        written = fidelity.write_report(report, output)
+    except (ConfigError, OSError) as error:
+        typer.echo(f"The fidelity report failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    console = Console()
+    for each in report["reports"]:
+        _print_fidelity(console, each, source, fidelity.VERSION)
+    console.print(f"Wrote the fidelity report to {written}.", markup=False, highlight=False, soft_wrap=True)
+
+
+_READINGS = {"higher": "simulated higher", "lower": "simulated lower", "within_noise": "within noise"}
+
+
+def _print_fidelity(console: Console, report: dict[str, Any], source: dict[str, Any], version: str) -> None:
+    """One setup's fidelity report as a table: each measure for the simulated and the real
+    conversations, and their difference, simulated minus real, with its interval."""
+    from rich.table import Table
+
+    from martian.evals.stats import rate_text
+
+    setup = report["setup"]
+    personas = setup.get("personas") or {}
+
+    def mean(found: dict[str, Any]) -> str:
+        if found["mean"] is None:
+            return "—"
+        interval = found["confidence_95"]
+        return f"{found['mean']:.1f}" + (f" ({interval[0]:.1f} to {interval[1]:.1f})" if interval else "")
+
+    def share(found: dict[str, Any], count: str) -> str:
+        if found["rate"] is None:
+            return "—"
+        shown = rate_text(found["rate"], found["confidence_95"]) if found["confidence_95"] else ""
+        return f"{found[count]} of {found['conversations']}" + (f", {shown}" if shown else "")
+
+    def apart(found: dict[str, Any], *, points: bool) -> str:
+        # A share's difference is in percentage points, its bounds rounded outward as rate_text's.
+        if found["value"] is None:
+            return "—"
+        interval = found["confidence_95"]
+        if points:
+            text = f"{found['value'] * 100:+.0f} points"
+            if interval:
+                text += f" ({math.floor(interval[0] * 100 + 1e-9):+d} to {math.ceil(interval[1] * 100 - 1e-9):+d})"
+        else:
+            text = f"{found['value']:+.1f}" + (f" ({interval[0]:+.1f} to {interval[1]:+.1f})" if interval else "")
+        return text + (f", {_READINGS[found['reading']]}" if found["reading"] else "")
+
+    turns, fixes, goal = report["turns"], report["corrections"], report["goal_reached"]
+    real_goal = goal["real"]
+    origin = (
+        f"{source['transcripts']}"
+        if "transcripts" in source
+        else f"{len(source['sessions'])} sessions of the data folder"
+    )
+    caption = (
+        f"Simulated: {turns['simulated']['conversations']} conversations of {report['cases']} cases in "
+        + ", ".join(report["results"])
+        + (f", {report['left_out']} that ended on an error left out" if report["left_out"] else "")
+        + f". Real: {turns['real']['conversations']} conversations from {origin}; goal reached as labelled for "
+        f"{real_goal['from'].get('label', 0)}, by the outcome rule for {real_goal['from'].get('rule', 0)}, unknown "
+        f"for {real_goal['unknown']}. Corrections and the outcome rule: {version} (docs/evals.md, simulator fidelity)."
+    )
+    table = Table(
+        title=f"Fidelity of {setup['model']} with personas from {personas.get('data')}",
+        caption=caption,
+    )
+    for column in ("Measure", "Simulated", "Real", "Difference (95% CI)"):
+        table.add_column(column)
+    table.add_row(
+        "Turns per conversation",
+        mean(turns["simulated"]),
+        mean(turns["real"]),
+        apart(turns["difference"], points=False),
+    )
+    table.add_row(
+        "Conversations with a correction",
+        share(fixes["simulated"], "with_correction"),
+        share(fixes["real"], "with_correction"),
+        apart(fixes["difference"], points=True),
+    )
+    table.add_row(
+        "Corrections per turn",
+        f"{fixes['simulated']['corrections']} of {fixes['simulated']['turns']}",
+        f"{fixes['real']['corrections']} of {fixes['real']['turns']}",
+        "—",
+    )
+    table.add_row(
+        "Goal reached",
+        share(goal["simulated"], "reached"),
+        share(goal["real"], "reached"),
+        apart(goal["difference"], points=True),
+    )
+    parameters = json.dumps(setup.get("parameters") or {}, sort_keys=True)
+    console.print(
+        f"Simulator setup: {setup['model']}, parameters {parameters}, instructions {setup.get('version')}, "
+        f"personas {personas.get('data')} (dataset digest {str(personas.get('digest'))[:12]})",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    console.print(table)
 
 
 @app.command("ui")

@@ -110,10 +110,16 @@ prompts.
   for a suite that [repeats its cases](evals.md#repeated-attempts) how many
   times each case ran, the rule each check's attempts combined by, a
   **Reliability** row under the pass rate and the
-  [flaky cases](evals.md#reliability-and-flaky-cases),
+  [flaky cases](evals.md#reliability-and-flaky-cases), for a suite with
+  [conversation cases](evals.md#conversations) a **Turns** row with the
+  turns' own counts and how many cases are conversations, for a suite with
+  [simulated users](evals.md#simulated-users) the simulated cases counted in
+  the headline, a **Simulated** row with their own counts, a `goal_reached`
+  row and the simulator's model,
   and up to 25 failed and 25 unfinished case
-  IDs with the checks that did not pass. A suite with a
-  [matrix](evals.md#a-matrix-of-prompts-and-models) has one row per
+  IDs with the checks that did not pass, `(simulated)` beside a simulated
+  case and, for a conversation, the numbers of the turns that failed. A suite
+  with a [matrix](evals.md#a-matrix-of-prompts-and-models) has one row per
   combination instead, up to 25: its counts, pass rate and interval, its reliability
   with repeats, its false refusals with a policy check, its comparison with a
   baseline, and how it ended; then, for up to ten combinations, their cases

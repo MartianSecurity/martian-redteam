@@ -33,7 +33,7 @@ from martian.evals.model import (
     prompt_digest,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_prompt, check_session_search
+from martian.evals.store import StoreError, StoreStatus, check_imported_prompt, check_prompt, check_session_search
 from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
@@ -255,6 +255,8 @@ class MemoryStore:
                 continue
             if query.user_id is not None and trace.user_id != query.user_id:
                 continue
+            if query.model is not None and trace.model != query.model:
+                continue
             if query.trace_ids and trace.id not in query.trace_ids:
                 continue
             if query.states and trace.state not in query.states:
@@ -388,6 +390,18 @@ class MemoryStore:
         space = _space(principal)
         found = [v for (s, _), (_, versions) in self._prompts.items() if s == space for v in versions]
         return sorted((v for v in found if v.digest == digest), key=lambda v: (v.created_at or _now(), v.name))
+
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        check_imported_prompt(prompt, versions)
+        key = (_space(principal), prompt.name)
+        if key in self._prompts:
+            raise StoreError("conflict", "a prompt with this name already exists")
+        now = _now()
+        kept = [v.model_copy(update={"created_at": v.created_at or now}) for v in versions]
+        self._prompts[key] = (prompt.model_copy(update={"created_at": prompt.created_at or now}), kept)
+        return list(kept)
 
     def _prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
         found = self._prompts.get((_space(principal), name))

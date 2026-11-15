@@ -10,6 +10,7 @@ missing. ``PRIVATE_DEPENDENCIES`` lists each internal name.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from mlflow.entities import Trace as MlflowTrace
@@ -165,13 +166,28 @@ class PromptRegistryStore(WorkspaceAwareRegistryStore):
     for this store only, as :class:`WorkspaceStore` has them for tracking. Its tables are in the
     same database as the tracking store's; every query requires a workspace in the request
     context. The SDK uses only its prompt methods (``create_prompt``, ``create_prompt_version``,
-    ``search_prompts``, ``search_prompt_versions``, ``get_prompt``, ``get_prompt_version``) and
+    ``search_prompts``, ``search_prompt_versions``, ``get_prompt``, ``get_prompt_version``),
     ``search_model_versions`` over prompt versions, which MLflow searches only when the filter
-    names :data:`IS_PROMPT_TAG_KEY`."""
+    names :data:`IS_PROMPT_TAG_KEY`, and :meth:`keep_prompt_times`."""
 
     @staticmethod
     def _workspaces_enabled() -> bool:
         return True
+
+    def keep_prompt_times(self, name: str, created: int | None, versions: Mapping[int, int | None]) -> None:
+        """Set the creation time of the prompt ``name`` and of each of its ``versions``, by number,
+        in epoch milliseconds, which MLflow sets to the current time when it creates them, so a data
+        import keeps the times its export holds. None leaves MLflow's own; each changed row's
+        last-updated time follows it, and the prompt's is its newest version's."""
+        with self.ManagedSessionMaker(read_only=False) as session:
+            model = self._get_registered_model(session, name)  # type: ignore[no-untyped-call]
+            if created is not None:
+                model.creation_time = model.last_updated_time = created
+            for number, at in versions.items():
+                if at is not None:
+                    row = self._get_sql_model_version(session, name, number)  # type: ignore[no-untyped-call]
+                    row.creation_time = row.last_updated_time = at
+                    model.last_updated_time = max(model.last_updated_time, at)
 
 
 def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore | WorkspaceAwareRegistryStore) -> None:

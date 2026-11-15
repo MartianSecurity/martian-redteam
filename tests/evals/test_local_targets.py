@@ -110,7 +110,7 @@ def test_a_name_in_use_is_refused(client):
         ({"url": "ftp://agent.example/chat"}, "url must be an http or https address"),
         ({"url": "https://user:pass@agent.example/chat"}, "url must not contain credentials; give the key instead"),
         ({"url": "https://agent.example/chat?key=${MARTIAN_TARGET_KEY}"}, "url cannot hold ${...}"),
-        ({"body": {"message": "fixed"}}, "a url target's body must use {{input}} or {{inputs.NAME}}"),
+        ({"body": {"message": "fixed"}}, "a url target's body must use {{input}}, {{inputs.NAME}} or {{messages}}"),
         ({"body": {"message": "{{prompt}}"}}, "unknown body placeholder(s) prompt"),
         ({"key_header": "X Key"}, "key_header must be a header name"),
         ({"model": "example-1"}, "model does not apply to an http target"),
@@ -153,6 +153,7 @@ def test_each_kind_is_the_shared_models_http_target_with_the_key_as_a_reference(
         body={"model": "example-1", "messages": [{"role": "user", "content": "{{input}}"}]},
         response_path="choices.0.message.content",
         headers={"Authorization": "Bearer ${MARTIAN_TARGET_KEY}"},
+        model_path="model",
     )
     assert targets.model_target(found[open_endpoint["id"]]).headers == {}
 

@@ -98,6 +98,19 @@ def check_prompt(name: str, text: str | None = None, *, message: str = "", descr
         raise StoreError("invalid", "a commit message or description is at most 1,000 characters")
 
 
+def check_imported_prompt(prompt: Prompt, versions: list[PromptVersion]) -> None:
+    """Refuse, as ``invalid``, a prompt and versions that ``EvalStore.import_prompt`` cannot keep as
+    they are: one :func:`check_prompt` refuses, a version of another prompt, or versions not
+    numbered 1, 2, 3 and on, in order."""
+    check_prompt(prompt.name, description=prompt.description)
+    for version in versions:
+        check_prompt(version.name, version.text, message=version.message)
+    if any(version.name != prompt.name for version in versions):
+        raise StoreError("invalid", "every version imported with a prompt is one of that prompt's")
+    if [version.version for version in versions] != list(range(1, len(versions) + 1)):
+        raise StoreError("invalid", "a prompt's versions are imported numbered from 1, in order")
+
+
 @runtime_checkable
 class EvalStore(Protocol):
     async def status(self, principal: Principal) -> StoreStatus:
@@ -238,6 +251,18 @@ class EvalStore(Protocol):
         oldest first."""
         ...
 
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        """Create the prompt with its versions as an install it was exported from had them: the
+        prompt's description, and each version's text, commit message and number, with who created
+        each and when (``created_by``, ``created_at``) kept, not the caller and the current time
+        that ``create_prompt`` and ``add_prompt_version`` record (:mod:`martian.evals.data_export`).
+        An unset ``created_by`` stays unset, and an unset ``created_at`` is the current time. A
+        prompt that exists is ``conflict``; versions :func:`check_imported_prompt` refuses are
+        ``invalid``. Returns the versions as stored."""
+        ...
+
     # Review questions and review queues.
     async def save_question(self, principal: Principal, project_id: str, question: ReviewQuestion) -> ReviewQuestion:
         """Create the question, or return the existing one if it is identical."""
@@ -291,6 +316,7 @@ __all__ = [
     "StoreError",
     "StoreState",
     "StoreStatus",
+    "check_imported_prompt",
     "check_prompt",
     "check_session_search",
 ]

@@ -297,3 +297,26 @@ def test_the_comparison_names_what_changed_in_the_suite():
     # Without a pair there is no label, and the gate rests on the unpaired cases alone.
     lone = baseline.compare({**before, "cases": []}, after)
     assert (lone["significance"], lone["label"], lone["new"], lone["gate"]) == (None, None, ["a"], "passed")
+
+
+def test_a_conversation_case_is_paired_by_its_turns_and_a_check_s_default_scope_keeps_its_digest():
+    from martian.evals.runner import CheckSpec, Suite, _verdicts
+
+    # A case of one input keeps the digest it had before conversations existed.
+    assert baseline.case_digest({"message": "Hi"}, {}, {}) == baseline.digest(
+        {"inputs": {"message": "Hi"}, "expectations": {}}
+    )
+    talk = {
+        "id": "talk",
+        "inputs": {},
+        "expectations": {},
+        "turns": [{"inputs": {"message": "Hi"}, "expectations": {}}],
+    }
+    changed = {**talk, "turns": [{"inputs": {"message": "Hello"}, "expectations": {}}]}
+    record = {"id": "talk", "passed": True, "checks": {"short": {"passed": True}}, "error": None}
+    suite = Suite(data="cases.jsonl", checks=[CheckSpec(type="length", name="short", max_length=10)])
+    first, second = _verdicts(suite, [record], [talk], None), _verdicts(suite, [record], [changed], None)
+    assert first["cases"][0]["digest"] != second["cases"][0]["digest"]
+    # The default scope is left out of a check's digest, so a baseline from before scopes pairs.
+    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope"})
+    assert first["checks"]["short"] == baseline.digest({"check": check, "judge": None, "combine": None})

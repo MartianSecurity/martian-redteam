@@ -220,19 +220,22 @@ def _setting_names(provider: str, base_url: str | None = None) -> tuple[str, str
     return f"the {provider} provider's key", f"the {provider} provider's address"
 
 
-def _provider_failure(stage: str, error: Exception, provider: str, base_url: str | None = None) -> ValueError:
-    """The judge's own message for a failed request, naming the setting to check.
+def _provider_failure(
+    caller: str, error: Exception, provider: str, base_url: str | None = None, setting: str = "judge"
+) -> ValueError:
+    """The caller's own message for a failed request, naming the setting to check.
 
     MLflow's outer retry classifier inspects type, status attributes and text, so only these
     fixed messages may cross into its error assessment. The provider's error text is read to
-    choose one and is never repeated. Suite file settings are named as ``judge.<name>``; in
-    Python they are the judge's argument of the same name.
+    choose one and is never repeated. ``caller`` names who asked (``Judge draft``), and suite file
+    settings are named as ``<setting>.<name>`` (``judge.model``, ``simulator.model``); in Python
+    they are the caller's argument of the same name.
     """
     key, address = _setting_names(provider, base_url)
     status = getattr(error, "status_code", None)
 
     def failed(code: str, hint: str) -> ValueError:
-        return ValueError(f"Judge {stage} failed [{code}]. {hint}")
+        return ValueError(f"{caller} failed [{code}]. {hint}")
 
     if isinstance(error, NotAChatCompletion):
         return failed("judge_provider_address", f"The address did not answer as a chat endpoint. Check {address}.")
@@ -250,10 +253,12 @@ def _provider_failure(stage: str, error: Exception, provider: str, base_url: str
     if status in (400, 403, 404, 422) and names_unknown_model(str(error)):
         return failed(
             "judge_provider_model",
-            f"The endpoint does not serve this model, or {key} may not use it. Check judge.model.",
+            f"The endpoint does not serve this model, or {key} may not use it. Check {setting}.model.",
         )
     if status in (401, 403):
-        return failed("judge_provider_auth", f"The endpoint refused the credentials. Check {key} and judge.headers.")
+        return failed(
+            "judge_provider_auth", f"The endpoint refused the credentials. Check {key} and {setting}.headers."
+        )
     if status in (404, 405):
         return failed(
             "judge_provider_address",
@@ -265,15 +270,19 @@ def _provider_failure(stage: str, error: Exception, provider: str, base_url: str
         return failed(
             "judge_provider_structured_output",
             "The endpoint refused structured output (response_format), and the judge asks again without it "
-            "only after an HTTP 400. Use a judge.model on an endpoint that supports it.",
+            f"only after an HTTP 400. Use a {setting}.model on an endpoint that supports it.",
         )
     if status in (400, 422):
-        return failed("judge_provider_rejected", "The endpoint rejected the request. Check judge.inference_params.")
+        return failed(
+            "judge_provider_rejected", f"The endpoint rejected the request. Check {setting}.inference_params."
+        )
     if status in _RATE_LIMIT_STATUS:
-        return failed("judge_provider_throttled", "Check the provider quota, or raise judge.rate_limit_wait_seconds.")
+        return failed(
+            "judge_provider_throttled", f"Check the provider quota, or raise {setting}.rate_limit_wait_seconds."
+        )
     return failed(
         "judge_provider_error",
-        "The endpoint failed without a judgment; judge.max_retries sets how often it is retried.",
+        f"The endpoint failed without a judgment; {setting}.max_retries sets how often it is retried.",
     )
 
 
@@ -292,58 +301,41 @@ def invoke_response_judge(
     cache: ModelCallCache | None = None,
     judge_version: str = "",
 ) -> Feedback:
-    """One judge stage's request and its validated judgment. ``endpoint`` is the base address of
-    the OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``.
+    """One judge stage's request and its validated judgment (:func:`invoke_structured`).
+    ``endpoint`` is the base address of the OpenAI-compatible endpoint that serves an ``openai:/``
+    model, used instead of ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``.
 
     With ``cache`` (:class:`martian.evals.cache.ModelCallCache`), a validated judgment is stored
     under the full request (:func:`_cache_request`, with ``judge_version``, the version of the
-    judge that built the prompt) and replayed for the same request in a later run. A failure is
-    raised as without the cache and never stored. A replayed judgment's metadata says so
-    (``martian.cache: hit``), with no provider retries, token counts or cost, since no call was made."""
-    # Reuse routing, credentials and wire transforms from the pinned MLflow.
-    # Calling the judge adapter itself would dispatch tools and drop envelope fields.
-    try:
-        provider, model = parse_model_uri(model_uri)
-        adapter = get_adapter(model_uri, prompt)
-    except Exception:
-        raise ValueError(
-            f"Judge {stage} failed [judge_provider_config]. Check judge.model: a model URI such as openai:/<model>."
-        ) from None
-    if not isinstance(adapter, (GatewayAdapter, LiteLLMAdapter)):
-        raise ValueError(
-            f"Judge {stage} failed [judge_provider_config]. "
-            "Check judge.model: its provider must return a direct chat completion."
-        )
-    if endpoint is not None and (provider != "openai" or not isinstance(adapter, GatewayAdapter)):
-        raise ValueError(
-            f"Judge {stage} failed [judge_provider_config]. "
-            "An endpoint serves openai:/ models: check the judge's model and endpoint."
-        )
-    # MLflow's openai provider refuses to start without a key, so say which one before it does.
-    if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError(f"Judge {stage} failed [judge_provider_key]. Set OPENAI_API_KEY.")
-    extra_headers = dict(headers or {})
+    judge that built the prompt) and replayed for the same request in a later run. The model, the
+    endpoint and the key are checked first, as without the cache. A failure is raised as without
+    the cache and never stored. A replayed judgment's metadata says so (``martian.cache: hit``),
+    with no provider retries, token counts or cost, since no call was made."""
+    caller = f"Judge {stage}"
 
     def fresh() -> Feedback:
-        return _judged(
-            provider=provider,
-            model=model,
+        judgment, metadata = invoke_structured(
             model_uri=model_uri,
-            adapter=adapter,
             prompt=prompt,
-            assessment_name=assessment_name,
             response_format=response_format,
             inference_params=inference_params,
-            stage=stage,
+            caller=caller,
+            setting="judge",
             max_retries=max_retries,
             rate_limit_wait_seconds=rate_limit_wait_seconds,
-            extra_headers=extra_headers,
+            headers=headers,
             endpoint=endpoint,
+        )
+        return Feedback(
+            name=assessment_name,
+            value=judgment.model_dump()["result"],
+            source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
+            metadata=metadata,
         )
 
     if cache is None:
         return fresh()
+    provider, _, _ = _route(model_uri, prompt, caller=caller, setting="judge", endpoint=endpoint)
     request = _cache_request(
         model_uri=model_uri,
         provider=provider,
@@ -351,7 +343,7 @@ def invoke_response_judge(
         prompt=prompt,
         response_format=response_format,
         inference_params=inference_params,
-        headers=extra_headers,
+        headers=dict(headers or {}),
         stage=stage,
         judge_version=judge_version,
     )
@@ -425,24 +417,62 @@ def _cache_request(
     }
 
 
-def _judged(
+def _route(
+    model_uri: str, prompt: list[ChatMessage], *, caller: str, setting: str, endpoint: str | None
+) -> tuple[str, str, Any]:
+    """The provider, the model and MLflow's adapter for ``model_uri``, once the model URI, the
+    endpoint and, for the openai provider, the key are checked. A problem is the caller's own
+    ``ValueError`` naming the ``<setting>`` to check."""
+    # Reuse routing, credentials and wire transforms from the pinned MLflow.
+    # Calling the judge adapter itself would dispatch tools and drop envelope fields.
+    try:
+        provider, model = parse_model_uri(model_uri)
+        adapter = get_adapter(model_uri, prompt)
+    except Exception:
+        raise ValueError(
+            f"{caller} failed [judge_provider_config]. Check {setting}.model: a model URI such as openai:/<model>."
+        ) from None
+    if not isinstance(adapter, (GatewayAdapter, LiteLLMAdapter)):
+        raise ValueError(
+            f"{caller} failed [judge_provider_config]. "
+            f"Check {setting}.model: its provider must return a direct chat completion."
+        )
+    if endpoint is not None and (provider != "openai" or not isinstance(adapter, GatewayAdapter)):
+        raise ValueError(
+            f"{caller} failed [judge_provider_config]. "
+            "An endpoint serves openai:/ models: check the judge's model and endpoint."
+        )
+    # MLflow's openai provider refuses to start without a key, so say which one before it does.
+    if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        raise ValueError(f"{caller} failed [judge_provider_key]. Set OPENAI_API_KEY.")
+    return provider, model, adapter
+
+
+def invoke_structured[Reply: BaseModel](
     *,
-    provider: str,
-    model: str,
     model_uri: str,
-    adapter: Any,
     prompt: list[ChatMessage],
-    assessment_name: str,
-    response_format: type[BaseModel],
+    response_format: type[Reply],
     inference_params: dict[str, Any] | None,
-    stage: Literal["draft", "review"],
-    max_retries: int,
-    rate_limit_wait_seconds: float,
-    extra_headers: dict[str, str],
-    endpoint: str | None,
-) -> Feedback:
-    """The judge stage's request sent to the provider, retried as :func:`invoke_response_judge`
-    says, and its reply validated."""
+    caller: str,
+    setting: str,
+    max_retries: int = 0,
+    rate_limit_wait_seconds: float = 0.0,
+    headers: Mapping[str, str] | None = None,
+    endpoint: str | None = None,
+) -> tuple[Reply, dict[str, Any]]:
+    """One structured-output request on the judges' provider path, and its validated reply with
+    the call's metadata (retries, the reply's format, the model the provider says answered, tokens
+    and cost). The judges and the simulated user (:mod:`martian.evals.simulation`) share it, so
+    they share the routing, the key, the retry rules and the failure messages: ``caller`` names who
+    asked (``Judge draft``, ``Simulated user``) and ``setting`` the suite file block whose settings a
+    failure names (``judge``, ``simulator``). ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``. Only the judges' calls go through
+    the cache of model calls (:func:`invoke_response_judge`); a simulated user's never do."""
+    provider, model, adapter = _route(model_uri, prompt, caller=caller, setting=setting, endpoint=endpoint)
+    extra_headers = dict(headers or {})
+
     retries = 0  # every retry, recorded in the feedback metadata
     failures = 0  # retries after a server error or connection failure, limited by max_retries
     started = _clock()
@@ -461,7 +491,7 @@ def _judged(
             # Only a failure that returned no judgment is retried. A reply that was received is
             # final, valid or not: a second attempt at it would be a retry towards a pass.
             if not _no_judgment_received(error):
-                raise _provider_failure(stage, error, provider, endpoint) from None
+                raise _provider_failure(caller, error, provider, endpoint, setting) from None
             asked = _asked_wait(error)
             backoff = min(_MAX_BACKOFF_SECONDS, 2.0**retries + random.uniform(0.0, 0.5))
             if getattr(error, "status_code", None) in _RATE_LIMIT_STATUS:
@@ -469,17 +499,17 @@ def _judged(
                 remaining = rate_limit_wait_seconds - (_clock() - started)
                 wait = asked if asked is not None else min(backoff, remaining)
                 if remaining <= 0 or wait > remaining:
-                    raise _provider_failure(stage, error, provider, endpoint) from None
+                    raise _provider_failure(caller, error, provider, endpoint, setting) from None
             else:
                 if failures >= max_retries:
-                    raise _provider_failure(stage, error, provider, endpoint) from None
+                    raise _provider_failure(caller, error, provider, endpoint, setting) from None
                 failures += 1
                 wait = min(asked, _MAX_BACKOFF_SECONDS) if asked is not None else backoff
             _sleep(wait)
             retries += 1
 
     if not completion.choices:
-        raise ValueError(f"Judge {stage} returned no choices [judge_invalid_response]")
+        raise ValueError(f"{caller} returned no choices [judge_invalid_response]")
     choice = completion.choices[0]
     message = choice.message
     if (
@@ -493,32 +523,34 @@ def _judged(
         }
     ):
         raise ValueError(
-            f"Judge {stage} returned a tool call [judge_unexpected_tool_call]. "
-            "Use a judge.model whose endpoint returns structured output as message text."
+            f"{caller} returned a tool call [judge_unexpected_tool_call]. "
+            f"Use a {setting}.model whose endpoint returns structured output as message text."
         )
 
     # A reply cut off at max_tokens is the likeliest reason for missing or incomplete JSON.
-    cut_off = " It was cut off: raise judge.inference_params.max_tokens." if choice.finish_reason == "length" else ""
+    cut_off = (
+        f" It was cut off: raise {setting}.inference_params.max_tokens." if choice.finish_reason == "length" else ""
+    )
     content = message.content
     if isinstance(content, list):
         content = "\n".join(part.text for part in content if getattr(part, "text", None))
     if not isinstance(content, str) or not content.strip():
-        raise ValueError(f"Judge {stage} returned no text [judge_invalid_response].{cut_off}")
+        raise ValueError(f"{caller} returned no text [judge_invalid_response].{cut_off}")
     content = content.strip()
     # Allow a single enclosing fence from JSON-in-text providers, with no surrounding prose.
     fence, _, body = content.partition("\n")
     if fence.strip().lower() in {"```", "```json"} and body.endswith("\n```"):
         content = body.removesuffix("\n```")
     try:
-        judgment = response_format.model_validate_json(content)
+        reply = response_format.model_validate_json(content)
     except ValidationError:
         hint = cut_off or (
-            " The endpoint may ignore structured output (response_format): check judge.model."
+            f" The endpoint may ignore structured output (response_format): check {setting}.model."
             if structured
             else " The endpoint declined structured output, and the reply without it was not the JSON asked for: "
-            "use a judge.model that supports response_format or follows the JSON instructions."
+            f"use a {setting}.model that supports response_format or follows the JSON instructions."
         )
-        raise ValueError(f"Judge {stage} reply failed schema validation [judge_invalid_schema].{hint}") from None
+        raise ValueError(f"{caller} reply failed schema validation [judge_invalid_schema].{hint}") from None
 
     metadata: dict[str, Any] = {
         PROVIDER_RETRIES_KEY: retries,
@@ -540,9 +572,4 @@ def _judged(
             and (cost := lookup_model_cost(model_uri, prompt_tokens, completion_tokens)) is not None
         ):
             metadata[AssessmentMetadataKey.JUDGE_COST] = cost
-    return Feedback(
-        name=assessment_name,
-        value=judgment.model_dump()["result"],
-        source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
-        metadata=metadata,
-    )
+    return reply, metadata

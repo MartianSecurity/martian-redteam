@@ -450,3 +450,38 @@ def test_a_target_defined_outside_a_suite_file_has_no_matrix_to_fill():
     body = {"message": "{{input}}", "model": "{{matrix.model}}"}
     with pytest.raises(ValidationError, match="names no axis of the suite file's matrix"):
         TargetDefinition(name="agent", kind="http", url="http://127.0.0.1:9/chat", body=body)
+
+
+def test_a_function_target_in_a_matrix_is_given_only_the_conversation_inputs_it_takes(tmp_path):
+    # The matrix's wrapper takes any keyword argument; a conversation reads the function's own
+    # parameters through it, so a function that takes history is not also given session_id.
+    folder = tmp_path / "talk"
+    folder.mkdir()
+    (folder / "agent.py").write_text(
+        "def answer(message, history, model):\n    return f'{model}: {message} after {len(history)} turns'\n",
+        encoding="utf-8",
+    )
+    talk = {
+        "id": "talk",
+        "turns": [
+            {"input": "Hi", "expectations": {"answer": "after 0 turns"}},
+            {"input": "Again", "expectations": {"answer": "after 2 turns"}},
+        ],
+    }
+    (folder / "cases.jsonl").write_text(json.dumps(talk) + "\n", encoding="utf-8")
+    (folder / "evals.yaml").write_text(
+        "data: cases.jsonl\n"
+        "target:\n  file: agent.py\n  function: answer\n"
+        "matrix:\n  model: [small, large]\n"
+        "checks:\n  - type: contains\n    name: answers\n    expectation: answer\n",
+        encoding="utf-8",
+    )
+    found = run_suite(folder / "evals.yaml")
+    assert [entry["gate"] for entry in found["combinations"]] == ["passed", "passed"]
+    for combination in ("model=small", "model=large"):
+        (record,) = records(folder / "results" / combination).values()
+        model = combination.removeprefix("model=")
+        assert [turn["output"] for turn in record["turns"]] == [
+            f"{model}: Hi after 0 turns",
+            f"{model}: Again after 2 turns",
+        ]

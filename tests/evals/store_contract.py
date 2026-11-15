@@ -14,6 +14,8 @@ from martian.evals.model import (
     Case,
     Counts,
     Project,
+    Prompt,
+    PromptVersion,
     ReviewQuestion,
     ReviewQueue,
     Run,
@@ -266,6 +268,46 @@ class StoreContract:
         alice = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="alice"))
         assert len(alice.items) == 3
 
+    async def test_a_trace_s_model_is_stored_and_searched_by_name(self, store: EvalStore, project: Project) -> None:
+        """A trace's model, given or mapped from its spans' attributes (the response's model before
+        the request's), is kept, comes back in a search and is a filter of its own
+        (MorningHQ/martian-notes#200)."""
+        span = Span(id="s1", name="chat", kind="CHAT_MODEL", status="ok")
+
+        def attributes(**values: str) -> list[Span]:
+            return [span.model_copy(update={"attributes": values})]
+
+        await store.record_trace(ORG_A, trace("t0", minutes=0, model="gpt-4o-2024-05-13"))
+        await store.record_trace(
+            ORG_A,
+            trace(
+                "t1",
+                minutes=1,
+                spans=attributes(**{"gen_ai.request.model": "gpt-4o", "gen_ai.response.model": "gpt-4o-2024-08-06"}),
+            ),
+        )
+        await store.record_trace(ORG_A, trace("t2", minutes=2, spans=attributes(**{"gen_ai.request.model": "gpt-4o"})))
+        await store.record_trace(ORG_A, trace("t3", minutes=3, model="it's `quoted`"))
+        await store.record_trace(ORG_A, trace("t4", minutes=4))
+        found = await store.search_traces(ORG_A, TraceQuery(project_id="p1", oldest_first=True))
+        assert [(t.id, t.model) for t in found.items] == [
+            ("t0", "gpt-4o-2024-05-13"),
+            ("t1", "gpt-4o-2024-08-06"),
+            ("t2", "gpt-4o"),
+            ("t3", "it's `quoted`"),
+            ("t4", None),
+        ]
+        for model, ids in (
+            ("gpt-4o-2024-08-06", ["t1"]),
+            ("gpt-4o", ["t2"]),
+            ("it's `quoted`", ["t3"]),
+            ("gpt-4", []),
+        ):
+            page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", model=model))
+            assert [t.id for t in page.items] == ids, model
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.model == "gpt-4o-2024-08-06"
+
     async def test_traces_take_tags_and_join_runs(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
         await store.record_trace(ORG_A, trace("t1"))
@@ -461,6 +503,39 @@ class StoreContract:
         await store.create_prompt(ORG_B, "support.terse")
         assert (await store.add_prompt_version(ORG_B, "support.terse", "Bonjour.")).version == 1
         assert len(await store.prompt_versions(ORG_A, "support.terse")) == 3
+
+    async def test_an_imported_prompt_keeps_its_versions_authors_and_times(self, store: EvalStore) -> None:
+        made = T0 - timedelta(days=30)
+        prompt = Prompt(name="support.terse", description="Imported", created_at=made, created_by="user-z")
+        texts = [("Answer in one sentence.", "First", "user-z"), ("Answer briefly.\n", "", None)]
+        versions = [
+            PromptVersion(
+                name="support.terse",
+                version=number,
+                text=text,
+                digest=prompt_digest(text),
+                message=message,
+                created_at=made + timedelta(days=number, milliseconds=250),
+                created_by=author,
+            )
+            for number, (text, message, author) in enumerate(texts, 1)
+        ]
+        assert await store.import_prompt(ORG_A, prompt, versions) == versions
+        assert await store.get_prompt(ORG_A, "support.terse") == prompt
+        assert await store.prompt_versions(ORG_A, "support.terse") == versions
+        assert await store.find_prompt_versions(ORG_A, versions[0].digest) == [versions[0]]
+        # The next version anyone adds follows them, by its own author and time.
+        added = await store.add_prompt_version(ORG_A, "support.terse", "Answer in two sentences.")
+        assert (added.version, added.created_by) == (3, "user-a") and added.created_at is not None
+        assert added.created_at > versions[-1].created_at  # type: ignore[operator]
+        await refused("conflict", store.import_prompt(ORG_A, prompt, versions))
+        other = prompt.model_copy(update={"name": "friendly"})
+        await refused("invalid", store.import_prompt(ORG_A, other, versions))  # another prompt's versions
+        await refused(
+            "invalid", store.import_prompt(ORG_A, other, [versions[1].model_copy(update={"name": "friendly"})])
+        )
+        assert await store.get_prompt(ORG_A, "friendly") is None
+        assert await store.list_prompts(ORG_B) == []
 
     async def test_review_questions_and_queues(self, store: EvalStore, project: Project) -> None:
         question = ReviewQuestion(name="correct", instruction="Is the answer correct?")
