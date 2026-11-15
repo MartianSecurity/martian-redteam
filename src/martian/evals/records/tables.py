@@ -38,6 +38,7 @@ runs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
     Index("ix_martian_runs_created", "space", "project_id", "created_at"),
+    Index("ix_martian_runs_state", "space", "state"),
 )
 
 case_results = Table(
@@ -78,6 +79,7 @@ scoring_jobs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
     Index("ix_martian_scoring_jobs_run", "space", "project_id", "run_id"),
+    Index("ix_martian_scoring_jobs_state", "space", "state"),
 )
 
 reviews = Table(

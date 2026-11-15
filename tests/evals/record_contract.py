@@ -111,6 +111,28 @@ class RecordContract:
         )
         assert [r.case_id for r in (await records.list_results(ORG_A, "p1", "r1")).items] == ["c1"]
 
+    async def test_active_runs_and_scoring_jobs_are_counted_across_projects_and_only_for_the_organisation(
+        self, records: RecordStore
+    ) -> None:
+        for run_id, state in [("r1", "queued"), ("r2", "running"), ("r3", "completed"), ("r4", "failed")]:
+            await records.create_run(ORG_A, run(run_id, state=state))
+        other_project = run("r5", state="running").model_copy(update={"project_id": "p2"})
+        await records.create_run(ORG_A, other_project)
+        await records.create_run(ORG_B, run("b1", state="running"))
+        assert await records.count_active_runs(ORG_A) == 3
+        assert await records.count_active_runs(ORG_A, up_to=2) == 2
+        assert await records.count_active_runs(ORG_B) == 1
+        for job_id, state in [("j1", "queued"), ("j2", "running"), ("j3", "completed"), ("j4", "failed")]:
+            await records.create_scoring_job(
+                ORG_A, "p1", ScoringJob(id=job_id, run_id="r3", scorers=[JUDGE], state=state)
+            )
+        # A job of a run that has not completed is not one a worker can take.
+        await records.create_scoring_job(ORG_A, "p1", ScoringJob(id="j5", run_id="r1", scorers=[JUDGE], state="queued"))
+        await records.create_scoring_job(ORG_B, "p1", ScoringJob(id="bj", run_id="b1", scorers=[JUDGE], state="queued"))
+        assert await records.count_active_scoring_jobs(ORG_A) == 2
+        assert await records.count_active_scoring_jobs(ORG_A, up_to=1) == 1
+        assert await records.count_active_scoring_jobs(ORG_B) == 0
+
     async def test_a_scoring_job_adds_scores_beside_the_runs_own(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
         own = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)

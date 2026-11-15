@@ -80,6 +80,11 @@ class RecordStore(Protocol):
         """Newest first."""
         ...
 
+    async def count_active_runs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        """How many runs of the organisation, in every project, are ``queued`` or ``running``, in
+        one query. With ``up_to``, it stops counting there and reads at most that many rows."""
+        ...
+
     async def update_run(self, principal: Principal, run: Run, *, expected_state: RunState | None = None) -> Run:
         """Replace the stored run. With ``expected_state``, only while the run is still in that state,
         so two workers cannot both move it on."""
@@ -118,6 +123,12 @@ class RecordStore(Protocol):
     ) -> ScoringJob: ...
 
     async def list_scoring_jobs(self, principal: Principal, project_id: str, run_id: str) -> list[ScoringJob]: ...
+
+    async def count_active_scoring_jobs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        """How many scoring jobs of the organisation's completed runs, in every project, are
+        ``queued`` or ``running``, in one query. With ``up_to``, it stops counting there and reads
+        at most that many rows."""
+        ...
 
     # Human reviews: append-only chains.
     async def add_review(self, principal: Principal, project_id: str, review: Review) -> Review:
