@@ -19,10 +19,15 @@ their own worker without changing the routes:
 - :class:`QueueWorker` implements ``submit`` by putting the work in a durable queue in the record
   store's database, and a worker, beside the app or in a process of its own, takes it from there
   and runs it with either of the two above, its :class:`Runner`. Restarting the API process then
-  loses no queued or running work (:mod:`martian.evals.worker.queue`).
+  loses no queued or running work (:mod:`martian.evals.worker.queue`). Given ``schedules``, it
+  also takes each schedule's turn at its slots and admits the schedule's runs itself
+  (:mod:`martian.evals.worker.schedule`).
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
+- A worker given alert settings (:class:`martian.evals.alerts.AlertSettings`) delivers the alerts
+  of thresholds on its monitors' scores after each pass, and says which channels it sends
+  (:class:`SendsAlerts`). Without them it sends no alert.
 
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
@@ -63,25 +68,51 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Work:
-    """One piece of work: a queued run (``kind="run"``) or a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``). The record store holds everything else about it."""
+    """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
+    (``kind="scoring"``, with ``job_id``), one pass of a monitor over its project's new traces
+    (``kind="monitor"``, with ``monitor_id`` and no run), or one turn of a schedule, which admits
+    its run when a slot is due (``kind="schedule"``, with ``schedule_id`` and no run). The record
+    store holds everything else about it."""
 
-    kind: Literal["run", "scoring"]
+    kind: Literal["run", "scoring", "monitor", "schedule"]
     principal: Principal
     project_id: str
-    run_id: str
+    run_id: str = ""
     job_id: str | None = None
+    monitor_id: str | None = None
+    schedule_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.kind == "scoring") != (self.job_id is not None):
             raise ValueError("scoring work names its job, and only scoring work does")
+        if (self.kind == "monitor") != (self.monitor_id is not None):
+            raise ValueError("monitor work names its monitor, and only monitor work does")
+        if (self.kind == "schedule") != (self.schedule_id is not None):
+            raise ValueError("schedule work names its schedule, and only schedule work does")
+        if (self.kind in ("monitor", "schedule")) == bool(self.run_id):
+            raise ValueError("run and scoring work name their run, and monitor and schedule work name none")
+
+
+@dataclass(frozen=True)
+class TargetReply:
+    """What a target call returns when it also reports the model that answered: the ``output``,
+    and ``model``, the model's name as the target reported it, such as an OpenAI-compatible
+    reply's ``model`` (``gpt-4o-2024-08-06``), or None. The worker records the model on the
+    case's trace and counts it in the run's ``provenance["model"]``
+    (:func:`~martian.evals.worker.targets.reported_model`). An HTTP target returns one when its
+    ``model_path`` or ``model_header`` is set; a function or an :class:`AgentExecutor` may return
+    one instead of its bare output."""
+
+    output: Any
+    model: str | None = None
 
 
 TargetCall = Callable[[Case], Awaitable[Any]]
-"""Calls the thing under test with one case and returns its output. An exception or a timeout is
-the case's error; the worker never retries. A function the worker is given as a target runs on an
-event loop of a thread of its own, so a function that blocks, or never returns, ends its case as
-``item timed out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
+"""Calls the thing under test with one case and returns its output, or a :class:`TargetReply`
+that also names the model that answered. An exception or a timeout is the case's error; the
+worker never retries. A function the worker is given as a target runs on an event loop of a
+thread of its own, so a function that blocks, or never returns, ends its case as ``item timed
+out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
 
 
 class Credentials(Protocol):
@@ -122,7 +153,8 @@ class AgentExecutor(Protocol):
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
         """Call the run's agent once with one case, within ``timeout_seconds``, and return its
-        output. An exception is the case's error; the worker never retries."""
+        output, or a :class:`TargetReply` with the model the agent reported answering with. An
+        exception is the case's error; the worker never retries."""
         ...
 
 
@@ -246,12 +278,54 @@ class InterruptedRuns(Protocol):
         ...
 
 
+@runtime_checkable
+class RunsMonitors(Protocol):
+    """What a worker adds when it runs monitors: it takes a monitor's work (``kind="monitor"``)
+    again every ``monitor_seconds`` for as long as the monitor exists, as a :class:`QueueWorker`
+    does with the monitor's row in its queue. The routes that create and resume monitors need it;
+    a worker without it runs one pass per ``submit``."""
+
+    @property
+    def monitor_seconds(self) -> float:
+        """How long after a monitor's pass ends its next pass is due."""
+        ...
+
+
+@runtime_checkable
+class SendsAlerts(Protocol):
+    """What a worker adds when it delivers thresholds' alerts (:mod:`martian.evals.alerts`): the
+    channels its installation configured, ``webhook`` and ``email``, or none. The threshold routes
+    refuse a channel the worker does not send; a worker without it sends none."""
+
+    @property
+    def alert_channels(self) -> frozenset[str]: ...
+
+
+def alert_channels(worker: object) -> frozenset[str]:
+    """The channels ``worker`` sends alerts on: none unless it is :class:`SendsAlerts`."""
+    return worker.alert_channels if isinstance(worker, SendsAlerts) else frozenset()
+
+
+@runtime_checkable
+class RunsSchedules(Protocol):
+    """What a worker adds when it runs schedules: it takes a schedule's work (``kind="schedule"``)
+    again at each of its slots for as long as the schedule exists, and admits the schedule's run
+    there, as a :class:`QueueWorker` given ``schedules`` does
+    (:mod:`martian.evals.worker.schedule`). ``schedules`` is what it admits runs with, or None when
+    it runs no schedules. The routes that create and resume schedules need one."""
+
+    @property
+    def schedules(self) -> ScheduleServices | None: ...
+
+
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.hooks import CaseContext, CaseHooks, CaseState  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
+from martian.evals.worker.monitor import execute_monitor, sampled  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
+from martian.evals.worker.schedule import ScheduleServices  # noqa: E402
 
 __all__ = [
     "AgentExecutor",
@@ -270,17 +344,25 @@ __all__ = [
     "ProcessWorker",
     "QueueWorker",
     "Runner",
+    "RunsMonitors",
+    "RunsSchedules",
+    "ScheduleServices",
+    "SendsAlerts",
     "TargetCall",
+    "TargetReply",
     "Verdict",
     "Work",
     "Worker",
     "WorkerServices",
     "agents_judge",
+    "alert_channels",
     "dump_work",
+    "execute_monitor",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",
     "load_work",
+    "sampled",
     "sdk_judge",
     "take_over",
 ]

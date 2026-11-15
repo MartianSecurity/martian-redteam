@@ -9,9 +9,12 @@ JSON object per line:
   reach (``private``), the parent's ``sys.path`` and whether to capture MLflow spans (``trace``),
   with the modules MLflow's autologging traces (``traced``). Spans are captured only when the
   target's module imported MLflow or one of those, since loading MLflow takes seconds;
-- the child answers ``{"ready": true, "files": <reason or null>}`` once the target is imported, or
-  ``{"ready": false, "error": ...}``. ``files`` is null when the private paths are hidden, else why
-  they are not;
+- the child answers ``{"ready": true, "files": <reason or null>, "parameters": ...}`` once the
+  target is imported, or ``{"ready": false, "error": ...}``. ``files`` is null when the private
+  paths are hidden, else why they are not. ``parameters`` are the names the function takes as
+  keywords (``names``) and the name of its ``**`` parameter (``rest``, or null), or null when its
+  signature cannot be read, so the parent can tell what a conversation's turn may give it without
+  importing the target;
 - each later line is a call, ``{"id": N, "inputs": {...}}``: the case's inputs and nothing else.
   The child calls the function with them as keyword arguments on a thread of its own and answers
   ``{"id": N, "value": ...}``, ``{"id": N, "raised": <exception type>}`` or, for a reply that is
@@ -35,6 +38,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import inspect
 import json
 import os
 import struct
@@ -203,6 +207,21 @@ def _load(file: str, function: str) -> Callable[..., Any]:
     return found  # type: ignore[no-any-return]
 
 
+def _parameters(function: Callable[..., Any]) -> dict[str, Any] | None:
+    """The names ``function`` takes as keyword arguments and the name of its ``**`` parameter, or
+    None when its signature cannot be read."""
+    try:
+        found = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    keywords = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    rest = [parameter.name for parameter in found if parameter.kind is inspect.Parameter.VAR_KEYWORD]
+    return {
+        "names": [parameter.name for parameter in found if parameter.kind in keywords],
+        "rest": next(iter(rest), None),
+    }
+
+
 def _json(value: Any) -> str | None:
     """Why ``value`` cannot go back to the parent, or None when it can."""
     try:
@@ -238,7 +257,7 @@ def main() -> int:
     # MLflow's import hooks fire at once for a library the target already imported.
     traced = setup["trace"] and any(name in sys.modules for name in ("mlflow", *setup["traced"]))
     tracer = _Tracer() if traced else None
-    send({"ready": True, "files": files})
+    send({"ready": True, "files": files, "parameters": _parameters(function)})
 
     def answer(number: int, inputs: dict[str, Any]) -> None:
         trace = None

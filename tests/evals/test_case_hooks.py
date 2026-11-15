@@ -1,4 +1,4 @@
-"""Per-case hooks and installed checks in the worker (MorningHQ/martian-notes#216).
+"""Per-case hooks and installed checks in the worker (MartianSecurity/martian-notes#216).
 
 A test edition installs, on the worker, hooks that prepare each case and clean it up, and checks it
 grades with by name. Here the hooks open a ledger for each case, which the agent under test writes
@@ -27,7 +27,8 @@ from typer.testing import CliRunner
 from martian.cli import app
 from martian.config import ConfigError
 from martian.evals.audit import INSTALLED, audit_saved_suite, audit_suite
-from martian.evals.model import Case, Project, Run, ScorerVersion, ScoringJob, Target
+from martian.evals.model import Case, Project, Run, ScorerVersion, ScoringJob, Target, Turn
+from martian.evals.records import Monitor
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.runner import run_suite
 from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER
@@ -36,7 +37,7 @@ from martian.evals.state import STATE
 from martian.evals.store import EvalStore, MemoryStore
 from martian.evals.suite_file import load_suite_file, suite_from_yaml, suite_to_yaml
 from martian.evals.worker import CaseContext, InProcessWorker, ProcessWorker, Work, Worker
-from martian.evals.worker.execute import CHECK_NOT_INSTALLED
+from martian.evals.worker.execute import CHECK_NOT_INSTALLED, CONVERSATION
 from martian.evals.worker.hooks import INPUT_TAKEN, installed_check
 from tests.evals.process_fixture import HOOK_LOG, cases, hooked_services, member, open_stores
 from tests.evals.write_fixture import AGENT
@@ -287,6 +288,30 @@ async def test_a_failed_setup_or_teardown_is_the_cases_error_and_the_other_hooks
     assert edition.ledgers == {}
 
 
+async def test_a_conversation_case_is_skipped_before_any_hook_or_installed_check(tmp_path):
+    talk = Case(id="talk", turns=[Turn(inputs={"message": "Record G-7"}), Turn(inputs={"message": "Record H-8"})])
+    store, dataset = await published([LEDGER_CASES[0], talk])
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    edition = Edition()
+    worker = worker_for(store, records, edition)
+    try:
+        run = await admitted(store, records, worker, dataset, [installed_check("ledger_holds", {"at_least": 1})])
+        await worker.drain()
+        results = {r.case_id: r for r in (await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)).items}
+        scores = await records.list_scores(SINGLE_USER, DEFAULT_PROJECT, run.id)
+    finally:
+        records.close()
+    # The worker runs no conversation, so the case is refused with its reason before any hook.
+    assert (results["talk"].status, results["talk"].error) == ("skipped", CONVERSATION)
+    assert not steps_of(edition.events, "talk") and {s.case_id for s in scores} == {"right"}
+    assert results["right"].status == "passed" and edition.ledgers == {}
+
+
+def test_a_monitor_refuses_an_installed_check():
+    with pytest.raises(ValueError, match="A monitor cannot run the custom Python scorer ledger_holds"):
+        Monitor(id="m1", project_id="p1", name="Live", scorers=[installed_check("ledger_holds")], sampling_rate=1)
+
+
 class Holding:
     """A worker that admits the run and keeps its work, for the test to run."""
 
@@ -464,6 +489,21 @@ def test_martian_evals_run_refuses_an_installed_check_before_anything_is_written
         run_suite(path)
     result = CliRunner().invoke(app, ["evals", "run", str(path)])
     assert result.exit_code == 2 and refusal in result.output
+    assert not (tmp_path / "results").exists() and not (tmp_path / "evals-home").exists()
+
+
+def test_martian_evals_run_refuses_an_installed_check_in_a_conversation_suite(tmp_path):
+    example = Path(__file__).resolve().parents[2] / "examples" / "evals" / "conversation"
+    for name in ("cases.jsonl", "agent.py"):
+        (tmp_path / name).write_text((example / name).read_text(encoding="utf-8"), encoding="utf-8")
+    text = (example / "evals.yaml").read_text(encoding="utf-8")
+    (tmp_path / "evals.yaml").write_text(
+        text + "  - type: installed\n    name: ledger_holds\n    scope: conversation\n", encoding="utf-8"
+    )
+    suite, _ = load_suite_file(tmp_path / "evals.yaml")
+    assert suite.scorers[-1] == installed_check("ledger_holds").model_copy(update={"scope": "conversation"})
+    with pytest.raises(ConfigError, match="check ledger_holds: an installed check runs in a worker"):
+        run_suite(tmp_path / "evals.yaml")
     assert not (tmp_path / "results").exists() and not (tmp_path / "evals-home").exists()
 
 

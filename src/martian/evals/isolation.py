@@ -9,7 +9,9 @@ the stores stay in the process that grades, which the target's process cannot re
 
 What the target's process has:
 
-- **its arguments**: the case's inputs, as keyword arguments, as before;
+- **its arguments**: the case's inputs, as keyword arguments, as before, and in a conversation's
+  turn the conversation's history and session id, those of them the function takes
+  (:meth:`TargetProcess.signature`);
 - **no memory of the run**: it is a new Python process (``python -P``) that has imported nothing
   of the evals package, and its parent sends it only inputs. On Linux, Landlock also stops it, and
   every process it starts, from tracing or reading the memory of its parent;
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import inspect
 import itertools
 import json
 import os
@@ -173,6 +176,21 @@ class TargetProcess:
             raise ConfigError(str(message["error"]))
         files: str | None = message["files"]
         return files
+
+    def signature(self) -> inspect.Signature:
+        """The target function's keyword parameters, as its process read them once it imported it:
+        one for each name it takes, and its ``**`` parameter when it has one. The target is never
+        imported in this process, so this is how a caller learns what the function takes, such as
+        whether a conversation's turn may give it ``history`` or ``session_id``. Waits as
+        :meth:`ready` does; raises ``ValueError`` when the process could not read them."""
+        message = self._ready.result()
+        found = message.get("parameters") if message["ready"] else None
+        if found is None:
+            raise ValueError("the target's process could not read the function's parameters")
+        kept = [inspect.Parameter(str(name), inspect.Parameter.KEYWORD_ONLY) for name in found["names"]]
+        if found["rest"] is not None:
+            kept.append(inspect.Parameter(str(found["rest"]), inspect.Parameter.VAR_KEYWORD))
+        return inspect.Signature(kept)
 
     def call(self, inputs: Mapping[str, Any], timeout_seconds: float) -> tuple[Any, dict[str, Any] | None]:
         """The target's reply to one case's ``inputs``, and the MLflow trace of its spans when it

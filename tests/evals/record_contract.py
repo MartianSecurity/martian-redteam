@@ -19,9 +19,27 @@ from martian.evals.model import (
     ScorerVersion,
     ScoringJob,
     Suite,
+    Target,
     digest,
 )
-from martian.evals.records import EventsLost, RecordStore, SavedView, SuiteAudit
+from martian.evals.records import (
+    Alert,
+    EventsLost,
+    Monitor,
+    MonitoredTrace,
+    MonitorProgress,
+    MonitorScores,
+    RecordStore,
+    SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleGates,
+    ScheduleProgress,
+    SuiteAudit,
+    Threshold,
+    ThresholdStatus,
+    WebhookChannel,
+)
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -29,6 +47,41 @@ ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
 T0 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 JUDGE = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", model="openai:/judge")
+
+
+def monitor(monitor_id: str, *, name: str = "Safety") -> Monitor:
+    return Monitor(id=monitor_id, project_id="p1", name=name, scorers=[JUDGE], sampling_rate=0.5)
+
+
+def threshold(threshold_id: str, *, name: str = "Safety rate", webhook: bool = True) -> Threshold:
+    return Threshold(
+        id=threshold_id,
+        project_id="p1",
+        name=name,
+        source=MonitorScores(monitor_id="m1", scorer="rubric_judge"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.9,
+        window_seconds=3600,
+        min_count=20,
+        webhook=WebhookChannel(url="https://alerts.example/hook") if webhook else None,
+    )
+
+
+def schedule(schedule_id: str, *, name: str = "Nightly") -> Schedule:
+    return Schedule(
+        id=schedule_id,
+        project_id="p1",
+        name=name,
+        cron="0 2 * * *",
+        suite_id="s1",
+        suite_version=1,
+        scorers=[JUDGE],
+        target=Target(kind="agent", agent_id="agent-1"),
+        dataset_name="faq",
+        dataset_id="d1",
+        max_cases=10,
+    )
 
 
 def run(run_id: str, *, minutes: int = 0, state: str = "running") -> Run:
@@ -317,6 +370,212 @@ class RecordContract:
         await records.create_run(ORG_B, run("r1", state="queued"))
         assert (await records.get_run(ORG_A, "p1", "r1")).state == "running"
         assert (await records.list_results(ORG_A, "p1", "r1")).items[0].status == "passed"
+
+    async def test_a_monitor_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_monitor(ORG_A, "p1", monitor("m1", name="Other")) == made
+        await records.create_monitor(ORG_A, "p1", monitor("m0", name="A first"))
+        assert [m.id for m in await records.list_monitors(ORG_A, "p1")] == ["m0", "m1"]
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == MonitorProgress()
+        progress = MonitorProgress(watermark=T0, day=T0.date(), judge_tokens=12, scored=3)
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)
+        paused = await records.update_monitor(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_monitor(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == progress
+        assert await records.get_monitor(ORG_A, "p1", "m1") == paused
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.get_monitor(ORG_A, "p1", "m1") is None
+        assert await records.monitor_progress(ORG_A, "p1", "m1") is None
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_monitor(ORG_A, "p1", "m1"))
+        await refused("not_found", records.update_monitor(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_monitor_takes_each_trace_once_and_only_while_active(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")  # its own
+        # A pass that stopped before storing its scores is taken over by the next.
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="second")
+        score = Score(trace_id="tr-1", scorer="safety", source="llm_judge", value=True, passed=True)
+        done = MonitoredTrace(monitor_id="m1", trace_id="tr-1", state="scored", pass_id="second", scores=[score])
+        await records.finish_monitored_trace(ORG_A, "p1", done)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="third")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-2", pass_id="third")
+        page = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1)
+        assert [t.trace_id for t in page.items] == ["tr-2"] and page.next_cursor
+        rest = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor=page.next_cursor)
+        [scored] = rest.items
+        assert (scored.state, scored.scores, scored.created_at is not None) == ("scored", [score], True)
+        # Paused or gone, it takes nothing; another organisation's monitor of the same id is its own.
+        stored = await records.get_monitor(ORG_A, "p1", "m1")
+        assert stored is not None
+        await records.update_monitor(ORG_A, "p1", stored.model_copy(update={"state": "paused"}), expected_revision=1)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-3", pass_id="third")
+        assert not await records.claim_monitored_trace(ORG_B, "p1", "m1", "tr-3", pass_id="third")
+        assert await records.get_monitor(ORG_B, "p1", "m1") is None
+        assert (await records.list_monitored_traces(ORG_B, "p1", "m1")).items == []
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1")).items == []
+
+    async def test_a_monitors_window_is_its_scored_traces_by_when_it_took_them(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        before = datetime.now(UTC)
+        for number in range(4):
+            trace_id = f"tr-{number}"
+            assert await records.claim_monitored_trace(ORG_A, "p1", "m1", trace_id, pass_id="p")
+            if number != 2:  # tr-2 is still being scored
+                score = Score(trace_id=trace_id, scorer="safety", source="llm_judge", value=number % 2 == 0)
+                await records.finish_monitored_trace(
+                    ORG_A,
+                    "p1",
+                    MonitoredTrace(monitor_id="m1", trace_id=trace_id, state="scored", pass_id="p", scores=[score]),
+                )
+            await asyncio.sleep(0.01)
+        after = datetime.now(UTC) + timedelta(seconds=1)
+        window = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=10)
+        assert [t.trace_id for t in window] == ["tr-3", "tr-1", "tr-0"]
+        newest = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=2)
+        assert [t.trace_id for t in newest] == ["tr-3", "tr-1"]
+        assert await records.scored_monitored_traces(ORG_A, "p1", "m1", since=after, until=after, limit=10) == []
+        assert await records.scored_monitored_traces(ORG_B, "p1", "m1", since=before, until=after, limit=10) == []
+        await refused("invalid", records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=0))
+
+    async def test_a_threshold_changes_state_once_and_keeps_its_secret_apart(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        made = await records.create_threshold(ORG_A, "p1", threshold("t1"), webhook_secret="s3cret-s3cret-s3cret")
+        assert (made.created_by, made.created_at is not None) == ("user-a", True)
+        assert (
+            await records.create_threshold(ORG_A, "p1", threshold("t1", name="Other"), webhook_secret="x" * 16) == made
+        )
+        await records.create_threshold(ORG_A, "p1", threshold("t0", name="A first", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t0", "t1"]
+        on_m1 = await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m1")
+        assert [t.id for t in on_m1] == ["t0", "t1"]
+        assert await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m2") == []
+        # The secret is kept beside the threshold, not in it, and only one method reads it back.
+        assert "s3cret" not in made.model_dump_json()
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
+        await refused(
+            "invalid", records.create_threshold(ORG_A, "p1", threshold("t2", webhook=False), webhook_secret="y" * 16)
+        )
+        assert await records.threshold_status(ORG_A, "p1", "t1") == ThresholdStatus()
+        assert [await records.threshold_signed(ORG_A, "p1", t) for t in ("t0", "t1")] == [False, True]
+        # A webhook an import wrote has no secret until it is given one, once (data export).
+        await records.create_threshold(ORG_A, "p1", threshold("t3", name="Imported"), webhook_secret=None)
+        assert not await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.set_threshold_secret(ORG_B, "p1", "t3", "o" * 16)
+        assert await records.set_threshold_secret(ORG_A, "p1", "t3", "n3w-s3cret-n3w-s3cret")
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t3", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t1", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t0", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "gone", "z" * 16)
+        assert await records.threshold_secret(ORG_A, "p1", "t3") == "n3w-s3cret-n3w-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.threshold_signed(ORG_B, "p1", "t3")
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
+
+        # A change of state and its alerts are written together, once, conditioned on the sequence.
+        breached = ThresholdStatus(state="breached", sequence=1, since=T0)
+        alert = Alert(id="a1", threshold_id="t1", channel="webhook", event="breached", sequence=1, payload={"n": 1})
+        assert await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert not await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert await records.threshold_status(ORG_A, "p1", "t1") == breached
+        [stored] = (await records.list_alerts(ORG_A, "p1", "t1")).items
+        assert (stored.id, stored.state, stored.created_at is not None) == ("a1", "pending", True)
+        assert stored.next_attempt_at is not None
+
+        # A due alert is taken by one delivery until it is held no longer, then recorded.
+        now = datetime.now(UTC) + timedelta(seconds=1)
+        hold = now + timedelta(minutes=2)
+        [taken] = await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold)
+        assert taken.next_attempt_at == hold
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold) == []
+        assert await records.take_due_alerts(ORG_B, "p1", ["t1"], now=hold, hold_until=hold) == []
+        delivered = taken.model_copy(update={"state": "delivered", "attempts": 1, "next_attempt_at": None})
+        await records.finish_alert(ORG_A, "p1", delivered)
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=hold, hold_until=hold) == []
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == [delivered]
+
+        # Another organisation sees none of it; deleting the threshold removes its alerts.
+        assert await records.get_threshold(ORG_B, "p1", "t1") is None
+        assert await records.threshold_secret(ORG_B, "p1", "t1") is None
+        assert not await records.set_threshold_status(ORG_B, "p1", "t1", breached, expected_sequence=1)
+        await records.delete_threshold(ORG_A, "p1", "t1")
+        assert await records.get_threshold(ORG_A, "p1", "t1") is None
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == []
+        await refused("not_found", records.delete_threshold(ORG_A, "p1", "t1"))
+        # Deleting the monitor deletes the thresholds on its scores.
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.list_thresholds(ORG_A, "p1") == []
+
+    async def test_a_schedule_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_schedule(ORG_A, "p1", schedule("sc1", name="Other")) == made
+        await records.create_schedule(ORG_A, "p1", schedule("sc0", name="A first"))
+        assert [s.id for s in await records.list_schedules(ORG_A, "p1")] == ["sc0", "sc1"]
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == ScheduleProgress()
+        progress = ScheduleProgress(next_slot=T0, last_slot=T0 - timedelta(days=1))
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)
+        paused = await records.update_schedule(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_schedule(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == progress
+        assert await records.get_schedule(ORG_A, "p1", "sc1") == paused
+        assert await records.get_schedule(ORG_B, "p1", "sc1") is None
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert await records.get_schedule(ORG_A, "p1", "sc1") is None
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") is None
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_schedule(ORG_A, "p1", "sc1"))
+        await refused("not_found", records.update_schedule(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_schedule_records_each_slot_once_latest_first(self, records: RecordStore) -> None:
+        await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        first = ScheduledRun(schedule_id="sc1", slot=T0, state="admitted", run_id="r1", missed=2)
+        saved = await records.add_scheduled_run(ORG_A, "p1", first)
+        assert saved.created_at is not None and saved.missed == 2
+        # The same slot again keeps what was recorded first.
+        again = ScheduledRun(schedule_id="sc1", slot=T0, state="skipped", reason="An eval run is already in progress")
+        assert await records.add_scheduled_run(ORG_A, "p1", again) == saved
+        for day in (1, 2):
+            skipped = again.model_copy(update={"slot": T0 + timedelta(days=day)})
+            await records.add_scheduled_run(ORG_A, "p1", skipped)
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == saved
+        gated = await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0, "failed")
+        assert gated == saved.model_copy(update={"gate": "failed"})
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == gated
+        saved = gated
+        assert await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0 + timedelta(days=9), "passed") is None
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0 + timedelta(days=9)) is None
+        page = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2)
+        assert [e.slot for e in page.items] == [T0 + timedelta(days=2), T0 + timedelta(days=1)] and page.next_cursor
+        rest = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2, cursor=page.next_cursor)
+        assert rest.items == [saved] and rest.next_cursor is None
+        # Another organisation's schedule of the same id is its own; a deleted schedule takes no slot.
+        assert (await records.list_scheduled_runs(ORG_B, "p1", "sc1")).items == []
+        await refused("not_found", records.add_scheduled_run(ORG_B, "p1", first))
+        # Deleting it removes the thresholds on its gate results, and leaves those on other sources.
+        gates = threshold("t-gate", webhook=False).model_copy(update={"source": ScheduleGates(schedule_id="sc1")})
+        await records.create_threshold(ORG_A, "p1", gates, webhook_secret=None)
+        await records.create_threshold(ORG_A, "p1", threshold("t-monitor", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1", source_kind="gate", source_id="sc1")] == [
+            "t-gate"
+        ]
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert (await records.list_scheduled_runs(ORG_A, "p1", "sc1")).items == []
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t-monitor"]
+        await refused("not_found", records.add_scheduled_run(ORG_A, "p1", first))
 
     async def test_changes_reach_listeners_of_the_same_organisation_only(self, records: RecordStore) -> None:
         mine, theirs = records.events.subscribe(ORG_A), records.events.subscribe(ORG_B)

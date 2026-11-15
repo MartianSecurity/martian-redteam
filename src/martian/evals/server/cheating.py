@@ -58,27 +58,41 @@ QUESTION = ReviewQuestion(
 
 async def run_transcripts(store: EvalStore, records: RecordStore, principal: Principal, run: Run) -> list[Transcript]:
     """Every transcript of a run: each case's, or with repeats each attempt's, with its trace's
-    spans, or none for a case whose trace is not in this run."""
+    spans, or none for a case whose trace is not in this run. A conversation case's every turn is
+    a transcript of its own, as each has its own trace, with the conversation so far (the earlier
+    turns' messages and replies) among its inputs: what the agent was given is never a signal."""
     transcripts: list[Transcript] = []
     for result in await run_results(records, principal, run):
         calls = (
-            [(attempt.number, attempt.output, attempt.trace_id) for attempt in result.attempts]
+            [(attempt.number, attempt.output, attempt.trace_id, attempt.turns) for attempt in result.attempts]
             if result.attempts
-            else [(None, result.output, result.store.trace_id)]
+            else [(None, result.output, result.store.trace_id, result.turns)]
         )
-        for number, output, trace_id in calls:
-            trace = await run_trace(store, principal, run.project_id, trace_id) if trace_id else None
-            transcripts.append(
-                Transcript(
-                    case_id=result.case_id,
-                    attempt=number,
-                    inputs=result.inputs,
-                    expectations=result.expectations,
-                    output=output,
-                    spans=tuple(trace.spans) if trace is not None else None,
-                    trace_id=trace_id if trace is not None else None,
+        for number, output, trace_id, turns in calls:
+            each: list[tuple[int | None, dict[str, Any], dict[str, Any], Any, str | None]] = []
+            history: list[Any] = []
+            for turn in turns:
+                inputs = {**turn.inputs, "history": list(history)}
+                each.append(
+                    (turn.number, inputs, {**result.expectations, **turn.expectations}, turn.output, turn.trace_id)
                 )
-            )
+                history += [turn.inputs, turn.output]
+            for turn_number, inputs, expectations, reply, found in each or [
+                (None, result.inputs, result.expectations, output, trace_id)
+            ]:
+                trace = await run_trace(store, principal, run.project_id, found) if found else None
+                transcripts.append(
+                    Transcript(
+                        case_id=result.case_id,
+                        attempt=number,
+                        inputs=inputs,
+                        expectations=expectations,
+                        output=reply,
+                        spans=tuple(trace.spans) if trace is not None else None,
+                        trace_id=found if trace is not None else None,
+                        turn=turn_number,
+                    )
+                )
     return transcripts
 
 
@@ -105,9 +119,8 @@ async def queue_flagged(
     results = {result.case_id: result for result in await run_results(records, principal, run)}
     reasons: dict[str, list[str]] = {}
     for finding in report["findings"]:
-        label = (
-            finding["reason"] if finding["attempt"] is None else f"attempt {finding['attempt']}: {finding['reason']}"
-        )
+        where = " ".join(f"{name} {finding[name]}" for name in ("attempt", "turn") if finding.get(name) is not None)
+        label = f"{where}: {finding['reason']}" if where else finding["reason"]
         reasons.setdefault(finding["case"], []).append(label)
     left_out = [
         {"case": case, "reason": "it has no trace in this run"}

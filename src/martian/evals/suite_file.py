@@ -14,6 +14,14 @@ unexpanded. A ``python`` check is a ``code`` scorer whose parameters name its fi
 neither loading nor writing imports that file. An ``installed`` check is a ``code`` scorer named
 after the check a worker installs, with its ``options`` in its parameters; the file says nothing
 else about it, and ``martian evals run`` refuses to run it.
+
+A JSONL row with ``turns`` is a conversation case (``Case.turns``), and a check's ``scope`` is its
+scorer's (:mod:`martian.evals.conversations`). Loading refuses a conversation the suite cannot run:
+no target, a turn that names a check the suite does not have or one that grades the whole
+conversation, or a conversation that no check grades. A row with ``simulated_user`` is a simulated
+conversation (``Case.simulated_user``), played by the suite's ``simulator`` (``Suite.simulator``,
+:mod:`martian.evals.simulation`); loading refuses one in a suite without a target or a simulator,
+and a check named ``goal_reached``, the label of its goal verdict.
 """
 
 from __future__ import annotations
@@ -28,17 +36,22 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
+from martian.evals.conversations import graded_turns
 from martian.evals.model import (
     Case,
     Repeats,
     RunLimits,
     RunSettings,
     ScorerVersion,
+    SimulatedUser,
+    Simulator,
     Suite,
     Target,
+    Turn,
     digest,
     suite_digest,
 )
+from martian.evals.simulation import GOAL
 
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
@@ -107,6 +120,7 @@ SUITE_FILE_FIELDS = {
     "checks.security": "ScorerVersion.parameters.security",
     "checks.options": "ScorerVersion.parameters.options (an installed check), as written",
     "checks.combine": "Suite.repeats.checks, by the check's label",
+    "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
     "concurrency": "RunSettings.concurrency",
@@ -119,10 +133,17 @@ SUITE_FILE_FIELDS = {
     "limits": "RunSettings.limits",
     "limits.max_seconds": "RunSettings.limits.max_seconds (RunLimits)",
     "limits.max_judge_tokens": "RunSettings.limits.max_judge_tokens (RunLimits)",
+    "simulator": "Suite.simulator, the model that plays the data's simulated users",
+    "simulator.model": "Simulator.model",
+    "simulator.inference_params": "Simulator.parameters",
+    "simulator.max_retries": "RunSettings.simulator_max_retries",
+    "simulator.rate_limit_wait_seconds": "RunSettings.simulator_rate_limit_wait_seconds",
+    "simulator.headers": "RunSettings.simulator_headers, values as written",
 }
 
-# The fields every check type takes: its type, its label and the rule its attempts combine by.
-COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
+# The fields every check type takes: its type, its label, the rule its attempts combine by and what
+# it grades in a conversation.
+COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine", "scope"})
 
 # The check fields each check type uses besides COMMON_CHECK_FIELDS, as the file names them.
 # Loading refuses the others.
@@ -171,8 +192,11 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "installed": frozenset({"options"}),
 }
 
-# The fields of a JSONL case that the runner reads.
-_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations", "group"})
+# The fields of a JSONL case that the runner reads, and of one turn of a conversation case.
+_CASE_FIELDS = frozenset(
+    {"id", "input", "inputs", "output", "outputs", "expectations", "group", "turns", "simulated_user"}
+)
+_TURN_FIELDS = frozenset({"input", "inputs", "expectations", "checks"})
 _DEFAULT_FUNCTION = runner.TargetRef.model_fields["function"].default
 _DEFAULT_INPUT_KEY = runner.Suite.model_fields["input_key"].default
 # Suite fields a suite file does not hold: loading it gives them from its name and its data, and
@@ -220,6 +244,8 @@ def _cases(file: Path, input_key: str) -> list[Case]:
                     expectations=row["expectations"],
                     outputs=row.get("outputs"),
                     tags={runner.GROUP_TAG: row["group"]} if "group" in row else {},
+                    turns=[Turn(**turn) for turn in row.get("turns", [])],
+                    simulated_user=SimulatedUser(**row["simulated_user"]) if "simulated_user" in row else None,
                 )
             )
         except ValidationError as error:
@@ -236,14 +262,62 @@ def _refuse_unread_fields(file: Path) -> None:
         if unknown := sorted(set(record) - _CASE_FIELDS):
             raise ConfigError(
                 f"data line {number}: a case has no field {', '.join(unknown)}; "
-                "its fields are id, input or inputs, output or outputs, expectations and group"
+                "its fields are id, input or inputs, output or outputs, expectations, group, turns and "
+                "simulated_user"
             )
         for one, other in (("input", "inputs"), ("output", "outputs")):
             if one in record and other in record:
                 raise ConfigError(f"data line {number}: give {one} or {other}, not both")
+        # load_cases has refused turns that are not a list of objects.
+        for turn_number, turn in enumerate(record.get("turns") or [], 1):
+            if unknown := sorted(set(turn) - _TURN_FIELDS):
+                raise ConfigError(
+                    f"data line {number}, turn {turn_number}: a turn has no field {', '.join(unknown)}; "
+                    "its fields are input or inputs, expectations and checks"
+                )
+            if "input" in turn and "inputs" in turn:
+                raise ConfigError(f"data line {number}, turn {turn_number}: give input or inputs, not both")
+
+
+def _check_conversations(file_suite: runner.Suite, cases: list[Case]) -> None:
+    """Refuse a conversation case the suite cannot run or grade."""
+    talks = [case for case in cases if case.turns or case.simulated_user is not None]
+    if not talks:
+        return
+    if file_suite.target is None:
+        raise ConfigError(f"case {talks[0].id} is a conversation, which runs against a target; name a target")
+    if simulated := [case for case in talks if case.simulated_user is not None]:
+        if file_suite.simulator is None:
+            raise ConfigError(
+                f"case {simulated[0].id} has a simulated user, which a model plays; name it in simulator.model"
+            )
+        if any(check.label == GOAL for check in file_suite.checks):
+            raise ConfigError(
+                f"checks: {GOAL} is the label of a simulated conversation's goal verdict; give the check another name"
+            )
+    scopes = {check.label: check.scope for check in file_suite.checks}
+    turn_labels = [label for label, scope in scopes.items() if scope == "turn"]
+    for case in talks:
+        for number, turn in enumerate(case.turns, 1):
+            for label in turn.checks or []:
+                if label not in scopes:
+                    raise ConfigError(f"case {case.id}, turn {number}: checks names {label!r}, which the suite has not")
+                if scopes[label] == "conversation":
+                    raise ConfigError(
+                        f"case {case.id}, turn {number}: {label} grades the whole conversation (scope: conversation), "
+                        "not a turn; remove it from the turn's checks"
+                    )
+        graded = graded_turns([turn.checks for turn in case.turns], turn_labels)
+        # A simulated conversation's goal verdict grades it, whatever the checks.
+        if case.turns and len(turn_labels) == len(scopes) and not any(graded.values()):
+            raise ConfigError(
+                f"case {case.id}: no check grades this conversation; name a check in a turn's checks, "
+                "or give a check scope: conversation"
+            )
 
 
 def _suite(file_suite: runner.Suite, *, name: str, suite_id: str | None, cases: list[Case]) -> Suite:
+    _check_conversations(file_suite, cases)
     fields = _definition(file_suite)
     fields.update(
         id=suite_id or name,
@@ -277,6 +351,9 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
                 combine=file_suite.combine,
                 checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
             ),
+            "simulator": None
+            if file_suite.simulator is None
+            else Simulator(model=file_suite.simulator.model, parameters=dict(file_suite.simulator.inference_params)),
         }
     except ValidationError as error:
         raise ConfigError(f"the suite does not fit the model: {_problems(error)}") from None
@@ -317,12 +394,14 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
             model=judge.model,
             parameters=dict(judge.inference_params),
             criteria={} if criterion is None else {check.type: criterion},
+            scope=check.scope,
         )
     return ScorerVersion(
         name=check.label,
         kind="code" if check.type in runner.CODE_CHECKS + runner.INSTALLED_CHECKS else "check",
         type=check.type,
         parameters={key: options[key] for key in sorted(options)},
+        scope=check.scope,
     )
 
 
@@ -341,6 +420,10 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
     if limits := {name: getattr(file_suite.limits, name) for name in file_suite.limits.model_fields_set}:
         values["limits"] = RunLimits(**limits)
+    simulator = file_suite.simulator
+    for name in ("max_retries", "rate_limit_wait_seconds", "headers"):
+        if simulator is not None and name in simulator.model_fields_set:
+            values[f"simulator_{name}"] = getattr(simulator, name)
     return RunSettings(**values)
 
 
@@ -377,7 +460,13 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
     for position, case in enumerate(cases, 1):
         if set(case.tags) - {runner.GROUP_TAG} or case.metadata:
             raise ConfigError(f"case {position}: a data file has no place for tags other than its group, or metadata")
-        row: dict[str, Any] = {"id": case.id, "inputs": case.inputs}
+        row: dict[str, Any] = {"id": case.id}
+        if case.turns:
+            row["turns"] = [_turn_file(turn) for turn in case.turns]
+        elif case.simulated_user is not None:
+            row["simulated_user"] = case.simulated_user.model_dump(mode="json")
+        else:
+            row["inputs"] = case.inputs
         if case.expectations:
             row["expectations"] = case.expectations
         if case.outputs is not None:
@@ -386,6 +475,15 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
             row["group"] = case.tags[runner.GROUP_TAG]
         lines.append(json.dumps(row, ensure_ascii=False) + "\n")
     return "".join(lines)
+
+
+def _turn_file(turn: Turn) -> dict[str, Any]:
+    written: dict[str, Any] = {"inputs": turn.inputs}
+    if turn.expectations:
+        written["expectations"] = turn.expectations
+    if turn.checks is not None:
+        written["checks"] = list(turn.checks)
+    return written
 
 
 def _label(check_type: str) -> str:
@@ -410,6 +508,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     ]
     if (judge := _judge_file(suite.scorers, settings)) is not None:
         file["judge"] = judge
+    if (simulator := _simulator_file(suite.simulator, settings)) is not None:
+        file["simulator"] = simulator
     file["checks"] = checks
     if repeats.attempts != 1:
         file["repeats"] = repeats.attempts
@@ -484,6 +584,26 @@ def _judge_file(scorers: list[ScorerVersion], settings: RunSettings) -> dict[str
     return written | transport
 
 
+def _simulator_file(simulator: Simulator | None, settings: RunSettings) -> dict[str, Any] | None:
+    transport = {
+        "max_retries": settings.simulator_max_retries,
+        "rate_limit_wait_seconds": settings.simulator_rate_limit_wait_seconds,
+        "headers": settings.simulator_headers,
+    }
+    transport = {name: value for name, value in transport.items() if value is not None}
+    if simulator is None:
+        if transport:
+            raise ConfigError(
+                "settings.simulator_max_retries, simulator_rate_limit_wait_seconds and simulator_headers "
+                "need a simulator"
+            )
+        return None
+    written: dict[str, Any] = {"model": simulator.model}
+    if simulator.parameters:
+        written["inference_params"] = dict(simulator.parameters)
+    return written | transport
+
+
 def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> dict[str, Any]:
     where = f"scorers.{position}"
     if scorer.version:
@@ -512,6 +632,8 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         written["name"] = scorer.name
     if combine is not None:
         written["combine"] = combine
+    if scorer.scope != "turn":
+        written["scope"] = scorer.scope
     return written | options
 
 

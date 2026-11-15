@@ -10,13 +10,14 @@ installs none.
   the opposite order, after the case is graded, whether the case passed, failed, timed out, its
   target raised or a later hook's setup did, and when the work is cancelled during the case. Each
   call of a case's target is one round: a case run again, after its worker stopped or its run was
-  resumed, is set up again.
+  resumed, is set up again. A case the run skips, a conversation case among them (the worker runs
+  no conversation), runs no hook, and neither does a scoring job, a monitor or a schedule's turn.
 - **State.** The worker gives each case a new :class:`CaseState`, which the hooks fill in.
   ``target_inputs`` reach the target beside the case's own inputs; ``values`` reach the installed
   checks and the teardown, never the target.
 - **What a hook is given** (:class:`CaseContext`): the principal, the run, the case without its
   expectations or stored output, its position and its state. So the expected answers never reach
-  a hook, and through it the target (MorningHQ/martian-notes#215); the installed checks grade with
+  a hook, and through it the target (MartianSecurity/martian-notes#215); the installed checks grade with
   them.
 - **Installed checks** are plain functions the setup installs by name
   (:data:`~martian.evals.worker.execute.InstalledChecks`). A suite, a run or a scoring job names

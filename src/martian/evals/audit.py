@@ -688,8 +688,10 @@ def audit_suite(
     """Audit a suite file: grade the built-in adversarial targets' replies to its cases with its
     checks, in place of its target or its stored outputs, and write ``audit.json`` in the output
     folder (``output``, else the suite's ``output``). Neither the target nor a model is called;
-    with ``run_judges`` the LLM judges are, on the replies every other check passed. Returns the
-    audit, with the folder it was written to under ``output``."""
+    with ``run_judges`` the LLM judges are, on the replies every other check passed. A conversation
+    case, scripted or simulated, is not audited: an audit grades one reply per case, and
+    ``skipped`` counts them. Returns the audit, with the folder it was written to under
+    ``output``."""
     from martian.evals import runner
     from martian.evals.suite_file import load_suite_file
 
@@ -697,6 +699,9 @@ def audit_suite(
     suite, base = runner.load_suite(path)
     if limit is not None:
         model_cases = model_cases[:limit]
+    # An audit grades one reply per case; a conversation's turns are not audited.
+    talks = sum(1 for case in model_cases if case.turns or case.simulated_user is not None)
+    model_cases = [case for case in model_cases if not (case.turns or case.simulated_user is not None)]
     if run_judges:
         runs = suite.model_copy(update={"checks": [c for c in suite.checks if c.type not in runner.INSTALLED_CHECKS]})
         built = dict(zip([spec.label for spec in runs.checks], runner._build_scorers(runs, base), strict=True))
@@ -729,6 +734,7 @@ def audit_suite(
         "sdk_version": __version__,
         "judges_run": run_judges,
         **run_audit(cases, checks, progress=progress),
+        "skipped": talks,
     }
     folder = Path(output) if output is not None else base / suite.output
     folder.mkdir(parents=True, exist_ok=True)
