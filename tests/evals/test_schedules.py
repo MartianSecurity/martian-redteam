@@ -380,7 +380,12 @@ async def test_a_scheduled_run_that_does_not_complete_cancels_its_suite_job(
     [job] = await records.list_scoring_jobs(SINGLE_USER, DEFAULT_PROJECT, entry.run_id)
     assert (job.state, job.error, follow.submitted) == ("cancelled", NOT_COMPLETED, [])
 
-    # A run that completed has its suite job queued, once.
+    # A run that completed has its suite job queued, once. The schedule's time limit is lifted
+    # first, so this run completes however busy the machine is.
+    schedule = await records.get_schedule(SINGLE_USER, DEFAULT_PROJECT, "sc1")
+    assert schedule is not None
+    unlimited = schedule.model_copy(update={"limits": None})
+    await records.update_schedule(SINGLE_USER, DEFAULT_PROJECT, unlimited, expected_revision=schedule.revision)
     at(monkeypatch, T0 + timedelta(minutes=1, seconds=1))
     fast = InProcessWorker(store, records, targets={AGENT: Answers()}, judge=judge)
     await execute_schedule(services, records, fast, work)
