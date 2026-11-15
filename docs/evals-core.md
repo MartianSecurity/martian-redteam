@@ -13,7 +13,7 @@ dependencies:
 | Argument | What it is | Local edition | Martian Cloud |
 | --- | --- | --- | --- |
 | `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its own `EvalStore` binding |
-| `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
+| `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres, with a [run admission](#run-admission) |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan ([editions](#editions-and-entitlements)) |
 | `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | Its own `Worker`, which runs each run or scoring job in a process of its own (`ProcessWorker`), so no two organisations' runs share a process ([the worker](#the-worker)) |
@@ -511,7 +511,8 @@ All paths are under `/v1/evals`. How the core carries them out:
   organisation has at most its edition's `concurrent_runs` queued or running at once
   ([editions and entitlements](#editions-and-entitlements)): one more is `409`, "An eval run is
   already in progress" at a limit of 1, else "5 eval runs are already in progress, as many as this
-  organisation may have at once". Run codes count up from `EV-1001`. The worker runs the
+  organisation may have at once". Run codes count up from `EV-1001`, unless the record store has a
+  [run admission](#run-admission), which may choose the code. The worker runs the
   dataset's active cases up to `max_items`, skips a case with no usable prompt or expected text,
   calls the target once per case with no retry, within the worker's time limit, grades each
   output by exact match and records a trace per called case. The frozen launch body has no field
@@ -2841,6 +2842,35 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 `MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
 so row-level security applies.
 
+### Run admission
+
+`SqlRecordStore(..., admission=...)` takes a `RunAdmission` (`martian.evals.records.admission`),
+a server's own rule for a run the launch records. The core counts a launched run's code from the
+organisation's records and refuses a launch while one of its datasets is being published
+([write routes](#write-routes)); a server whose organisations share more than the core knows can
+add to both:
+
+```python
+class RunAdmission(Protocol):
+    async def admit(self, principal: Principal, run: Run) -> Run: ...
+```
+
+- The store calls `admit` for each new run whose `source` is `console` (`LAUNCHED`), the runs the
+  server's launch records, before it stores the run. A run another process records (`ci`,
+  `local`) is never asked about, and neither is a launch sent again: its run id is stored, and it
+  keeps the code it was stored with.
+- `admit` returns the run, with another `code` if it numbers runs itself
+  (`run.model_copy(update={"code": ...})`), or refuses it by raising. The store raises what
+  `admit` raises, so the run is not stored and the launch fails with it. Raise
+  `HTTPException(409, ...)`, or `StoreError("conflict", ...)`, which `create_app` and a mount
+  that handles `StoreError` answer as `409`.
+- A code taken for a run that is then not stored, because the launch fails after it or two
+  requests for the same new run race, is not given back.
+- The store has no admission by default, and the local edition has none: a run keeps the code
+  the launch counted. The core names nothing of why a server refuses or where its codes come from.
+  A launch's other checks run first, in the launch's order: the edition's `concurrent_runs`, then
+  the publication pause, then the admission.
+
 ## Deleting runs and traces
 
 Both stores can remove a run or a trace for good, in every edition. They hold no policy: when to
@@ -3758,7 +3788,9 @@ and binds the core's dependencies with FastAPI's dependency overrides. `current_
 session lookup (`organisation_principal` with the member's role, names and platform-admin flag),
 `current_entitlements` the organisation's plan, `current_store` a `ServerStore` per request (the
 whole `EvalStore` on its MLflow REST binding, with the organisation's evaluation experiment as the
-default project), `current_records` a `SqlRecordStore` on its Postgres (schema `martian`),
+default project), `current_records` a `SqlRecordStore` on its Postgres (schema `martian`) with a
+[run admission](#run-admission) that pauses an organisation's new runs and numbers them from the
+sequence its CI gate shares,
 `current_worker` and `optional_worker` its worker (one `ProcessWorker` process per run or
 scoring job, with the agent's target lease; not the durable queue yet), `current_judge_settings`
 each organisation's default judge model, and `current_agent_names` its agent registry. It
@@ -3774,7 +3806,7 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_agreement.py`, `test_reviewer_agreement.py`, `test_calibration.py`,
-`test_calibration_recheck.py`, `test_write_routes.py`, `test_write_contract.py`,
+`test_calibration_recheck.py`, `test_write_routes.py`, `test_run_admission.py`, `test_write_contract.py`,
 `test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
 `test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,
 `test_worker_limits.py`, `test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`,

@@ -74,6 +74,7 @@ from martian.evals.records import (
     Threshold,
     ThresholdStatus,
 )
+from martian.evals.records.admission import LAUNCHED, RunAdmission
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     calibration_rechecks,
@@ -169,8 +170,10 @@ class SqlRecordStore:
         schema: str = "martian",
         events: EventBus | None = None,
         migrate: bool = True,
+        admission: RunAdmission | None = None,
     ) -> None:
         self._postgres = is_postgres(database_url)
+        self.admission = admission
         self._engine = engine_for(database_url, schema=schema)
         if migrate:
             upgrade(self._engine)
@@ -229,6 +232,13 @@ class SqlRecordStore:
     # --- runs --------------------------------------------------------------------------------
 
     async def create_run(self, principal: Principal, run: Run) -> Run:
+        if (
+            self.admission is not None
+            and run.source == LAUNCHED
+            and await self.get_run(principal, run.project_id, run.id) is None
+        ):
+            run = await self.admission.admit(principal, run)
+
         def work(connection: Connection, space: str) -> tuple[Run, bool]:
             if stored := self._one(connection, runs, space, run.project_id, id=run.id):
                 return Run.model_validate(stored), False
