@@ -165,6 +165,41 @@ included; a run records the key only as the reference `${MARTIAN_TARGET_KEY}`. A
 cannot point an existing target, and so its key, at another address: a target cannot be edited.
 They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
 
+## What store errors contain
+
+An error of the evals store or the record store never quotes what was written. When either
+refuses a request, its `StoreError` names the operation, the store method such as
+`record_trace`, and what was refused. For a write the database refused, that is the table, the
+column or constraint when Postgres names one, and the driver's error class and code:
+`record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
+It holds no value written: no request, response, case, score, review, id or name. The same text is
+the `detail` of the API's `404`, `409` or `422`, the `error` of a failed run, and the worker's log
+line.
+
+- The database's and MLflow's own messages are not passed on, because both can quote values:
+  SQLAlchemy writes a statement's values into its errors, and Postgres repeats a duplicate key's.
+  The one MLflow message passed on is its length refusal, such as
+  `'value' exceeds the maximum length of 20000 characters`, which names the field and the limit.
+- A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
+  so no traceback or error reporter reaches the values. The names above are what an operator
+  debugs with.
+- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+  database failure that is not a refusal holds none either. The record store raises such a
+  failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
+  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  the database's own message for the failure.
+- Not covered: MLflow shortens a trace tag value over 8,000 characters given to
+  `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
+  trace tag. Errors that are not the stores', such as a function target's own exception, which a
+  case result keeps as its error, are the target's text.
+
+`tests/evals/test_store_errors.py` writes a canary in writes that are refused: a trace the
+database refuses, directly for a metadata value over 8,000 characters and through a run of the
+worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
+refuses, a case result, a run two writers create at once, a draft case through its route, and a
+score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
+included, on SQLite and on Postgres.
+
 ## Runtime reporting data boundary
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.

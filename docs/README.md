@@ -15,6 +15,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, pass rates and their confidence intervals, comparing two runs, the judges, deterministic checks and custom Python checks, and the dataset regression gate
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
    - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, and the worker interface
+   - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
