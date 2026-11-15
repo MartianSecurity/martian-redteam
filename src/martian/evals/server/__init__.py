@@ -41,7 +41,6 @@ people's agreement with each other in ``agreement``, and each judge version's ca
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Annotated, Any
@@ -184,8 +183,6 @@ def create_app(
     app.state.martian_evals_worker = worker
     app.state.martian_evals_judge_settings = judge_settings
     app.state.martian_evals_agent_names = agent_names
-    # One OpenTelemetry trace write at a time, so that requests carrying spans of one trace merge in turn.
-    app.state.martian_evals_trace_writes = asyncio.Lock()
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
     for part in (

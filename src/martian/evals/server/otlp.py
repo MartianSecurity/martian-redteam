@@ -16,8 +16,11 @@ the one the ``x-martian-project-id`` header names. Traces only; the core serves 
 - **Partial batches.** Exporters send spans as they end, so one trace's spans arrive in several
   requests, usually children before their root. Each request merges its spans into the trace
   already stored (a span sent again replaces itself) and records the trace again, so the mapping
-  sees every span. Writes are serialised within the process, so two requests carrying spans of
-  one trace cannot lose each other's spans; processes sharing one store do not coordinate.
+  sees every span. Writes of one trace are serialised within the process, by the principal's
+  organisation, the project and the trace's store id (:class:`TraceLocks`), so two requests
+  carrying spans of one trace cannot lose each other's spans, while writes of different traces,
+  of one organisation or of two, do not wait for each other. Processes sharing one store do not
+  coordinate.
 - **Limits.** A body, and a gzip or deflate body once decompressed, of at most
   :data:`MAX_BODY_BYTES`; more is ``413``.
 - **An edition's own route.** :func:`export` is the endpoint after the principal: an edition that
@@ -44,7 +47,9 @@ import json
 import math
 import uuid
 import zlib
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -81,6 +86,49 @@ TraceIds = Callable[[Principal, str, bytes], str]
 traces go to and the OpenTelemetry trace id (16 bytes). The id must be one the store takes; the
 same arguments must give the same id, so that a trace's spans sent in several requests, or sent
 again, make one trace."""
+
+TraceKey = tuple[str | None, str, str]
+"""What one trace's writes are serialised by: the principal's organisation (``None`` for the single
+local user), the store's key of the project and the trace's store id."""
+
+
+@dataclass
+class _Lock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+class TraceLocks:
+    """A lock for each trace being written, so that the writes of one trace merge in turn and the
+    writes of different traces do not wait for each other. A trace's lock exists while a write of it
+    is waiting or running, and is dropped with the last of them, so the locks never outnumber the
+    writes in flight. One application, and its event loop, has one."""
+
+    def __init__(self) -> None:
+        self._locks: dict[TraceKey, _Lock] = {}
+
+    @asynccontextmanager
+    async def hold(self, key: TraceKey) -> AsyncIterator[None]:
+        held = self._locks.setdefault(key, _Lock())
+        held.users += 1
+        try:
+            async with held.lock:
+                yield
+        finally:
+            held.users -= 1
+            if not held.users:
+                del self._locks[key]
+
+
+def _trace_locks(request: Request) -> TraceLocks:
+    """The application's trace locks, made by its first write, so that an edition's own application
+    needs to set nothing up."""
+    state = request.app.state
+    locks: TraceLocks | None = getattr(state, "martian_evals_trace_locks", None)
+    if locks is None:
+        locks = state.martian_evals_trace_locks = TraceLocks()
+    return locks
+
 
 PROTOBUF = "application/x-protobuf"
 JSON = "application/json"
@@ -298,8 +346,8 @@ async def export(
     """Record the request's spans as ``principal``'s traces in ``store``, and answer as OTLP does:
     everything ``POST /v1/traces`` does once its principal and store are known, the role check
     first. ``trace_ids`` makes each trace's store id; ``max_body_bytes`` is the largest body, as
-    sent and decompressed, :data:`MAX_BODY_BYTES` when not given. The request's application must
-    hold the trace write lock ``create_app`` sets (``state.martian_evals_trace_writes``)."""
+    sent and decompressed, :data:`MAX_BODY_BYTES` when not given. Writes of one trace are serialised
+    in the application's process (:class:`TraceLocks`); the application sets nothing up for it."""
     if highest_role(principal.roles) not in WRITERS:
         raise HTTPException(403, "Requires member role")
     encoding = _encoding(request)
@@ -324,10 +372,10 @@ async def export(
     if invalid:
         rejected += invalid
         reasons.append(f"{invalid} span(s) without a valid trace id, span id or parent span id")
-    lock: asyncio.Lock = request.app.state.martian_evals_trace_writes
+    locks = _trace_locks(request)
     for trace_id, spans in traces.items():
         try:
-            async with lock:
+            async with locks.hold((principal.organisation_id, project, trace_id)):
                 await _write(store, principal, project, trace_id, spans)
         except StoreError as error:
             rejected += len(spans)
