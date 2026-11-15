@@ -31,6 +31,7 @@ EventKind = Literal[
     "schedule",
     "calibration",
     "recheck",
+    "blind_queue",
 ]
 
 

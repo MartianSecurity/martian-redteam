@@ -81,6 +81,9 @@ OWN_NAMES |= {
 OWN_NAMES |= {("post", "/v1/evals/judge-panels")}
 # Re-checking a judge version's calibration (MartianSecurity/martian-notes#188).
 OWN_NAMES |= {("post", "/v1/evals/judge-rechecks"), ("get", "/v1/evals/judge-rechecks/{recheck_id}")}
+# Creating a review queue with blind double review (MartianSecurity/martian-notes#357), which the
+# contract's QueueRequest has no field for.
+OWN_NAMES |= {("post", "/v1/evals/blind-review-queues")}
 # The core's own monitor routes, which the contract does not have either (MartianSecurity/martian-notes#196).
 OWN_NAMES |= {
     ("get", "/v1/evals/monitors"),

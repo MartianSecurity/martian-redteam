@@ -24,6 +24,7 @@ from martian.evals.model import (
 )
 from martian.evals.records import (
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     EventsLost,
     JudgeCalibration,
@@ -335,6 +336,23 @@ class RecordContract:
         await records.delete_view(ORG_A, "p1", "v1", expected_revision=2)
         assert await records.get_view(ORG_A, "p1", "v1") is None
         await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
+
+    async def test_a_blind_queue_is_kept_once_and_listed_by_its_run(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        await records.create_run(ORG_A, run("r2"))
+        first = await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="user-a"))
+        assert first.created_at is not None
+        # Marking the same queue again returns it as it was first kept.
+        assert (
+            await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="someone")) == first
+        )
+        await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q2", run_id="r2"))
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1")] == ["q1", "q2"]
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1", run_id="r2")] == ["q2"]
+        # A queue of a run the project does not have, of another project, or of another space.
+        await refused("not_found", records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q3", run_id="nope")))
+        assert await records.list_blind_queues(ORG_A, "p2") == []
+        assert await records.list_blind_queues(ORG_B, "p1") == []
 
     async def test_every_calibration_is_kept_and_listed_newest_first(self, records: RecordStore) -> None:
         def calibration(id: str, judge: str, minutes: int) -> JudgeCalibration:

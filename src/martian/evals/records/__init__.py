@@ -172,6 +172,21 @@ class JudgeCalibration(BaseModel):
     created_at: datetime | None = None
 
 
+class BlindQueue(BaseModel):
+    """A review queue with blind double review (:mod:`martian.evals.server.blind`): each reviewer
+    answers an item without reading the other reviewers' answers to it until they have given their
+    own. ``id`` is the queue's id in the store. The core's own record, kept apart from the queue in
+    the store, so that every store binding keeps it: it is recorded before the queue is created and
+    never changed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    run_id: Identifier
+    created_by: Identifier | None = None
+    created_at: datetime | None = None
+
+
 RecheckState = Literal["queued", "running", "completed", "failed"]
 
 
@@ -822,6 +837,18 @@ class RecordStore(Protocol):
         oldest first."""
         ...
 
+    # Review queues with blind double review: recorded once, before the queue is created.
+    async def add_blind_queue(self, principal: Principal, project_id: str, queue: BlindQueue) -> BlindQueue:
+        """Record that a review queue of a run of the project has blind double review. Recording the
+        same queue again returns the stored one; a run the project does not have is ``not_found``."""
+        ...
+
+    async def list_blind_queues(
+        self, principal: Principal, project_id: str, *, run_id: str | None = None
+    ) -> list[BlindQueue]:
+        """The project's review queues with blind double review, or one run's, oldest first."""
+        ...
+
     # Judge calibrations: every one is kept, and the newest of a judge version is its calibration.
     async def save_calibration(
         self, principal: Principal, project_id: str, calibration: JudgeCalibration
@@ -1078,6 +1105,7 @@ __all__ = [
     "RECORD_METHODS",
     "THRESHOLD_WINDOW_BOUND",
     "Alert",
+    "BlindQueue",
     "CalibrationRecheck",
     "DatasetManifest",
     "Delivery",
