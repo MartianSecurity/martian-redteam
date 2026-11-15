@@ -6,6 +6,7 @@ The source is a real tracking store that MLflow itself writes, with the mlflow-s
 pins, in a process of its own: ``tests/fixtures/mlflow/write_store.py`` says what it holds.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -39,10 +40,12 @@ from martian.evals.mlflow_import import (
     verdict,
 )
 from martian.evals.model import Project
+from martian.evals.server.principal import SINGLE_USER
 from tests.evals.evals_contract import validate_response
 
 WRITER = Path(__file__).resolve().parents[1] / "fixtures" / "mlflow" / "write_store.py"
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
+needs_postgres = pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run on Postgres")
 
 
 def write_store(folder: Path, url: str | None = None) -> None:
@@ -254,6 +257,90 @@ def test_same_named_assessments_of_different_sources_are_each_their_own_score(wr
     }
     assert sorted(stored.values()) == [("CODE", False), ("HUMAN", False), ("LLM_JUDGE", "yes")]
     assert {stored[a["native_id"]] for a in scores} == {("CODE", False), ("LLM_JUDGE", "yes")}
+
+
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=needs_postgres)])
+def stores(request, tmp_path):
+    """A store in a data folder, and a record store on SQLite, or on Postgres in a schema of its own."""
+    from sqlalchemy import create_engine, text
+
+    from martian.evals.records.sql import SqlRecordStore
+    from martian.evals.store.mlflow_local import MlflowStore
+
+    home = tmp_path / "stores"
+    home.mkdir()
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    schema = f"martian_test_{uuid.uuid4().hex[:10]}"
+    if request.param == "sqlite":
+        records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    else:
+        assert POSTGRES_URL is not None
+        records = SqlRecordStore(POSTGRES_URL, schema=schema)
+    yield store, records
+    records.close()
+    if request.param == "postgres":
+        engine = create_engine(POSTGRES_URL)
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
+
+
+def test_a_second_assessment_of_one_name_and_source_on_a_case_is_reported_not_dropped(source, stores):
+    # On the baseline run's case "Where is my order?", the person's exact_match feedback becomes a
+    # second judge's, after the first judge's, and a code expectation of the dataset's
+    # expected_response comes after the person's. The case keeps the first of each and the report
+    # names the other; the trace keeps both.
+    order = "(SELECT trace_id FROM assessments WHERE name = 'exact_match' AND source_type = 'HUMAN')"
+    change(
+        source,
+        "INSERT INTO assessments (assessment_id, trace_id, name, assessment_type, value, error, created_timestamp,"
+        " last_updated_timestamp, source_type, source_id, run_id, span_id, rationale, overrides, valid,"
+        " assessment_metadata, experiment_id, trace_timestamp_ms, aggregate_value, is_numeric_value)"
+        " SELECT 'a-second-expectation', trace_id, name, assessment_type, '\"Ask support.\"', error,"
+        " created_timestamp + 1, last_updated_timestamp + 1, 'CODE', 'sync', run_id, span_id, rationale, overrides,"
+        " valid, assessment_metadata, experiment_id, trace_timestamp_ms, aggregate_value, is_numeric_value"
+        f" FROM assessments WHERE trace_id = {order} AND name = 'expected_response'",
+        "UPDATE assessments SET source_type = 'LLM_JUDGE', source_id = 'openai:/gpt-4o',"
+        " assessment_id = 'a-second-judge' WHERE name = 'exact_match' AND source_type = 'HUMAN'",
+    )
+    store, records = stores
+    plan = read_mlflow_store(str(source))
+    report = copy_mlflow_store(plan, store, records)
+    (run,) = [run for run in report.runs if run.code == "mlflow-baseline"]
+    results = asyncio.run(records.list_results(SINGLE_USER, run.project_id, run.id)).items
+    case = next(r for r in results if r.inputs == {"question": "Where is my order?"})
+    scores = asyncio.run(records.list_scores(SINGLE_USER, run.project_id, run.id, case_id=case.case_id))
+    assert [(s.scorer, s.source, s.value) for s in scores if s.scorer == "exact_match"] == [
+        ("exact_match", "code", False),
+        ("exact_match", "llm_judge", "yes"),
+    ]
+    assert case.expectations == {"expected_response": "Track your order under Orders in your account."}
+    trace_id = case.store.trace_id
+    assert trace_id is not None
+    mlflow_trace = asyncio.run(store.get_trace(SINGLE_USER, run.project_id, trace_id))
+    assert mlflow_trace is not None
+    source_trace = mlflow_trace.metadata["mlflow_source.trace_id"]
+    kept = {
+        (s.scorer, s.source, s.value) for s in mlflow_trace.scores if s.scorer in {"exact_match", "expected_response"}
+    }
+    assert kept >= {
+        ("exact_match", "llm_judge", "yes"),
+        ("exact_match", "llm_judge", False),
+        ("expected_response", "code", "Ask support."),
+    }
+    skipped = {(s.kind, s.name, s.reason) for s in plan.skipped if s.name.startswith(("exact_match", "expected"))}
+    assert skipped == {
+        (
+            "assessment",
+            f"exact_match (a-second-judge) on {source_trace}",
+            "the case of its run keeps the first assessment of its name and source; the trace keeps this one",
+        ),
+        (
+            "assessment",
+            f"expected_response (a-second-expectation) on {source_trace}",
+            "the case of its run keeps the first expectation of its name; the trace keeps this one",
+        ),
+    }
 
 
 def test_copying_again_copies_only_what_is_new(written, tmp_path):
