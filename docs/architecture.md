@@ -117,12 +117,16 @@ is independent (`CATALOG_VERSION`); graph/policy revisions come from the service
 
 ## Open-source evals core
 
-This repository is the home of the open-source evals core. The names stay as they are: the
+This public repository is the home of the open-source evals core. The names stay as they are: the
 repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
 and the command `martian`. Everything here is Apache-2.0, except `src/martian/ui/`: a build of the
-Evals app from the private frontend, whose packages carry no licence yet
-(MorningHQ/martian-notes#220). Paid Enterprise features live in the private Martian backend and
-console, which use the core; this repository holds no commercially licensed code. The repository is private until the open-source launch.
+Evals app from Martian's frontend, whose three packages it is built from
+(`@martian/design-system`, `@martian/evals` and `@martian/client`) are being relicensed Apache-2.0
+and carry no licence until then (MorningHQ/martian-notes#220). The contribution policy is not
+chosen yet (MorningHQ/martian-notes#220). The core is the same code in every edition, its paid
+features behind feature keys; Martian Cloud and On-Premises serve it, and the features made only
+for them are built outside this repository, which holds no commercially licensed code
+([editions](evals-core.md#editions-and-entitlements)).
 
 The core grows into this layout. Paths marked as planned do not exist yet; the issue named
 next to each one creates it.
@@ -132,7 +136,7 @@ next to each one creates it.
 | `src/martian/evals/` | SDK: suite runner (conversations, and [simulated users](evals.md#simulated-users) with personas from real conversations and a [fidelity report](evals.md#simulator-fidelity)), suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
 | `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes and the OpenTelemetry traces endpoint |
-| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
+| `src/martian/evals/store/` | Store interface with its in-process bindings | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; Martian Cloud's binding is its own, outside this repository |
 | `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views) and the worker's queue, portable to SQLite and Postgres | Exists |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
 | `src/martian/evals/local_targets.py` | The local edition's targets in place of an Agents registry: an HTTP endpoint or an OpenAI-compatible model, with the user's key in a file only the user can read, and their `/v1/local/targets` routes ([local targets](evals-core.md#local-targets)) | Exists |

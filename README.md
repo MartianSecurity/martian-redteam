@@ -142,3 +142,7 @@ qualification. See [development](https://github.com/MorningHQ/martian-redteam/bl
 
 Apache-2.0. See [LICENSE](https://github.com/MorningHQ/martian-redteam/blob/main/LICENSE)
 and [NOTICE](https://github.com/MorningHQ/martian-redteam/blob/main/NOTICE).
+
+The evals core here is the open-source Community edition of Martian Evals. Martian Cloud and
+On-Premises serve the same core, with its paid features turned on by feature keys; see
+[editions](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#editions-and-entitlements).
