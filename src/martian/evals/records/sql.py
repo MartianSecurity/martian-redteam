@@ -58,6 +58,7 @@ from martian.evals.model import (
 from martian.evals.records import (
     THRESHOLD_WINDOW_BOUND,
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     DatasetManifest,
     Delivery,
@@ -74,8 +75,10 @@ from martian.evals.records import (
     Threshold,
     ThresholdStatus,
 )
+from martian.evals.records.admission import LAUNCHED, RunAdmission
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
+    blind_queues,
     calibration_rechecks,
     case_results,
     dataset_draft_cases,
@@ -169,8 +172,10 @@ class SqlRecordStore:
         schema: str = "martian",
         events: EventBus | None = None,
         migrate: bool = True,
+        admission: RunAdmission | None = None,
     ) -> None:
         self._postgres = is_postgres(database_url)
+        self.admission = admission
         self._engine = engine_for(database_url, schema=schema)
         if migrate:
             upgrade(self._engine)
@@ -229,6 +234,13 @@ class SqlRecordStore:
     # --- runs --------------------------------------------------------------------------------
 
     async def create_run(self, principal: Principal, run: Run) -> Run:
+        if (
+            self.admission is not None
+            and run.source == LAUNCHED
+            and await self.get_run(principal, run.project_id, run.id) is None
+        ):
+            run = await self.admission.admit(principal, run)
+
         def work(connection: Connection, space: str) -> tuple[Run, bool]:
             if stored := self._one(connection, runs, space, run.project_id, id=run.id):
                 return Run.model_validate(stored), False
@@ -390,6 +402,7 @@ class SqlRecordStore:
                 (score_rows, score_rows.c.run_id),
                 (scoring_jobs, scoring_jobs.c.run_id),
                 (reviews, reviews.c.run_id),
+                (blind_queues, blind_queues.c.run_id),
                 (schedule_runs, schedule_runs.c.run_id),
             ):
                 removed[table.name] = connection.execute(
@@ -1156,6 +1169,53 @@ class SqlRecordStore:
 
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
+
+    # --- review queues with blind double review ----------------------------------------------
+
+    async def add_blind_queue(self, principal: Principal, project_id: str, queue: BlindQueue) -> BlindQueue:
+        def work(connection: Connection, space: str) -> tuple[BlindQueue, bool]:
+            if stored := self._one(connection, blind_queues, space, project_id, id=queue.id):
+                return BlindQueue.model_validate(stored), False
+            self._require_run(connection, space, project_id, queue.run_id)
+            saved = queue.model_copy(update={"created_at": queue.created_at or _now()})
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(blind_queues).values(
+                            space=space,
+                            project_id=project_id,
+                            id=saved.id,
+                            run_id=saved.run_id,
+                            created_at=saved.created_at,
+                            record=_json(saved),
+                        )
+                    )
+            except IntegrityError:
+                # The same queue recorded at the same time: the one kept first is the queue's.
+                stored = self._one(connection, blind_queues, space, project_id, id=queue.id)
+                return BlindQueue.model_validate(stored), False
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "blind_queue", project_id, saved.id)
+        return saved
+
+    async def list_blind_queues(
+        self, principal: Principal, project_id: str, *, run_id: str | None = None
+    ) -> list[BlindQueue]:
+        def work(connection: Connection, space: str) -> list[BlindQueue]:
+            query = select(blind_queues.c.record).where(
+                blind_queues.c.space == space, blind_queues.c.project_id == project_id
+            )
+            if run_id is not None:
+                query = query.where(blind_queues.c.run_id == run_id)
+            rows: Sequence[Any] = (
+                connection.execute(query.order_by(blind_queues.c.created_at, blind_queues.c.id)).scalars().all()
+            )
+            return [BlindQueue.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
 
     # --- judge calibrations --------------------------------------------------------------------
 

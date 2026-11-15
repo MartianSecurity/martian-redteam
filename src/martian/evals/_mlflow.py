@@ -16,6 +16,7 @@ tracing needs itself; they are listed here too, and the guard allows them in tha
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +40,11 @@ from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
 from mlflow.ml_package_versions import FLAVOR_TO_MODULE_NAME
+from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from mlflow.store.db.utils import _all_tables_exist, _get_alembic_config, _get_latest_schema_revision
+from mlflow.store.model_registry.sqlalchemy_workspace_store import (
+    WorkspaceAwareSqlAlchemyStore as WorkspaceAwareRegistryStore,
+)
 from mlflow.store.tracking.dbmodels.models import SqlRun, SqlTraceInfo
 from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
@@ -76,6 +81,7 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.ml_package_versions", "FLAVOR_TO_MODULE_NAME"),
     # imported by the function target's process (martian.evals._target_process), not here
     ("mlflow.models.evaluation.utils.trace", "configure_autologging_for_evaluation"),
+    ("mlflow.prompt.constants", "IS_PROMPT_TAG_KEY"),
     ("mlflow.pytest.decorator", "MLFLOW_TEST_ATTR"),
     ("mlflow.pytest.plugin", ""),  # loaded by name as a pytest plugin
     ("mlflow.store.db.utils", "_all_tables_exist"),
@@ -94,6 +100,15 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.tracking.fluent", "_active_experiment_id"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.create_prompt"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.get_prompt"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_prompts"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.create_prompt_version"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.get_prompt_version"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_prompt_versions"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_model_versions"),
     ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
     ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.request_preview"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
@@ -162,13 +177,43 @@ class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
         return root
 
 
-def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore) -> None:
+class PromptRegistryStore(WorkspaceAwareRegistryStore):
+    """MLflow's SQL model registry store, which keeps MLflow's prompt registry, with workspaces on
+    for this store only, as :class:`WorkspaceStore` has them for tracking. Its tables are in the
+    same database as the tracking store's; every query requires a workspace in the request
+    context. The SDK uses only its prompt methods (``create_prompt``, ``create_prompt_version``,
+    ``search_prompts``, ``search_prompt_versions``, ``get_prompt``, ``get_prompt_version``),
+    ``search_model_versions`` over prompt versions, which MLflow searches only when the filter
+    names :data:`IS_PROMPT_TAG_KEY`, and :meth:`keep_prompt_times`."""
+
+    @staticmethod
+    def _workspaces_enabled() -> bool:
+        return True
+
+    def keep_prompt_times(self, name: str, created: int | None, versions: Mapping[int, int | None]) -> None:
+        """Set the creation time of the prompt ``name`` and of each of its ``versions``, by number,
+        in epoch milliseconds, which MLflow sets to the current time when it creates them, so a data
+        import keeps the times its export holds. None leaves MLflow's own; each changed row's
+        last-updated time follows it, and the prompt's is its newest version's."""
+        with self.ManagedSessionMaker(read_only=False) as session:
+            model = self._get_registered_model(session, name)  # type: ignore[no-untyped-call]
+            if created is not None:
+                model.creation_time = model.last_updated_time = created
+            for number, at in versions.items():
+                if at is not None:
+                    row = self._get_sql_model_version(session, name, number)  # type: ignore[no-untyped-call]
+                    row.creation_time = row.last_updated_time = at
+                    model.last_updated_time = max(model.last_updated_time, at)
+
+
+def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore | WorkspaceAwareRegistryStore) -> None:
     """Keep the values of the store's SQL statements out of SQLAlchemy's errors and log lines.
 
     MLflow's SQL store creates its engine itself (``engine``, one per database URL, shared by every
-    MLflow store in the process on that URL), and SQLAlchemy writes a failed statement's values
-    into its error, which MLflow passes on in its own and logs for some database failures. The
-    values of a trace are its request and its response.
+    MLflow store of its kind in the process on that URL: the tracking stores share one, the model
+    registry stores another), and SQLAlchemy writes a failed statement's values into its error,
+    which MLflow passes on in its own and logs for some database failures. The values of a trace
+    are its request and its response; those of a prompt version, its text.
     """
     store.engine.hide_parameters = True
 
@@ -297,7 +342,9 @@ __all__ = [
     "EvaluationResult",
     "GatewayAdapter",
     "GatewayCaller",
+    "IS_PROMPT_TAG_KEY",
     "LiteLLMAdapter",
+    "PromptRegistryStore",
     "ServerWorkspaceContext",
     "SpansLocation",
     "TraceTagKey",

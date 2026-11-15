@@ -297,6 +297,45 @@ def test_a_suite_file_panel_and_a_python_check_grade_side_by_side(provider, tmp_
         load_suite_file(path)
 
 
+def test_every_combination_of_a_matrix_is_graded_by_the_panel_on_its_own_replies(provider, tmp_path):
+    (tmp_path / "agent.py").write_text("def answer(message, greeting):\n    return f'{greeting} How can I help?'\n")
+    cases = [{"id": f"case-{i}", "input": f"Question {i}"} for i in (1, 2)]
+    (tmp_path / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases), encoding="utf-8")
+    suite = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent.py", "function": "answer"},
+        "matrix": {"greeting": {"plain": "Hi.", "warm": "Hello, and welcome!"}},
+        "judge": {"max_retries": 0, "rate_limit_wait_seconds": 0},
+        "checks": [
+            {
+                "type": "rubric",
+                "rubric": "Pass if polite.",
+                "panel": ["openai:/pass-a", "openai:/pass-b", "openai:/fail-a"],
+            }
+        ],
+    }
+    (tmp_path / "evals.yaml").write_text(yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
+    summary = run_suite(tmp_path / "evals.yaml")
+    # Each member graded each case of each combination once, the combination's own reply.
+    assert len(provider.requests) == 2 * 2 * 3
+    graded = [json.dumps(sent["body"]["messages"]) for sent in provider.requests]
+    assert (
+        sum("Hello, and welcome!" in text for text in graded)
+        == sum("Hi. How can I help?" in text for text in graded)
+        == 6
+    )
+    members = [f"openai:/{m}" for m in ("pass-a", "pass-b", "fail-a")]
+    for entry in summary["combinations"]:
+        assert (entry["summary"]["passed"], entry["gate"]) == (2, "passed")
+        lines = (tmp_path / "results" / entry["folder"] / "results.jsonl").read_text().splitlines()
+        for record in map(json.loads, lines):
+            votes = record["checks"]["rubric_judge"]["metadata"]
+            assert (votes["martian.panel.passed"], votes["martian.panel.failed"]) == ("2", "1")
+        # Each combination's recorded run names the panel as its scores' source.
+        scores = local_scores(tmp_path, entry["run"]["id"])
+        assert {score.source_id for score in scores} == {panel_source((model, None) for model in members)}
+
+
 # --- a registered judge the core's worker grades -------------------------------------------------
 
 MEMBERS = {"tone": ["a", "b", "c"], "strict": ["a", "b", "d"]}

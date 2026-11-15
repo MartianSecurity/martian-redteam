@@ -33,7 +33,9 @@ imported.references["dataset_id"]  # each source dataset version id and the rece
 ## What an export holds
 
 Everything the store and the record store hold for the principal's organisation (or the single
-local user), and nothing of another organisation's: every project the store lists, and in each
+local user), and nothing of another organisation's: the organisation's
+[prompts](evals-core.md#prompt-versions) with every version, each with its number, author and
+time, which a run's `provenance.prompts` names; and every project the store lists, and in each
 
 - its registered scorers, every version, a judge graded by a
   [panel of judges](evals.md#a-panel-of-judges) with its members; its review questions;
@@ -41,8 +43,9 @@ local user), and nothing of another organisation's: every project the store list
   manifest that pins the version publishing wrote, and any publication that never finished;
 - its suites, every version; its dataset drafts with their cases; its saved views;
 - its runs as the record store holds them and as the store holds them, each with its case
-  results, scores, scoring jobs, every review of every chain (replaced ones too), the review
-  queues its reviews name with each item's status, and its artifacts;
+  results, scores, scoring jobs, every review of every chain (replaced ones too) with whether it
+  was given blind, the review queues its reviews name with each item's status, which of them have
+  [blind double review](evals.md#blind-double-review), and its artifacts;
 - its traces, oldest first, each with its spans and its scores: judges' and checks' verdicts and
   people's annotations;
 - its [monitors](evals-core.md#monitors) with their progress and every trace each took for
@@ -72,6 +75,13 @@ describe, and what the two stores do not hold:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
+- What a suite-file run keeps outside the stores: its output folder (`results.jsonl`,
+  `summary.json`, `verdicts.json`, the `comparison.json` a `--baseline` comparison writes and a
+  matrix's `matrix.json`), which a later `--baseline` reads, and the
+  [cache of model calls](evals.md#a-cache-of-model-calls), replies kept on disk to replay, which
+  expire. The run each one recorded is exported, with its `provenance` (a matrix's combination,
+  its prompt versions, and how much of the cache it used); copy an output folder that a baseline
+  should read, and let the fresh install's cache fill again.
 - A suite version's [audit](evals-core.md#suite-audits) (the record store's `martian_suite_audits`
   table): it is derived, the suite version's checks grading the built-in do-nothing and cheating
   replies to a published dataset, with no target or model called. An import holds none; audit a
@@ -110,13 +120,15 @@ evals-export/
 ```
 
 Each `.jsonl` file is [JSON Lines](https://jsonlines.org/): UTF-8, one JSON object per line, each
-line ending in `\n`. Every line has `project_id`, the keys that place the object, and the object
-itself in the [shared eval model](eval-model.md)'s JSON (`model_dump(mode="json")` of the named
+line ending in `\n`. Every line has `project_id` (but the prompt files', whose objects are the
+organisation's), the keys that place the object, and the object itself in the [shared eval model](eval-model.md)'s JSON (`model_dump(mode="json")` of the named
 class, with its `store` references as the source store had them). Every file is present, empty
 when there is nothing of its kind. An import reads them in this order:
 
 | File | One line per | Line |
 | --- | --- | --- |
+| `prompts.jsonl` | Prompt of the organisation, by name | `prompt`: `Prompt`; no `project_id`, as a prompt is the organisation's |
+| `prompt_versions.jsonl` | Version of a prompt, oldest first; consecutive per prompt, in the order of `prompts.jsonl` | `version`: `PromptVersion`, with its text, digest, commit message, author and time; no `project_id` |
 | `projects.jsonl` | Project | `project_id`, `project`: `Project` |
 | `scorers.jsonl` | Version of a registered scorer, oldest first | `project_id`, `scorer`: `ScorerVersion` |
 | `questions.jsonl` | Review question | `project_id`, `question`: `ReviewQuestion` |
@@ -133,6 +145,7 @@ when there is nothing of its kind. An import reads them in this order:
 | `scoring_jobs.jsonl` | Scoring job | `project_id`, `job`: `ScoringJob` |
 | `reviews.jsonl` | Review, each after the review it replaces | `project_id`, `review`: `Review` |
 | `queues.jsonl` | Review queue | `project_id`, `queue`: `ReviewQueue`, `items`: a list of `QueueItem`, one per case with its trace and status |
+| `blind_queues.jsonl` | Review queue with blind double review, by run | `project_id`, `blind_queue`: `BlindQueue`, the queue's `id`, its `run_id`, who created it and when |
 | `artifacts.jsonl` | Run artifact | `project_id`, `run_id`, `name` (a relative path), `sha256`, `size`; the bytes are `artifacts/<sha256>` |
 | `traces.jsonl` | Trace, oldest first | `project_id`, `trace`: `Trace` with its `spans` and `scores`, read one at a time, so its `request` and `response` are whole and not a search's previews |
 | `monitors.jsonl` | Monitor, by name | `project_id`, `monitor`: `Monitor`, `progress`: `MonitorProgress` |
@@ -154,7 +167,7 @@ need no new references.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 5,
+  "version": 7,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -166,25 +179,32 @@ need no new references.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `5`): a new
+`null` for the single local user. `version` is the format's version (`VERSION`, here `7`): a new
 file, or a change to a file, to a line's shape or to what a file's lines can hold, is a new
 version, and an import reads only its own. Version 2 added the six monitoring files, version 3
-added `manifests.jsonl`, version 4 added `calibrations.jsonl` and `rechecks.jsonl`, and version 5
+added `manifests.jsonl`, version 4 added `calibrations.jsonl` and `rechecks.jsonl`, version 5
 let `scores.jsonl` hold a score of each source for one case, scorer and scoring job: a person's
 answer named like a check or a judge is a line beside that scorer's, where version 4 had one line
 per case, scorer and scoring job. Its lines keep their shape, so an SDK that reads version 4
-would import such a pair as one score; it refuses version 5 instead. An export of an earlier
-version, version 4 too, is refused: import it with the SDK that wrote it, and export again with
-this one.
+would import such a pair as one score; it refuses version 5 instead. Version 6 added
+`prompts.jsonl` and `prompt_versions.jsonl`, and version 7 added `blind_queues.jsonl`. An export of an
+earlier version is refused: import it with the SDK that wrote it, and export again with this one.
+
+`martian evals push` sends runs to a server as lines of this format, under its name and version,
+written by the same code (`run_records` and `export_line`): a run's lines of `runs.jsonl`,
+`case_results.jsonl`, `scores.jsonl` and `scoring_jobs.jsonl`, its project's `projects.jsonl` line
+and its traces' `traces.jsonl` lines. So a change to one of those lines is a new version for the
+push too, and a server reads pushes of its own version only ([pushed runs](evals-core.md#pushed-runs)).
 
 ## Exporting and resuming
 
-An export runs in steps, in a fixed order: for each project, its definitions (the project, its
-scorers, questions, suites, drafts, dataset publications and views, and its judges' calibrations
-and re-checks), then each dataset version, each run, its monitoring (monitors, schedules and
-thresholds with their history), and each page of 500 traces. Monitoring comes before the traces,
-so every trace a monitor took is among the traces exported. Before the first step it lists the
-projects, their dataset versions and their runs
+An export runs in steps, in a fixed order: first the organisation's prompts with their versions,
+then for each project, its definitions (the project, its scorers, questions, suites, drafts,
+dataset publications and views, and its judges' calibrations and re-checks), then each dataset
+version, each run, its monitoring (monitors, schedules and thresholds with their history), and
+each page of 500 traces. Monitoring comes before the traces, so every trace a monitor took is
+among the traces exported. Before the first step it lists the projects, their dataset versions and
+their runs
 in `export-plan.json`. After each step it flushes the files and records in
 `export-progress.json` how long each file is and where the next step starts.
 
@@ -210,22 +230,24 @@ as it does for any run no process is working on. An import does not refuse the e
 
 An import goes into a fresh install: one whose projects hold no runs, datasets, traces, suites,
 drafts, dataset publications, views, scorers, review questions, monitors, schedules, thresholds,
-judge calibrations or re-checks for the principal. A project the install already has
+judge calibrations or re-checks for the principal, and no prompts. A project the install already has
 under the same id, such as the local edition's empty default project, is used as it is; one with
 another name is refused.
 
 Before anything is written, the import checks the manifest's format and version and each file's
 size, line count and SHA-256, and each artifact's SHA-256. It then writes every object through the
-interfaces, creating what an object refers to before the object: projects, scorers, questions,
+interfaces, creating what an object refers to before the object: prompts with their versions,
+each with its number, author and time (`EvalStore.import_prompt`), projects, scorers, questions,
 dataset versions, dataset publications (a published one finished again as the receiving store's
 version, so a run of that version is still checked against its manifest), suites, runs (in the
 store, then in the record store), traces with their scores, case results, scores, scoring jobs,
-reviews, queues, artifacts, drafts and views, then monitors with the traces they took, schedules
+blind queues (before their reviews and queues, so a blind queue is never ordinary in the fresh
+install), reviews, queues, artifacts, drafts and views, then monitors with the traces they took, schedules
 with their slots, thresholds with their status and alerts, and judge calibrations and their
 re-checks, each as it was saved, who saved it and when included; projects that were archived are
 archived last. A dataset version that does not come back with its digest,
-version and case count, or a suite or scorer version given another version number, stops the
-import. An import that stops leaves what it
+version and case count, or a suite, scorer or prompt version given another version number, stops
+the import. An import that stops leaves what it
 wrote; import into a fresh install again.
 
 The receiving store assigns its own identifiers and bookkeeping for what it creates; the import
@@ -283,9 +305,11 @@ in the fresh install, that the outbox's deliveries stay behind, that the import 
 and that no file of the export holds the threshold's webhook secret (a canary), which the fresh
 install does not have until it is given again, once; on the in-memory store, that the published
 version is still pinned by its manifest in the fresh install, and that the person's answer named
-like the judge comes back beside the judge's score in both exports. It checks that every table of the
-record store and every kind of object of the two interfaces is exported or left out with a reason.
-It interrupts an export inside a run's step, inside the monitoring step and on a page of traces,
-resumes it and compares the files byte for byte with an uninterrupted export, and covers what an
-export and an import refuse (a slot whose run started after the export did among them) and both
-commands.
+like the judge comes back beside the judge's score in both exports. Prompt versions another member
+added come back with that member as their author, not the importing user, and their own times;
+`tests/evals/store_contract.py` checks `import_prompt` on both bindings. It checks that every table
+of the record store and every kind of object of the two interfaces is exported or left out with a
+reason. It interrupts an export inside a run's step, inside the monitoring step and on a page of
+traces, resumes it and compares the files byte for byte with an uninterrupted export, and covers
+what an export and an import refuse (a slot whose run started after the export did among them) and
+both commands.

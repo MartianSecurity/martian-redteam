@@ -8,6 +8,7 @@ compares them. The routes build these from the shared model in ``martian.evals.s
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal
@@ -126,4 +127,24 @@ class TraceQuery(BaseModel):
             raise ValueError("Start must precede end")
         if bool(self.assessment) != bool(self.assessment_value):
             raise ValueError("Choose an assessment name and value together")
+        return self
+
+
+# A triage decision on quality issues' traces (POST /quality-issues/triage).
+class IssueTriageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: uuid.UUID | None = None
+    trace_ids: list[str] = Field(min_length=1, max_length=100)
+    state: Literal["open", "investigating", "resolved", "dismissed"]
+    rationale: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def valid_ids(self) -> IssueTriageRequest:
+        if any(not re.fullmatch(r"tr-[a-f0-9]{32}", i) for i in self.trace_ids) or len(set(self.trace_ids)) != len(
+            self.trace_ids
+        ):
+            raise ValueError("Choose unique trace IDs")
+        if not self.rationale.strip():
+            raise ValueError("Explain this triage decision")
         return self
