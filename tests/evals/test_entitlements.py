@@ -3,7 +3,7 @@
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, Header, HTTPException
+from fastapi import Header, HTTPException
 from fastapi.testclient import TestClient
 
 from martian.evals.records.sql import SqlRecordStore
@@ -25,9 +25,14 @@ from martian.evals.server import (
     resolve_edition,
 )
 from martian.evals.store import MemoryStore
+from tests.evals.evals_contract import operation
 
-# These tests read no records; an in-memory record store satisfies create_app.
-RECORDS = SqlRecordStore("sqlite://")
+
+@pytest.fixture
+def records(tmp_path):
+    store = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    yield store
+    store.close()
 
 
 def test_the_key_list_and_the_edition_sets():
@@ -67,7 +72,8 @@ def test_entitlements_hold_only_known_keys():
         require_entitlement("sso")
 
 
-def _app_with_paid_route(entitlements):
+def _app_with_paid_route(records, entitlements):
+    """The core's own review queue route, which the edition map gates."""
     plans = {"org-community": "community", "org-enterprise": "enterprise"}
 
     def from_header(x_org: Annotated[str | None, Header()] = None) -> Principal:
@@ -75,37 +81,29 @@ def _app_with_paid_route(entitlements):
             raise HTTPException(401, "Sign in")
         return organisation_principal("user-1", x_org, frozenset({"member"}))
 
-    app = create_app(
-        records=RECORDS,
+    return create_app(
+        records=records,
         store=MemoryStore(),
         principal=from_header,
         entitlements=entitlements or (lambda p: entitlements_for(resolve_edition(plan=plans[p.organisation_id]))),
     )
 
-    @app.get("/v1/evals/review-queues", dependencies=[Depends(require_entitlement("review_queues"))])
-    def queues() -> dict[str, list[str]]:
-        return {"items": []}
 
-    return app
+NO_QUEUES = {"items": [], "total": 0, "has_more": False, "page": 1, "limit": 25}
 
 
-def test_a_paid_route_is_refused_in_community_with_a_clear_error():
-    client = TestClient(_app_with_paid_route(None))
+def test_a_paid_route_is_refused_in_community_with_a_clear_error(records):
+    client = TestClient(_app_with_paid_route(records, None))
     refused = client.get("/v1/evals/review-queues", headers={"x-org": "org-community"})
     assert refused.status_code == 403
     assert refused.json() == {"detail": "The Community edition does not include review queues"}
     allowed = client.get("/v1/evals/review-queues", headers={"x-org": "org-enterprise"})
-    assert (allowed.status_code, allowed.json()) == (200, {"items": []})
+    assert (allowed.status_code, allowed.json()) == (200, NO_QUEUES)
     assert client.get("/v1/evals/review-queues").status_code == 401  # sign-in is checked first
 
 
-def test_the_local_edition_is_community_by_default_and_refuses_paid_routes():
-    app = create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER)
-
-    @app.get("/v1/evals/monitoring", dependencies=[Depends(require_entitlement("monitoring"))])
-    def monitoring() -> dict[str, list[str]]:
-        return {"items": []}
-
+def test_the_local_edition_is_community_by_default_and_refuses_paid_routes(records):
+    app = create_app(records=records, store=MemoryStore(), principal=lambda: SINGLE_USER)
     response = TestClient(app).get("/v1/evals/monitoring")
     assert (response.status_code, response.json()) == (
         403,
@@ -123,11 +121,12 @@ def test_part_of_a_request_can_need_a_feature():
     )
 
 
-def test_an_on_premises_licence_turns_the_paid_routes_on():
-    client = TestClient(_app_with_paid_route(lambda _p: entitlements_for(resolve_edition(licence="on_premises"))))
-    assert client.get("/v1/evals/review-queues", headers={"x-org": "org-community"}).status_code == 200
+def test_an_on_premises_licence_turns_the_paid_routes_on(records):
+    licence = _app_with_paid_route(records, lambda _p: entitlements_for(resolve_edition(licence="on_premises")))
+    assert TestClient(licence).get("/v1/evals/review-queues", headers={"x-org": "org-community"}).status_code == 200
 
 
-def test_the_refusal_adds_nothing_to_the_route_contract():
-    operation = _app_with_paid_route(None).openapi()["paths"]["/v1/evals/review-queues"]["get"]
-    assert "parameters" not in operation and set(operation["responses"]) == {"200"}
+def test_the_refusal_adds_nothing_to_the_route_contract(records):
+    openapi = _app_with_paid_route(records, None).openapi()["paths"]
+    for path in ("/v1/evals/review-queues", "/v1/evals/monitoring"):
+        assert openapi[path]["get"] == operation("get", path)
