@@ -114,4 +114,5 @@ dev = [
     "jsonschema>=4.23,<5",
     "pytest-xdist>=3.8.0",
     "twine>=7.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
 ]
