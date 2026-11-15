@@ -590,7 +590,9 @@ A judge's pass rate says how often it passes, not how often it is right. `martia
 compares a judge version's verdicts with the labels people gave the same items. The evals core
 reports it for every judge version of a project (`GET /v1/evals/judge-agreement`), the Evals UI
 shows it on the Judges page, and the SDK computes it from scores and reviews or from a suite-file
-run's results. A report saved as a judge version's [calibration](#calibration) says when the
+run's results. Beside it the report gives how far people agree with each other on the same
+question ([agreement between reviewers](#agreement-between-reviewers)), the most a judge can be
+expected to reach. A report saved as a judge version's [calibration](#calibration) says when the
 judge was last checked, and each judge score names the calibration that applied. No model is
 called.
 
@@ -658,9 +660,69 @@ compares any two sets of values item by item, the first the one being checked; a
 
 | Where | What |
 | --- | --- |
-| [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read |
-| The Evals UI's Judges page | An agreement panel with a row per judge version, its calibration with its date or "Unchecked", and an action to save a measured report as its calibration; each version's agreement and calibration in its version history; and on a judge score's detail, the calibration that applied. The Martian server does not serve these routes yet, so against the server the page shows none of them |
+| [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read, and the reviewers' agreement on each question named like a judge |
+| The Evals UI's Judges page | An agreement panel with a row per judge version, the reviewers' agreement on its question beside it, its calibration with its date or "Unchecked", and an action to save a measured report as its calibration; each version's agreement and calibration in its version history; and on a judge score's detail, the calibration that applied. The Martian server does not serve these routes yet, so against the server the page shows none of them |
 | `martian evals run` | Nothing: people label after the run. Use `results_agreement` on its results, or review it in `martian ui` |
+
+### Agreement between reviewers
+
+A label is one person's answer, and people disagree. When two or more people answered the same
+question about the same case result, `martian.evals.agreement` measures how far they agree with
+each other: the most a judge can be expected to agree with them on that question, since a judge
+that agreed more often would be agreeing with one reviewer's habits rather than with people. The
+evals core reports it for every review queue of a project (`GET /v1/evals/reviewer-agreement`),
+the stand-alone Evals UI shows it for a queue on the Reviews page and beside each judge's
+agreement on the Judges page, and the SDK computes it from reviews and queues. The Martian server
+does not serve the route, so the console shows neither. No model is called.
+
+**Which answers meet.** An item is a run, a case and a question, the criterion a review of a
+[review queue](evals-core.md#write-routes) answers. On each item each reviewer counts once, with
+their newest review: a complete one is their answer, and a pending one withdraws it. When a second
+person answers, their review follows the first in the case's chain and becomes the current one, the
+label a judge is compared with; the first person's answer still counts here. A review that names
+no reviewer counts for nobody, and a review outside a queue answers `human_review`, no queue's
+question, so it is not counted. An item is `shared` when two or more reviewers answered it; only
+shared items are compared, `answered` counts the items anyone answered, and `reviewers` the people
+who answered shared ones. An answer of another kind than the question's is counted in
+`incomparable` and left out.
+
+| Question's answers | What is reported |
+| --- | --- |
+| Pass/fail and categories | `agreement`, the share of shared items on which every reviewer gave the same answer, with its Wilson interval; `kappa`, that agreement corrected for chance |
+| Numbers | `mean_absolute_difference`, how far apart two reviewers' answers to an item are on average, with its Student t interval over the items; and `concordance`, the coefficient `method` names |
+| Free text | Nothing (`not_comparable`) |
+
+- **Two reviewers or more.** `method` says which coefficient was used. With two reviewers across
+  the shared items, their answers are paired item by item: Cohen's kappa (`cohen`) for pass/fail
+  and categories, Lin's concordance (`lin`) for numbers, the measures a judge's report uses. With
+  three or more, each item may have its own reviewers and its own number of them: Fleiss' kappa
+  (`fleiss`), each item's agreement taken over its own pairs of answers, and the intraclass
+  correlation ICC(1) (`icc`), the one-way random-effects model.
+- **How many items it rests on.** Below 30 shared items (`minimum`, `MINIMUM_LABELLED`) the
+  `status` is `too_few`: the counts, and `agreed` for pass/fail and categories, are given, and
+  `method` and every rate, interval and coefficient are `null`, as for a judge.
+- **What it does not say.** The core does not hide one reviewer's answer from the next, so a second
+  reviewer may see the first answer before giving theirs, which makes people look more alike than
+  they are. The local edition (`martian ui`) is Community, with no review queues, and has one
+  user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
+  organisation's members does.
+- **Per queue and per question.** The route reports each queue with a report per question, and
+  each question across every queue that asks it, its kind the newest such queue's. The judge
+  report's `reviewer_agreement` is the latter for each question named like one of its judges. Its
+  `kind` is the question's, which may differ from the judge's.
+
+```python
+from martian.evals.agreement import queue_agreement, question_agreement
+
+# reviews: every link of each review chain (records.list_reviews(..., current_only=False));
+# queues: the ReviewQueue objects they answer.
+for report in queue_agreement(reviews, queues):
+    for found in report.questions:
+        print(report.name, found.question, found.status, found.shared, found.method, found.kappa)
+```
+
+`compare_reviewers` compares answers given as one mapping of reviewer to answer per item, and
+`fleiss_kappa` and `intraclass_correlation` are the coefficients for more than two reviewers.
 
 ### Calibration
 

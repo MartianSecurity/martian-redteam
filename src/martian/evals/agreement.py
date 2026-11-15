@@ -41,6 +41,31 @@ concordance have no interval.
 the second the reference. :func:`judge_agreement` reports every judge version from scores and
 reviews in the shared model, as the evals core's ``GET /v1/evals/judge-agreement`` does, and
 :func:`results_agreement` reports a suite-file run's checks against labels keyed by case.
+
+**Between reviewers.** People disagree with each other too, and a judge cannot be expected to
+agree with people more often than they agree among themselves. :func:`compare_reviewers` measures
+how far people's answers to one question agree on the items two or more of them answered, and
+:func:`queue_agreement` and :func:`question_agreement` report it from reviews and review queues,
+per queue and question and per question across queues, as the evals core's
+``GET /v1/evals/reviewer-agreement`` does:
+
+- **Items and answers.** An item is a case result (a run and a case) and the question a review
+  answers (its criterion). On each item each reviewer counts once, with their newest review of it:
+  a complete one is their answer, and a pending one withdraws it. A review that names no reviewer,
+  or whose queue is not reported, counts for nobody. An item is ``shared`` when two or more
+  reviewers answered it, and only shared items are compared.
+- **Two reviewers or more.** With two reviewers across the shared items, their answers are paired
+  item by item: ``method`` is ``cohen`` (Cohen's kappa, :func:`cohen_kappa`) for pass/fail and
+  categories, and ``lin`` (Lin's concordance, :func:`concordance`) for numbers. With more,
+  each item may have its own reviewers and number of them: ``method`` is ``fleiss``
+  (:func:`fleiss_kappa`) or ``icc`` (the intraclass correlation ICC(1),
+  :func:`intraclass_correlation`).
+- **Measures.** For pass/fail and categories ``agreement`` is the share of shared items on which
+  every reviewer gave the same answer, with its Wilson interval, and ``kappa`` that agreement
+  corrected for chance. For numbers ``mean_absolute_difference`` is how far apart two reviewers'
+  answers to an item are on average, with its Student t interval over the items, and
+  ``concordance`` is the coefficient ``method`` names. Free-text answers are not compared.
+- **Too few items** is :data:`MINIMUM_LABELLED` shared items, as for a judge.
 """
 
 from __future__ import annotations
@@ -51,20 +76,24 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from fractions import Fraction
+from itertools import combinations
 from pathlib import Path
 from statistics import fmean
 from typing import Any, Literal
 
-from martian.evals.model import Review, Score, Value, from_results_record
+from martian.evals.model import Review, ReviewQueue, Score, Value, from_results_record
 from martian.evals.panel import is_panel, member_sources
 from martian.evals.stats import Interval, mean_interval, wilson
 
 MINIMUM_LABELLED = 30
-"""The fewest labelled items a judge version's agreement is reported on. Below it the report gives
-the counts and says there are too few."""
+"""The fewest labelled items a judge version's agreement is reported on, and the fewest shared
+items people's agreement with each other is. Below it the report gives the counts and says there
+are too few."""
 
 Kind = Literal["boolean", "categorical", "numeric", "text"]
 Status = Literal["measured", "too_few", "not_comparable"]
+Method = Literal["cohen", "fleiss", "lin", "icc"]
 KINDS: tuple[Kind, ...] = ("boolean", "categorical", "numeric", "text")
 
 Item = tuple[str, ...]
@@ -158,6 +187,53 @@ def concordance(pairs: Sequence[tuple[float, float]]) -> float | None:
     if spread == 0:
         return 1.0
     return 2 * sxy / spread
+
+
+def fleiss_kappa(items: Sequence[Sequence[Value]]) -> float | None:
+    """Fleiss' kappa of categorical answers, each item answered by two or more people, not
+    necessarily the same people or as many: (P̄ − P_e) / (1 − P_e), with P̄ the mean over the items
+    of the share of an item's pairs of answers that match, Σ_k n_ik(n_ik − 1) / (n_i(n_i − 1)), and
+    P_e = Σ_k p_k², p_k the share of every answer that is k. With the same number of answers on
+    every item it is Fleiss' (1971). Exact over the counts. Items with fewer than two answers are
+    left out. None for no such item, or when every answer is the same."""
+    rated = [Counter(_key(value) for value in item) for item in items if len(item) >= 2]
+    if not rated:
+        return None
+    matching = Fraction(0)
+    totals: Counter[tuple[str, Value]] = Counter()
+    for counts in rated:
+        n = sum(counts.values())
+        matching += Fraction(sum(c * (c - 1) for c in counts.values()), n * (n - 1))
+        totals.update(counts)
+    observed = matching / len(rated)
+    answers = sum(totals.values())
+    chance = sum(Fraction(count, answers) ** 2 for count in totals.values())
+    if chance == 1:
+        return None
+    return float((observed - chance) / (1 - chance))
+
+
+def intraclass_correlation(items: Sequence[Sequence[float]]) -> float | None:
+    """The intraclass correlation ICC(1) of numeric answers, each item answered by two or more
+    people, not necessarily the same people or as many: the one-way random-effects model,
+    (MS_between − MS_within) / (MS_between + (n₀ − 1)·MS_within), with n₀ = (N − Σ n_i² / N) / (a − 1)
+    for a items of n_i answers, N in all. 1 when every item's answers are equal, including when no
+    answer differs from another. Items with fewer than two answers are left out. None for fewer
+    than two such items."""
+    rated = [[float(value) for value in item] for item in items if len(item) >= 2]
+    a = len(rated)
+    if a < 2:
+        return None
+    n = sum(len(item) for item in rated)
+    grand = math.fsum(value for item in rated for value in item) / n
+    means = [fmean(item) for item in rated]
+    between = math.fsum(len(item) * (mean - grand) ** 2 for item, mean in zip(rated, means, strict=True)) / (a - 1)
+    within = math.fsum((value - mean) ** 2 for item, mean in zip(rated, means, strict=True) for value in item) / (n - a)
+    n0 = (n - math.fsum(len(item) ** 2 for item in rated) / n) / (a - 1)
+    spread = between + (n0 - 1) * within
+    if spread == 0:
+        return 1.0
+    return (between - within) / spread
 
 
 def _key(value: Value) -> tuple[str, Value]:
@@ -465,6 +541,209 @@ def results_agreement(
     return [report for report in reports if (report.judge, report.version) in named]
 
 
+# --- between reviewers -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReviewerAgreement:
+    """People's answers to one question against each other, on the items two or more of them
+    answered.
+
+    ``answered`` counts the items anyone answered, ``shared`` those two or more reviewers answered,
+    which are the ones compared, and ``reviewers`` the people who answered the shared items.
+    ``incomparable`` counts answers of another kind than the question's, which are left out.
+    ``method`` names the coefficient: ``cohen`` or ``lin`` for two reviewers, ``fleiss`` or
+    ``icc`` for more; it, every rate, interval and coefficient are given only when measured, and
+    ``agreed`` (the shared items on which every reviewer gave the same answer, for pass/fail and
+    categories) whatever the status."""
+
+    question: str
+    kind: Kind
+    answered: int
+    shared: int
+    reviewers: int
+    incomparable: int
+    minimum: int
+    status: Status
+    method: Method | None = None
+    agreed: int | None = None
+    agreement: float | None = None
+    agreement_confidence_95: Interval | None = None
+    kappa: float | None = None
+    mean_absolute_difference: float | None = None
+    mean_absolute_difference_confidence_95: Interval | None = None
+    concordance: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """The report as the evals core serves it."""
+        return {
+            "question": self.question,
+            "kind": self.kind,
+            "answered": self.answered,
+            "shared": self.shared,
+            "reviewers": self.reviewers,
+            "incomparable": self.incomparable,
+            "minimum": self.minimum,
+            "status": self.status,
+            "method": self.method,
+            "agreed": self.agreed,
+            "agreement": self.agreement,
+            "agreement_confidence_95": _interval(self.agreement_confidence_95),
+            "kappa": self.kappa,
+            "mean_absolute_difference": self.mean_absolute_difference,
+            "mean_absolute_difference_confidence_95": _interval(self.mean_absolute_difference_confidence_95),
+            "concordance": self.concordance,
+        }
+
+
+@dataclass(frozen=True)
+class QueueAgreement:
+    """A review queue's reviewers' agreement, one report per question in the queue's order."""
+
+    queue_id: str
+    name: str
+    run_id: str
+    questions: tuple[ReviewerAgreement, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        """The queue's report as the evals core serves it."""
+        return {
+            "queue_id": self.queue_id,
+            "name": self.name,
+            "run_id": self.run_id,
+            "questions": [question.as_dict() for question in self.questions],
+        }
+
+
+def compare_reviewers(
+    items: Iterable[Mapping[str, Value]], kind: Kind, *, question: str = "", minimum: int = MINIMUM_LABELLED
+) -> ReviewerAgreement:
+    """People's answers to one question of ``kind`` against each other. Each item maps a reviewer
+    to their answer; an answer that is None or of another kind is left out."""
+    if minimum < 1:
+        raise ValueError("minimum must be at least 1")
+    if kind not in KINDS:
+        raise ValueError(f"unknown kind {kind!r}")
+    answered = incomparable = 0
+    shared: list[dict[str, Value]] = []
+    for item in items:
+        given = {reviewer: value for reviewer, value in item.items() if value is not None}
+        kept: dict[str, Value] = {reviewer: value for reviewer, value in given.items() if comparable(kind, value)}
+        incomparable += len(given) - len(kept)
+        answered += bool(kept)
+        if len(kept) >= 2:
+            shared.append(kept)
+    people = sorted({reviewer for item in shared for reviewer in item})
+    counts: dict[str, Any] = {
+        "question": question,
+        "kind": kind,
+        "answered": answered,
+        "shared": len(shared),
+        "reviewers": len(people),
+        "incomparable": incomparable,
+        "minimum": minimum,
+    }
+    if kind == "text":
+        return ReviewerAgreement(**counts, status="not_comparable")
+    measured = len(shared) >= minimum
+    status: Status = "measured" if measured else "too_few"
+    two = len(people) == 2
+    if kind == "numeric":
+        if not measured:
+            return ReviewerAgreement(**counts, status=status)
+        numbers = [{reviewer: float(value) for reviewer, value in item.items()} for item in shared]  # type: ignore[arg-type]
+        apart = [fmean(abs(a - b) for a, b in combinations(item.values(), 2)) for item in numbers]
+        coefficient = (
+            concordance([(item[people[0]], item[people[1]]) for item in numbers])
+            if two
+            else intraclass_correlation([list(item.values()) for item in numbers])
+        )
+        return ReviewerAgreement(
+            **counts,
+            status=status,
+            method="lin" if two else "icc",
+            mean_absolute_difference=fmean(apart),
+            mean_absolute_difference_confidence_95=mean_interval(apart),
+            concordance=coefficient,
+        )
+    agreed = sum(len({_key(value) for value in item.values()}) == 1 for item in shared)
+    if not measured:
+        return ReviewerAgreement(**counts, status=status, agreed=agreed)
+    return ReviewerAgreement(
+        **counts,
+        status=status,
+        method="cohen" if two else "fleiss",
+        agreed=agreed,
+        agreement=agreed / len(shared),
+        agreement_confidence_95=wilson(agreed, len(shared)),
+        kappa=cohen_kappa([(item[people[0]], item[people[1]]) for item in shared])
+        if two
+        else fleiss_kappa([list(item.values()) for item in shared]),
+    )
+
+
+def _answers(
+    reviews: Iterable[Review], queue_ids: set[str], *, by_queue: bool
+) -> dict[tuple[str, ...], dict[str, Value]]:
+    """Each item's answers by reviewer: each reviewer's newest review of the item, when it is
+    complete. An item is its queue (``by_queue``), run, case and question."""
+    newest = _newest(
+        (((r.queue_id or "") if by_queue else "", r.run_id, r.case_id, r.criterion, r.reviewer), r)
+        for r in reviews
+        if r.reviewer and r.queue_id in queue_ids
+    )
+    found: dict[tuple[str, ...], dict[str, Value]] = {}
+    for (queue, run, case, question, reviewer), review in newest.items():
+        if review.state == "complete" and review.value is not None:
+            found.setdefault((queue, run, case, question), {})[reviewer] = review.value
+    return found
+
+
+def queue_agreement(
+    reviews: Iterable[Review], queues: Iterable[ReviewQueue], *, minimum: int = MINIMUM_LABELLED
+) -> list[QueueAgreement]:
+    """Each review queue's reviewers' agreement on each of its questions, in the order the queues
+    are given. ``reviews`` are reviews of the queues' cases, every link of each chain
+    (``list_reviews(..., current_only=False)``): an answer a later review replaced still counts for
+    the reviewer who gave it."""
+    queues = list(queues)
+    answers = _answers(reviews, {queue.id for queue in queues}, by_queue=True)
+    grouped: dict[tuple[str, str], list[dict[str, Value]]] = {}
+    for (queue_id, _, _, question), found in answers.items():
+        grouped.setdefault((queue_id, question), []).append(found)
+    return [
+        QueueAgreement(
+            queue_id=queue.id,
+            name=queue.name,
+            run_id=queue.run_id,
+            questions=tuple(
+                compare_reviewers(grouped.get((queue.id, q.name), []), q.kind, question=q.name, minimum=minimum)
+                for q in queue.questions
+            ),
+        )
+        for queue in queues
+    ]
+
+
+def question_agreement(
+    reviews: Iterable[Review], queues: Iterable[ReviewQueue], *, minimum: int = MINIMUM_LABELLED
+) -> list[ReviewerAgreement]:
+    """Reviewers' agreement on each question the queues ask, across every queue that asks it, by
+    question name. A question's kind is its kind in the newest queue that asks it; an answer of
+    another kind is counted in ``incomparable``. ``reviews`` are as :func:`queue_agreement` takes."""
+    queues = sorted(queues, key=lambda queue: (queue.created_at or _OLDEST, queue.id), reverse=True)
+    kinds: dict[str, Kind] = {}
+    for queue in queues:
+        for question in queue.questions:
+            kinds.setdefault(question.name, question.kind)
+    grouped: dict[str, list[dict[str, Value]]] = {}
+    for (_, _, _, name), found in _answers(reviews, {queue.id for queue in queues}, by_queue=False).items():
+        grouped.setdefault(name, []).append(found)
+    return [
+        compare_reviewers(grouped.get(name, []), kinds[name], question=name, minimum=minimum) for name in sorted(kinds)
+    ]
+
+
 __all__ = [
     "KINDS",
     "MINIMUM_LABELLED",
@@ -472,14 +751,22 @@ __all__ = [
     "Item",
     "JudgeAgreement",
     "Kind",
+    "Method",
     "Pair",
+    "QueueAgreement",
+    "ReviewerAgreement",
     "Status",
     "cohen_kappa",
     "comparable",
     "compare",
+    "compare_reviewers",
     "concordance",
+    "fleiss_kappa",
+    "intraclass_correlation",
     "item_of",
     "judge_agreement",
+    "queue_agreement",
+    "question_agreement",
     "results_agreement",
     "value_kind",
 ]
