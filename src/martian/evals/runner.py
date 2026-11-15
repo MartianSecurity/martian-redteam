@@ -1568,6 +1568,7 @@ def run_suite(
             limit=limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
             repeats=repeat_plan if repeated else None,
+            conversations=sum("turns" in case for case in cases),
         )
         # Leave MLflow as it was found: another evaluation in this process must not inherit this
         # run's store, experiment or worker settings.

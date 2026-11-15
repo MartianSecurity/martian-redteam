@@ -18,9 +18,11 @@
   each attempt's trace is recorded with that attempt's verdicts. The case result's trace is its
   representative attempt's (:func:`martian.evals.repeats.representative`). Its scores are the
   attempts combined, which no one trace carries, so they name no trace.
-- A conversation case's result holds its session id and every turn it sent. Each turn's trace is
-  recorded with that turn's verdicts and the conversation's session id, so the turns group into
-  one session; with repeats each attempt's turns are, under that attempt's own session id. The
+- When the run has conversation cases, the run's ``provenance`` holds how many under
+  ``conversations``. A conversation case's result holds its session id and every turn it sent.
+  Each turn's trace is recorded with that turn's verdicts and the conversation's session id, so
+  the turns group into one session; with repeats each attempt's turns are, under that attempt's
+  own session id. The
   case result's trace is that of its first turn whose verdict is the conversation's, else of its
   first turn, its latency the turns' latencies added up. Its scores are the conversation's
   verdicts, which no one trace carries, so they name no trace.
@@ -124,14 +126,27 @@ class RunRecorder:
         limit: int | None,
         reused: list[GradedCase],
         repeats: dict[str, Any] | None = None,
+        conversations: int = 0,
     ) -> Run:
         """Record that the run started over ``planned`` of the dataset's ``total`` cases, with the
-        results it reuses from earlier runs, and with ``repeats``, the suite's repeat plan, when
-        it runs each case more than once."""
-        return _wait(self._start(planned=planned, total=total, limit=limit, reused=reused, repeats=repeats))
+        results it reuses from earlier runs, with ``repeats``, the suite's repeat plan, when it
+        runs each case more than once, and with ``conversations``, how many of the planned cases
+        are conversations."""
+        return _wait(
+            self._start(
+                planned=planned, total=total, limit=limit, reused=reused, repeats=repeats, conversations=conversations
+            )
+        )
 
     async def _start(
-        self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase], repeats: dict[str, Any] | None
+        self,
+        *,
+        planned: int,
+        total: int,
+        limit: int | None,
+        reused: list[GradedCase],
+        repeats: dict[str, Any] | None,
+        conversations: int,
     ) -> Run:
         from martian.evals.local_runs import PROCESS, RunLock
 
@@ -144,6 +159,8 @@ class RunRecorder:
         }
         if repeats is not None:
             provenance["repeats"] = repeats
+        if conversations:
+            provenance["conversations"] = conversations
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,

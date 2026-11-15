@@ -177,6 +177,9 @@ def test_a_scripted_three_turn_case_is_scored_per_turn_and_as_a_whole(tmp_path):
         "failed",
         "My order number is A-1002.",
     )
+    # The run's provenance says how many of its cases are conversations, so a page asks the turns
+    # route only for a run that has some.
+    assert detail["provenance"]["conversations"] == 2
     talks = {item["dataset_item_id"]: item for item in client.get(f"/v1/evals/{run_id}/turns").json()["items"]}
     shown = talks["cancel-later"]
     assert (shown["id"], shown["status"], shown["session_id"]) == (
@@ -402,6 +405,8 @@ def test_repeats_and_limits_treat_a_conversation_as_one_case(tmp_path):
     detail = client.get(f"/v1/evals/{run_id}").json()
     validate_response("get", "/v1/evals/{run_id}", detail)
     assert detail["planned_count"] == 1 and detail["truncated"] is True
+    # Only the planned cases count: the limit leaves one of the two conversations.
+    assert detail["provenance"]["conversations"] == 1
 
 
 # ---------- the suite file and the model ----------
@@ -530,8 +535,10 @@ def test_a_single_turn_run_has_no_conversation_fields_and_no_turns(tmp_path):
     summary = run_suite(suite(tmp_path, [{"id": "a", "input": "hi"}], target=FUNCTION, checks=CONTAINS))
     assert "conversations" not in summary and "scope" not in summary["checks"]["contains"]
     assert set(results_of(tmp_path)["a"]) == {"id", "passed", "checks", "inputs", "output", "error", "fingerprint"}
-    found = local_ui(tmp_path).get(f"/v1/evals/{summary['run']['id']}/turns").json()
+    client = local_ui(tmp_path)
+    found = client.get(f"/v1/evals/{summary['run']['id']}/turns").json()
     assert found == {"run_id": summary["run"]["id"], "items": []}
+    assert "conversations" not in client.get(f"/v1/evals/{summary['run']['id']}").json()["provenance"]
 
 
 # ---------- the worker ----------
