@@ -64,6 +64,8 @@ WRITE_OPERATIONS = [
 # (tests/evals/test_bootstrap.py). CI gate sessions and tokens stay with the server's CI gate, and
 # the explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap")}
+# The core's own route, which the server's contract does not have (MorningHQ/martian-notes#180).
+OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts")}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),

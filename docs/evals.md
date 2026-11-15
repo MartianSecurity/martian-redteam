@@ -73,7 +73,7 @@ target:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case |
+| `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case, or per attempt with [repeats](#repeated-attempts) |
 | `body` | Yes | The JSON body, with placeholders in its string values |
 | `headers` | No | Request headers |
 | `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
@@ -125,21 +125,23 @@ and give repeated check types a `name`.
 
 | File | Content |
 | --- | --- |
-| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`) |
-| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), and `case_groups` when the data names groups |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). With repeats, also `repeats` and `attempts` |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
-interval, such as `67% (20–94%)`, and the reasons cases had no verdict. It exits `0` when every
-case passed, `1` when a case failed, and `2` when a case has no verdict or the suite file is invalid.
+interval, such as `67% (20–94%)`, with repeats the rule each check's attempts combined by, and
+the reasons cases had no verdict. It exits `0` when every case passed, `1` when a case failed,
+and `2` when a case has no verdict or the suite file is invalid.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
-run that is stopped can be started again: finished cases are skipped, and cases that errored are
-tried again. `--fresh` discards earlier results. `--data-dir` names the local Evals UI's data
-folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`, else
-`~/.martian/evals`.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh` and
+`--data-dir DIR`. A run that is stopped can be started again: finished cases are skipped, and
+cases that errored are tried again. `--repeats` runs each case N times, 1 to 100, in place of the
+suite file's `repeats` ([repeated attempts](#repeated-attempts)). `--fresh` discards earlier
+results. `--data-dir` names the local Evals UI's data folder the run is recorded in, as for
+`martian ui`; without it, `MARTIAN_EVALS_HOME`, else `~/.martian/evals`.
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
 comment on the pull request with the result, still with no Martian account. See
@@ -147,7 +149,8 @@ comment on the pull request with the result, still with no Martian account. See
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
-inputs, expectations and stored output, and the SDK version. A function target counts by the
+inputs, expectations and stored output, the number of attempts and the rule each check's attempts
+combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
@@ -214,6 +217,78 @@ results, with a message naming the setting to check, and the rest of the run car
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
+## Repeated attempts
+
+A case that fails one time in five passes a gate that runs it once four times out of five.
+`repeats` runs each case several times and combines each check's verdicts over the attempts by a
+rule, so a case that is not reliably right fails:
+
+```yaml
+repeats: 5                 # attempts of each case, 1 to 100; default 1
+combine: majority          # the suite's rule: all (the default), majority or any
+checks:
+  - type: not_contains     # a security check: all, whatever the suite's rule
+    name: no_secret_leak
+    expectation: secret
+  - type: rubric           # the suite's rule: majority
+    rubric: "Pass if the reply answers the question."
+  - type: contains
+    values: ["thank"]
+    combine: any           # its own rule
+```
+
+`martian evals run evals.yaml --repeats 5`, or `run_suite(path, repeats=5)` from
+`martian.evals.runner`, replaces the file's `repeats` for one run. Each attempt calls the target
+and every judge again, so five attempts cost five times as much.
+
+| Rule | A check passes the case when |
+| --- | --- |
+| `all` | Every attempt passed it |
+| `majority` | More than half of the attempts passed it; a tie fails |
+| `any` | At least one attempt passed it |
+
+- **Which rule a check uses.** Its own `combine`, when it names one. Otherwise `all` for a
+  security check, and the suite's `combine` for any other. The suite's `combine` is `all` unless
+  it names another, so a suite that names no rule needs every attempt to pass every check.
+- **Security checks** are `not_contains` and `not_matches`, the checks that fail a reply for
+  holding something it must never hold, such as a secret or a key. One leak in five attempts fails
+  the case, even when the suite takes `majority` or `any`; a security check combines more loosely
+  only when it names its own `combine`. An LLM judge is not a security check by its type: give a
+  judge that guards a secret `combine: all` when the suite's rule is looser.
+- **A case passes** when every check, combined, passes it, as with one attempt.
+- **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
+  verdict, could have gone either way. A combined verdict stands when it is the same both ways;
+  otherwise the case has no verdict, the run exits `2`, and the next run tries the case again,
+  every attempt of it. So under `all` one failed attempt fails the check whatever the others did,
+  and under `any` one passing attempt passes it.
+- **Counts and pass rates are of cases.** A case counts once, by its combined verdict, in
+  `passed`, `failed`, `errors`, each pass rate and its [interval](#pass-rates-and-confidence-intervals).
+  Five attempts of one case are not five cases: they are related, as grouped cases are, and an
+  interval over attempts would be narrower than the evidence.
+- **Comparing two runs** pairs the cases' combined verdicts
+  ([comparing two runs](#comparing-two-runs)). A run that repeats against one that does not, or
+  two runs with different rules, compare different verdicts, so the label measures the change of
+  rule as well as the change of system.
+- **Resume.** The number of attempts and the rule each check combines by are part of what a
+  reused verdict depends on, so changing either grades the cases again. With one attempt every
+  rule gives the same verdict, so `combine` alone changes nothing.
+- **Not in the dataset gate.** Repeats belong to suite-file runs. The pytest gate (`assert_gate`,
+  `assert_checks`) evaluates each row once, and the platform re-scores one output per pinned item.
+
+Every attempt is recorded:
+
+| Where | What |
+| --- | --- |
+| `results.jsonl` | The case's `passed` and `checks` are the attempts combined, and each check's `rationale` says how the attempts went and what its rule asks, such as `4 of 5 attempts passed, 1 failed (all: every attempt must pass)`. `attempts` lists every attempt in order: its `number`, `passed`, `checks` (each with its own verdict, rationale and error), `output` and `error`. The case's `output` and `error` are those of its first attempt with the case's verdict, else of its first attempt: under `all`, a failed case shows an attempt that failed |
+| `summary.json` | `repeats`: the attempts of each case (`attempts`), the suite's rule (`combine`), and each check's rule with where it came from (`checks.<label>.combine` and `from`: `check`, `security` or `suite`). `attempts`: the attempts' own counts, `total`, `passed`, `failed` and `errors`, and the same per check under `checks.<label>.attempts`. `target_errors` and `check_errors` count attempts |
+| `junit.xml` | The `repeats` property and each check's rule, `check.<label>.combine` |
+| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The attempts of each case and each check's rule |
+| The local Evals UI's data folder | The case result holds every attempt, each with its own trace, named `<run> <case> attempt <n>` and carrying that attempt's verdicts; the case's trace is that of the attempt that shows its reply. The run's `provenance` holds `repeats` as `summary.json` has it. [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) returns both. The Evals UI's pages do not show attempts yet |
+
+A run without repeats writes and records exactly what it did before: no `attempts`, no `repeats`.
+The share of cases that pass every attempt, and the cases whose verdict changes between attempts,
+are not reported yet (MorningHQ/martian-notes#183).
+
 ## Pass rates and confidence intervals
 
 A pass rate from a few dozen cases is uncertain: 8 of 10 and 80 of 100 are both 80%. The pass
@@ -229,8 +304,9 @@ rates do not report intervals.
 | Grouped cases | Both widened by the cluster-robust (CR1) design effect | See below |
 
 A pass rate counts only cases with a verdict: errors and missing scores are reported beside it,
-not counted as failures. Shown as text, a rate is rounded to the nearest percent and its bounds
-outward, so `67% (20–94%)` always contains the computed interval.
+not counted as failures. A case run several times counts once, by its attempts combined
+([repeated attempts](#repeated-attempts)). Shown as text, a rate is rounded to the nearest
+percent and its bounds outward, so `67% (20–94%)` always contains the computed interval.
 
 **Grouped cases.** Cases that share a `group` in the data file are related, so they tell less than
 the same number of independent cases. With n cases in k ≥ 2 groups and e the difference of each
@@ -264,7 +340,8 @@ traces, which can share a session, as independent too.
 ### Comparing two runs
 
 Two runs of the same data compare case by case: each case is a pair, one result from each run,
-so how much cases differ from each other does not count as noise. The evals core labels a
+so how much cases differ from each other does not count as noise. A case run several times is
+one pair, by its attempts combined ([repeated attempts](#repeated-attempts)). The evals core labels a
 comparison **better**, **worse** or **within noise** with a paired test (`martian.evals.stats`):
 
 | Measure | Test | p-value |

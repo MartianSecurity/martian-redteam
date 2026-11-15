@@ -25,7 +25,7 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Case, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
+from martian.evals.model import Case, Repeats, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
 
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
@@ -56,6 +56,9 @@ SUITE_FILE_FIELDS = {
     "checks.case_sensitive": "ScorerVersion.parameters.case_sensitive",
     "checks.pattern": "ScorerVersion.parameters.pattern",
     "checks.required_keys": "ScorerVersion.parameters.required_keys",
+    "checks.combine": "Suite.repeats.checks, by the check's label",
+    "repeats": "Suite.repeats.attempts",
+    "combine": "Suite.repeats.combine",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -65,7 +68,10 @@ SUITE_FILE_FIELDS = {
     "mlflow.experiment": "RunSettings.mlflow_experiment",
 }
 
-# The check fields each check type uses besides `type` and `name`. Loading refuses the others.
+# The fields every check type takes: its type, its label and the rule its attempts combine by.
+COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
+
+# The check fields each check type uses besides COMMON_CHECK_FIELDS. Loading refuses the others.
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
@@ -178,6 +184,11 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
             "target": _target(file_suite.target),
             "scorers": [_scorer(position, check, file_suite.judge) for position, check in enumerate(file_suite.checks)],
             "settings": _settings(file_suite),
+            "repeats": Repeats(
+                attempts=file_suite.repeats,
+                combine=file_suite.combine,
+                checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
+            ),
         }
     except ValidationError as error:
         raise ConfigError(f"the suite does not fit the model: {_problems(error)}") from None
@@ -198,7 +209,7 @@ def _target(reference: runner.TargetRef | None) -> Target:
 
 
 def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | None) -> ScorerVersion:
-    given = check.model_fields_set - {"type", "name"}
+    given = check.model_fields_set - COMMON_CHECK_FIELDS
     if unused := sorted(given - CHECK_OPTIONS[check.type]):
         raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
@@ -293,10 +304,17 @@ def _file(suite: Suite) -> dict[str, Any]:
     file: dict[str, Any] = {"data": suite.dataset_location}
     if (target := _target_file(suite.target, settings)) is not None:
         file["target"] = target
-    checks = [_check_file(position, scorer) for position, scorer in enumerate(suite.scorers)]
+    repeats = suite.repeats
+    checks = [
+        _check_file(position, scorer, repeats.checks.get(scorer.name)) for position, scorer in enumerate(suite.scorers)
+    ]
     if (judge := _judge_file(suite.scorers, settings)) is not None:
         file["judge"] = judge
     file["checks"] = checks
+    if repeats.attempts != 1:
+        file["repeats"] = repeats.attempts
+    if repeats.combine != "all":
+        file["combine"] = repeats.combine
     for name in ("concurrency", "batch", "output"):
         if (value := getattr(settings, name)) is not None:
             file[name] = value
@@ -362,7 +380,7 @@ def _judge_file(scorers: list[ScorerVersion], settings: RunSettings) -> dict[str
     return written | transport
 
 
-def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:
+def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> dict[str, Any]:
     where = f"scorers.{position}"
     if scorer.version:
         raise ConfigError(f"{where}: a suite file does not pin a scorer version")
@@ -385,11 +403,14 @@ def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:
     written: dict[str, Any] = {"type": scorer.type}
     if scorer.name != _label(scorer.type):
         written["name"] = scorer.name
+    if combine is not None:
+        written["combine"] = combine
     return written | options
 
 
 __all__ = [
     "CHECK_OPTIONS",
+    "COMMON_CHECK_FIELDS",
     "SUITE_FILE_FIELDS",
     "cases_to_jsonl",
     "load_suite_file",

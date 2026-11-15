@@ -130,6 +130,8 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
         if summary["groups"]:
             plural = "group" if summary["groups"] == 1 else "groups"
             lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
+        if repeats := summary.get("repeats"):
+            lines.append(f"\n{_repeats(repeats)}")
         lines.append("")
         failed = [case for case in outcome.cases if case["passed"] is False]
         errored = [case for case in outcome.cases if case["passed"] is None]
@@ -157,8 +159,20 @@ def _table(
     return [*lines, ""]
 
 
-def _names(names: list[str]) -> str:
-    shown = ", ".join(code(name) for name in names[:5])
+def _repeats(repeats: Mapping[str, Any]) -> str:
+    """How many times each case ran, and which checks' attempts combined by which rule."""
+    by_rule: dict[str, list[str]] = {}
+    for name, rule in repeats["checks"].items():
+        by_rule.setdefault(rule["combine"], []).append(name)
+    rules = "; ".join(f"{code(rule, cell=False)} for {_names(names, cell=False)}" for rule, names in by_rule.items())
+    return (
+        f"Each case ran {repeats['attempts']} times, and the counts are of cases: each check's attempts "
+        f"combine by its rule, {rules}."
+    )
+
+
+def _names(names: list[str], *, cell: bool = True) -> str:
+    shown = ", ".join(code(name, cell=cell) for name in names[:5])
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
