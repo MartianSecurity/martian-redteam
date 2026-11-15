@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, with their [score trends](#score-trends), [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, with their [score trends](#score-trends), [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended, and again [when the model behind it changes](#when-the-model-changes) | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -565,6 +565,41 @@ no registered agent, so an install with no martian-agents service runs functions
   the agent does, and holds nothing, such as a lease or a time, that changes while the agent does
   not. The server implements the executor when it mounts the core (MorningHQ/martian-notes#102).
 
+#### The model a target reports
+
+A provider can change the model behind an agent without notice, so the worker records the model
+that answered each case wherever the target reports one. A target call returns its output, or a
+`TargetReply(output, model)` (`martian.evals.worker`) that also names the model, as the target
+reported it (`gpt-4o-2024-08-06`):
+
+| Target | How it reports the model |
+| --- | --- |
+| An HTTP target | `model_path`, a path into the JSON response written as `response_path` is (`model` for an OpenAI-compatible reply), or `model_header`, a response header such as `X-Model`; one of them. `http_call` reads it from each response (`response_model` in `martian.evals.worker.targets`) |
+| A local target | A `model` target reads `model` from each chat completion, as `model_path` ([local targets](#local-targets)); an `http` target reports none, since the UI has no field for it |
+| A function | Returns a `TargetReply`; a function that returns its bare output reports none |
+| A registered agent | The executor's `call` returns a `TargetReply`. On the Martian server that is martian-agents' reply carrying the model the agent used, which its executor (`app/evals_targets.py` in MorningHQ/MartianBackend) passes on when it mounts the core (MorningHQ/martian-notes#102); until then registered agents report none |
+| A suite file's URL target under `martian evals run` | Not read: the command-line runner records no model for its runs |
+
+The worker keeps it, as text of at most 200 characters, in two places:
+
+- **The case's trace**: its `model`, and `gen_ai.response.model` on its `target` span, so the
+  Traces page shows it and the store's trace search finds it (`TraceQuery.model`,
+  [trace conventions](#trace-conventions)).
+- **The run**: `provenance.model`, with `name`, the model of the latest case that reported one,
+  and `cases`, how many cases each model answered (at most 20 models). A run whose model changed
+  part way counts both.
+
+A response that names no model, or a value that is not text, records none for that case; the
+case's output and verdict stand, since a target that reports no model is not wrong. `model_path`
+is refused as `response_path` is, naming `targets['ID'].model_path`. Both fields are part of an
+HTTP target as written, so of its pin ([the same target](#the-same-target-on-every-start)); unset,
+they are left out, so a target without them keeps its pin.
+
+`tests/evals/test_model_changes.py` runs an HTTP target on loopback that names its model in its
+JSON and in a header, and one that names none, and a function and a registered agent that return
+a `TargetReply`, and checks the model on every case's trace and span, in the run's provenance and
+in a trace search by model.
+
 `ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
 gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
 the HTTP target its run names, as written, with its work, and no other, so a target the run does
@@ -601,8 +636,8 @@ target is compared by:
 
 | Target | Its pin | What changes it |
 | --- | --- | --- |
-| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body` or `response_path`, or the id becoming another kind of target |
-| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target |
+| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body`, `response_path`, `model_path` or `model_header`, or the id becoming another kind of target |
+| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target. A `model` target's pin includes `model_path`, which an earlier release left out, so a run of one admitted by an earlier release and resumed after an upgrade fails as changed |
 | A function | `{"kind": "agent", "agent_id"}` | Only the id becoming another kind of target. A function is the installation's own code, with nothing to digest, so one replaced by another function under the same id is not detected; give the new function a new id |
 | A registered agent | The executor's `check`, asked again in the process that calls the agent | Whatever the executor's pin holds. On the Martian server that is the agent's approved connection, its revision and its approval (`EvalTarget.pin` in `app/evals_targets.py`) |
 
@@ -1289,12 +1324,6 @@ route reads the monitor's scored traces once, by time from the oldest window's s
 5,000, never a monitor's whole record, leaving out a trace older than the span; it also refuses
 more than 200 windows, an unknown monitor and a Community edition.
 
-What builds on it:
-
-| Issue | Change |
-| --- | --- |
-| MorningHQ/martian-notes#200 | Evaluating again when a model changes |
-
 ## Thresholds and alerts
 
 A threshold watches one scorer of a [monitor](#monitors), or the gate results of a
@@ -1535,7 +1564,8 @@ taking of due alerts on SQLite and Postgres.
 ## Schedules
 
 A schedule runs a saved suite version against a target unattended, every so many seconds or on a
-cron expression, always in UTC, and keeps a history of its runs. Schedules are part of the
+cron expression, always in UTC, and, if it is set to, again when the model behind the target
+changes ([below](#when-the-model-changes)), and keeps a history of its runs. Schedules are part of the
 `monitoring` feature key, so every route below needs an edition that includes it (Enterprise,
 On-Premises; Community is `403`), and the routes that change a schedule need the `run` capability,
 as a launch does. The routes are the core's own (`martian.evals.server.schedules`); the server's
@@ -1562,6 +1592,7 @@ frozen contract has none.
   "max_items": 100,
   "cron": "0 2 * * *",
   "limits": {"max_seconds": 1800, "max_judge_tokens": 200000},
+  "on_model_change": {"source": "traces", "settle_seconds": 300, "min_interval_seconds": 3600},
   "acknowledge_model_cost": true
 }
 ```
@@ -1584,6 +1615,10 @@ frozen contract has none.
   not pinned: each run pins it when it is admitted, as a launch does
   ([the same target](#the-same-target-on-every-start)), since a changed target is what a
   regression schedule is for.
+- **`on_model_change`**, optional, also runs the suite when the model behind the target changes:
+  `source` (`traces` or `runs`, required), `settle_seconds` (0 to 7 days, 300 by default) and
+  `min_interval_seconds` (at least 60, at most 30 days, 3600 by default)
+  ([when the model changes](#when-the-model-changes)).
 - **Refused when it is created:** a suite version not saved (`404`), a dataset not published
   (`422`), a target the worker does not know (`404`), a suite with a model judge without
   `acknowledge_model_cost` or on a worker without a judge (`422`), an archived project (`409`), a
@@ -1591,11 +1626,15 @@ frozen contract has none.
   installation's worker does not run schedules"). The schedule's id is derived from `request_id`:
   the same request again returns the same schedule, and another with that `request_id` is `409`.
 
-A schedule in a response carries its definition, `timezone`, `next_slot` (when its next run is
-due; `null` while it is paused, and in the past while no worker has taken its turn), its `state`
-(`active` or `paused`), `revision`, `active_since` (when it was created or last resumed), and its
-`progress`: `next_slot`, `last_slot` (the slot it last ran or skipped), `error` (why its last turn
-failed, else empty) and `last_turn_at`.
+A schedule in a response carries its definition, `on_model_change` among it (or `null`),
+`timezone`, `next_slot` (when its next run is due; `null` while it is paused, and in the past
+while no worker has taken its turn), its `state` (`active` or `paused`), `revision`,
+`active_since` (when it was created or last resumed), and its `progress`: `next_slot`,
+`last_slot` (the slot it last ran or skipped), `error` (why its last turn failed, else empty),
+`last_turn_at` and `model_watch`, how far it has watched the model (`null` until its first turn,
+and for a schedule without `on_model_change`): `model`, `candidate`, `candidate_since`,
+`watermark`, `observed`, `last_change_at`, `change`, `caught_up`, `error` and `checked_at`
+([when the model changes](#when-the-model-changes)).
 
 ### How the worker runs a schedule
 
@@ -1649,6 +1688,53 @@ schedule's row gives it back, due one lease later, for another worker. A deleted
 leaves the queue at its next slot. Pausing stops the next turn admitting a run; resuming moves
 `active_since` to then, so the slots of the pause are not run.
 
+### When the model changes
+
+A provider can update the model behind an agent without notice, and a regression suite should run
+again when it does. A schedule with `on_model_change` watches the model and runs its suite once
+when it changes, besides its slots (`martian.evals.worker.model_watch`). Its row then comes back
+every `model_watch_seconds` (60 unless `ScheduleServices` is given another) as well as at its
+slots, and at once while its watch has more to read; each turn reads the model first, then runs
+the slot if one is due.
+
+**Where the model is read**, the watch's `source`:
+
+| Source | What it reads | For |
+| --- | --- | --- |
+| `traces` | The model of the project's live traces, `Trace.model`, which the [trace conventions](#trace-conventions) map from `gen_ai.response.model` before `gen_ai.request.model`. It reads by time only, as a monitor does: request times from its `watermark` to `now - trace_settle_seconds` (20 unless `ScheduleServices` is given another), oldest first, at most 1,000 traces a turn, never older traffic. Traces of eval runs and traces in progress are not traffic | An agent whose project holds its production traffic, sent over [OpenTelemetry](#opentelemetry-traces) or recorded through the store |
+| `runs` | The model the target reported on the project's runs of it, `provenance.model` ([the model a target reports](#the-model-a-target-reports)), from the project's 100 newest runs, each counted once, when it finishes after the `watermark`. A run the schedule itself started evaluated the model it reports, so it moves the watch's `model` there and starts nothing | A target that reports its model: runs launched by hand, by CI or by the schedule |
+
+A trace whose search result names no model, such as one MLflow tracing wrote straight into the
+in-process binding's database (which maps such a trace only when it is read on its own), is not
+read. The watch reads from when the schedule was created or last resumed, so nothing seen while
+it was paused counts; on its first turn it starts from the latest model seen before that, if
+there is one, else from the first seen after.
+
+**What counts as a change.** The watch keeps `model`, the model the suite last ran for (at first
+the one it starts from, which runs nothing: the slots evaluate it). Another model becomes the
+`candidate`, from when it was first seen after the last sight of any other (`candidate_since`);
+seeing `model` again drops it, and a third model is the candidate from then. A candidate is a
+change once:
+
+1. **it has settled**: `settle_seconds` have passed since `candidate_since` with no other model
+   seen. This is the debounce. A model that flaps back and forth more often than that never
+   settles, so it starts nothing;
+2. **and the interval has passed**: `min_interval_seconds` since the last change that started the
+   suite (`last_change_at`). A change that settles sooner waits, and one whose model goes back
+   meanwhile starts nothing. So however often the model flaps, the watch starts the suite at most
+   once per interval, and each run is for the change from the model the previous one ran for.
+
+**Once, and noted.** A change is written to the progress as `change`, with `previous`, `current`
+and the slot `at` that will hold it, before any run is admitted: the regular slot due at the same
+turn, whose run then stands for the change, or a slot of its own at the turn's time. Its run is
+admitted as a slot's is, under the rules of a launch, with `provenance.schedule` naming the
+`trigger` (`model_change`, for a slot of its own) and the `model_change` (`from`, `to`). A run that
+is not admitted is recorded as `skipped` with the reason, the change noted on it, and is not tried
+again: the next slot runs the suite on the new model. The watch's `model` then becomes the new one.
+A turn that stops part way leaves the change in the progress, and the next turn records it at the
+same slot without admitting a second run, as for a regular slot. A read that fails is the watch's
+`error`, and the schedule's slots go on; the next turn reads again.
+
 ### A schedule's history
 
 `GET /v1/evals/schedules/{schedule_id}/runs` answers `items`, the latest slot first, with `page`,
@@ -1659,10 +1745,13 @@ leaves the queue at its next slot. Pausing stops the next turn admitting a run; 
 | `slot` | The slot it ran or skipped, in UTC |
 | `missed` | The later slots that were also due when its turn came, which this run stood for (counted up to 1,000) |
 | `fired_at` | When its turn came |
+| `trigger` | `slot`, its schedule's timing, or `model_change`, a slot of its own that a change of the model started |
+| `model_change`, `note` | The change of the model its run was started for, `{"from": ..., "to": ...}`, and `model changed from X to Y`, on either kind of slot; else `null` and empty |
 | `state` | `skipped`, or its run's state |
 | `reason` | Why it was skipped, else empty |
 | `error` | Its run's `error`, else empty |
 | `run_id`, `run_code` | Its run, or `null` when skipped |
+| `model` | The model its run's target reported (`provenance.model.name`), or `null` |
 | `pass_rate`, `counts` | Its run's exact-match pass rate, `passed / (passed + failed)`, or `null` with neither, and its `passed`, `failed`, `skipped` and `errored` cases |
 | `gate` | Its run's gate result, once its suite has scored it ([gate results](#gate-results)), else `null` |
 | `scoring` | Its suite scoring job: `job_id`, `state`, `error`, and the scorecard's `gate` and each criterion's `name`, `kind`, `pass_rate`, `mean` and `gate`, as the Monitoring page's scorecard has them ([read routes](#read-routes)) |
@@ -1717,6 +1806,21 @@ fourth failed gate and recovers once nine of the ten gates in its window passed,
 each. The record contract checks the schedule records, their slots and gates, and that deleting a
 schedule deletes the thresholds on its gate results, on both databases.
 
+`tests/evals/test_model_changes.py` checks when a model change counts: a new model only once it
+was alone for `settle_seconds`, never one that flaps faster than that, and at most once per
+`min_interval_seconds`. One turn at a time at fixed times: fake live traces whose model changes
+start the suite once, an eval run's traces are not read, and later traces of the same model start
+nothing more; a target whose reported model changes on its runs starts the suite once, and the
+schedule's own run then moves the watch to it; a change noticed at a turn whose slot is due rides
+on that slot's run; a turn that stopped after admitting a change's run admits no second; and a
+model that flips every ten seconds for half an hour starts nothing, then flipping every ten
+minutes for three hours (17 changes) starts the suite three times, an hour or more apart, each
+from the model the last run was for. Through the routes and the queue, on SQLite and on Postgres
+as an ordinary role: Community is refused, an interval under the minimum is `422`, the same
+request is the same schedule, and a changed model in the live traffic starts one completed run
+whose history entry says `model changed from X to Y` with the run's reported model. The record
+store keeps the watch, its progress and the noted changes on both databases.
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
@@ -1762,7 +1866,11 @@ schedule deletes the thresholds on its gate results, on both databases.
 - [Schedules](#schedules): a saved suite run against a target unattended, every so many seconds or
   on a cron expression in UTC, admitted by the queue's worker at each slot under a launch's rules,
   with a history of each slot's run, its pass rate and its paired comparison with the schedule's
-  previous completed run.
+  previous completed run; and, when set to, once more when the model behind the target changes,
+  read from the project's live traces or the target's runs, debounced, and noted in the history.
+- [The model a target reports](#the-model-a-target-reports): an HTTP target's response path or
+  header, a function's or a registered agent's `TargetReply`, recorded on each case's trace and in
+  the run's provenance.
 - [Thresholds and alerts](#thresholds-and-alerts): a pass rate or mean of a monitor's scorer over a
   window, judged on its 95% interval once it has enough scores, with a persisted state machine
   that sends one alert per breach and one per recovery by signed webhook or email, retried with
@@ -1801,7 +1909,7 @@ schedule deletes the thresholds on its gate results, on both databases.
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
   search filters and paging, sessions and users, traces in each attribute style mapped with their
-  attributes kept, scores kept with their trace, the times given to traces and scores kept as
+  attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
@@ -1917,6 +2025,9 @@ as JSON text, and MLflow's JSON-encoded values are decoded.
   `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
   the trace names (the current one when it names none), and refuses a version this release does
   not have with `409`.
+- **Searching by model.** `TraceQuery.model` keeps the traces whose model is exactly that name, on
+  every binding, so the model a trace was mapped with is searchable. The frozen contract's trace
+  search (`POST /v1/evals/traces/search`) has no model filter; its rows show each trace's `model`.
 - **Tool calls** are spans in the shared model: a `TOOL` span whose inputs are the arguments and
   whose outputs are the result, and the calls a model asked for are in its output messages. The
   span view keeps the server's fields, so the normalized `tool` and `tool_calls` of `SpanFields`
@@ -2094,7 +2205,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   experiment an earlier SDK release created keeps MLflow's layout, for its earlier runs and its
   new ones, so a data folder an earlier release wrote reads back unchanged.
 - Trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow
-  has: run, session, user, tags, trace ids, states and time. A page reads only its own traces
+  has: run, session, user, model, tags, trace ids, states and time. A trace's model is the
+  `mlflow.trace.model` metadata the binding writes when it records the trace. A page reads only its own traces
   and a session search only the traces it groups, so the Traces page and the Sessions page take
   about as long in a project of 100,000 traces as in one of 1,000. The binding checks each trace
   MLflow returns against the whole query. Only free text, and a session, user, tag or run value
@@ -2207,7 +2319,9 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   `martian_schedules`, one row per schedule holding the schedule as its routes write it and its
   progress as the worker writes it, in separate columns, and `martian_schedule_runs`, one row per
   slot a schedule ran or skipped, keyed by schedule and slot, so a slot is recorded once, with
-  its run's gate result once its suite has scored it. `create_schedule`, `get_schedule`,
+  its run's gate result once its suite has scored it. A schedule's `on_model_change`, its
+  progress's `model_watch` and a slot's `trigger` and `model_change` are fields of those JSON
+  columns, so watching the model needed no migration. `create_schedule`, `get_schedule`,
   `list_schedules`, `update_schedule` (naming the revision it read) and `delete_schedule` keep the
   schedules; `schedule_progress` and `set_schedule_progress` the progress; `add_scheduled_run`,
   `get_scheduled_run`, `list_scheduled_runs` and `set_scheduled_run_gate` the slots.
@@ -2447,7 +2561,7 @@ key for it if it needs one (`martian.evals.local_targets`). A target is one of:
 | Kind | Fields | What it calls |
 | --- | --- | --- |
 | `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{uuid}}`, and `response_path` finds the reply |
-| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content` |
+| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content`, and the model that answered, which the run records, at `model` |
 
 Every target has a `name`, unique among the targets. The key is sent in `key_header` (always
 `Authorization` for a model): as `Bearer <key>` in `Authorization`, as it is in any other header.
@@ -3071,6 +3185,7 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
 `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
-`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_schedules.py`, `test_no_outbound.py` and the store and record
+`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_schedules.py`,
+`test_model_changes.py`, `test_no_outbound.py` and the store and record
 tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.

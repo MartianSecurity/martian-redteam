@@ -661,6 +661,32 @@ curl -X POST "$EVALS_CORE/v1/evals/schedules" -H 'Content-Type: application/json
 - `POST .../schedules/{id}/pause`, `.../resume` and `DELETE .../schedules/{id}` stop and restart
   it; slots that pass while it is paused are not run.
 
+### Run it again when the model changes
+
+A provider can update the model behind your agent without notice. Add `on_model_change` to the
+schedule and its suite also runs once whenever that model changes, besides its slots:
+
+```json
+"on_model_change": {"source": "traces", "settle_seconds": 300, "min_interval_seconds": 3600}
+```
+
+- **`source`** is where the model is read. `traces`: the project's live traces, the model their
+  spans report (`gen_ai.response.model`, or `gen_ai.request.model`, and the OpenInference and
+  MLflow equivalents), as your application sends them over OpenTelemetry. `runs`: the model the
+  target reported on the project's runs of it. An HTTP target reports it when you set
+  `model_path`, the path in its JSON response (`model` for an OpenAI-compatible reply), or
+  `model_header`, a response header; a function target by returning
+  `martian.evals.worker.TargetReply(output, model=...)`. Every run and every case's trace then
+  records the model that answered.
+- **It ignores flapping.** A new model counts only once it has been the only one seen for
+  `settle_seconds` (300 by default), so traffic that switches back and forth between two models
+  starts nothing; and a change starts the suite at most once every `min_interval_seconds` (3600 by
+  default, at least 60).
+- **History**: the run a change starts is a slot of its own (`"trigger": "model_change"`), unless
+  a regular slot was due at the same time, and its entry says `model changed from X to Y`. Every
+  entry shows the `model` its run's target reported, and the comparison with the previous run
+  shows what the change did to the scores.
+
 The local edition is Community, so it runs no schedules. The routes, how the worker admits each
 run and what the history holds are in [schedules](evals-core.md#schedules).
 

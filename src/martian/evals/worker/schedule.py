@@ -32,6 +32,15 @@ Once a scheduled run's suite job has scored it, the worker that ran the job reco
 gate result on its slot and evaluates the thresholds on the schedule's gate results, then delivers
 their due alerts (:func:`record_gate`, :class:`~martian.evals.thresholds.GateSource`), as a
 monitor's pass does for the thresholds on its scores.
+
+A schedule with ``on_model_change`` also runs when the model behind its target changes
+(MorningHQ/martian-notes#200). Its row then comes back every ``model_watch_seconds`` as well as at
+its slots, and each turn first reads the model (:func:`~martian.evals.worker.model_watch.watch_model`).
+A change it decides is written to the progress before any run is admitted, with the slot that
+will hold it: the regular slot due at the same turn, whose run then stands for the change, or a
+slot of its own at the turn's time (``trigger`` ``model_change``). So a turn that stops part way
+admits no second run for the change: the next turn finds the change and its slot, as it finds a
+regular slot. The slot's history entry notes the change (``model_change``).
 """
 
 from __future__ import annotations
@@ -40,14 +49,14 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import HTTPException
 
 from martian.evals.alerts import AlertSender
 from martian.evals.model import ScoringJob, Target
-from martian.evals.records import RecordStore, Schedule, ScheduledRun, ScheduleProgress
+from martian.evals.records import ModelChange, RecordStore, Schedule, ScheduledRun, ScheduleProgress
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id
 from martian.evals.slots import Cron, Interval, timing
 from martian.evals.store import EvalStore, StoreError
@@ -55,6 +64,7 @@ from martian.evals.thresholds import GateSource, evaluate_thresholds
 
 # The package defines these before it imports this module.
 from martian.evals.worker import Work, Worker
+from martian.evals.worker.model_watch import SETTLE_SECONDS, WATCH_SECONDS, settled, watch_model
 
 if TYPE_CHECKING:
     from martian.evals.server.entitlements import Entitlements
@@ -70,6 +80,7 @@ DATASET_GONE = "The schedule's dataset version is no longer in the store"
 SUITE_GONE = "The schedule's suite version is no longer saved"
 NO_JUDGE = "Model judges require a judge configured for this installation's worker"
 NOT_COMPLETED = "The run did not complete, so its suite did not score it"
+Trigger = Literal["slot", "model_change"]
 
 
 @dataclass(frozen=True)
@@ -77,10 +88,20 @@ class ScheduleServices:
     """What a worker admits a schedule's runs with, as the API process admits a launch: the
     ``store``, and ``entitlements``, the edition's function from a principal to its
     :class:`~martian.evals.server.Entitlements`, which holds the ``monitoring`` feature and the
-    ``concurrent_runs`` limit. A worker given none runs no schedules."""
+    ``concurrent_runs`` limit. A worker given none runs no schedules.
+
+    For a schedule that watches the model behind its target, ``model_watch_seconds`` is how often
+    its turn comes back besides its slots, and ``trace_settle_seconds`` how long after its request
+    time a trace is first read (:mod:`martian.evals.worker.model_watch`)."""
 
     store: EvalStore
     entitlements: Callable[[Principal], Entitlements]
+    model_watch_seconds: float = WATCH_SECONDS
+    trace_settle_seconds: float = SETTLE_SECONDS
+
+    def __post_init__(self) -> None:
+        if self.model_watch_seconds <= 0 or self.trace_settle_seconds < 0:
+            raise ValueError("model_watch_seconds is positive and trace_settle_seconds not negative")
 
 
 def _now() -> datetime:
@@ -100,12 +121,21 @@ def due_slot(schedule: Schedule, progress: ScheduleProgress | None) -> datetime:
     return due if due is not None and due > start else schedule_timing(schedule).after(start)
 
 
-def next_due(schedule: Schedule, progress: ScheduleProgress | None, now: datetime) -> datetime:
+def next_due(
+    schedule: Schedule, progress: ScheduleProgress | None, now: datetime, *, watch_seconds: float | None = None
+) -> datetime:
     """When the schedule's row in the queue is next due: its due slot while it is active and that
-    slot is still ahead, else the first slot after ``now``."""
-    if schedule.state == "active" and (due := due_slot(schedule, progress)) > now:
-        return due
-    return schedule_timing(schedule).after(now)
+    slot is still ahead, else the first slot after ``now``. An active schedule that watches its
+    model is due sooner, ``watch_seconds`` from now, and at once while its watch has more to read
+    or a change to record."""
+    active = schedule.state == "active"
+    slot = due if active and (due := due_slot(schedule, progress)) > now else schedule_timing(schedule).after(now)
+    if not active or schedule.on_model_change is None or watch_seconds is None:
+        return slot
+    watch = progress.model_watch if progress is not None else None
+    if watch is not None and (not watch.caught_up or watch.change is not None):
+        return now
+    return min(slot, now + timedelta(seconds=watch_seconds))
 
 
 def scheduled_run_id(schedule_id: str, slot: datetime) -> str:
@@ -121,7 +151,8 @@ def suite_job_id(run_id: str) -> str:
 async def execute_schedule(services: ScheduleServices, records: RecordStore, worker: Worker, work: Work) -> None:
     """One turn of the schedule ``work`` names, by ``worker``, which checks the target and queues
     the run. A paused or deleted schedule's turn does nothing. A turn that fails part way leaves
-    the slot due, and the next turn looks at it again."""
+    the slot due, and the next turn looks at it again. A schedule that watches its model reads it
+    first, and a change it decides is admitted with the slot due now or in a slot of its own."""
     principal, project, schedule_id = work.principal, work.project_id, work.schedule_id or ""
     schedule = await records.get_schedule(principal, project, schedule_id)
     if schedule is None or schedule.state != "active":
@@ -129,26 +160,74 @@ async def execute_schedule(services: ScheduleServices, records: RecordStore, wor
     progress = await records.schedule_progress(principal, project, schedule_id) or ScheduleProgress()
     now, slots = _now(), schedule_timing(schedule)
     due = due_slot(schedule, progress)
-    if now < due:
-        if progress.next_slot != due:
-            await records.set_schedule_progress(
-                principal, project, schedule_id, progress.model_copy(update={"next_slot": due})
-            )
-        return
-    if await records.get_scheduled_run(principal, project, schedule_id, due) is None:
+    open_slot = now >= due and await records.get_scheduled_run(principal, project, schedule_id, due) is None
+    watching = schedule.on_model_change is not None
+    if watching:
+        earlier = progress.model_watch.change if progress.model_watch is not None else None
+        watch = await watch_model(
+            services.store,
+            records,
+            principal,
+            schedule,
+            progress.model_watch,
+            now,
+            slot=due if open_slot else None,
+            settle_seconds=services.trace_settle_seconds,
+        )
+        progress = progress.model_copy(update={"model_watch": watch})
+        if watch.change is not None and watch.change != earlier:
+            # A change is in the progress, with its slot, before any run is admitted for it.
+            await records.set_schedule_progress(principal, project, schedule_id, progress)
+    change = progress.model_watch.change if progress.model_watch is not None else None
+    if open_slot:
         missed = slots.count(due, now, up_to=MISSED_UP_TO)
-        entry = await _fire(services, records, worker, principal, schedule, due, missed, now)
-        try:
-            entry = await records.add_scheduled_run(principal, project, entry)
-        except StoreError as error:
-            if error.kind != "not_found":
-                raise
-            return  # deleted meanwhile; a run it admitted stays an ordinary run
-        if entry.state == "skipped":
-            log.warning("Schedule %s skipped its slot %s: %s", schedule_id, due.isoformat(), entry.reason)
-    following = slots.after(now)
-    moved = {"next_slot": following, "last_slot": due, "error": "", "last_turn_at": now}
-    await records.set_schedule_progress(principal, project, schedule_id, progress.model_copy(update=moved))
+        rides = change if change is not None and change.at == due else None
+        if not await _record(services, records, worker, principal, schedule, due, missed, now, rides, "slot"):
+            return
+    # A change that did not ride on this turn's slot has a slot of its own, unless a turn that
+    # stopped part way already recorded it.
+    own_slot = change is not None and not (open_slot and change.at == due)
+    if (
+        own_slot
+        and change is not None
+        and await records.get_scheduled_run(principal, project, schedule_id, change.at) is None
+        and not await _record(services, records, worker, principal, schedule, change.at, 0, now, change, "model_change")
+    ):
+        return
+    updates: dict[str, Any] = {}
+    if change is not None and progress.model_watch is not None:
+        updates["model_watch"] = settled(progress.model_watch, change, now)
+    if now >= due:
+        updates |= {"next_slot": slots.after(now), "last_slot": due, "error": "", "last_turn_at": now}
+    elif progress.next_slot != due:
+        updates["next_slot"] = due
+    if updates or watching:
+        await records.set_schedule_progress(principal, project, schedule_id, progress.model_copy(update=updates))
+
+
+async def _record(
+    services: ScheduleServices,
+    records: RecordStore,
+    worker: Worker,
+    principal: Principal,
+    schedule: Schedule,
+    slot: datetime,
+    missed: int,
+    now: datetime,
+    change: ModelChange | None,
+    trigger: Trigger,
+) -> bool:
+    """Admit the run of ``slot`` and record the slot; False once the schedule is gone."""
+    entry = await _fire(services, records, worker, principal, schedule, slot, missed, now, change, trigger)
+    try:
+        entry = await records.add_scheduled_run(principal, schedule.project_id, entry)
+    except StoreError as error:
+        if error.kind != "not_found":
+            raise
+        return False  # deleted meanwhile; a run it admitted stays an ordinary run
+    if entry.state == "skipped":
+        log.warning("Schedule %s skipped its slot %s: %s", schedule.id, slot.isoformat(), entry.reason)
+    return True
 
 
 async def _fire(
@@ -160,16 +239,28 @@ async def _fire(
     slot: datetime,
     missed: int,
     now: datetime,
+    change: ModelChange | None = None,
+    trigger: Trigger = "slot",
 ) -> ScheduledRun:
-    """Admit the run of ``slot``, and what the slot records of it."""
+    """Admit the run of ``slot``, and what the slot records of it, with the model ``change`` its
+    run stands for, if any."""
     run_id = scheduled_run_id(schedule.id, slot)
-    admitted = ScheduledRun(
-        schedule_id=schedule.id, slot=slot, state="admitted", run_id=run_id, missed=missed, created_at=now
+    admitted = ScheduledRun.model_validate(
+        {
+            "schedule_id": schedule.id,
+            "slot": slot,
+            "state": "admitted",
+            "run_id": run_id,
+            "missed": missed,
+            "created_at": now,
+            "trigger": trigger,
+            "model_change": change,
+        }
     )
     if await records.get_run(principal, schedule.project_id, run_id) is not None:
         return admitted  # admitted by a turn that stopped before it recorded the slot
     try:
-        await _admit(services, records, worker, principal, schedule, slot, run_id)
+        await _admit(services, records, worker, principal, schedule, slot, run_id, admitted)
     except HTTPException as refused:
         return admitted.model_copy(update={"state": "skipped", "run_id": None, "reason": str(refused.detail)})
     except StoreError as refused:
@@ -187,6 +278,7 @@ async def _admit(
     schedule: Schedule,
     slot: datetime,
     run_id: str,
+    entry: ScheduledRun,
 ) -> None:
     """Admit the slot's run under the rules of a launch, or raise the refusal."""
     # The routes' modules import the worker package, so they are imported when a turn needs them.
@@ -208,9 +300,12 @@ async def _admit(
         raise HTTPException(422, SUITE_GONE)
     if any(scorer.kind == "llm_judge" for scorer in schedule.scorers) and not worker.judges:
         raise HTTPException(422, NO_JUDGE)
-    provenance: dict[str, Any] = {
-        SCHEDULE_KEY: {"id": schedule.id, "name": schedule.name, "slot": slot.astimezone(UTC).isoformat()}
-    }
+    scheduled: dict[str, Any] = {"id": schedule.id, "name": schedule.name, "slot": slot.astimezone(UTC).isoformat()}
+    if entry.trigger != "slot":
+        scheduled["trigger"] = entry.trigger
+    if (change := entry.model_change) is not None:
+        scheduled["model_change"] = {"from": change.previous, "to": change.current}
+    provenance: dict[str, Any] = {SCHEDULE_KEY: scheduled}
     if schedule.limits is not None:
         provenance[LIMITS_KEY] = schedule.limits.model_dump(mode="json")
     await admit_run(

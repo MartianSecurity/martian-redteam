@@ -88,11 +88,26 @@ class Work:
             raise ValueError("run and scoring work name their run, and monitor and schedule work name none")
 
 
+@dataclass(frozen=True)
+class TargetReply:
+    """What a target call returns when it also reports the model that answered: the ``output``,
+    and ``model``, the model's name as the target reported it, such as an OpenAI-compatible
+    reply's ``model`` (``gpt-4o-2024-08-06``), or None. The worker records the model on the
+    case's trace and counts it in the run's ``provenance["model"]``
+    (:func:`~martian.evals.worker.targets.reported_model`). An HTTP target returns one when its
+    ``model_path`` or ``model_header`` is set; a function or an :class:`AgentExecutor` may return
+    one instead of its bare output."""
+
+    output: Any
+    model: str | None = None
+
+
 TargetCall = Callable[[Case], Awaitable[Any]]
-"""Calls the thing under test with one case and returns its output. An exception or a timeout is
-the case's error; the worker never retries. A function the worker is given as a target runs on an
-event loop of a thread of its own, so a function that blocks, or never returns, ends its case as
-``item timed out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
+"""Calls the thing under test with one case and returns its output, or a :class:`TargetReply`
+that also names the model that answered. An exception or a timeout is the case's error; the
+worker never retries. A function the worker is given as a target runs on an event loop of a
+thread of its own, so a function that blocks, or never returns, ends its case as ``item timed
+out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
 
 
 class Credentials(Protocol):
@@ -133,7 +148,8 @@ class AgentExecutor(Protocol):
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
         """Call the run's agent once with one case, within ``timeout_seconds``, and return its
-        output. An exception is the case's error; the worker never retries."""
+        output, or a :class:`TargetReply` with the model the agent reported answering with. An
+        exception is the case's error; the worker never retries."""
         ...
 
 
@@ -324,6 +340,7 @@ __all__ = [
     "ScheduleServices",
     "SendsAlerts",
     "TargetCall",
+    "TargetReply",
     "Verdict",
     "Work",
     "Worker",
