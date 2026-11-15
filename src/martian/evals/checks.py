@@ -6,8 +6,10 @@ seconds"), and keep the LLM judges for questions of meaning.
 
 Each factory returns an MLflow scorer for ``evaluate(..., scorers=[...])``. Values to look for
 are given when the scorer is created, or per row through ``expectation="<key>"``, which reads
-``expectations[<key>]`` (one string or a list of strings). :func:`latency` and :func:`cost` read
-the trace MLflow records for the row's call instead of the reply.
+``expectations[<key>]`` (one string or a list of strings). :func:`number_equals`,
+:func:`sums_to`, :func:`reconciles` and :func:`table_equals` read the reply's numbers and tables
+as exact decimals (:mod:`martian.evals._numeric`). :func:`latency` and :func:`cost` read the
+trace MLflow records for the row's call instead of the reply.
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ import json
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
 
-from martian.evals import _json_schema
+from martian.evals import _json_schema, _numeric
 from martian.evals.scorers import output_text
 
 
@@ -53,12 +56,16 @@ def _named(name: str) -> None:
         raise ValueError("a check needs a nonempty name")
 
 
-def _configured(name: str, fixed: Sequence[str], expectation: str | None) -> None:
+def _expectation_key(name: str, expectation: str | None) -> None:
     _named(name)
     if expectation is not None and (not isinstance(expectation, str) or not expectation.strip()):
         raise ValueError("expectation must be a nonempty expectations key")
     if expectation == name:
         raise ValueError("the check's name must differ from its expectations key")
+
+
+def _configured(name: str, fixed: Sequence[str], expectation: str | None) -> None:
+    _expectation_key(name, expectation)
     if not fixed and expectation is None:
         raise ValueError("give the values to look for, or expectation='<key>' to read them from each row")
 
@@ -343,9 +350,10 @@ def not_matches(pattern: str, *, name: str = "not_matches", flags: int = 0) -> S
     return _scorer(name, None, decide)
 
 
-def _parsed_json(outputs: Any) -> tuple[bool, Any]:
+def _parsed_json(outputs: Any, *, exact: bool = False) -> tuple[bool, Any]:
     """Whether the output is JSON, and its value. An output that is already a dict or list is
-    JSON; one enclosing Markdown code fence around JSON text is accepted."""
+    JSON; one enclosing Markdown code fence around JSON text is accepted. ``exact`` reads JSON
+    text's fractional numbers as ``Decimal``, as written."""
     if not isinstance(outputs, str):
         return True, outputs
     text = outputs.strip()
@@ -353,7 +361,7 @@ def _parsed_json(outputs: Any) -> tuple[bool, Any]:
     if fence.strip().lower() in {"```", "```json"} and body.rstrip().endswith("```"):
         text = body.rstrip()[:-3]
     try:
-        return True, json.loads(text)
+        return True, json.loads(text, parse_float=Decimal if exact else None)
     except ValueError:
         return False, None
 
@@ -408,6 +416,175 @@ def json_schema(schema: Mapping[str, Any], *, name: str = "json_schema") -> Scor
         return Feedback(value=found is None, rationale="the output matches the schema" if found is None else found)
 
     return check
+
+
+# --- the reply's numbers and tables -----------------------------------------------------------
+
+# A figure as the check is given it: a number, or text that is one number, such as "1,234.56".
+Figure = Decimal | int | float | str
+
+
+def number_equals(
+    value: Figure | None = None,
+    *,
+    expectation: str | None = None,
+    path: str | None = None,
+    pattern: str | None = None,
+    abs_tolerance: Figure = 0,
+    rel_tolerance: Figure = 0,
+    name: str = "number_equals",
+) -> Scorer:
+    """Pass when the number the output gives is ``value`` (or, with ``expectation="<key>"``, the
+    row's ``expectations[<key>]``), within the tolerance.
+
+    The number is read at ``path`` in the JSON output, or where ``pattern`` finds it in the text
+    (its first group, or the whole match), or else it is the one number the text holds. It may
+    be a JSON number or text such as ``$1,234.56``. Figures are compared as exact decimals: with
+    no tolerance, 1234.57 is not 1234.56. The difference may be at most the larger of
+    ``abs_tolerance`` and ``rel_tolerance`` times the expected number's size.
+    """
+    _expectation_key(name, expectation)
+    options = _numeric.number_options(
+        value=value,
+        expectation=expectation,
+        path=path,
+        pattern=pattern,
+        abs_tolerance=abs_tolerance,
+        rel_tolerance=rel_tolerance,
+    )
+
+    def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
+        expected = options.expected
+        if expected is None:
+            expected = _numeric.given_figure(f"expectations.{expectation}", (expectations or {}).get(expectation or ""))
+        parsed, document = _parsed_json(text, exact=True)
+        try:
+            found = options.found(text, parsed, document)
+        except _numeric.Unreadable as reason:
+            return Feedback(value=False, rationale=str(reason))
+        passed, off, allowed = options.tolerance.check(found, expected)
+        return Feedback(
+            value=passed, rationale=_numeric.closeness(found, expected, off, allowed, passed, "the expected number")
+        )
+
+    return _scorer(name, expectation, decide)
+
+
+def _balance(name: str, options: _numeric.BalanceOptions) -> Scorer:
+    _named(name)
+
+    def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
+        parsed, document = _parsed_json(text, exact=True)
+        if not parsed:
+            return Feedback(value=False, rationale="the output is not JSON, so its figures cannot be read")
+        try:
+            passed, rationale = options.decide(document)
+        except _numeric.Unreadable as reason:
+            return Feedback(value=False, rationale=str(reason))
+        return Feedback(value=passed, rationale=rationale)
+
+    return _scorer(name, None, decide)
+
+
+def sums_to(
+    *,
+    parts: Sequence[str],
+    total: str,
+    abs_tolerance: Figure = 0,
+    rel_tolerance: Figure = 0,
+    name: str = "sums_to",
+) -> Scorer:
+    """Pass when the numbers at the ``parts`` paths of the JSON output add up to the number at its
+    ``total`` path, within the tolerance of that total.
+
+    A path step ``*`` is every item of a list, so ``lines.*.amount`` is each line's amount.
+    """
+    return _balance(
+        name,
+        _numeric.balance_options(
+            check="sums_to",
+            add_option="parts",
+            add=parts,
+            subtract=(),
+            total=total,
+            abs_tolerance=abs_tolerance,
+            rel_tolerance=rel_tolerance,
+        ),
+    )
+
+
+def reconciles(
+    *,
+    add: Sequence[str],
+    subtract: Sequence[str] = (),
+    total: str,
+    abs_tolerance: Figure = 0,
+    rel_tolerance: Figure = 0,
+    name: str = "reconciles",
+) -> Scorer:
+    """Pass when the numbers at the ``add`` paths of the JSON output, less those at the
+    ``subtract`` paths, come to the number at its ``total`` path, within the tolerance of that
+    total: an opening balance plus deposits less withdrawals is the closing balance."""
+    return _balance(
+        name,
+        _numeric.balance_options(
+            check="reconciles",
+            add_option="add",
+            add=add,
+            subtract=subtract,
+            total=total,
+            abs_tolerance=abs_tolerance,
+            rel_tolerance=rel_tolerance,
+        ),
+    )
+
+
+def table_equals(
+    rows: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    key: str | Sequence[str],
+    expectation: str | None = None,
+    columns: Sequence[str] = (),
+    path: str | None = None,
+    abs_tolerance: Figure = 0,
+    rel_tolerance: Figure = 0,
+    case_sensitive: bool = False,
+    name: str = "table_equals",
+) -> Scorer:
+    """Pass when the table the output gives has the expected ``rows`` (or, with
+    ``expectation="<key>"``, the row's ``expectations[<key>]``), matched by their ``key`` columns
+    in any order, with every expected cell equal.
+
+    The output's rows are the JSON objects at ``path`` in the JSON output, or the whole JSON
+    output, or else the one Markdown table in its text. A cell whose expected value is a number
+    is compared as one, within the tolerance; any other cell as text, ignoring surrounding
+    whitespace and, unless ``case_sensitive=True``, case. ``columns`` limits the cells compared;
+    by default every column of an expected row is. A failure names the rows and cells that differ.
+    """
+    _expectation_key(name, expectation)
+    options = _numeric.table_options(
+        rows=rows,
+        expectation=expectation,
+        key=key,
+        columns=columns,
+        path=path,
+        abs_tolerance=abs_tolerance,
+        rel_tolerance=rel_tolerance,
+        case_sensitive=case_sensitive,
+    )
+
+    def decide(text: str, expectations: dict[str, Any] | None) -> Feedback:
+        expected = options.rows
+        if expected is None:
+            expected = options.expected((expectations or {}).get(expectation or ""), f"expectations.{expectation}")
+        parsed, document = _parsed_json(text, exact=True)
+        try:
+            passed, rationale = options.compare(expected, options.actual(text, parsed, document))
+        except _numeric.Unreadable as reason:
+            return Feedback(value=False, rationale=str(reason))
+        return Feedback(value=passed, rationale=rationale)
+
+    return _scorer(name, expectation, decide)
 
 
 # --- the recorded call ------------------------------------------------------------------------
@@ -504,6 +681,10 @@ __all__ = [
     "matches",
     "not_contains",
     "not_matches",
+    "number_equals",
+    "reconciles",
     "similarity",
     "starts_with",
+    "sums_to",
+    "table_equals",
 ]

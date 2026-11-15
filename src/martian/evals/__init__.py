@@ -20,8 +20,12 @@ from martian.evals.checks import (
     matches,
     not_contains,
     not_matches,
+    number_equals,
+    reconciles,
     similarity,
     starts_with,
+    sums_to,
+    table_equals,
 )
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
@@ -61,9 +65,13 @@ __all__ = [
     "matches",
     "not_contains",
     "not_matches",
+    "number_equals",
+    "reconciles",
     "response_guidelines",
     "response_conditions",
     "response_rubric",
     "similarity",
     "starts_with",
+    "sums_to",
+    "table_equals",
 ]

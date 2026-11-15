@@ -78,6 +78,26 @@ EVERY_FIELD_URL = {
         },
         {"type": "length", "min_length": 1, "max_length": 800},
         {"type": "latency", "max_ms": 2500.0},
+        {"type": "number_equals", "value": "1,234.56", "path": "totals.net", "abs_tolerance": 0.005},
+        {"type": "number_equals", "name": "stated_total", "expectation": "total", "pattern": "Total: (\\S+)"},
+        {"type": "sums_to", "parts": ["lines.*.amount", "tax"], "total": "totals.net", "rel_tolerance": "0.001"},
+        {
+            "type": "reconciles",
+            "add": ["opening", "deposits.*.amount"],
+            "subtract": ["withdrawals.*.amount"],
+            "total": "closing",
+        },
+        {
+            "type": "table_equals",
+            "rows": [{"invoice": "INV-1", "line": 1, "amount": 12.5, "status": "paid"}],
+            "key": ["invoice", "line"],
+            "columns": ["amount"],
+            "path": "lines",
+            "abs_tolerance": 0.01,
+            "rel_tolerance": 0.001,
+            "case_sensitive": True,
+        },
+        {"type": "table_equals", "name": "ledger", "expectation": "ledger", "key": "ref"},
     ],
     "concurrency": 8,
     "batch": 10,
@@ -117,7 +137,8 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            if isinstance(nested, dict) and name not in ("headers", "body", "inference_params", "conditions", "schema"):
+            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows")
+            if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
 
@@ -148,7 +169,7 @@ def test_every_suite_file_field_has_a_place_in_the_model():
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
     assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
-    assert set(runner.TEXT_CHECKS + runner.CALL_CHECKS) <= set(runner.CHECKS)
+    assert set(runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS) <= set(runner.CHECKS)
 
 
 def test_the_every_field_suites_set_every_field():
@@ -215,6 +236,21 @@ def test_every_field_lands_where_the_map_says(tmp_path):
     # The file's `schema` keeps its name in the model, though the runner's field is json_schema.
     assert by_name["json_schema"].parameters["schema"]["required"] == ["answer"]
     assert by_name["latency"].parameters == {"max_ms": 2500.0}
+    # A figure keeps the form it was written in: text stays text, so "1,234.56" is not a float.
+    assert by_name["number_equals"].parameters == {"value": "1,234.56", "path": "totals.net", "abs_tolerance": 0.005}
+    assert by_name["sums_to"].parameters == {
+        "parts": ["lines.*.amount", "tax"],
+        "total": "totals.net",
+        "rel_tolerance": "0.001",
+    }
+    assert by_name["reconciles"].parameters["subtract"] == ["withdrawals.*.amount"]
+    assert by_name["table_equals"].parameters["key"] == ["invoice", "line"]
+    assert by_name["table_equals"].parameters["rows"] == [
+        {"invoice": "INV-1", "line": 1, "amount": 12.5, "status": "paid"}
+    ]
+    assert by_name["ledger"] == ScorerVersion(
+        name="ledger", kind="check", type="table_equals", parameters={"expectation": "ledger", "key": "ref"}
+    )
     assert suite.settings.model_dump() == {
         "concurrency": 8,
         "batch": 10,
@@ -332,6 +368,22 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
             "max_tokens does not apply to latency checks",
         ),
         ({"checks": [{"type": "json_schema", "json_schema": {}}]}, "json_schema: Extra inputs are not permitted"),
+        (
+            {"checks": [{"type": "number_equals", "value": 1, "rows": [{"id": "a"}]}]},
+            "rows does not apply to number_equals checks",
+        ),
+        (
+            {"checks": [{"type": "sums_to", "parts": ["a"], "subtract": ["b"], "total": "c"}]},
+            "subtract does not apply to sums_to checks",
+        ),
+        (
+            {"checks": [{"type": "reconciles", "add": ["a"], "parts": ["b"], "total": "c"}]},
+            "parts does not apply to reconciles checks",
+        ),
+        (
+            {"checks": [{"type": "contains", "values": ["a"], "abs_tolerance": 0.01}]},
+            "abs_tolerance does not apply to contains checks",
+        ),
     ],
 )
 def test_a_field_the_model_would_lose_is_refused_on_load(suite, problem, tmp_path):
@@ -377,6 +429,23 @@ def judge(name="rubric_judge", model="openai:/judge-model", **fields):
         (
             {"scorers": [ScorerVersion(name="s", kind="check", type="json_schema", parameters={"json_schema": {}})]},
             "json_schema is not an option of json_schema checks",
+        ),
+        (
+            {
+                "scorers": [
+                    judge(parameters={"temperature": 0, "max_tokens": 512}),
+                    ScorerVersion(name="n", kind="check", type="number_equals", parameters={"value": "ten"}),
+                ]
+            },
+            "invalid suite file: .*value must be a number",
+        ),
+        (
+            {
+                "scorers": [
+                    ScorerVersion(name="n", kind="check", type="sums_to", parameters={"add": ["a"], "total": "t"})
+                ]
+            },
+            "add is not an option of sums_to checks",
         ),
         ({"scorers": [judge(), judge(name="second")]}, "invalid suite file: .*at most one check of each judge type"),
         (

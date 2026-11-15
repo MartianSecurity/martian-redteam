@@ -100,7 +100,7 @@ agent needs anything else: another HTTP method, a non-JSON body, a multi-step ca
 secret in the body.
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
-every other type is one of the fifteen [deterministic checks](#deterministic-checks), each with
+every other type is one of the nineteen [deterministic checks](#deterministic-checks), each with
 its options and an example. Criteria written in the suite file apply to every case that does
 not carry its own in `expectations`. Use at most one check of each judge type, and give repeated
 check types a `name`.
@@ -264,6 +264,10 @@ trace) says what it measured.
 | `is_json` | `required_keys` | The output is valid JSON; with keys, a JSON object holding each one | `{type: is_json, required_keys: [answer]}` |
 | `json_schema` | `schema` | The output is JSON that matches the JSON Schema | `{type: json_schema, schema: {type: object, required: [answer]}}` |
 | `length` | `min_length`, `max_length` | The output has at least `min_length` and at most `max_length` characters; give either or both | `{type: length, max_length: 800}` |
+| `number_equals` | `value` or `expectation`, `path` or `pattern`, `abs_tolerance`, `rel_tolerance` | The number the output gives is the expected one, within the tolerance | `{type: number_equals, path: totals.net, expectation: net}` |
+| `sums_to` | `parts`, `total`, `abs_tolerance`, `rel_tolerance` | The numbers at the `parts` paths of the JSON output add up to the number at `total` | `{type: sums_to, parts: [lines.*.amount], total: subtotal}` |
+| `reconciles` | `add`, `subtract`, `total`, `abs_tolerance`, `rel_tolerance` | The numbers at the `add` paths, less those at `subtract`, come to the number at `total` | `{type: reconciles, add: [opening, deposits.*.amount], subtract: [withdrawals.*.amount], total: closing}` |
+| `table_equals` | `rows` or `expectation`, `key`, `columns`, `path`, `abs_tolerance`, `rel_tolerance`, `case_sensitive` | The output's table has the expected rows, matched by `key`, with every expected cell equal | `{type: table_equals, key: invoice, expectation: invoices}` |
 | `latency` | `max_ms` | The target's call took at most `max_ms` milliseconds | `{type: latency, max_ms: 3000}` |
 | `cost` | `max_usd`, `max_tokens` | The target's call cost at most `max_usd` US dollars and used at most `max_tokens` tokens; give either or both | `{type: cost, max_usd: 0.02, max_tokens: 4000}` |
 
@@ -324,6 +328,119 @@ Annotations such as `title`, `description`, `default`, `examples` and `$schema` 
 `format` is accepted and not checked, as the standard leaves it by default. Any other keyword,
 such as `if`, `patternProperties`, `prefixItems` or a `$ref` to another document, is refused
 when the suite loads (or when `json_schema(...)` is called), so a schema is never half applied.
+
+**Numbers.** `number_equals` reads one number from the output: at `path` in the JSON output
+(read as `is_json` reads it, with `path` written as a URL target's `response_path`, dotted keys
+and list indexes), or where `pattern`, a regular expression, first finds it in the text (its first
+group, or the whole match when it has no group). With neither, it is the one number the text
+holds; a text with none or several fails, and the reason says to give a pattern or a path. The
+number may be a JSON number or text: `1234.56`, `1,234.56`, `$1,234.56`, `-1,234.56`,
+`(1,234.56)` (negative, as accounts write it), `USD 1,234.56`, `1,234.56 EUR` or `12.5%` (which
+is 12.5, not 0.125). Parentheses and currency codes count only around a whole value, such as a
+JSON string, a table cell or the pattern's group, not in prose. A point is the decimal point and
+a comma only separates groups of three digits, so `1.234,56` and `1,23` are not numbers. The
+currency is not compared. The expected number is `value`, or the row's `expectations[<key>]`
+with `expectation: <key>`, not both, as a number or as text such as a CSV data file gives.
+
+**Exact figures.** Every figure is a decimal read from its digits, not a binary float, and sums
+and differences are exact: with no tolerance, 1234.57 is not 1234.56, and 0.1 + 0.2 is 0.3.
+Trailing zeros do not matter, so 10.1 equals 10.10. A number in a suite file or a JSON data file
+is a YAML or JSON number, exact to 15 significant digits; write a longer one as text, such as
+`"12345678901234567.89"`. An output's JSON text keeps every digit, and a structured output's
+floats are read as their shortest text, so 0.1 is 0.1. A figure that needs more than 100 digits
+is a scorer error, not a near miss.
+
+**Tolerance.** With no tolerance the figures must be equal. A check passes when the difference
+is at most the larger of `abs_tolerance` and `rel_tolerance` times the size of the reference:
+the expected number for `number_equals`, the stated total for `sums_to` and `reconciles`, and the
+expected cell for `table_equals`.
+
+- `abs_tolerance` is in the figure's own units: `0.01` allows one cent either way.
+- `rel_tolerance` is a fraction of the reference's size, from 0 to below 1: `0.001` is 0.1%, so it
+  allows 2 on 2000 or on -2000. A value of 1 or more is refused, so `5` meant as 5% cannot pass
+  almost anything.
+- Given both, the larger allowance applies: `abs_tolerance: 5` with `rel_tolerance: 0.001` allows
+  5 on 1000 and 10 on 10000. Python's `math.isclose` combines them the same way, but measures
+  relative to the larger of the two figures; here it is always the reference.
+- The bound is included: with `abs_tolerance: 0.01`, 100.01 passes against 100.
+- A relative tolerance allows nothing at zero and little near it, so give an `abs_tolerance` for
+  figures that can be zero.
+- Nothing is rounded first: 100.004 is 0.004 off 100, and `abs_tolerance: 0.005` accepts every
+  figure that rounds to the same cent, and 100.005 as well.
+
+Tolerances are numbers, or text that is one number, and cannot be negative.
+
+**Totals and reconciliation.** `sums_to` and `reconciles` read their figures from the JSON output
+by path. A step `*` is every item of a list, so `lines.*.amount` is each line's amount, and a list
+with no items adds up to 0. `sums_to` passes when the numbers at its `parts` paths add up to the
+number at `total`; `reconciles` when the numbers at `add`, less those at `subtract`, come to it.
+An output that is not JSON, a path with no value or a value that is not a number fails the check,
+and the reason names the path. A month-end bank reconciliation, from
+[`examples/evals/reconciliation`](../examples/evals/reconciliation/evals.yaml):
+
+```yaml
+checks:
+  - type: reconciles             # opening balance + deposits - withdrawals = closing balance
+    add: [opening_balance, deposits.*.amount]
+    subtract: [withdrawals.*.amount]
+    total: closing_balance
+  - type: sums_to                # the deposits add up to the total the reply states
+    parts: [deposits.*.amount]
+    total: total_deposits
+  - type: number_equals          # the closing balance is the bank statement's
+    path: closing_balance
+    expectation: closing_balance
+  - type: table_equals           # every deposit matches the statement, by its reference
+    path: deposits
+    key: ref
+    expectation: deposits
+```
+
+Its first case reconciles. In the second, one deposit is a cent off, and three checks fail with
+these reasons, while the closing balance still equals the statement's:
+
+```text
+reconciles    16545.11 added (3 values) less 1750.00 subtracted (2 values) is 14795.11, but the total is 14795.10: off by 0.01
+sums_to       2 parts add up to 4045.11, but the total is 4045.10: off by 0.01
+table_equals  1 of 2 rows differ: D-102: amount is 845.11, expected 845.10, off by 0.01
+```
+
+**Tables.** `table_equals` compares a table by its rows and cells. The output's rows are the JSON
+objects at `path` in the JSON output, or the JSON output itself, which must then be a list of
+objects; an output that is not JSON must hold exactly one Markdown pipe table. These are the two
+forms a model gives a table in: JSON when asked for structured output, Markdown in a chat reply.
+CSV is not read from an output, because CSV in a reply cannot be told apart from prose with
+commas in it. The expected rows are `rows`, or the row's `expectations[<key>]`, not both: a
+nonempty list of objects, or JSON text of one, as a CSV data file gives it.
+
+- Rows are matched by their `key` column, or columns (`key: [invoice, line]`), in any order. An
+  expected row the output lacks, a row the expected table lacks (a totals row too), and two
+  output rows with the same key fail the check. Key cells are matched by their text.
+- Every column of an expected row besides its key is compared, or only those `columns` names. A
+  column only the output has is ignored. An expected cell that is a number, or text that reads as
+  one, is compared as a number within the tolerance; a blank one (null or empty text) matches a
+  blank or missing cell; any other is compared as text without surrounding whitespace, ignoring
+  case unless `case_sensitive: true`, which applies to column names and keys as well.
+- In a Markdown table the outer pipes are optional, `\|` is a pipe inside a cell, and `**`, `*`
+  or backticks around a whole cell are dropped, so `**$50.00**` is 50.
+- The reason names each row that differs and how, the first ten of each kind:
+
+```text
+2 of 3 rows differ: INV-1: amount is 1200.01, expected 1200.00, off by 0.01, status is "unpaid", expected "paid"; INV-2 is missing. 1 unexpected row: INV-9
+```
+
+In Python `value` and `rows` may be the first positional argument, the other options are keyword
+arguments, and a figure may also be a `Decimal`:
+
+```python
+from martian.evals import number_equals, reconciles, table_equals
+
+scorers = [
+    reconciles(add=["opening_balance", "deposits.*.amount"], subtract=["withdrawals.*.amount"], total="closing_balance"),
+    number_equals(expectation="closing_balance", path="closing_balance"),
+    table_equals(expectation="deposits", key="ref", path="deposits", abs_tolerance="0.005"),
+]
+```
 
 **Latency and cost** read the trace MLflow records for the target's call, the same trace the
 local Evals UI shows for the case. `latency` reads its duration. `cost` reads the token usage

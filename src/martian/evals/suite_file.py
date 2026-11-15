@@ -62,6 +62,17 @@ SUITE_FILE_FIELDS = {
     "checks.max_ms": "ScorerVersion.parameters.max_ms",
     "checks.max_usd": "ScorerVersion.parameters.max_usd",
     "checks.max_tokens": "ScorerVersion.parameters.max_tokens",
+    "checks.value": "ScorerVersion.parameters.value, as written",
+    "checks.path": "ScorerVersion.parameters.path",
+    "checks.abs_tolerance": "ScorerVersion.parameters.abs_tolerance, as written",
+    "checks.rel_tolerance": "ScorerVersion.parameters.rel_tolerance, as written",
+    "checks.parts": "ScorerVersion.parameters.parts",
+    "checks.add": "ScorerVersion.parameters.add",
+    "checks.subtract": "ScorerVersion.parameters.subtract",
+    "checks.total": "ScorerVersion.parameters.total",
+    "checks.key": "ScorerVersion.parameters.key",
+    "checks.columns": "ScorerVersion.parameters.columns",
+    "checks.rows": "ScorerVersion.parameters.rows",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -74,6 +85,7 @@ SUITE_FILE_FIELDS = {
 # The check fields each check type uses besides `type` and `name`, as the file names them.
 # Loading refuses the others.
 _TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
+_TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
@@ -93,6 +105,10 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "length": frozenset({"min_length", "max_length"}),
     "latency": frozenset({"max_ms"}),
     "cost": frozenset({"max_usd", "max_tokens"}),
+    "number_equals": _TOLERANCE_OPTIONS | {"value", "expectation", "path", "pattern"},
+    "sums_to": _TOLERANCE_OPTIONS | {"parts", "total"},
+    "reconciles": _TOLERANCE_OPTIONS | {"add", "subtract", "total"},
+    "table_equals": _TOLERANCE_OPTIONS | {"rows", "expectation", "key", "columns", "path", "case_sensitive"},
 }
 
 # The fields of a JSONL case that the runner reads.

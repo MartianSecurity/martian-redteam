@@ -1,5 +1,6 @@
 """Deterministic checks decide from the reply, or from the recorded call, and never call a model."""
 
+import json
 import random
 from types import SimpleNamespace
 
@@ -19,9 +20,14 @@ from martian.evals import (
     matches,
     not_contains,
     not_matches,
+    number_equals,
+    reconciles,
     similarity,
     starts_with,
+    sums_to,
+    table_equals,
 )
+from martian.evals._numeric import read_text
 from martian.evals.checks import _edit_distance
 
 
@@ -306,6 +312,31 @@ def test_a_row_with_a_stored_output_has_no_call_to_measure():
         lambda: cost(max_usd=-1),
         lambda: cost(max_tokens=10.5),
         lambda: json_schema({"type": "object"}, name=""),
+        lambda: number_equals(),
+        lambda: number_equals(1, expectation="total"),
+        lambda: number_equals(True),
+        lambda: number_equals("about ten"),
+        lambda: number_equals(1, path="a", pattern="(.+)"),
+        lambda: number_equals(1, path="lines.*.amount"),
+        lambda: number_equals(1, path="a..b"),
+        lambda: number_equals(1, pattern="("),
+        lambda: number_equals(1, abs_tolerance=-0.01),
+        lambda: number_equals(1, rel_tolerance=5),  # 5 meaning 5% would accept almost anything
+        lambda: number_equals(1, rel_tolerance=float("nan")),
+        lambda: number_equals(expectation="total", name="total"),
+        lambda: sums_to(parts="lines.*.amount", total="total"),
+        lambda: sums_to(parts=[], total="total"),
+        lambda: sums_to(parts=["lines.*.amount"], total="lines.*.amount"),
+        lambda: reconciles(add=["opening"], subtract="fees", total="closing"),
+        lambda: table_equals(key="id"),
+        lambda: table_equals([{"id": "a"}], key="id", expectation="rows"),
+        lambda: table_equals([], key="id"),
+        lambda: table_equals([{"id": "a"}, {"id": "A"}], key="id"),
+        lambda: table_equals([{"name": "a"}], key="id"),
+        lambda: table_equals([{"id": "a", "tags": ["x"]}], key="id"),
+        lambda: table_equals([{"id": "a"}], key="id", columns=["amount"]),
+        lambda: table_equals([{"id": "a"}], key="id", columns=["id"]),
+        lambda: table_equals([{"id": "a"}], key=[]),
     ],
 )
 def test_misconfigured_checks_raise_when_created_or_run(build):
@@ -389,3 +420,244 @@ def test_latency_and_cost_read_the_trace_mlflow_records_for_the_call(monkeypatch
     finally:
         STATE.reset()
         mlflow.set_tracking_uri(old_uri)
+
+
+# --- numbers and tables -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("1234.56", "1234.56"),
+        ("  1,234.56 ", "1234.56"),
+        ("$1,234.56", "1234.56"),
+        ("-$1,234.56", "-1234.56"),
+        ("$-1,234.56", "-1234.56"),
+        ("\u22121,234.56", "-1234.56"),
+        ("(1,234.56)", "-1234.56"),
+        ("USD 1,234.56", "1234.56"),
+        ("1,234.56 EUR", "1234.56"),
+        ("12.5%", "12.5"),
+        ("1234567", "1234567"),
+        ("0.10", "0.10"),
+    ],
+)
+def test_a_number_written_as_text_is_read_exactly(text, number):
+    assert str(read_text(text)) == number
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "ten", "1,23", "1.234,56", "1 234", ".5", "1.", "1e5", "--5", "(-5)", "$5%", "12,34.5", "5 apples", "\u0665"],
+)
+def test_text_that_is_not_one_number_is_not_read(text):
+    assert read_text(text) is None
+
+
+def test_number_equals_reads_the_one_number_a_pattern_or_a_path():
+    assert value(number_equals(1234.56), "The total is $1,234.56.") is True
+    assert value(number_equals("1234.560"), "1234.56") is True  # the same value, written longer
+    two = number_equals(30)(outputs="3 items cost $30.")
+    assert (two.value, two.rationale) == (
+        False,
+        "the output holds 2 numbers; a pattern or a path picks the one to compare",
+    )
+    assert value(number_equals(30, pattern=r"cost (\S+)\."), "3 items cost $30.") is True
+    assert value(number_equals(30, pattern=r"\$\d+"), "3 items cost $30.") is True  # the whole match
+    assert value(number_equals(30, pattern=r"total (\d+)"), "3 items cost $30.") is False
+    assert value(number_equals(10.1, path="totals.net"), '{"totals": {"net": "10.10"}}') is True
+    assert value(number_equals(7, path="lines.1"), {"lines": [5, 7]}) is True
+    missing = number_equals(10, path="totals.gross")(outputs='{"totals": {"net": 10}}')
+    assert (missing.value, missing.rationale) == (False, "the output has no value at totals.gross")
+    assert number_equals(10, path="totals")(outputs="10").rationale == "the output has no value at totals"
+    assert number_equals(10, path="a")(outputs="ten").rationale == "the output is not JSON, so path cannot be read"
+    assert number_equals(10, path="a")(outputs='{"a": true}').rationale == "the value at a is not a number"
+
+
+def test_number_equals_reads_the_expected_number_from_each_row():
+    check = number_equals(expectation="total", path="total")
+    # A CSV data file gives every expectation as text.
+    assert value(check, '{"total": 1234.56}', {"total": "1,234.56"}) is True
+    assert value(check, '{"total": 1234.56}', {"total": 1234.57}) is False
+    with pytest.raises(ValueError, match="expectations.total must be a number"):
+        value(check, '{"total": 1}', {"other": 1})
+
+
+def test_a_one_cent_error_fails_and_figures_are_exact_decimals():
+    exact = number_equals("1234.56")
+    feedback = exact(outputs="1234.57")
+    assert (feedback.value, feedback.rationale) == (
+        False,
+        "1234.57, but the expected number is 1234.56: off by 0.01",
+    )
+    assert value(exact, "1234.55") is False
+    # 0.1 + 0.2 is 0.30000000000000004 in binary floats, and exactly 0.3 here.
+    assert value(sums_to(parts=["a", "b"], total="total"), '{"a": 0.1, "b": 0.2, "total": 0.3}') is True
+    assert value(sums_to(parts=["a", "b"], total="total"), {"a": 0.1, "b": 0.2, "total": 0.3}) is True
+    # A float's shortest text is its value: 1e16 + 1 cannot be held in a float, but is read here.
+    assert value(number_equals("10000000000000001"), "10,000,000,000,000,001") is True
+    assert value(number_equals("10000000000000001"), "10,000,000,000,000,000") is False
+    with pytest.raises(ValueError, match="more than 100 digits"):
+        number_equals("1" * 120)(outputs="2" * 120)
+
+
+def test_tolerance_is_the_larger_of_the_absolute_and_the_relative_and_includes_its_bound():
+    absolute = number_equals(100, abs_tolerance=0.01)
+    assert value(absolute, "100.01") is True and value(absolute, "99.99") is True  # the bound itself
+    assert absolute(outputs="100.011").rationale == (
+        "100.011, but the expected number is 100: off by 0.011, more than the tolerance of 0.01"
+    )
+    relative = number_equals(-2000, rel_tolerance="0.001")  # 0.1% of the expected number's size: 2
+    assert value(relative, "-2002") is True and value(relative, "-2002.01") is False
+    assert relative(outputs="-1999").rationale == "-1999, within 2.000 of the expected number -2000"
+    both = number_equals(1000, abs_tolerance=5, rel_tolerance=0.001)  # 5, and 1: 5 applies
+    assert value(both, "1004.5") is True and value(both, "1005.5") is False
+    small = number_equals("0.50", abs_tolerance=0.01, rel_tolerance=0.1)  # 0.01, and 0.05: 0.05 applies
+    assert value(small, "0.55") is True and value(small, "0.56") is False
+    # Near zero a relative tolerance allows nothing; an absolute one is needed.
+    assert value(number_equals(0, rel_tolerance=0.5), "0.0001") is False
+    assert value(number_equals(0, abs_tolerance=0.001, rel_tolerance=0.5), "0.0001") is True
+
+
+STATEMENT = {
+    "opening_balance": "12,500.00",
+    "deposits": [{"ref": "D-101", "amount": 3200.00}, {"ref": "D-102", "amount": "845.10"}],
+    "withdrawals": [{"ref": "W-201", "amount": 1520.00}, {"ref": "W-202", "amount": 230.00}],
+    "total_deposits": 4045.10,
+    "closing_balance": "$14,795.10",
+}
+BALANCE = {
+    "add": ["opening_balance", "deposits.*.amount"],
+    "subtract": ["withdrawals.*.amount"],
+    "total": "closing_balance",
+}
+
+
+def statement(**changes):
+    return json.dumps({**STATEMENT, **changes})
+
+
+def test_a_reconciliation_passes_and_a_one_cent_error_fails():
+    check = reconciles(**BALANCE)
+    feedback = check(outputs=statement())
+    assert (feedback.value, feedback.rationale) == (
+        True,
+        "16545.10 added (3 values) less 1750.0 subtracted (2 values) is 14795.10, equal to the total 14795.10",
+    )
+    one_cent = check(outputs=statement(closing_balance="14,795.11"))
+    assert (one_cent.value, one_cent.rationale) == (
+        False,
+        "16545.10 added (3 values) less 1750.0 subtracted (2 values) is 14795.10, "
+        "but the total is 14795.11: off by 0.01",
+    )
+    assert value(reconciles(**BALANCE, abs_tolerance=0.01), statement(closing_balance="14,795.11")) is True
+    deposits = statement(deposits=[{"ref": "D-101", "amount": 3200}, {"ref": "D-102", "amount": 845.11}])
+    assert value(check, deposits) is False
+    assert value(sums_to(parts=["deposits.*.amount"], total="total_deposits"), statement()) is True
+    assert value(sums_to(parts=["deposits.*.amount"], total="total_deposits"), deposits) is False
+
+
+def test_totals_and_reconciliation_fail_on_a_figure_they_cannot_read():
+    check = reconciles(**BALANCE)
+    assert check(outputs="The books balance.").rationale == "the output is not JSON, so its figures cannot be read"
+    broken = statement(withdrawals=[{"ref": "W-201", "amount": "n/a"}])
+    assert check(outputs=broken).rationale == "the value at withdrawals.0.amount is not a number"
+    assert check(outputs=statement(withdrawals={})).rationale == (
+        "the value at withdrawals is not a list, so * has no items"
+    )
+    assert check(outputs=json.dumps({"opening_balance": 1, "deposits": []})).rationale == (
+        "the output has no value at withdrawals"
+    )
+    # No items is a sum of zero.
+    nothing = json.dumps({"opening_balance": 5, "deposits": [], "withdrawals": [], "closing_balance": 5})
+    assert value(check, nothing) is True
+
+
+INVOICES = [
+    {"invoice": "INV-1", "amount": "1,200.00", "status": "paid"},
+    {"invoice": "INV-2", "amount": 50, "status": "open"},
+    {"invoice": "INV-3", "amount": 75.5, "status": None},
+]
+MARKDOWN = """Here are the invoices:
+
+| Invoice | Amount | Status |
+| :--- | ---: | --- |
+| INV-2 | **$50.00** | Open |
+| `INV-1` | 1,200.00 | paid |
+| INV-3 | 75.50 | |
+
+Let me know if you need more.
+"""
+
+
+def test_table_equals_matches_rows_by_key_in_any_order_from_markdown_or_json():
+    check = table_equals(INVOICES, key="invoice")
+    feedback = check(outputs=MARKDOWN)
+    assert (feedback.value, feedback.rationale) == (True, "3 rows match, 6 cells compared")
+    rows = [
+        {"invoice": "INV-3", "amount": 75.50, "status": "", "note": "an extra column is not compared"},
+        {"invoice": "INV-1", "amount": 1200, "status": "PAID"},
+        {"invoice": "INV-2", "amount": "50", "status": "open"},
+    ]
+    assert value(check, rows) is True
+    assert value(check, "```json\n" + json.dumps(rows) + "\n```") is True
+    assert value(table_equals(INVOICES, key="invoice", path="data.rows"), {"data": {"rows": rows}}) is True
+    assert value(table_equals(INVOICES, key="invoice", case_sensitive=True), rows) is False
+
+
+def test_table_equals_names_the_rows_and_cells_that_differ():
+    rows = [
+        {"invoice": "INV-1", "amount": "1,200.01", "status": "unpaid"},
+        {"invoice": "INV-3", "amount": 75.5},
+        {"invoice": "INV-9", "amount": 1, "status": "open"},
+    ]
+    feedback = table_equals(INVOICES, key="invoice")(outputs=rows)
+    assert feedback.value is False
+    assert feedback.rationale == (
+        '2 of 3 rows differ: INV-1: amount is 1200.01, expected 1200.00, off by 0.01, status is "unpaid", '
+        'expected "paid"; INV-2 is missing. 1 unexpected row: INV-9'
+    )
+    within = table_equals(INVOICES, key="invoice", columns=["amount"], abs_tolerance=0.01)(outputs=rows)
+    assert within.rationale == "1 of 3 rows differ: INV-2 is missing. 1 unexpected row: INV-9"
+    nan = table_equals([{"id": "a", "n": 1}], key="id")(outputs=[{"id": "a", "n": "one"}])
+    assert nan.rationale == '1 of 1 row differ: a: n is "one", not a number; expected 1'
+    blank = table_equals([{"id": "a", "n": ""}], key="id")(outputs=[{"id": "a", "n": 0}])
+    assert blank.rationale == "1 of 1 row differ: a: n is 0, expected blank"
+    absent = table_equals([{"id": "a", "n": 1}], key="id")(outputs=[{"id": "a"}])
+    assert absent.rationale == "1 of 1 row differ: a: no n"
+    many = table_equals([{"id": str(n)} for n in range(12)], key="id")(outputs=[])
+    assert many.rationale.endswith("9 is missing; and 2 more")
+
+
+def test_table_equals_takes_a_composite_key_and_rows_from_each_case():
+    check = table_equals(expectation="lines", key=["invoice", "line"])
+    expected = [{"invoice": "INV-1", "line": 1, "amount": 10}, {"invoice": "INV-1", "line": 2, "amount": 5}]
+    table = "| invoice | line | amount |\n|---|---|---|\n| INV-1 | 2 | 5 |\n| INV-1 | 1 | 10.00 |"
+    assert value(check, table, {"lines": expected}) is True
+    assert value(check, table, {"lines": json.dumps(expected)}) is True  # as a CSV data file gives it
+    wrong = check(outputs=table.replace("| 5 |", "| 6 |"), expectations={"lines": expected})
+    assert wrong.rationale == "1 of 2 rows differ: INV-1, 2: amount is 6, expected 5, off by 1"
+    with pytest.raises(ValueError, match="expectations.lines must be a nonempty list of row objects"):
+        value(check, table, {"lines": {"invoice": "INV-1"}})
+
+
+@pytest.mark.parametrize(
+    ("output", "problem"),
+    [
+        ("No table here.", "the output is not JSON and holds no Markdown table; the check reads one"),
+        (MARKDOWN + "\n" + MARKDOWN, "the output is not JSON and holds 2 Markdown tables; the check reads one"),
+        ('{"rows": []}', "the JSON output is not a list of row objects"),
+        ("| invoice |\n|---|\n| INV-1 | extra |", "row 1 of the table has 2 cells and its header 1"),
+        ("| id |\n|---|\n| INV-1 |", "row 1 of the output has no invoice, a key column"),
+        ('[{"invoice": "INV-1"}, {"invoice": "inv-1"}]', "the output has two rows with the key inv-1"),
+        ("| Invoice | invoice |\n|---|---|\n| a | b |", "row 1 of the output has two columns named invoice"),
+    ],
+)
+def test_table_equals_fails_on_an_output_it_cannot_read_as_one_table(output, problem):
+    feedback = table_equals(INVOICES, key="invoice")(outputs=output)
+    assert (feedback.value, feedback.rationale) == (False, problem)
+
+
+def test_table_equals_reads_markdown_without_outer_pipes_and_with_escaped_ones():
+    rows = [{"name": "a|b", "n": 1}]
+    assert value(table_equals(rows, key="name"), "name | n\n--- | ---\na\\|b | 1") is True

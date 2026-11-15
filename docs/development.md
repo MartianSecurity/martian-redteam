@@ -23,7 +23,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
-| `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
+| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, and `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, which the suite file runner also checks options with |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
