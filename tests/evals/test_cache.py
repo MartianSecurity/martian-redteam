@@ -6,8 +6,10 @@ One loopback server stands in for both models and counts what each is sent: a UR
 ``/chat`` and an OpenAI-compatible judge at ``/v1/chat/completions``. No real model is called.
 """
 
+import asyncio
 import importlib.util
 import json
+import re
 import stat
 import sys
 import threading
@@ -25,8 +27,9 @@ from martian.config import ConfigError
 from martian.evals import cache as caches
 from martian.evals import judge_panel, response_rubric
 from martian.evals.cache import ModelCallCache, is_credential, key_address, key_headers
-from martian.evals.local import create_local_app
+from martian.evals.local import create_local_app, open_stores
 from martian.evals.runner import run_suite
+from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.state import STATE
 from martian.evals.suite_file import load_suite_file
 
@@ -228,8 +231,11 @@ def test_a_second_identical_run_makes_no_model_calls(tmp_path, endpoint):
     assert [run["run_code"] for run in runs] == ["evals-1", "evals-2"]
     assert provenances[0]["target"] == {"hits": 0, "calls": 3, "stored": 3}
     assert provenances[1]["target"] == {"hits": 3, "calls": 0, "stored": 0}
-    assert provenances[1]["judge"] == {"hits": 3, "calls": 0, "stored": 0}
-    assert provenances[1]["folder"] == str(folder)
+    assert provenances[1] == {
+        "on": True,
+        "target": {"hits": 3, "calls": 0, "stored": 0},
+        "judge": {"hits": 3, "calls": 0, "stored": 0},
+    }
 
 
 def test_a_replayed_judgment_says_it_was_not_a_fresh_call(tmp_path, endpoint):
@@ -682,6 +688,63 @@ def test_a_suite_with_conversation_cases_is_refused_with_the_cache_on(tmp_path, 
     # Without the cache it runs, every turn sent.
     found = run_suite(suite, cache=False)
     assert (found["cases"], found["errors"], endpoint.counts()["target"]) == (4, 0, 3 + 2)
+
+
+# ---------- what a run's readers see of the cache ----------
+
+
+def test_no_run_route_shows_the_cache_s_folder(tmp_path, endpoint):
+    # A finished run, one replayed from the cache, and one stopped at a limit, which records its use
+    # of the cache when it stops.
+    path = write(tmp_path / "suite", suite_file(endpoint, batch=1))
+    run_suite(path)
+    run_suite(path, resume=False)
+    run_suite(path, resume=False, cache=False)
+    endpoint.reset()
+    stopped = write(tmp_path / "other", suite_file(endpoint, batch=1)).rename(tmp_path / "other" / "stopped.yaml")
+    assert run_suite(stopped, max_judge_tokens=1)["stopped"] is not None
+    folders = [str((tmp_path / name / "model-cache").resolve()) for name in ("suite", "other")]
+    client = local_ui(tmp_path)
+    runs = client.get("/v1/evals").json()
+    assert len(runs) == 4
+    # Every route that answers with a run or reads one, for every run, and the run list.
+    paths = client.get("/openapi.json").json()["paths"]
+    routes = [
+        name
+        for name, operations in paths.items()
+        if "get" in operations and re.findall(r"\{(\w+)\}", name) == ["run_id"]
+    ]
+    assert {"/v1/evals/{run_id}", "/v1/evals/{run_id}/provenance", "/v1/evals/{run_id}/attempts"} <= set(routes)
+    answers = [client.get("/v1/evals"), client.get("/v1/evals?limit=1")]
+    for run in runs:
+        answers += [client.get(route.replace("{run_id}", run["id"])) for route in routes]
+        answers.append(client.post(f"/v1/evals/{run['id']}/cancel"))
+        answers.append(client.get(f"/v1/evals/compare?baseline_id={runs[0]['id']}&candidate_id={run['id']}"))
+    for answer in answers:
+        assert answer.status_code < 500, answer.text
+        assert not any(folder in answer.text for folder in folders), answer.request.url
+        assert "model-cache" not in answer.text and "ttl_seconds" not in answer.text, answer.request.url
+    # A run that used the cache says so, with its counts; one without it names no cache.
+    shown = {run["run_code"]: run["provenance"].get("cache") for run in client.get("/v1/evals").json()}
+    assert shown["evals-2"] == {
+        "on": True,
+        "target": {"hits": 3, "calls": 0, "stored": 0},
+        "judge": {"hits": 3, "calls": 0, "stored": 0},
+    }
+    assert shown["evals-3"] is None
+    assert shown["evals-1"]["on"] is True and shown["evals-1"]["target"] == {"hits": 0, "calls": 3, "stored": 3}
+    assert shown["stopped-1"] == {
+        "on": True,
+        "target": {"hits": 0, "calls": 1, "stored": 1},
+        "judge": {"hits": 0, "calls": 1, "stored": 1},
+    }
+    # The data folder's record keeps the folder for its own use; only the routes leave it out.
+    _, kept = open_stores(tmp_path / "evals-home")
+    try:
+        stored = asyncio.run(kept.get_run(SINGLE_USER, DEFAULT_PROJECT, runs[0]["id"]))
+    finally:
+        kept.close()
+    assert stored is not None and stored.provenance["cache"]["folder"] in folders
 
 
 # ---------- where the cache meets a panel of judges ----------

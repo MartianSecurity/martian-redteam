@@ -314,10 +314,12 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     "stopped": ("limit", "value", "used", "message"),
     # A suite-file run's combination of its matrix (martian.evals.matrix), the registered prompt
     # version each of its values matched, one object per axis (martian.evals.prompts), and its use
-    # of the cache of model calls (martian.evals.cache).
+    # of the cache of model calls (martian.evals.cache): that it was on, and the hits, calls made
+    # and replies stored of the target's and the judges' calls. Never the cache's settings, such as
+    # its folder, a path on the machine that ran it.
     "matrix": ("id", "values", "axes", "invocation"),
     "prompts": ("axis", "value", "name", "version", "digest"),
-    "cache": ("folder", "ttl_seconds", "functions", "target", "judge"),
+    "cache": ("on", "target", "judge"),
     # The model a run's target reported (martian.evals.worker.execute), and the schedule and slot a
     # run was admitted for (martian.evals.worker.schedule).
     "model": ("name", "cases"),

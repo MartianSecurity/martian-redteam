@@ -166,11 +166,13 @@ are named in the run's `provenance.prompts`: one entry per such axis, in the mat
 ([prompt versions](evals.md#prompt-versions)). The suite file itself names no prompt version.
 
 A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on, from the suite file's
-`cache` or from `--cache`, has it in `provenance.cache`: `folder` (the cache's absolute path),
-`ttl_seconds` and `functions` from the start, then, once the run ends (finished, `stopped` at a
-limit or `cancelled`), `target` and
+`cache` or from `--cache`, has it in `provenance.cache`: `on` (`true`), `folder` (the cache's
+absolute path), `ttl_seconds` and `functions` from the start, then, once the run ends (finished,
+`stopped` at a limit or `cancelled`), `target` and
 `judge`, each that run's `hits`, `calls` and `stored`, or null when the suite makes no such call
-that the cache holds. A replayed reply is a reply an earlier run received, so the provenance is
+that the cache holds. The run routes show only `on`, `target` and `judge`: the folder is a path on
+the machine that ran the suite and stays in the data folder's record
+([run provenance](evals-core.md#run-provenance)). A replayed reply is a reply an earlier run received, so the provenance is
 where a reader of the run learns that it was not called fresh; `CaseResult` and `Score` carry
 nothing new.
 

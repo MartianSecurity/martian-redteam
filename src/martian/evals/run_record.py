@@ -47,9 +47,10 @@
   named under ``prompts`` (:func:`martian.evals.prompts.matched_prompts`), with the prompt's name
   and version, so the run shows the prompt version it used.
 - A run with the cache of model calls on (:mod:`martian.evals.cache`) has it in ``provenance``
-  under ``cache``: its folder, time to live and whether function targets are cached from the
-  start, and once the run ends how many target and judge replies came from the cache, so a
-  replayed result is never taken for a fresh one.
+  under ``cache``: ``on: true``, its folder, time to live and whether function targets are cached
+  from the start, and once the run ends how many target and judge replies came from the cache, so
+  a replayed result is never taken for a fresh one. The run routes show only ``on`` and the counts
+  (``READER_PROVENANCE``), never the folder.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -158,8 +159,9 @@ class RunRecorder:
     ) -> None:
         """``limits`` are the run's (``provenance.limits`` when it has any), and ``matrix`` the run's
         combination of the suite's matrix, as ``provenance.matrix`` holds it, for a suite with a
-        matrix. ``cache`` is the cache of model calls the run uses, as ``provenance.cache`` holds it
-        from the start; :meth:`used_cache` gives its counts, which ending the run adds."""
+        matrix. ``cache`` is the cache of model calls the run uses, which ``provenance.cache`` holds
+        from the start with ``on: true``; :meth:`used_cache` gives its counts, which ending the run
+        adds."""
         from martian.evals.local import LocalEditionError, open_stores
 
         self._hold: RunHold | None = None
@@ -256,7 +258,7 @@ class RunRecorder:
             if used:
                 provenance[PROVENANCE_KEY] = used
         if self.cache is not None:
-            provenance["cache"] = self.cache
+            provenance["cache"] = {"on": True, **self.cache}
         if simulator is not None:
             provenance["simulator"] = {**simulator.model_dump(mode="json"), "version": SIMULATOR_VERSION}
         run = Run(
@@ -386,7 +388,7 @@ class RunRecorder:
         if stopped is not None:
             provenance["stopped"] = stopped
         if self._cache_used is not None:
-            provenance["cache"] = self._cache_used
+            provenance["cache"] = {"on": True, **self._cache_used}
         if provenance != current.provenance:
             changes["provenance"] = provenance
         finished = current.model_copy(update=changes)

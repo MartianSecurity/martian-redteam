@@ -677,7 +677,7 @@ for a fresh one:
 | `matrix.json` | Each combination's own counts in its `summary.cache` |
 | The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
-| The local Evals UI's data folder | The run's `provenance.cache`: the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled |
+| The local Evals UI's data folder | The run's `provenance.cache`: `on`, the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled. The Evals UI's run routes show only `on` and the counts, never the folder |
 | `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call. A panel is marked only when every member was replayed; its tokens are those of the members that made a call |
 
 ## Conversations
