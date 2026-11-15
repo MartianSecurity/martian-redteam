@@ -39,6 +39,7 @@ from martian.evals.store import (
     check_session_search,
     check_trace_deletion,
     cursor_offset,
+    text_matches,
 )
 from martian.evals.trace_conventions import map_trace
 
@@ -268,7 +269,7 @@ class MemoryStore:
                 continue
             if any(trace.tags.get(key) != value for key, value in query.tags.items()):
                 continue
-            if query.text and query.text.lower() not in f"{trace.name}\n{trace.request}\n{trace.response}".lower():
+            if query.text and not text_matches(query.text, trace.name, trace.request, trace.response):
                 continue
             when = trace.request_time
             if query.since is not None and (when is None or when < query.since):

@@ -129,8 +129,8 @@ def test_migrations_run_both_ways_on_postgres_in_their_own_schema(schema):
         engine.dispose()
 
 
-# The scores table as migration 0009 left it: a score keyed by run, case, scorer and scoring job.
-SCORES_AT_0009 = Table(
+# The scores table as migration 0011 leaves it: a score keyed by run, case, scorer and scoring job.
+SCORES_AT_0011 = Table(
     "martian_scores",
     MetaData(),
     *(Column(name, String(200)) for name in ("space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id")),
@@ -172,16 +172,16 @@ def _sources(engine, space: str, table: Table) -> list[tuple[str, str]]:
 
 
 def _sources_join_the_score_key(engine) -> None:
-    """Migration 0010 fills each score's source from its record in every space, so a check's score
+    """Migration 0012 fills each score's source from its record in every space, so a check's score
     and a person's of the same name are two rows; going back keeps the check's (the review still
     holds the person's answer)."""
-    upgrade(engine, "0009")
+    upgrade(engine, "0011")
     with engine.begin() as connection:
         for space in SPACES:
             _in_space(connection, space)
             # A review's answer that replaced the judge's score on c1, and a judge's score on c2.
             connection.execute(
-                insert(SCORES_AT_0009), [_score_row(space, "c1", "human"), _score_row(space, "c2", "llm_judge")]
+                insert(SCORES_AT_0011), [_score_row(space, "c1", "human"), _score_row(space, "c2", "llm_judge")]
             )
     upgrade(engine)
     _migrations_match_the_tables(engine)
@@ -191,9 +191,9 @@ def _sources_join_the_score_key(engine) -> None:
         _in_space(connection, "org-a")
         connection.execute(insert(scores), [{**_score_row("org-a", "c1", "llm_judge"), "source": "llm_judge"}])
     assert _sources(engine, "org-a", scores) == [("c1", "human"), ("c1", "llm_judge"), ("c2", "llm_judge")]
-    downgrade(engine, "0009")
-    assert _sources(engine, "org-a", SCORES_AT_0009) == [("c1", "llm_judge"), ("c2", "llm_judge")]
-    assert _sources(engine, "~local", SCORES_AT_0009) == [("c1", "human"), ("c2", "llm_judge")]
+    downgrade(engine, "0011")
+    assert _sources(engine, "org-a", SCORES_AT_0011) == [("c1", "llm_judge"), ("c2", "llm_judge")]
+    assert _sources(engine, "~local", SCORES_AT_0011) == [("c1", "human"), ("c2", "llm_judge")]
     upgrade(engine)
     _migrations_match_the_tables(engine)
 

@@ -33,7 +33,10 @@ frozen evals API contract: status and bootstrap here, the read routes in ``runs`
 ``POST /v1/traces``, which records an application's spans as traces through the store,
 ``monitors`` the monitors that score a project's live traces, ``thresholds`` the thresholds on
 their scores and on schedules' gate results, which send alerts, and ``schedules`` the schedules
-that run a saved suite against a target unattended.
+that run a saved suite against a target unattended. Some routes are the core's own, which the
+contract does not have: a run's attempts in ``runs``, the judges' agreement with people and
+people's agreement with each other in ``agreement``, and each judge version's calibration in
+``calibration``.
 """
 
 from __future__ import annotations
@@ -49,6 +52,8 @@ from fastapi.responses import JSONResponse
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
 from martian.evals.server import (
+    agreement,
+    calibration,
     datasets,
     drafts,
     launch,
@@ -197,6 +202,8 @@ def create_app(
         reviews.explorer,
         suites.router,
         suites.explorer,
+        agreement.explorer,
+        calibration.explorer,
         projects.router,
         views.router,
         drafts.router,

@@ -47,6 +47,22 @@ REQUEST_PREVIEW_TRUNCATED = "martian.request_preview_truncated"
 the trace's request instead of the whole; ``get_trace`` gives it whole. Absent otherwise."""
 RESPONSE_PREVIEW_TRUNCATED = "martian.response_preview_truncated"
 """The same for the trace's response."""
+TEXT_SEARCH_REACH = 1000
+"""How much of a trace's request and of its response a free-text search looks in, in every
+binding: the whole of one up to this many characters, and the first ``TEXT_SEARCH_REACH - 3``
+(997) of a longer one, which is what MLflow's 1,000-character preview holds of it before its
+``...``. Looking further means scanning the content of every span in the project without an
+index (``docs/trace-store-limits.md``)."""
+
+
+def text_matches(text: str, name: str, request: str, response: str) -> bool:
+    """Whether a search's free ``text`` is, ignoring case, in a trace's name or in the part of its
+    request or its response a search looks in (:data:`TEXT_SEARCH_REACH`)."""
+
+    def searched(value: str) -> str:
+        return value if len(value) <= TEXT_SEARCH_REACH else value[: TEXT_SEARCH_REACH - 3]
+
+    return text.lower() in f"{name}\n{searched(request)}\n{searched(response)}".lower()
 
 
 class StoreStatus(BaseModel):
@@ -177,7 +193,8 @@ class EvalStore(Protocol):
         """Traces without their spans. A page may hold fewer than ``limit`` traces, or none, and
         still have a ``next_cursor``: only a ``next_cursor`` of ``None`` ends the search. A binding
         may give a preview of a long request or response, and says so in the trace's metadata
-        (``REQUEST_PREVIEW_TRUNCATED``)."""
+        (``REQUEST_PREVIEW_TRUNCATED``). Free text matches as :func:`text_matches` says: the
+        start of a long request or response only (``TEXT_SEARCH_REACH``)."""
         ...
 
     async def search_sessions(
@@ -284,6 +301,7 @@ __all__ = [
     "REQUEST_PREVIEW_TRUNCATED",
     "RESPONSE_PREVIEW_TRUNCATED",
     "STORE_METHODS",
+    "TEXT_SEARCH_REACH",
     "TRACE_DELETE_LIMIT",
     "EvalStore",
     "MemoryStore",
@@ -293,4 +311,5 @@ __all__ = [
     "check_session_search",
     "check_trace_deletion",
     "cursor_offset",
+    "text_matches",
 ]

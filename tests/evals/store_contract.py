@@ -13,6 +13,7 @@ import pytest
 from martian.evals.model import (
     Case,
     Counts,
+    Page,
     Project,
     ReviewQuestion,
     ReviewQueue,
@@ -25,8 +26,8 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
 )
-from martian.evals.server.principal import SINGLE_USER, organisation_principal
-from martian.evals.store import EvalStore, StoreError
+from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
+from martian.evals.store import EvalStore, MemoryStore, StoreError
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, UNKNOWN, sample_trace
 
@@ -70,6 +71,19 @@ async def refused(kind: str, awaitable: object) -> None:
     with pytest.raises(StoreError) as caught:
         await awaitable  # type: ignore[misc]
     assert caught.value.kind == kind
+
+
+class EmptyFirstPages(MemoryStore):
+    """``MemoryStore`` whose trace search answers each page first with no traces and a
+    ``next_cursor``, then whole: what the store interface allows a binding that filters in its
+    own process, such as ``MlflowStore`` with free text, to return. A caller that takes an empty
+    page for the end of a search misses every trace."""
+
+    async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
+        if query.cursor is None or not query.cursor.startswith("then:"):
+            return Page[Trace](items=[], next_cursor=f"then:{query.cursor or ''}")
+        whole = query.model_copy(update={"cursor": query.cursor.removeprefix("then:") or None})
+        return await super().search_traces(principal, whole)
 
 
 class StoreContract:
@@ -393,6 +407,79 @@ class StoreContract:
                 assert len(shown) < len(whole) and shown.endswith("...") and whole.startswith(shown[:-3])
             else:
                 assert key not in read.metadata and shown == whole
+
+    async def test_free_text_looks_in_the_start_of_a_long_request_and_response(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        """Free text matches a trace's name, its request and its response up to 1,000 characters,
+        and the first 997 of a longer one, which MLflow's preview holds before its "..."
+        (MartianSecurity/martian-notes#348). Read back, the trace has both whole."""
+        inside, outside = "|inside-the-reach|", "|outside-the-reach|"
+        request = "a" * (997 - len(inside)) + inside + outside + "b" * 2000
+        await store.record_trace(ORG_A, trace("long", minutes=2, request=request, response=LONG_RESPONSE))
+        at_most = "c" * (1000 - len("|ends-at-1000|")) + "|ends-at-1000|"
+        await store.record_trace(ORG_A, trace("whole", minutes=1, request=at_most, response="Thirty days."))
+        await store.record_trace(ORG_A, trace("short", minutes=0, response="What is the refund window? Thirty days."))
+
+        async def ids(text: str) -> list[str]:
+            pages = [await store.search_traces(ORG_A, TraceQuery(project_id="p1", text=text))]
+            while (cursor := pages[-1].next_cursor) is not None:
+                pages.append(await store.search_traces(ORG_A, TraceQuery(project_id="p1", text=text, cursor=cursor)))
+            return [t.id for page in pages for t in page.items]
+
+        assert await ids("INSIDE-the-reach") == ["long"]
+        assert await ids("a|inside-the-reach|") == ["long"]
+        assert await ids("outside-the-reach") == []
+        assert await ids("inside-the-reach||out") == []
+        assert await ids("...") == []
+        assert await ids("|ends-at-1000|") == ["whole"]
+        assert await ids("An answer quoting the policy") == ["long"]
+        assert await ids("Thirty days.") == ["whole", "short"]  # LONG_RESPONSE ends with it, past the reach
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", text="outside-the-reach"))
+        assert sessions.traces_examined == 0
+        read = await store.get_trace(ORG_A, "p1", "long")
+        assert read is not None and (read.request, read.response) == (request, LONG_RESPONSE)
+
+    async def test_free_text_keeps_its_reach_with_latency_verdicts_and_order(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        """Free text, the latency and verdict filters and the latency order apply together, before
+        paging, and the text still looks only at the start of a long request."""
+        # "refund" starts a's long request, is past the reach of b's, and is in c's and d's; e has none.
+        for name, minutes, latency, request, verdict in (
+            ("a", 0, 100.0, "refund " + "y" * 2000, True),
+            ("b", 1, 800.0, "x" * 1200 + " refund", True),
+            ("c", 2, 500.0, "What is the refund window?", False),
+            ("d", 3, None, "A refund policy", None),
+            ("e", 4, 900.0, "Where is my parcel?", True),
+        ):
+            await store.record_trace(ORG_A, trace(name, minutes=minutes, latency_ms=latency, request=request))
+            if verdict is not None:
+                await store.log_score(ORG_A, "p1", name, Score(scorer="exact_match", source="code", value=verdict))
+
+        async def ids(**query: object) -> list[str]:
+            """Every page of the query for "REFUND", one trace at a time."""
+            found: list[str] = []
+            cursor = None
+            for _ in range(20):
+                page = await store.search_traces(
+                    ORG_A,
+                    TraceQuery(project_id="p1", text="REFUND", limit=1, cursor=cursor, **query),  # type: ignore[arg-type]
+                )
+                found += [t.id for t in page.items]
+                if (cursor := page.next_cursor) is None:
+                    return found
+            raise AssertionError("the search never ended")
+
+        assert await ids() == ["d", "c", "a"]
+        assert await ids(min_latency_ms=200) == ["c"]
+        assert await ids(verdicts={"exact_match": True}) == ["a"]
+        assert await ids(verdicts={"exact_match": False}) == ["c"]
+        assert await ids(slowest_first=True) == ["c", "a", "d"]
+        assert await ids(slowest_first=False, oldest_first=True) == ["a", "c", "d"]
+        assert await ids(min_latency_ms=50, slowest_first=True, verdicts={"exact_match": True}) == ["a"]
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", text="refund", min_latency_ms=200))
+        assert (sessions.traces_examined, sessions.ungrouped) == (1, 1)
 
     async def test_a_trace_keeps_the_state_it_was_recorded_with(self, store: EvalStore, project: Project) -> None:
         span = Span(id="s1", name="model call", kind="LLM", status="ok")

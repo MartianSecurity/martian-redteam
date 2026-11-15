@@ -64,7 +64,7 @@ scores = Table(
     Column("scorer", String(ID), primary_key=True),
     # Empty for a run's own scores; a scoring job's scores sit beside them, never replacing them.
     Column("scoring_job_id", String(ID), primary_key=True),
-    # The score's source (migration 0010): a person's answer named like a check or a judge sits
+    # The score's source (migration 0012): a person's answer named like a check or a judge sits
     # beside that scorer's score, never replacing it.
     Column("source", String(16), primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -288,6 +288,35 @@ deliveries = Table(
     Index("ix_martian_deliveries_due", "space", "state", "next_attempt_at"),
 )
 
+# Judge calibrations (migration 0010): every calibration saved, newest of a judge version first.
+judge_calibrations = Table(
+    "martian_judge_calibrations",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("judge", String(ID), nullable=False),
+    Column("version", String(40), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_judge_calibrations_judge", "space", "project_id", "judge", "version", "created_at"),
+)
+
+# Re-checks of calibrations (migration 0011): queued, then moved on by the worker.
+calibration_rechecks = Table(
+    "martian_calibration_rechecks",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("judge", String(ID), nullable=False),
+    Column("version", String(40), nullable=False),
+    Column("state", String(20), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_calibration_rechecks_judge", "space", "project_id", "judge", "created_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -299,6 +328,8 @@ TABLES = (
     dataset_draft_cases,
     saved_views,
     work_queue,
+    judge_calibrations,
+    calibration_rechecks,
     monitors,
     monitored_traces,
     thresholds,

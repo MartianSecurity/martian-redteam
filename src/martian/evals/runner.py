@@ -73,6 +73,8 @@ from martian.evals.conversations import (
     user_text,
 )
 from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, SimulatedUser, Turn
+from martian.evals.panel import PREFIX as PANEL_PREFIX
+from martian.evals.panel import check_models
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability, representative
 from martian.evals.simulation import GOAL, SIMULATOR_VERSION, SimulatedUsers, Step, goal_verdict
 from martian.evals.stats import proportion_interval
@@ -83,7 +85,19 @@ GROUP_TAG = "martian.group"
 CRITERIA_JUDGES = ("rubric", "guidelines", "conditions")
 # LLM judges of the case's documents (inputs.context) that take no criteria.
 GROUNDING_JUDGES = ("groundedness", "context_relevance", "context_sufficiency")
-JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES
+# LLM judges that read a whole conversation (martian.evals.conversation_judges): they grade
+# conversation cases only, at scope: conversation.
+CONVERSATION_JUDGES = ("task_completion", "policy_adherence", "knowledge_retention")
+JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES + CONVERSATION_JUDGES
+CRITERIA_KEYS = {
+    "rubric": "rubric",
+    "guidelines": "guidelines",
+    "conditions": "conditions",
+    "policy_adherence": "guidelines",
+}
+"""The judges whose criteria a suite file can give once for every case, and the expectation key each
+reads them from. A ``policy_adherence`` judge reads ``guidelines``, as a ``guidelines`` judge does: a
+conversation's guidelines are the case's, and each turn's its own."""
 CHECKS = (
     "contains",
     "not_contains",
@@ -245,7 +259,8 @@ class TargetRef(_Model):
 
 
 class JudgeConfig(_Model):
-    model: str
+    # The model of every LLM judge check that names no panel of its own.
+    model: str | None = None
     inference_params: dict[str, float | int] = Field(default_factory=dict)
     # Added to every judge request; ${NAME} in a value is read from the environment.
     headers: dict[str, str] = Field(default_factory=dict)
@@ -253,6 +268,11 @@ class JudgeConfig(_Model):
     max_retries: int = Field(default=5, ge=0, le=10)
     # Rate limits are retried for up to this many seconds, as long as the provider asks.
     rate_limit_wait_seconds: float = Field(default=300, ge=0, le=3600)
+
+
+class SimulatorConfig(JudgeConfig):
+    # The simulator has the judge's settings, and always names its model: it has no panel.
+    model: str
 
 
 class CheckSpec(_Model):
@@ -263,6 +283,9 @@ class CheckSpec(_Model):
         "groundedness",
         "context_relevance",
         "context_sufficiency",
+        "task_completion",
+        "policy_adherence",
+        "knowledge_retention",
         "contains",
         "not_contains",
         "contains_any",
@@ -294,10 +317,14 @@ class CheckSpec(_Model):
         "python",
     ]
     name: str | None = None
-    # Criteria for an LLM judge, applied to every row that does not carry its own.
+    # Criteria for an LLM judge, applied to every row that does not carry its own; a
+    # policy_adherence judge takes guidelines too.
     rubric: str | None = None
     guidelines: list[str] | None = None
     conditions: list[dict[str, str]] | None = None
+    # An LLM judge's panel: the judge models that each grade it, in place of judge.model; the
+    # strict majority of those that give a verdict decides (martian.evals.panel).
+    panel: list[str] | None = None
     # Deterministic checks.
     values: list[str] = Field(default_factory=list)
     expectation: str | None = None
@@ -355,10 +382,23 @@ class CheckSpec(_Model):
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
-        if self.scope == "conversation" and self.type in JUDGES:
+        if self.panel is not None:
+            if self.type not in JUDGES:
+                raise ValueError(f"a panel names judge models, and a {self.type} check is no LLM judge")
+            check_models(self.panel)
+        if self.type in CONVERSATION_JUDGES and self.scope != "conversation":
+            raise ValueError(f"a {self.type} judge reads a whole conversation; give it scope: conversation")
+        if self.scope == "conversation" and self.type in JUDGES and self.type not in CONVERSATION_JUDGES:
             raise ValueError(
-                f"a {self.type} judge grades each turn's reply; scope: conversation is for deterministic checks"
+                f"a {self.type} judge grades each turn's reply; scope: conversation is for deterministic checks, "
+                f"python checks and the conversation judges ({', '.join(CONVERSATION_JUDGES)})"
             )
+        if (
+            self.type == "policy_adherence"
+            and self.guidelines is not None
+            and (not self.guidelines or not all(guideline.strip() for guideline in self.guidelines))
+        ):
+            raise ValueError("a policy_adherence check's guidelines must be a nonempty list of nonempty strings")
         if self.scope == "conversation" and self.type in CALL_CHECKS:
             raise ValueError(f"a {self.type} check measures one target call; scope: conversation does not apply to it")
         if self.scope == "conversation" and self.type in TOOL_CHECKS:
@@ -491,7 +531,7 @@ class Suite(_Model):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     # The model that plays the data's simulated users (martian.evals.simulation), with the judge's
     # settings.
-    simulator: JudgeConfig | None = None
+    simulator: SimulatorConfig | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -501,8 +541,9 @@ class Suite(_Model):
         kinds = [check.type for check in self.checks if check.type in JUDGES]
         if len(set(kinds)) != len(kinds):
             raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
-        if kinds and self.judge is None:
-            raise ValueError("LLM judge checks need a judge.model")
+        single = [check for check in self.checks if check.type in JUDGES and check.panel is None]
+        if single and (self.judge is None or self.judge.model is None):
+            raise ValueError("LLM judge checks need a judge.model, or a panel of their own")
         if self.limits.max_judge_tokens is not None and not kinds and self.simulator is None:
             raise ValueError(
                 "limits.max_judge_tokens counts the tokens of LLM judge checks and simulated users, "
@@ -1068,7 +1109,8 @@ def _python_check(check: CheckSpec, base: Path, modules: dict[Path, Any]) -> Any
 def _build_scorers(suite: Suite, base: Path) -> list[Any]:
     """The scorer of each check. A python check's file is imported here, as the run starts, and
     never when the suite loads."""
-    from martian.evals import grounding, judges
+    from martian.evals import conversation_judges, grounding, judges
+    from martian.evals.panel import judge_panel
 
     built = []
     modules: dict[Path, Any] = {}
@@ -1083,22 +1125,28 @@ def _build_scorers(suite: Suite, base: Path) -> list[Any]:
         "groundedness": grounding.groundedness,
         "context_relevance": grounding.context_relevance,
         "context_sufficiency": grounding.context_sufficiency,
+        "task_completion": conversation_judges.task_completion,
+        "policy_adherence": conversation_judges.policy_adherence,
+        "knowledge_retention": conversation_judges.knowledge_retention,
     }
+    settings = suite.judge or JudgeConfig()
     for check in suite.checks:
         if check.type in JUDGES:
-            assert suite.judge is not None
+            options: dict[str, Any] = {
+                "name": check.label,
+                "inference_params": dict(settings.inference_params) or None,
+                "max_retries": settings.max_retries,
+                "rate_limit_wait_seconds": settings.rate_limit_wait_seconds,
+                "headers": judge_headers,
+            }
             factory = factories[check.type]
-            built.append(
-                factory(
-                    model=suite.judge.model,
-                    name=check.label,
-                    input_key=suite.input_key,
-                    inference_params=dict(suite.judge.inference_params) or None,
-                    max_retries=suite.judge.max_retries,
-                    rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
-                    headers=judge_headers,
-                )
-            )
+            # A conversation judge reads the conversation a conversation check is given, not an input.
+            if check.type not in CONVERSATION_JUDGES:
+                options["input_key"] = suite.input_key
+            if check.panel is not None:
+                built.append(judge_panel(factory, models=check.panel, **options))
+            else:
+                built.append(factory(model=settings.model, **options))
         elif check.type in CODE_CHECKS:
             built.append(_python_check(check, base, modules))
         else:
@@ -1202,14 +1250,22 @@ def _build_check(check: CheckSpec) -> Any:
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 
-def _with_suite_criteria(case: dict[str, Any], suite: Suite) -> dict[str, Any]:
-    """Fill in criteria given once in the suite file for rows that do not carry their own."""
+def _with_suite_criteria(case: dict[str, Any], suite: Suite, scope: CheckScope | None = None) -> dict[str, Any]:
+    """Fill in criteria given once in the suite file for rows that do not carry their own. ``scope``
+    is what the row is graded as in a conversation case, a turn or the whole conversation, so only
+    the checks of that scope give their criteria; a case of one input (None) takes every check's.
+    In a suite with a ``task_completion`` judge, a simulated conversation's row for its conversation
+    checks also has its user's ``goal`` when the case's expectations give none."""
     expectations = dict(case["expectations"])
     for check in suite.checks:
-        for key in ("rubric", "guidelines", "conditions"):
-            value = getattr(check, key)
-            if check.type == key and value is not None and key not in expectations:
-                expectations[key] = value
+        key = CRITERIA_KEYS.get(check.type)
+        if key is None or scope not in (None, check.scope):
+            continue
+        if (value := getattr(check, key)) is not None and key not in expectations:
+            expectations[key] = value
+    completes = any(check.type == "task_completion" for check in suite.checks)
+    if completes and scope == "conversation" and "simulated_user" in case and "goal" not in expectations:
+        expectations["goal"] = case["simulated_user"]["goal"]
     return expectations
 
 
@@ -1247,7 +1303,10 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
             target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
     checks = []
     for check in suite.checks:
-        written = check.model_dump(mode="json", exclude={"combine"} | ({"scope"} if check.scope == "turn" else set()))
+        # A check without a panel, or of the default scope, leaves the field out, so its fingerprint
+        # is the one it had before panels and scopes existed.
+        left_out = ({"panel"} if check.panel is None else set()) | ({"scope"} if check.scope == "turn" else set())
+        written = check.model_dump(mode="json", exclude={"combine"} | left_out)
         if check.type in CODE_CHECKS:
             written["file_sha256"] = hashlib.sha256(_relative(check.file or "", base).read_bytes()).hexdigest()
         checks.append(written)
@@ -1731,6 +1790,7 @@ def run_suite(
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
     scorers = _build_scorers(suite, base)
     labels = [check.label for check in suite.checks]
+    panelled = {check.label for check in suite.checks if check.panel is not None}
     scorer_of = dict(zip(labels, scorers, strict=True))
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
     turn_labels = [label for label in labels if scopes[label] == "turn"]
@@ -1820,6 +1880,14 @@ def run_suite(
             # A function target's exception may hold anything, so only the SDK's own words
             # (TargetCallError, such as NOT_RUN or TIMED_OUT) give a reason.
             reason = (why() if broke else None) or ("the target call failed" if broke else None)
+            # A panel check's votes, from its feedback's metadata (martian.evals.panel).
+            votes: dict[str, dict[str, str]] = {}
+            assessments = frame["assessments"].iloc[position] if "assessments" in frame.columns else None
+            for item in assessments if isinstance(assessments, list) else []:
+                found = (item.get("metadata") or {}) if isinstance(item, dict) else {}
+                panel = {key: str(value) for key, value in found.items() if str(key).startswith(PANEL_PREFIX)}
+                if panel and item.get("assessment_name") in panelled:
+                    votes[str(item["assessment_name"])] = panel
             verdicts: dict[str, dict[str, Any]] = {}
             for label in checked:
                 value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
@@ -1841,6 +1909,8 @@ def run_suite(
                         "the target failed" if broke else str(detail)[:300] if not _missing(detail) else "no verdict"
                     ),
                 }
+                if label in votes and not broke:
+                    verdicts[label]["metadata"] = votes[label]
             values = [verdict["passed"] for verdict in verdicts.values()]
             return {
                 "passed": None if any(v is None for v in values) else all(values),
@@ -1966,7 +2036,7 @@ def run_suite(
                                     SESSION_ID: states[key]["session_id"],
                                     HISTORY: list(states[key]["history"]),
                                 },
-                                "expectations": _with_suite_criteria(turn, suite),
+                                "expectations": _with_suite_criteria(turn, suite, "turn"),
                                 "tags": {"martian_case_id": case["id"], "martian_attempt": str(number)},
                             }
                         )
@@ -2027,7 +2097,7 @@ def run_suite(
                 {
                     "inputs": {MESSAGES: state["history"]},
                     "outputs": replies(state["turns"]),
-                    "expectations": _with_suite_criteria(by_id[case_id], suite),
+                    "expectations": _with_suite_criteria(by_id[case_id], suite, "conversation"),
                     "tags": {"martian_case_id": case_id, "martian_attempt": str(number)},
                 }
                 for (case_id, number), state in states.items()
@@ -2039,6 +2109,10 @@ def run_suite(
                     tags = frame["tags"].iloc[position] or {}
                     key = (str(tags.get("martian_case_id")), int(tags.get("martian_attempt", 1)))
                     wholes[key] = outcome(frame, position, whole_labels, _no_reason)["checks"]
+                    # A conversation judge's tokens count towards max_judge_tokens as a turn judge's do.
+                    if "assessments" in frame.columns:
+                        for tokens in _judge_tokens(frame["assessments"].iloc[position], judges):
+                            budget.spend(tokens)
             out: dict[tuple[str, int], tuple[dict[str, Any], list[Any]]] = {}
             for key, state in states.items():
                 case = by_id[key[0]]
