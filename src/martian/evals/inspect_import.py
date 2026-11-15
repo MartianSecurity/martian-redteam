@@ -187,7 +187,8 @@ class InspectLog:
 
 def read_inspect_log(path: Path) -> InspectLog:
     """The Inspect log at ``path``, ``.eval`` or ``.json``, with its samples. Raises
-    :class:`InspectLogError` for a file that is not a finished Inspect log of format version 2."""
+    :class:`InspectLogError` for a file that is not a finished Inspect log of format version 2, or
+    for a log the model cannot hold (:func:`_one_score_per_name`)."""
     path = path.expanduser().resolve()
     try:
         data = path.read_bytes()
@@ -218,7 +219,40 @@ def read_inspect_log(path: Path) -> InspectLog:
         raise InspectLogError(f"{path.name}: the eval has not finished (status started); import its log once it ends")
     if not log.samples:
         raise InspectLogError(f"{path.name} has no samples: Inspect wrote it without them (--no-log-samples)")
+    _one_score_per_name(log, path.name)
     return InspectLog(path=path, sha256=hashlib.sha256(data).hexdigest(), format=form, log=log)
+
+
+def _one_score_per_name(log: InspectEvalLog, name: str) -> None:
+    """Refuse a log that gives a sample two scores of one name and source, before anything is
+    written: a case holds one score of a name and source. A scorer's dict entry ``<scorer>/<key>``
+    can be named like another scorer, such as a code scorer named ``tool_use/calls`` beside the
+    entry ``calls`` of the code scorer ``tool_use``. Each score's value is checked as importing
+    it does."""
+    keys = _entry_keys(log)
+    for sample in log.samples or []:
+        judges = _judges(sample.events)
+        seen: dict[tuple[str, str], Score] = {}
+        for scorer, found in _scores_of(sample, log).items():
+            for score in inspect_scores(
+                scorer, found, run_id="", case_id=case_id(sample), keys=keys.get(scorer), judge=judges.get(scorer)
+            ):
+                first = seen.setdefault((score.scorer, score.source), score)
+                if first is not score:
+                    kind = "judge" if score.source == "llm_judge" else "code"
+                    raise InspectLogError(
+                        f"{name}: sample {case_id(sample)} has two {kind} scores named {score.scorer}: "
+                        f"{_origin(first)} and {_origin(score)}; a case holds one score of a name and source"
+                    )
+
+
+def _origin(score: Score) -> str:
+    """Which part of the log a score is: a scorer's value, or an entry of its dict or list."""
+    scorer = score.metadata.get("inspect.scorer")
+    for key in ("inspect.key", "inspect.index"):
+        if key in score.metadata:
+            return f"the entry {score.metadata[key]} of the scorer {scorer}"
+    return f"the scorer {scorer}"
 
 
 def _json(data: bytes, name: str) -> Any:
