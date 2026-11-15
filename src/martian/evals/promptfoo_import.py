@@ -15,7 +15,8 @@ default project, the way ``martian evals import inspect`` writes its runs:
 - Each result row (a test, once per prompt and repeat) is a ``CaseResult`` with the rendered
   prompt and the vars as its inputs, the test's assertions as its expectations, the provider's
   output and latency, and promptfoo's verdict: ``failureReason`` 2 is ``error``, a row that
-  passed is ``passed``, any other ``failed``.
+  passed is ``passed``, any other ``failed``. Its id names the test and the prompt the same way
+  under every provider, so two providers' runs compare case by case.
 - Every assertion promptfoo graded is a ``Score``: its pass as the value and the verdict, its
   numeric score in the metadata and its reason as the rationale. Model-graded assertions have
   source ``llm_judge``.
@@ -207,11 +208,12 @@ def read_promptfoo_results(path: Path) -> PromptfooResults:
     providers = {row.provider for row in rows}
     if len({provider_name(provider) for provider in providers}) != len(providers):
         raise PromptfooResultsError(f"{path.name}: two providers have the same label; give each its own label")
-    prompts = len({row.prompt_idx for row in rows})
+    positions = _prompt_positions(rows)
+    prompts = len(set(positions.values()))
     seen: set[tuple[str, str]] = set()
     for row in rows:
         name = provider_name(row.provider)
-        identifier = case_id(row.test_idx, row.prompt_idx, prompts=prompts, repeat=row.repeat_index)
+        identifier = case_id(row.test_idx, positions[_column(row)], prompts=prompts, repeat=row.repeat_index)
         if (name, identifier) in seen:
             raise PromptfooResultsError(f"{path.name}: provider {name} has {identifier} twice")
         seen.add((name, identifier))
@@ -222,11 +224,45 @@ def read_promptfoo_results(path: Path) -> PromptfooResults:
 
 
 def case_id(test: int, prompt: int, *, prompts: int, repeat: int | None = None) -> str:
-    """The case id of test ``test`` (promptfoo's zero-based ``testIdx``) on prompt ``prompt``:
-    ``test 1``, with ``, prompt 2`` when the eval has more than one prompt and `` (repeat 2)`` for
-    a later repeat. ``martian evals convert promptfoo`` gives its cases the same ids."""
+    """The case id of test ``test`` (promptfoo's zero-based ``testIdx``) on the eval's prompt
+    ``prompt`` (zero-based): ``test 1``, with ``, prompt 2`` when the eval has more than one prompt
+    and `` (repeat 2)`` for a later repeat. ``martian evals convert promptfoo`` gives its cases the
+    same ids."""
     found = f"test {test + 1}" if prompts == 1 else f"test {test + 1}, prompt {prompt + 1}"
     return found if not repeat else f"{found} (repeat {repeat + 1})"
+
+
+_Column = tuple[str, str, int]
+"""One of promptfoo's prompt columns: its provider's id and label, and its ``promptIdx``."""
+
+
+def _column(row: PromptfooResult) -> _Column:
+    return (row.provider.id, row.provider.label or "", row.prompt_idx)
+
+
+def _prompt_positions(rows: list[PromptfooResult]) -> dict[_Column, int]:
+    """Each prompt column of ``rows`` as the position of its prompt among the eval's prompts, so
+    that a test on one prompt has one case id under every provider.
+
+    promptfoo gives each provider a column of its own for each prompt it runs, numbered on from the
+    previous provider's (``promptIdx``): with two prompts, the second provider's columns are 2 and
+    3. A column's prompt is its ``promptId``, promptfoo's hash of the prompt's label, and how many
+    of the provider's columns up to it have that id, for two prompts with one label. Prompts are
+    numbered in the order of their first column: the config's order when the first provider runs
+    every prompt."""
+    providers: dict[tuple[str, str], dict[int, str]] = {}
+    for row in rows:
+        providers.setdefault((row.provider.id, row.provider.label or ""), {})[row.prompt_idx] = row.prompt_id
+    prompts: dict[_Column, tuple[str, int]] = {}
+    for (identifier, label), columns in providers.items():
+        seen: dict[str, int] = {}
+        for index in sorted(columns):
+            seen[columns[index]] = seen.get(columns[index], 0) + 1
+            prompts[(identifier, label, index)] = (columns[index], seen[columns[index]])
+    positions: dict[tuple[str, int], int] = {}
+    for column in sorted(prompts, key=lambda column: column[2]):
+        positions.setdefault(prompts[column], len(positions))
+    return {column: positions[prompt] for column, prompt in prompts.items()}
 
 
 def provider_name(provider: PromptfooProvider) -> str:
@@ -238,20 +274,25 @@ def promptfoo_runs(found: PromptfooResults, *, codes: dict[str, str]) -> list[Im
     """The file ``found`` as one run per provider, in the order the file first names them, each
     coded ``codes[provider name]``."""
     summary = found.file.results
-    prompts = len({row.prompt_idx for row in summary.results})
+    positions = _prompt_positions(summary.results)
     providers: dict[tuple[str, str], list[PromptfooResult]] = {}
     for row in summary.results:
         providers.setdefault((row.provider.id, row.provider.label or ""), []).append(row)
     return [
-        _run(found, rows, run_id=str(uuid.uuid4()), code=codes[provider_name(rows[0].provider)], prompts=prompts)
+        _run(found, rows, run_id=str(uuid.uuid4()), code=codes[provider_name(rows[0].provider)], positions=positions)
         for rows in providers.values()
     ]
 
 
-def _run(found: PromptfooResults, rows: list[PromptfooResult], *, run_id: str, code: str, prompts: int) -> ImportedRun:
+def _run(
+    found: PromptfooResults, rows: list[PromptfooResult], *, run_id: str, code: str, positions: dict[_Column, int]
+) -> ImportedRun:
     summary = found.file.results
-    ordered = sorted(rows, key=lambda row: (row.test_idx, row.prompt_idx, row.repeat_index or 0))
-    identifiers = [case_id(row.test_idx, row.prompt_idx, prompts=prompts, repeat=row.repeat_index) for row in ordered]
+    prompts = len(set(positions.values()))
+    ordered = sorted(rows, key=lambda row: (row.test_idx, positions[_column(row)], row.repeat_index or 0))
+    identifiers = [
+        case_id(row.test_idx, positions[_column(row)], prompts=prompts, repeat=row.repeat_index) for row in ordered
+    ]
     cases = [
         _case(row, run_id=run_id, code=code, identifier=identifier, position=position)
         for position, (row, identifier) in enumerate(zip(ordered, identifiers, strict=True))
