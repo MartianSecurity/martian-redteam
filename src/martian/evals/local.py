@@ -8,17 +8,30 @@ unless the caller names another:
 - ``artifacts/``: that store's run artifacts.
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
   runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
+- ``targets.json`` and ``target-keys.json``: the targets the user defines in the UI, in place of
+  the hosted console's Agents registry, and their keys, in a file only the user can read
+  (:mod:`martian.evals.local_targets`).
 - ``settings.json``: the local settings, :class:`~martian.evals.judge_settings.FileJudgeSettings`:
   the default judge model, which an organisation sets on the server. Written when it is first set.
+- ``locks/``: an empty file per process working on a run, which that process holds an OS lock on
+  (:class:`~martian.evals.local_runs.RunLock`), so that another process can tell it is alive.
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
 open the folder, so that an application can then record traces into the project's experiment with
 MLflow tracing (``docs/evals-core.md`` gives the settings).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
-``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
-the built Evals UI, by default the one the wheel ships in ``martian/ui``. The server listens on
+Runs started in the UI run in processes of their own, with the edition's worker
+(:class:`~martian.evals.local_runs.LocalWorker`), against the targets the user defines, and their
+suites' model judges run on the SDK judge, on the default judge model in ``settings.json`` or the
+judge's own. When it starts, the server finishes as interrupted each queued or running run that no
+process is working on any more (:func:`~martian.evals.local_runs.finish_interrupted`).
+
+The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
+``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
+``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``
+(:mod:`martian.evals.local_runs`). Every other path is a file of the built Evals UI, by default
+the one the wheel ships in ``martian/ui``. The server listens on
 127.0.0.1 and refuses a request whose ``Host`` header names another host, so a web page cannot
 reach it through a name that resolves to this machine. The container image (``Dockerfile``) sets
 :data:`BIND_ENV` so that the server listens on the container's interfaces; the ``Host`` check
@@ -41,6 +54,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
@@ -175,18 +189,28 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
 
 def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
-    user, the session call, and the built UI in ``ui``, a folder holding ``index.html``. It answers
-    a request only when its ``Host`` header names one of ``hosts``."""
+    user, with a worker that runs each run in a process of its own, the session call, the local
+    targets in ``home`` and the local runs, and the built UI in ``ui``, a folder holding
+    ``index.html``. It answers a request only when its ``Host`` header names one of ``hosts``.
+    Runs of ``home`` that no process is working on any more are finished as interrupted first."""
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
+    asyncio.run(local_runs.finish_interrupted(home, store, records))
+    targets = local_targets.LocalTargets(home)
+    judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
+    worker = local_runs.LocalWorker(home, records, targets, judge_settings)
     app = create_app(
         store=store,
         records=records,
         principal=lambda: SINGLE_USER,
-        judge_settings=FileJudgeSettings(home / SETTINGS_FILE),
+        worker=worker,
+        judge_settings=judge_settings,
     )
+    app.state.martian_local_targets = targets
     app.include_router(session_router)
+    app.include_router(local_targets.router)
+    app.include_router(local_runs.router)
     app.mount("/", StaticFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
     return app
