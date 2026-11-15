@@ -355,11 +355,14 @@ The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes
 
 ## Licence, attribution and vulnerability reports
 
-Every file in this repository is Apache-2.0 (`LICENSE`); no file carries another licence.
+Every file in this repository is Apache-2.0 (`LICENSE`) except the third-party code bundled in the
+Evals UI build in `src/martian/ui/`: its JavaScript bundles hold third-party packages under MIT, ISC
+and Apache-2.0, and its Inter font files are OFL-1.1, each listed with its licence text in
+`src/martian/ui/third-party-licenses.md`. The UI's own code is Apache-2.0.
 Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
-`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 
