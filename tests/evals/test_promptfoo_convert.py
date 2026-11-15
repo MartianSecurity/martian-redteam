@@ -229,9 +229,9 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
     conversion = convert_promptfoo_config(config, output=out, target=TARGET)
     assert conversion.unconverted == [] and len(conversion.suites) == 1
     write_conversion(conversion, out)
-    suite, _ = runner.load_suite(out / "evals.yaml")
+    suite, base = runner.load_suite(out / "evals.yaml")
     _, cases = load_suite_file(out / "evals.yaml")
-    (check,) = runner._build_scorers(suite)
+    (check,) = runner._build_scorers(suite, base)
     (spec,) = suite.checks
     assert spec.type == ASSERTION_CHECKS[assertion["type"]]
     expectations = cases[0].expectations
@@ -249,7 +249,10 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
         ({"type": "trajectory:tool-used", "value": "search"}, "the closest check is tool_called"),
         ({"type": "trajectory:tool-sequence", "value": ["a"]}, "the closest check is tool_trajectory"),
         ({"type": "trajectory:step-count", "value": {"max": 3}}, "the closest check is step_count"),
-        ({"type": "is-valid-openai-tools-call"}, "scorer library release, and then the rule is added by hand"),
+        ({"type": "is-valid-openai-tools-call"}, "against the schemas of the provider's own tools or functions"),
+        ({"type": "tool-call-f1", "value": ["a", "b"]}, "only when the two sets are equal"),
+        ({"type": "trajectory:tool-args-match", "value": {"name": "a"}}, "(add tool_called by hand to use it)"),
+        ({"type": "trajectory:tool-sequence", "value": ["a", "b"]}, "in parallel in one turn are in order"),
         ({"type": "finish-reason", "value": "stop"}, "reads the provider's trace or metadata"),
         ({"type": "contains-json"}, "contains-json: finds JSON inside other text"),
         ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no check on main does"),
@@ -299,14 +302,14 @@ def test_every_documented_type_converts_or_has_a_reason():
         ASSERTION_CHECKS
     )
     assert {"javascript", "contains-json", "similar", "python", "is-refusal", "not-is-refusal"} <= set(UNSUPPORTED)
-    # No reason says custom code or tool calls have no equivalent: both name the check to use.
+    # No reason says custom code or tool calls have no equivalent: both name the check to use, and
+    # none says it is still to come. No tool-call assertion matches a check exactly, so none converts.
     for kind in ("javascript", "python", "ruby", "webhook"):
         assert "custom Python scorer" in UNSUPPORTED[kind]
-    for kind in _TOOL_CALLS:
-        assert any(
-            f"closest check is {check}" in UNSUPPORTED[kind]
-            for check in ("tool_called", "tool_trajectory", "step_count")
-        )
+    for kind, (check, _) in _TOOL_CALLS.items():
+        assert f"closest check is {check}" in UNSUPPORTED[kind]
+        assert f"(add {check} by hand to use it)" in UNSUPPORTED[kind]
+    assert not [kind for kind, why in UNSUPPORTED.items() if "release" in why]
 
 
 def call(milliseconds=None, spent=None):
@@ -341,11 +344,11 @@ def test_latency_and_cost_limit_the_targets_call_as_promptfoo_does(tmp_path, ass
         "tests[0].assert[0].metric: names a promptfoo metric; the check is named after the assertion's type"
     ]
     write_conversion(conversion, out)
-    suite, _ = runner.load_suite(out / "evals.yaml")
+    suite, base = runner.load_suite(out / "evals.yaml")
     (spec,) = suite.checks
     limit = CALL_CHECKS[assertion["type"]]
     assert (spec.type, getattr(spec, limit)) == (assertion["type"], assertion["threshold"])
-    (check,) = runner._build_scorers(suite)
+    (check,) = runner._build_scorers(suite, base)
     if verdict is None:
         with pytest.raises(ValueError, match="records no cost"):
             check(trace=trace)

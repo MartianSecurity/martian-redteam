@@ -7,7 +7,7 @@ promptfoo, and writes suite files and their data files where the features map:
 - Each test, once per prompt, is a case: the prompt rendered with the test's vars (``{{ name }}``
   and ``{{ name.key }}``) is the input ``prompt``, and the vars are the input ``vars``. Case ids
   are the ones ``martian evals import promptfoo`` gives the same test's results.
-- Each assertion that a check on the scorer library decides the same way is a check:
+- Each assertion that a suite file's check decides the same way is a check:
   ``ASSERTION_CHECKS`` maps them. ``defaultTest`` assertions come first, as promptfoo runs them.
 - A suite file applies every check to every case, and promptfoo asserts per test, so tests are
   grouped by the checks they need: one suite file per group, ``evals.yaml`` and ``cases.jsonl``
@@ -156,15 +156,48 @@ _CLOSENESS = (
     "perplexity",
     "perplexity-score",
 )
+# promptfoo's tool-call assertions: the closest tool-call check, and how the two decide apart.
+# None decides as a check does, so none converts.
+_TRAJECTORY = (
+    "reads every span of promptfoo's trace that names a tool in its attributes, a tool's own inner spans too, "
+    "and matches a tool's name as a case-insensitive pattern (* and ?); the closest check is {check}, which "
+    "reads the TOOL spans of MLflow's trace of the target's call, not those inside a tool span, and compares "
+    "the name as written"
+)
+_VALID_CALL = (
+    "validates the reply's tool calls against the schemas of the provider's own tools or functions; the closest "
+    "check is tool_called with arguments_match: schema, which checks the calls of a tool it names against a "
+    "schema it gives"
+)
 _TOOL_CALLS = {
-    "is-valid-function-call": "tool_called with a schema argument match",
-    "is-valid-openai-function-call": "tool_called with a schema argument match",
-    "is-valid-openai-tools-call": "tool_called with a schema argument match",
-    "tool-call-f1": "tool_trajectory",
-    "trajectory:tool-used": "tool_called",
-    "trajectory:tool-args-match": "tool_called with an argument match",
-    "trajectory:tool-sequence": "tool_trajectory",
-    "trajectory:step-count": "step_count",
+    "is-valid-function-call": ("tool_called", _VALID_CALL),
+    "is-valid-openai-function-call": ("tool_called", _VALID_CALL),
+    "is-valid-openai-tools-call": ("tool_called", _VALID_CALL),
+    "tool-call-f1": (
+        "tool_trajectory",
+        "scores the reply's set of tool names against the expected set (F1, passing at its threshold, 1.0 by "
+        "default, only when the two sets are equal), and also reads Responses API function_call items and JSON "
+        "on lines of its own inside text; the closest check is tool_trajectory with order: any_order, which "
+        "passes when the expected calls are made, other calls too, and refuses those replies",
+    ),
+    "trajectory:tool-used": ("tool_called", _TRAJECTORY.format(check="tool_called")),
+    "trajectory:tool-args-match": (
+        "tool_called",
+        _TRAJECTORY.format(check="tool_called with arguments_match")
+        + "; promptfoo's partial match also matches lists item by item, and it has defaults and ignore",
+    ),
+    "trajectory:tool-sequence": (
+        "tool_trajectory",
+        _TRAJECTORY.format(check="tool_trajectory")
+        + "; promptfoo orders the tool spans by start time, and tool_trajectory orders model turns, so calls made "
+        "in parallel in one turn are in order for promptfoo and not for in_order",
+    ),
+    "trajectory:step-count": (
+        "step_count",
+        _TRAJECTORY.format(check="step_count")
+        + "; promptfoo counts the trace's steps of a type, and a trace with no tool span as none, where step_count "
+        "counts model turns and tool calls, and reads no trace without a model or tool span",
+    ),
 }
 _CALL_DATA = (
     "finish-reason",
@@ -181,14 +214,12 @@ UNSUPPORTED: dict[str, str] = {
         "runs custom code, which a suite file's built-in checks do not; write the rule as a custom Python "
         "scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads; `trace` too) "
         "returning True or False, a number, or a pair of either with a reason, and add it with `type: python` "
-        "(`file:` and `function:`) by hand. Custom Python scorers come with the scorer library release; "
-        "this converter does not translate the code",
+        "(`file:` and `function:`) by hand; this converter does not translate the code",
     ),
     **{
-        kind: f"is promptfoo's tool-call assertion; the closest check is {check}, which reads the reply's or "
-        "the trace's turns and tool calls, but its match is not exactly promptfoo's, so this converter does not "
-        "map it; the tool-call checks come with the scorer library release, and then the rule is added by hand"
-        for kind, check in _TOOL_CALLS.items()
+        kind: f"is promptfoo's tool-call assertion, which {why}, so the two decide some replies differently "
+        f"(add {check} by hand to use it)"
+        for kind, (check, why) in _TOOL_CALLS.items()
     },
     **dict.fromkeys(
         _MODEL_GRADED,
