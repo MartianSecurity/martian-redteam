@@ -20,7 +20,8 @@ takes. A URL target's body names them as placeholders: ``{{session_id}}``, ``{{h
 A check grades either each turn's reply (scope ``turn``, the default) or the conversation once
 (scope ``conversation``). A turn names the turn checks that grade it (``Turn.checks``); without a
 list every turn check does. A conversation check grades the target's replies, joined by a blank
-line, against the case's own expectations.
+line, against the case's own expectations; a python one is given the conversation as ``messages``
+in its inputs, and no trace. A tool-call check reads one call's tool calls, so it grades turns only.
 
 The conversation's verdict on a turn check passes when the check passed every turn it grades
 (:func:`over_turns`); the case passes when every check, so combined, passes it. A target call

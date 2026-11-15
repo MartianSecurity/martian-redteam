@@ -521,6 +521,10 @@ def test_a_conversation_the_suite_cannot_run_is_refused_before_any_turn(
     [
         ('  - type: rubric\n    rubric: "Pass if polite."\n    scope: conversation\n', "grades each turn's reply"),
         ("  - type: latency\n    max_ms: 100\n    scope: conversation\n", "measures one target call"),
+        (
+            "  - type: tool_not_called\n    calls: [close_account]\n    scope: conversation\n",
+            "reads the tool calls of one target call",
+        ),
     ],
 )
 def test_judges_and_call_checks_grade_turns_not_conversations(tmp_path, check, problem):
@@ -528,6 +532,121 @@ def test_judges_and_call_checks_grade_turns_not_conversations(tmp_path, check, p
         runner.parse_suite(
             f"data: cases.jsonl\ntarget:\n  file: agent.py\njudge:\n  model: openai:/m\nchecks:\n{check}"
         )
+
+
+# ---------- tool-call checks and python checks in a conversation ----------
+
+TOOL_AGENT = """\
+import mlflow
+from mlflow.entities import SpanType
+
+TOOLS = {
+    "Where is order A-1001?": [("lookup_order", {"order_id": "A-1001"})],
+    "Please refund it.": [("issue_refund", {"order_id": "A-1001"})],
+    "Refund it and close my account.": [("issue_refund", {"order_id": "A-1001"}), ("close_account", {})],
+}
+
+
+def reply(message, history):
+    # A model turn that asks for the tools, the tools, then the model turn that answers.
+    for calls in (TOOLS[message], []):
+        with mlflow.start_span(name="chat", span_type=SpanType.CHAT_MODEL) as model:
+            model.set_outputs({"role": "assistant", "content": "ok"})
+        for name, arguments in calls:
+            with mlflow.start_span(name=name, span_type=SpanType.TOOL) as tool:
+                tool.set_inputs(arguments)
+                tool.set_outputs("done")
+    return "Done."
+"""
+
+
+def test_tool_call_checks_read_the_tool_calls_of_each_turns_own_call(tmp_path):
+    (tmp_path / "agent.py").write_text(TOOL_AGENT, encoding="utf-8")
+    cases = [
+        {
+            "id": name,
+            "turns": [
+                {"input": "Where is order A-1001?", "checks": ["looks_up", "never_closes"]},
+                {"input": second, "checks": ["never_closes"]},
+            ],
+        }
+        for name, second in (("careful", "Please refund it."), ("reckless", "Refund it and close my account."))
+    ]
+    checks = (
+        "  - type: tool_called\n    name: looks_up\n    calls: [lookup_order]\n"
+        "  - type: tool_not_called\n    name: never_closes\n    calls: [close_account]\n"
+    )
+    target = "target:\n  file: agent.py\n  function: reply\n"
+    summary = run_suite(suite(tmp_path, cases, target=target, checks=checks))
+    assert (summary["passed"], summary["failed"], summary["errors"]) == (1, 1, 0)
+    found = results_of(tmp_path)
+    assert found["careful"]["checks"]["never_closes"]["rationale"] == "2 of 2 turns passed"
+    # Each turn's check reads that turn's call only: the account is closed in turn 2, not turn 1.
+    reckless = found["reckless"]
+    assert reckless["checks"]["looks_up"]["passed"] is True
+    assert reckless["checks"]["never_closes"] == {
+        "passed": False,
+        "rationale": "1 of 2 turns passed, failed on turn 2",
+        "error": None,
+    }
+    assert [turn["checks"]["never_closes"]["passed"] for turn in reckless["turns"]] == [True, False]
+    assert "close_account" in reckless["turns"][1]["checks"]["never_closes"]["rationale"]
+
+
+PYTHON_SCORERS = """\
+def numbered(inputs, outputs):
+    # Each turn is given its own inputs, with the conversation so far, and its own reply.
+    number = len(inputs["history"]) // 2 + 1
+    return outputs.startswith(f"turn {number}:"), f"turn {number}"
+
+
+def whole(inputs, outputs, expectations):
+    # The conversation is given its messages, the replies joined by a blank line, and its expectations.
+    turns = expectations["turns"]
+    return len(inputs["messages"]) == 2 * turns and outputs.count("\\n\\n") == turns - 1, f"{turns} turns"
+
+
+def traced(outputs, trace):
+    return True
+"""
+
+
+def numbered_suite(folder: Path, cases: list[dict], checks: str) -> Path:
+    folder.mkdir(exist_ok=True)
+    (folder / "agent.py").write_text(
+        "def reply(message, history):\n    return f'turn {len(history) // 2 + 1}: {message}'\n", encoding="utf-8"
+    )
+    (folder / "scorers.py").write_text(PYTHON_SCORERS, encoding="utf-8")
+    return suite(folder, cases, target="target:\n  file: agent.py\n  function: reply\n", checks=checks)
+
+
+def test_python_checks_grade_each_turn_and_the_whole_conversation(tmp_path):
+    cases = [
+        {"id": "two", "turns": [{"input": "hi"}, {"input": "again"}], "expectations": {"turns": 2}},
+        {"id": "three", "turns": [{"input": "a"}, {"input": "b"}, {"input": "c"}], "expectations": {"turns": 2}},
+    ]
+    checks = (
+        "  - type: python\n    name: numbered\n    file: scorers.py\n    function: numbered\n"
+        "  - type: python\n    name: whole\n    file: scorers.py\n    function: whole\n    scope: conversation\n"
+    )
+    summary = run_suite(numbered_suite(tmp_path, cases, checks))
+    assert (summary["passed"], summary["failed"], summary["errors"]) == (1, 1, 0)
+    found = results_of(tmp_path)
+    assert found["two"]["checks"]["whole"]["passed"] is True
+    assert found["three"]["checks"]["numbered"]["rationale"] == "3 of 3 turns passed"
+    assert found["three"]["checks"]["whole"]["passed"] is False
+    assert [turn["checks"]["numbered"]["rationale"] for turn in found["three"]["turns"]] == [
+        "turn 1",
+        "turn 2",
+        "turn 3",
+    ]
+
+    # A conversation check has no call of its own to trace, so one that reads the trace is refused.
+    traced = checks + "  - type: python\n    name: traced\n    file: scorers.py\n    function: traced\n"
+    traced += "    scope: conversation\n"
+    with pytest.raises(ConfigError, match="no target call of its own has a trace"):
+        run_suite(numbered_suite(tmp_path / "traced", cases, traced))
+    assert not (tmp_path / "traced" / "results").exists()
 
 
 def test_a_single_turn_run_has_no_conversation_fields_and_no_turns(tmp_path):
