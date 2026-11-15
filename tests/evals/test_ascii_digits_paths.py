@@ -25,6 +25,7 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 ALLOWED = {
     "martian/evals/_digits.py": "the helper itself",
     "martian/evals/runner.py": "finds a response_path step of non-ASCII digits in order to refuse it by name",
+    "martian/evals/fidelity.py": "keeps a one-character digit of any script as a content word; reads no number",
 }
 CHECKS = {"isdigit", "isnumeric", "isdecimal"}
 

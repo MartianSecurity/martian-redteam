@@ -1,11 +1,14 @@
 """The full data export: everything an organisation holds, exported, imported into a fresh install
 and exported again with nothing lost, on the in-memory store and on the local edition's MLflow
-store; an interrupted export resumed to the same files; and what an import refuses."""
+store; every table of the record store and every kind of object of the two store interfaces either
+exported or left out with a reason; an interrupted export resumed to the same files; and what an
+import refuses."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import typing
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,12 +16,18 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
+from sqlalchemy import create_engine, func, select
 from typer.testing import CliRunner
 
 from martian.cli import app
 from martian.evals import data_export
 from martian.evals.data_export import (
+    EXPORTED_KINDS,
+    EXPORTED_TABLES,
     FILES,
+    LEFT_OUT_KINDS,
+    LEFT_OUT_TABLES,
     MANIFEST,
     PROGRESS,
     ExportError,
@@ -30,6 +39,7 @@ from martian.evals.data_export import (
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
 from martian.evals.local_runs import INTERRUPTED
+from martian.evals.manifests import checked_cases, manifest_for
 from martian.evals.mlflow_import import import_mlflow_store
 from martian.evals.model import (
     Case,
@@ -51,10 +61,12 @@ from martian.evals.model import (
     Trace,
     suite_digest,
 )
-from martian.evals.records import RecordStore, SavedView
+from martian.evals.outbox import save_queue_item
+from martian.evals.records import RECORD_METHODS, RecordStore, SavedView
 from martian.evals.records.sql import SqlRecordStore
+from martian.evals.records.tables import metadata
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
-from martian.evals.store import EvalStore, MemoryStore
+from martian.evals.store import STORE_METHODS, EvalStore, MemoryStore
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -68,6 +80,7 @@ REASSIGNED = {
     "datasets.jsonl": ("dataset", {"created_at", "created_by"}),
     "drafts.jsonl": ("draft", {"revision", "updated_at", "updated_by"}),
     "views.jsonl": ("view", {"revision", "updated_at"}),
+    "manifests.jsonl": ("manifest", {"published_at"}),
 }
 
 
@@ -278,7 +291,9 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         }
     )
     await records.add_review(principal, project, answered)
-    await store.set_queue_item(principal, project, queue.id, traced[0], "completed")
+    # Through the outbox, as the review routes set it: a delivery the export leaves out.
+    delivered = await save_queue_item(store, records, principal, project, queue.id, traced[0], "completed")
+    assert delivered.state == "delivered"
 
     # A run admitted but never started: in the record store only.
     queued_id, _ = ids()
@@ -342,6 +357,15 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     await records.publish_draft(
         principal, project, done.id, expected_revision=saved_done.revision, digest=second.digest
     )
+    # The manifest that pins the version publishing wrote, and a publication that never finished.
+    second_cases = (await store.read_cases(principal, project, second.id, offset=0, limit=10)).items
+    pinned = manifest_for(
+        str(uuid.uuid4()), project, "support", second_cases, draft_id=done.id, published_by=principal.user_id
+    )
+    await records.begin_publication(principal, project, pinned.model_copy(update={"started_at": T0}))
+    await records.finish_publication(principal, project, pinned.id, second.id)
+    abandoned = manifest_for(str(uuid.uuid4()), project, "support next", cases[:2], draft_id=draft.id)
+    await records.begin_publication(principal, project, abandoned.model_copy(update={"started_at": T0}))
     for visibility in ("private", "organization"):
         await records.save_view(
             principal,
@@ -413,6 +437,75 @@ def assert_round_trip(first: Path, again: Path, references: dict[str, dict[str, 
     assert normalised(first, references) == normalised(again)
 
 
+def table_rows(database: Path, space: str) -> dict[str, int]:
+    """How many rows of one organisation (or the single local user) each table of the record
+    store's database holds."""
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            return {
+                table.name: connection.execute(
+                    select(func.count()).select_from(table).where(table.c.space == space)
+                ).scalar_one()
+                for table in metadata.sorted_tables
+            }
+    finally:
+        engine.dispose()
+
+
+def assert_tables_round_trip(source: Path, target: Path, space: str) -> None:
+    """Every table the export carries holds rows in the source, and as many in the fresh install;
+    the outbox's deliveries stay behind."""
+    before, after = table_rows(source, space), table_rows(target, space)
+    assert {name: before[name] > 0 for name in EXPORTED_TABLES} == dict.fromkeys(EXPORTED_TABLES, True)
+    assert {name: after[name] for name in EXPORTED_TABLES} == {name: before[name] for name in EXPORTED_TABLES}
+    assert (before["martian_deliveries"] > 0, after["martian_deliveries"]) == (True, 0)
+
+
+def models_in(hint: Any) -> set[str]:
+    """The names of the model classes a type hint names, with unions, lists and generic models
+    such as ``Page[Run]`` opened up."""
+    found: set[str] = set()
+    if isinstance(hint, type) and issubclass(hint, BaseModel):
+        generic = hint.__pydantic_generic_metadata__
+        found.add((generic["origin"] or hint).__name__)
+        for arg in generic["args"]:
+            found |= models_in(arg)
+    for arg in typing.get_args(hint):
+        found |= models_in(arg)
+    return found
+
+
+def interface_kinds(interface: type, methods: frozenset[str]) -> set[str]:
+    """Every model class a store interface's methods take or return."""
+    found: set[str] = set()
+    for name in methods:
+        for hint in typing.get_type_hints(getattr(interface, name), localns={"Principal": Principal}).values():
+            found |= models_in(hint)
+    return found
+
+
+def test_every_table_and_kind_of_object_is_exported_or_left_out_with_a_reason():
+    # A table or a kind of object added to the record store or the store fails here until the
+    # export writes it (a new file, so a new format version) or names it as left out, and why.
+    tables = {table.name for table in metadata.sorted_tables}
+    unlisted = tables - set(EXPORTED_TABLES) - set(LEFT_OUT_TABLES)
+    assert not unlisted, f"the export neither writes nor leaves out the record store's tables {sorted(unlisted)}"
+    assert set(EXPORTED_TABLES) | set(LEFT_OUT_TABLES) == tables, "the export names tables the record store lacks"
+    assert not set(EXPORTED_TABLES) & set(LEFT_OUT_TABLES)
+
+    kinds = interface_kinds(EvalStore, STORE_METHODS) | interface_kinds(RecordStore, RECORD_METHODS)
+    unlisted = kinds - set(EXPORTED_KINDS) - set(LEFT_OUT_KINDS)
+    assert not unlisted, f"the export neither writes nor leaves out the stores' kinds of object {sorted(unlisted)}"
+    assert set(EXPORTED_KINDS) | set(LEFT_OUT_KINDS) == kinds, "the export names kinds the stores lack"
+    assert not set(EXPORTED_KINDS) & set(LEFT_OUT_KINDS)
+
+    # What it writes, it writes in a file of the format; what it leaves out has a reason.
+    written = set(EXPORTED_TABLES.values()) | {name for names in EXPORTED_KINDS.values() for name in names}
+    assert written <= set(FILES)
+    assert all(reason.strip() for reason in [*LEFT_OUT_TABLES.values(), *LEFT_OUT_KINDS.values()])
+
+
 async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     source, source_records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
     await populate(source, source_records, ORG_A, default_exists=False)
@@ -427,10 +520,15 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     again = await export_data(target, target_records, ORG_A, tmp_path / "again")
 
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
+    assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
     # The receiving store's dataset ids are new, and the references to them follow.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
+    # The published version is still pinned by its manifest: a run reads it only as published.
+    published = [d for d in await target.list_datasets(ORG_A, "default") if d.version == 2]
+    assert (await target_records.manifest_of(ORG_A, "default", published[0].id)) is not None
+    assert len(await checked_cases(target, target_records, ORG_A, "default", published[0])) == 3
     source_records.close()
     target_records.close()
 
@@ -473,6 +571,7 @@ def test_the_local_edition_comes_back_whole_in_a_fresh_data_folder(tmp_path):
     export_local(fresh, tmp_path / "again")
 
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
+    assert_tables_round_trip(home / "martian.db", fresh / "martian.db", "~local")
     # MLflow assigns its own experiment, run and assessment ids; every reference follows them.
     assert all(imported.references[kind] for kind in ("experiment_id", "run_id", "dataset_id", "assessment_id"))
     # The Evals UI shows the imported runs, their results, scores and reviews as it showed them.
@@ -594,8 +693,9 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 2}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 2; this SDK reads version 1"):
+    # An export of the first format, before dataset publications were in it.
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 1}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 1; this SDK reads version 2"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")

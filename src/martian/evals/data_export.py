@@ -19,6 +19,11 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   refers to before the object. The receiving store assigns its own identifiers for what it
   stores (``StoreRef``, dataset version ids, assessment ids), and the import points every
   reference at them.
+- :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
+  kind of object of the two interfaces that an export carries, and the files it is in;
+  :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
+  when a table or a kind is in neither, so a new one is exported (a new file: a new format
+  version) or left out on purpose.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
 )
-from martian.evals.records import SavedView
+from martian.evals.records import DatasetManifest, SavedView
 
 if TYPE_CHECKING:
     from martian.evals.records import RecordStore
@@ -68,7 +73,7 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 1
+VERSION = 2
 """The format's version, in ``manifest.json``. An import reads this version only."""
 
 MANIFEST = "manifest.json"
@@ -82,6 +87,7 @@ FILES = (
     "questions.jsonl",
     "datasets.jsonl",
     "cases.jsonl",
+    "manifests.jsonl",
     "suites.jsonl",
     "drafts.jsonl",
     "draft_cases.jsonl",
@@ -96,6 +102,70 @@ FILES = (
     "traces.jsonl",
 )
 """Every file of an export, in the order an import reads them."""
+
+EXPORTED_TABLES = {
+    "martian_runs": "runs.jsonl",
+    "martian_case_results": "case_results.jsonl",
+    "martian_scores": "scores.jsonl",
+    "martian_scoring_jobs": "scoring_jobs.jsonl",
+    "martian_reviews": "reviews.jsonl",
+    "martian_suites": "suites.jsonl",
+    "martian_dataset_drafts": "drafts.jsonl",
+    "martian_dataset_draft_cases": "draft_cases.jsonl",
+    "martian_saved_views": "views.jsonl",
+    "martian_dataset_manifests": "manifests.jsonl",
+}
+"""Each table of the record store (``martian.evals.records.tables``) that an export carries, and
+the file its rows are in."""
+
+LEFT_OUT_TABLES = {
+    "martian_work_queue": (
+        "the worker's queue of runs and scoring jobs no worker has finished: transient. A run "
+        "exported queued or running is finished as interrupted when the local edition opens the "
+        "data folder it was imported into"
+    ),
+    "martian_deliveries": (
+        "the outbox, store writes on their way from the record store to the store: transient. A "
+        "delivered write is in the store and exported from there. A pending one is not carried: its "
+        "score is exported with the record store's scores, but its trace or review queue item is "
+        "exported as the store holds it, so let the outbox deliver before exporting"
+    ),
+}
+"""Each table of the record store that an export leaves out, and why."""
+
+EXPORTED_KINDS = {
+    "Project": ("projects.jsonl",),
+    "ScorerVersion": ("scorers.jsonl",),
+    "ReviewQuestion": ("questions.jsonl",),
+    "DatasetVersion": ("datasets.jsonl",),
+    "Case": ("cases.jsonl", "draft_cases.jsonl"),
+    "Suite": ("suites.jsonl",),
+    "DatasetDraft": ("drafts.jsonl",),
+    "SavedView": ("views.jsonl",),
+    "DatasetManifest": ("manifests.jsonl",),
+    "Run": ("runs.jsonl",),
+    "CaseResult": ("case_results.jsonl",),
+    "Score": ("scores.jsonl", "traces.jsonl"),
+    "ScoringJob": ("scoring_jobs.jsonl",),
+    "Review": ("reviews.jsonl",),
+    "ReviewQueue": ("queues.jsonl",),
+    "QueueItem": ("queues.jsonl",),
+    "Trace": ("traces.jsonl",),
+}
+"""Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
+return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
+not objects: ``artifacts.jsonl`` and ``artifacts/``."""
+
+LEFT_OUT_KINDS = {
+    "StoreStatus": "the store's readiness, not data",
+    "Page": "one page of a listing; the export writes the objects listed",
+    "TraceQuery": "a trace search, not data",
+    "SessionSearch": "sessions grouped from a search's traces; the export writes the traces",
+    "Counts": "a run's counts, written with its run",
+    "Delivery": "a store write on its way from the record store to the store (the outbox, left out)",
+}
+"""Each model class the two interfaces take or return that is not a kind of object an export
+carries, and why."""
 
 TRACE_PAGE = 500
 """Traces read per export step: a page of the store's trace search."""
@@ -324,7 +394,8 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
 async def _project(
     store: EvalStore, records: RecordStore, principal: Principal, files: _Files, project_id: str
 ) -> None:
-    """The project and what is defined in it: scorers, questions, suites, drafts and views."""
+    """The project and what is defined in it: scorers, questions, suites, drafts, dataset
+    publications and views."""
     project = await store.get_project(principal, project_id)
     if project is None:
         raise ExportError(f"project {project_id} is no longer in the store")
@@ -349,6 +420,8 @@ async def _project(
             if page.next_cursor is None:
                 break
             offset += PAGE
+    for manifest in await records.list_publications(principal, project_id):
+        files.write("manifests.jsonl", _line(project_id, manifest=manifest))
     for view in await records.list_views(principal, project_id):
         files.write("views.jsonl", _line(project_id, view=view))
 
@@ -598,6 +671,8 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("suites")
         if await records.list_drafts(principal, project_id):
             found.append("dataset drafts")
+        if await records.list_publications(principal, project_id):
+            found.append("dataset publications")
         if await records.list_views(principal, project_id):
             found.append("saved views")
         if project_id in present:
@@ -695,6 +770,7 @@ async def _import(
     for project_id, question in _objects(folder, "questions.jsonl", "question", ReviewQuestion):
         await store.save_question(principal, project_id, question)
     await _import_datasets(store, principal, folder, refs)
+    await _import_manifests(records, principal, folder, refs)
     for project_id, suite in _objects(folder, "suites.jsonl", "suite", Suite):
         saved = await records.save_suite(principal, project_id, suite)
         if saved.version != suite.version:
@@ -739,6 +815,16 @@ async def _import_datasets(store: EvalStore, principal: Principal, folder: Path,
         refs.add("experiment_id", dataset.store.experiment_id, created.store.experiment_id)
     if not cases.done():
         raise ExportError("cases.jsonl holds cases of a dataset version datasets.jsonl does not list")
+
+
+async def _import_manifests(records: RecordStore, principal: Principal, folder: Path, refs: _References) -> None:
+    """Each dataset publication, with its start time; a published one is finished again as the
+    receiving store's dataset version, so a run of that version is still checked against it."""
+    for project_id, manifest in _objects(folder, "manifests.jsonl", "manifest", DatasetManifest):
+        await records.begin_publication(principal, project_id, manifest)
+        if manifest.state == "published" and manifest.dataset_id is not None:
+            dataset_id = refs.get("dataset_id", manifest.dataset_id)
+            await records.finish_publication(principal, project_id, manifest.id, str(dataset_id))
 
 
 async def _import_runs(
@@ -853,8 +939,12 @@ def import_local(folder: Path, home: Path) -> ImportSummary:
 
 
 __all__ = [
+    "EXPORTED_KINDS",
+    "EXPORTED_TABLES",
     "FILES",
     "FORMAT",
+    "LEFT_OUT_KINDS",
+    "LEFT_OUT_TABLES",
     "VERSION",
     "ExportError",
     "ExportSummary",
