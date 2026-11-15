@@ -41,6 +41,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import DataError, IntegrityError
 
+from martian.evals._digits import ascii_digits
 from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
 from martian.evals.model import (
     Case,
@@ -57,9 +58,14 @@ from martian.evals.model import (
 from martian.evals.records import (
     THRESHOLD_WINDOW_BOUND,
     Alert,
+    CalibrationRecheck,
+    DatasetManifest,
+    Delivery,
+    JudgeCalibration,
     Monitor,
     MonitoredTrace,
     MonitorProgress,
+    RecheckState,
     SavedView,
     Schedule,
     ScheduledRun,
@@ -70,9 +76,13 @@ from martian.evals.records import (
 )
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
+    calibration_rechecks,
     case_results,
     dataset_draft_cases,
     dataset_drafts,
+    dataset_manifests,
+    deliveries,
+    judge_calibrations,
     monitored_traces,
     monitors,
     reviews,
@@ -87,7 +97,7 @@ from martian.evals.records.tables import (
     thresholds,
 )
 from martian.evals.records.tables import scores as score_rows
-from martian.evals.store import StoreError
+from martian.evals.store import StoreError, cursor_offset
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -256,7 +266,7 @@ class SqlRecordStore:
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[Run]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = cursor_offset(cursor)
         _bounds(offset, limit, 500)
 
         def work(connection: Connection, space: str) -> Page[Run]:
@@ -1035,6 +1045,304 @@ class SqlRecordStore:
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
 
+    # --- judge calibrations --------------------------------------------------------------------
+
+    async def save_calibration(
+        self, principal: Principal, project_id: str, calibration: JudgeCalibration
+    ) -> JudgeCalibration:
+        if calibration.project_id != project_id:
+            raise StoreError("invalid", "the calibration belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[JudgeCalibration, bool]:
+            if stored := self._one(connection, judge_calibrations, space, project_id, id=calibration.id):
+                return JudgeCalibration.model_validate(stored), False
+            saved = calibration.model_copy(update={"created_at": calibration.created_at or _now()})
+            connection.execute(
+                insert(judge_calibrations).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    judge=saved.judge,
+                    version=saved.version,
+                    created_at=saved.created_at,
+                    record=_json(saved),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "calibration", project_id, saved.id)
+        return saved
+
+    async def get_calibration(
+        self, principal: Principal, project_id: str, calibration_id: str
+    ) -> JudgeCalibration | None:
+        def work(connection: Connection, space: str) -> JudgeCalibration | None:
+            stored = self._one(connection, judge_calibrations, space, project_id, id=calibration_id)
+            return JudgeCalibration.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_calibrations(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[JudgeCalibration]:
+        def work(connection: Connection, space: str) -> list[JudgeCalibration]:
+            query = select(judge_calibrations.c.record).where(
+                judge_calibrations.c.space == space, judge_calibrations.c.project_id == project_id
+            )
+            if judge is not None:
+                query = query.where(judge_calibrations.c.judge == judge)
+            order = (judge_calibrations.c.created_at.desc(), judge_calibrations.c.id.desc())
+            rows: Sequence[Any] = connection.execute(query.order_by(*order)).scalars().all()
+            return [JudgeCalibration.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- calibration re-checks -----------------------------------------------------------------
+
+    async def create_recheck(
+        self, principal: Principal, project_id: str, recheck: CalibrationRecheck
+    ) -> CalibrationRecheck:
+        if recheck.project_id != project_id:
+            raise StoreError("invalid", "the re-check belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[CalibrationRecheck, bool]:
+            if stored := self._one(connection, calibration_rechecks, space, project_id, id=recheck.id):
+                return CalibrationRecheck.model_validate(stored), False
+            saved = recheck.model_copy(update={"created_at": recheck.created_at or _now()})
+            connection.execute(
+                insert(calibration_rechecks).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    judge=saved.judge,
+                    version=saved.version,
+                    state=saved.state,
+                    created_at=saved.created_at,
+                    record=_json(saved),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "recheck", project_id, saved.id)
+        return saved
+
+    async def get_recheck(self, principal: Principal, project_id: str, recheck_id: str) -> CalibrationRecheck | None:
+        def work(connection: Connection, space: str) -> CalibrationRecheck | None:
+            stored = self._one(connection, calibration_rechecks, space, project_id, id=recheck_id)
+            return CalibrationRecheck.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def update_recheck(
+        self,
+        principal: Principal,
+        project_id: str,
+        recheck: CalibrationRecheck,
+        *,
+        expected_state: RecheckState | None = None,
+    ) -> CalibrationRecheck:
+        def work(connection: Connection, space: str) -> CalibrationRecheck:
+            stored = self._one(connection, calibration_rechecks, space, project_id, id=recheck.id)
+            if stored is None:
+                raise StoreError("not_found", "re-check not found")
+            saved = recheck.model_copy(update={"created_at": CalibrationRecheck.model_validate(stored).created_at})
+            table = calibration_rechecks
+            statement = update(table).where(
+                table.c.space == space, table.c.project_id == project_id, table.c.id == recheck.id
+            )
+            if expected_state is not None:
+                statement = statement.where(table.c.state == expected_state)
+            if connection.execute(statement.values(state=saved.state, record=_json(saved))).rowcount == 0:
+                raise StoreError("conflict", "the re-check is no longer in the expected state")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "recheck", project_id, saved.id)
+        return saved
+
+    async def list_rechecks(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[CalibrationRecheck]:
+        def work(connection: Connection, space: str) -> list[CalibrationRecheck]:
+            table = calibration_rechecks
+            query = select(table.c.record).where(table.c.space == space, table.c.project_id == project_id)
+            if judge is not None:
+                query = query.where(table.c.judge == judge)
+            order = (table.c.created_at.desc(), table.c.id.desc())
+            rows: Sequence[Any] = connection.execute(query.order_by(*order)).scalars().all()
+            return [CalibrationRecheck.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- dataset manifests -------------------------------------------------------------------
+
+    async def begin_publication(
+        self, principal: Principal, project_id: str, manifest: DatasetManifest
+    ) -> DatasetManifest:
+        if manifest.project_id != project_id:
+            raise StoreError("invalid", "the manifest belongs to another project")
+
+        def work(connection: Connection, space: str) -> DatasetManifest:
+            if stored := self._one(connection, dataset_manifests, space, project_id, id=manifest.id):
+                return DatasetManifest.model_validate(stored)
+            saved = manifest.model_copy(
+                update={"state": "publishing", "dataset_id": None, "started_at": manifest.started_at or _now()}
+            )
+            connection.execute(
+                insert(dataset_manifests).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    dataset_id=None,
+                    state=saved.state,
+                    started_at=saved.started_at,
+                    record=_json(saved),
+                )
+            )
+            return saved
+
+        return await self._run(principal, work)
+
+    async def finish_publication(
+        self, principal: Principal, project_id: str, manifest_id: str, dataset_id: str
+    ) -> DatasetManifest:
+        def work(connection: Connection, space: str) -> DatasetManifest:
+            stored = self._one(connection, dataset_manifests, space, project_id, id=manifest_id)
+            if stored is None:
+                raise StoreError("not_found", "publication not found")
+            manifest = DatasetManifest.model_validate(stored)
+            if manifest.state == "published":
+                if manifest.dataset_id != dataset_id:
+                    raise StoreError("conflict", "the publication was already finished as another dataset")
+                return manifest
+            saved = manifest.model_copy(update={"state": "published", "dataset_id": dataset_id, "published_at": _now()})
+            connection.execute(
+                update(dataset_manifests)
+                .where(
+                    dataset_manifests.c.space == space,
+                    dataset_manifests.c.project_id == project_id,
+                    dataset_manifests.c.id == manifest_id,
+                )
+                .values(dataset_id=dataset_id, state=saved.state, record=_json(saved))
+            )
+            return saved
+
+        return await self._run(principal, work)
+
+    async def manifest_of(self, principal: Principal, project_id: str, dataset_id: str) -> DatasetManifest | None:
+        def work(connection: Connection, space: str) -> DatasetManifest | None:
+            # Two drafts with the same name and cases publish the same version: the newest manifest.
+            stored = connection.execute(
+                select(dataset_manifests.c.record)
+                .where(
+                    dataset_manifests.c.space == space,
+                    dataset_manifests.c.project_id == project_id,
+                    dataset_manifests.c.dataset_id == dataset_id,
+                    dataset_manifests.c.state == "published",
+                )
+                .order_by(dataset_manifests.c.started_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            return DatasetManifest.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_publications(self, principal: Principal, project_id: str) -> list[DatasetManifest]:
+        def work(connection: Connection, space: str) -> list[DatasetManifest]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(dataset_manifests.c.record)
+                    .where(dataset_manifests.c.space == space, dataset_manifests.c.project_id == project_id)
+                    .order_by(dataset_manifests.c.started_at.desc(), dataset_manifests.c.id)
+                )
+                .scalars()
+                .all()
+            )
+            return [DatasetManifest.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- the outbox --------------------------------------------------------------------------
+
+    def _put_delivery(self, connection: Connection, space: str, project_id: str, delivery: Delivery) -> None:
+        values = {
+            "space": space,
+            "project_id": project_id,
+            "id": delivery.id,
+            "kind": delivery.kind,
+            "state": delivery.state,
+            "next_attempt_at": delivery.next_attempt_at,
+            "created_at": delivery.created_at,
+            "record": _json(delivery),
+        }
+        self._upsert(connection, deliveries, values, ["space", "project_id", "id"])
+
+    async def put_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        if delivery.project_id != project_id:
+            raise StoreError("invalid", "the delivery belongs to another project")
+        now = _now()
+        saved = delivery.model_copy(
+            update={
+                "state": "pending",
+                "attempts": 0,
+                "error": "",
+                "next_attempt_at": now,
+                "created_at": delivery.created_at or now,
+                "delivered_at": None,
+            }
+        )
+
+        def work(connection: Connection, space: str) -> Delivery:
+            self._put_delivery(connection, space, project_id, saved)
+            return saved
+
+        return await self._run(principal, work)
+
+    async def settle_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        if delivery.next_attempt_at is None or delivery.created_at is None:
+            raise StoreError("invalid", "a settled delivery has its times")
+
+        def work(connection: Connection, space: str) -> Delivery:
+            if self._one(connection, deliveries, space, project_id, id=delivery.id) is None:
+                raise StoreError("not_found", "delivery not found")
+            self._put_delivery(connection, space, project_id, delivery)
+            return delivery
+
+        return await self._run(principal, work)
+
+    async def get_delivery(self, principal: Principal, project_id: str, delivery_id: str) -> Delivery | None:
+        def work(connection: Connection, space: str) -> Delivery | None:
+            stored = self._one(connection, deliveries, space, project_id, id=delivery_id)
+            return Delivery.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def due_deliveries(self, principal: Principal, *, now: datetime, limit: int = 100) -> list[Delivery]:
+        _bounds(0, limit)
+
+        def work(connection: Connection, space: str) -> list[Delivery]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(deliveries.c.record)
+                    .where(
+                        deliveries.c.space == space,
+                        deliveries.c.state == "pending",
+                        deliveries.c.next_attempt_at <= now,
+                    )
+                    .order_by(deliveries.c.created_at, deliveries.c.id)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return [Delivery.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
     # --- monitors ------------------------------------------------------------------------------
 
     async def create_monitor(self, principal: Principal, project_id: str, monitor: Monitor) -> Monitor:
@@ -1253,7 +1561,7 @@ class SqlRecordStore:
     async def list_monitored_traces(
         self, principal: Principal, project_id: str, monitor_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[MonitoredTrace]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[MonitoredTrace]:
@@ -1567,7 +1875,7 @@ class SqlRecordStore:
     async def list_alerts(
         self, principal: Principal, project_id: str, threshold_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[Alert]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[Alert]:
@@ -1803,7 +2111,7 @@ class SqlRecordStore:
     async def list_scheduled_runs(
         self, principal: Principal, project_id: str, schedule_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[ScheduledRun]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[ScheduledRun]:

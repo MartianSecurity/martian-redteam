@@ -15,7 +15,7 @@ import json
 import os
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,21 +24,25 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+import martian.evals.worker.schedule as schedule_module
 from martian.cli import app
 from martian.config import ConfigError
 from martian.evals.audit import INSTALLED, audit_saved_suite, audit_suite
-from martian.evals.model import Case, Project, Run, ScorerVersion, ScoringJob, Target, Turn
-from martian.evals.records import Monitor
+from martian.evals.model import Case, Project, Run, ScorerVersion, ScoringJob, Suite, Target, Trace, Turn, suite_digest
+from martian.evals.records import Monitor, Schedule
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.runner import run_suite
-from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER
+from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER, Entitlements
+from martian.evals.server.entitlements import PAID
 from martian.evals.server.launch import admit_run
 from martian.evals.state import STATE
 from martian.evals.store import EvalStore, MemoryStore
 from martian.evals.suite_file import load_suite_file, suite_from_yaml, suite_to_yaml
-from martian.evals.worker import CaseContext, InProcessWorker, ProcessWorker, Work, Worker
+from martian.evals.worker import CaseContext, InProcessWorker, ProcessWorker, ScheduleServices, Work, Worker
 from martian.evals.worker.execute import CHECK_NOT_INSTALLED, CONVERSATION
 from martian.evals.worker.hooks import INPUT_TAKEN, installed_check
+from martian.evals.worker.schedule import SCHEDULE_KEY, after_scheduled_run, execute_schedule, suite_job_id
+from martian.evals.worker.scorers import builtin_scorer
 from tests.evals.process_fixture import HOOK_LOG, cases, hooked_services, member, open_stores
 from tests.evals.write_fixture import AGENT
 
@@ -439,6 +443,128 @@ async def test_a_process_per_run_runs_the_hooks_and_checks_its_setup_installs(tm
     ]
     # The hooks ran in the run's own process, never in this one.
     assert os.getpid() not in {step[-1] for step in steps}
+
+
+# --- schedules and monitors (MartianSecurity/martian-notes#197, #196) ---------------------------
+
+MONITORED = Entitlements(edition="enterprise", features=PAID, limits={"concurrent_runs": 1})
+
+
+async def test_a_scheduled_run_runs_the_hooks_and_its_suite_job_grades_an_installed_check_with_no_state(
+    tmp_path, monkeypatch
+):
+    store, dataset = await published(LEDGER_CASES[:2])
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    edition = Edition()
+    worker = worker_for(store, records, edition)
+    holding = Holding(worker)
+    slot = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
+    try:
+        draft = Suite(id="suite-1", name="Ledger", scorers=[installed_check("had_state")], digest="0" * 64)
+        suite = await records.save_suite(
+            SINGLE_USER, DEFAULT_PROJECT, draft.model_copy(update={"digest": suite_digest(draft)})
+        )
+        schedule = Schedule(
+            id="sc1",
+            project_id=DEFAULT_PROJECT,
+            name="Hourly",
+            every_seconds=3600,
+            suite_id=suite.id,
+            suite_version=suite.version,
+            suite_name=suite.name,
+            scorers=suite.scorers,
+            target=Target(kind="agent", agent_id=AGENT),
+            dataset_name=dataset.name,
+            dataset_id=dataset.id,
+            dataset_digest=dataset.digest,
+            max_cases=100,
+            active_since=slot - timedelta(seconds=30),
+            created_at=slot - timedelta(seconds=30),
+        )
+        await records.create_schedule(SINGLE_USER, DEFAULT_PROJECT, schedule)
+        monkeypatch.setattr(schedule_module, "_now", lambda: slot + timedelta(seconds=1))
+        turn = Work(kind="schedule", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, schedule_id="sc1")
+        await execute_schedule(ScheduleServices(store, lambda _p: MONITORED), records, holding, turn)
+        # The turn admitted the slot's run and ran no hook.
+        assert edition.events == []
+        [work] = holding.works
+        await worker.run(work)  # the run it admitted, as the queue's worker runs it
+        await after_scheduled_run(records, worker, work)  # which queues the run's suite job
+        await worker.drain()
+        run = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, work.run_id)
+        scores = await records.list_scores(SINGLE_USER, DEFAULT_PROJECT, work.run_id)
+    finally:
+        records.close()
+    assert run is not None and run.state == "completed" and run.provenance[SCHEDULE_KEY]["id"] == "sc1"
+    # A run like any other: the hooks ran around each of its cases, and the target got the ledger.
+    for case_id in ("right", "wrong"):
+        assert [event[:2] for event in steps_of(edition.events, case_id)] == [
+            ("setup", "first"),
+            ("setup", "second"),
+            ("call", case_id),
+            ("teardown", "second"),
+            ("teardown", "first"),
+        ]
+    assert all("ledger" in case.inputs for case in edition.sent) and edition.ledgers == {}
+    # It was admitted with no installed check: the suite's check graded in its suite job, after
+    # the case's teardown, with no state.
+    assert [scorer.name for scorer in run.scorers] == ["exact_match"]
+    graded = {(s.scoring_job_id, s.case_id, s.scorer): (s.value, s.rationale) for s in scores}
+    job = suite_job_id(run.id)
+    assert {key: value for key, value in graded.items() if key[2] == "had_state"} == {
+        (job, case_id, "had_state"): (False, "given no state") for case_id in ("right", "wrong")
+    }
+
+
+async def test_a_monitors_pass_runs_no_hook_and_takes_no_trace_of_a_hooked_run(tmp_path):
+    store, dataset = await published(LEDGER_CASES[:1])
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    edition = Edition()
+    worker = InProcessWorker(
+        store, records, targets={AGENT: edition.agent}, hooks=edition.hooks, monitor_settle_seconds=0
+    )
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    try:
+        await records.create_monitor(
+            SINGLE_USER,
+            DEFAULT_PROJECT,
+            Monitor(
+                id="m1",
+                project_id=DEFAULT_PROJECT,
+                name="Live length",
+                scorers=[builtin_scorer("response_length")],
+                sampling_rate=1,
+                active_since=since,
+                created_at=since,
+            ),
+        )
+        run = await admitted(store, records, worker, dataset, [])
+        await worker.drain()
+        hooked = list(edition.events)
+        live = await store.record_trace(
+            SINGLE_USER,
+            Trace(
+                id="tr-" + uuid.uuid4().hex,
+                project_id=DEFAULT_PROJECT,
+                name="support turn",
+                state="ok",
+                request_time=since + timedelta(minutes=1),
+                request="Where is my order?",
+                response="It ships tomorrow.",
+            ),
+        )
+        await worker.submit(Work(kind="monitor", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, monitor_id="m1"))
+        await worker.drain()
+        taken = await records.list_monitored_traces(SINGLE_USER, DEFAULT_PROJECT, "m1", limit=100)
+        [result] = (await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)).items
+    finally:
+        records.close()
+    assert [event[0] for event in hooked] == ["setup", "setup", "call", "teardown", "teardown"]
+    # The pass scored the live trace and ran no hook; the hooked run's trace is an eval run's, which
+    # a monitor never takes.
+    assert edition.events == hooked
+    assert [(t.trace_id, t.state) for t in taken.items] == [(live.id, "scored")]
+    assert result.store.trace_id not in {t.trace_id for t in taken.items}
 
 
 # --- the suite file ---------------------------------------------------------------------------

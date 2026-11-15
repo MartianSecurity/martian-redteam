@@ -48,6 +48,7 @@ from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, 
 from martian.evals.worker.execute import InstalledChecks, InstalledScorers, execute_run, execute_scoring
 from martian.evals.worker.hooks import CaseHooks
 from martian.evals.worker.monitor import SETTLE_SECONDS, execute_monitor
+from martian.evals.worker.recheck import execute_recheck
 from martian.evals.worker.schedule import record_gate
 from martian.evals.worker.targets import own_target, target_call, target_pin
 
@@ -185,5 +186,7 @@ class InProcessWorker:
             await execute_monitor(
                 self._store, self._records, work, judge=self._judge, settle_seconds=self._settle, alerts=self._alerts
             )
+        elif work.kind == "recheck":
+            await execute_recheck(self._store, self._records, work, judge=self._judge)
         else:
             raise ValueError(NOT_A_RUNNERS)

@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from martian.evals._digits import ascii_digits
 from martian.evals.isolation import TargetProcess, TargetRaised
 from martian.evals.model import MODEL_NAME_LENGTH, Case, Run, Target, digest
 from martian.evals.runner import (
@@ -165,6 +166,11 @@ FUNCTIONS = FunctionTargets()
 """The function targets' thread, one for the process."""
 
 
+class TargetRefused(ValueError):
+    """A target the worker has but will not call, such as one in ``targets`` that is neither an HTTP
+    nor a function target. The message names the worker's setting and never repeats a value of it."""
+
+
 def reported_model(value: Any) -> str | None:
     """The model a target reported, as a run and a trace keep it: text, stripped, of at most
     :data:`~martian.evals.model.MODEL_NAME_LENGTH` characters; None for anything else."""
@@ -223,7 +229,7 @@ def response_model(response: httpx.Response, target: Target, steps: list[str]) -
     for step in steps:
         if isinstance(found, dict) and step in found:
             found = found[step]
-        elif isinstance(found, list) and step.isascii() and step.isdigit() and int(step) < len(found):
+        elif isinstance(found, list) and ascii_digits(step) and int(step) < len(found):
             found = found[int(step)]
         else:
             return None
@@ -337,13 +343,20 @@ async def target_pin(
 ) -> dict[str, Any]:
     """What pins a run of ``target``: an HTTP target's :func:`http_pin` or a function target's
     :func:`function_pin`, for the targets the worker calls itself (``own``), a ``TargetCall``'s id,
-    or the executor's pin of a registered agent. An id the worker does not know is ``not_found``."""
+    or the executor's pin of a registered agent. An id the worker does not know is ``not_found``; a
+    target of ``own`` it refuses is :class:`TargetRefused`, naming ``targets[ID]``."""
     agent_id = target.agent_id if target is not None and target.kind == "agent" else None
     if agent_id is None:
         raise StoreError("not_found", NOT_FOUND)
     if agent_id in own:
-        found = own_target(own[agent_id])
-        return function_pin(agent_id, found) if found.kind == "function" else http_pin(agent_id, found)
+        try:
+            found = own_target(own[agent_id])
+            return function_pin(agent_id, found) if found.kind == "function" else http_pin(agent_id, found)
+        except ValueError as error:
+            # A refusal that names the target's setting already, as a response_path one does, is
+            # not given the setting a second time.
+            setting, reason = f"targets[{agent_id!r}]", str(error)
+            raise TargetRefused(reason if setting in reason else f"{reason}; check {setting}") from None
     if agent_id in calls:
         return {"kind": "agent", "agent_id": agent_id}
     if executor is not None:
@@ -408,6 +421,7 @@ __all__ = [
     "TARGET_CHANGED",
     "FunctionProcessCall",
     "FunctionTargets",
+    "TargetRefused",
     "changed_target",
     "function_pin",
     "http_call",

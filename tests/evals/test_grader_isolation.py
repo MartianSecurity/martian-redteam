@@ -27,7 +27,7 @@ import pytest
 
 from martian.config import ConfigError
 from martian.evals.local import open_stores
-from martian.evals.model import Case, Run, Target
+from martian.evals.model import Case, Run, Target, TraceQuery
 from martian.evals.runner import parse_suite, run_suite
 from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.server.launch import admit_run
@@ -373,6 +373,61 @@ async def test_a_function_target_that_looks_for_its_answers_finds_none_in_the_wo
         report = json.loads(result.output)
         check_report(report, grader=set(answers), control=control, env_control=env_control, private=[home])
         assert report["arguments"] == [] and "MARTIAN_TEST_POSTGRES_URL" not in report["locations"]
+
+
+SLOW_IMPORT = """
+import time
+
+time.sleep(1.5)  # a target slow to import: its process is ready only after this
+
+
+def target(message):
+    if message == "Question 1?":
+        time.sleep(0.6)
+        return "A slow answer."
+    return "Answer 0."
+"""
+
+
+async def test_a_function_targets_process_start_is_no_cases_latency_in_the_stores_trace_filters(tmp_path):
+    """The store filters and orders a project's traces by latency and verdict (TraceQuery's
+    ``min_latency_ms``, ``slowest_first`` and ``verdicts``). A function target's process is ready
+    before the run's first case starts its time, so a case's latency is its call's, and the
+    filters see a slow call, not a slow start."""
+    home = tmp_path / "data"
+    store, records = await asyncio.to_thread(open_stores, home)  # it runs an event loop of its own
+    try:
+        cases = [
+            Case(id="faq-0", inputs={"message": "Question 0?"}, expectations={"expected_response": "Answer 0."}),
+            Case(id="faq-1", inputs={"message": "Question 1?"}, expectations={"expected_response": "Answer 1."}),
+        ]
+        await store.create_dataset(SINGLE_USER, DEFAULT_PROJECT, "support-faq", cases)
+        (tmp_path / "agent").mkdir()
+        (tmp_path / "agent" / "agent.py").write_text(SLOW_IMPORT, encoding="utf-8")
+        function = Target(kind="function", file=str(tmp_path / "agent" / "agent.py"), function="target")
+        worker = InProcessWorker(
+            store, records, targets={AGENT: function}, private_paths=[home], target_timeout_seconds=60
+        )
+        run = await admitted(store, records, worker, AGENT)
+        await worker.drain()
+        finished = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
+        query = TraceQuery(project_id=DEFAULT_PROJECT, run_id=run.id)
+
+        async def names(**filters: Any) -> list[str]:
+            page = await store.search_traces(SINGLE_USER, query.model_copy(update=filters))
+            return [trace.name for trace in page.items]
+
+        slow = await names(min_latency_ms=400)
+        slowest = await names(slowest_first=True)
+        passed, failed = await names(verdicts={"exact_match": True}), await names(verdicts={"exact_match": False})
+    finally:
+        records.close()
+    assert finished is not None and finished.state == "completed", finished
+    code = finished.code
+    # The first case ran right after the target's 1.5-second import, which is not in its latency.
+    assert slow == [f"{code} faq-1"]
+    assert slowest == [f"{code} faq-1", f"{code} faq-0"]
+    assert (passed, failed) == ([f"{code} faq-0"], [f"{code} faq-1"])
 
 
 class RecordingAgents:

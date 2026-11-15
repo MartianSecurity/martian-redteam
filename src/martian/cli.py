@@ -99,8 +99,8 @@ def run_evals(
             "--max-judge-tokens",
             min=1,
             show_default=False,
-            help="Suite file only: stop the run once its LLM judges have used this many tokens; run it again "
-            "to resume. Replaces limits.max_judge_tokens.",
+            help="Suite file only: stop the run once its LLM judges and simulated users have used this many "
+            "tokens together; run it again to resume. Replaces limits.max_judge_tokens.",
         ),
     ] = None,
 ) -> None:
