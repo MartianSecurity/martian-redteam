@@ -125,7 +125,7 @@ when there is nothing of its kind. An import reads them in this order:
 | `views.jsonl` | Saved trace view | `project_id`, `view`: `SavedView` |
 | `runs.jsonl` | Run, newest first | `project_id`, `run`: `Run` as the record store holds it, `store_run`: `Run` as the store holds it, or `null` for a run that never started there |
 | `case_results.jsonl` | Case result, in case order per run | `project_id`, `result`: `CaseResult` |
-| `scores.jsonl` | A run's score in the record store | `project_id`, `score`: `Score` |
+| `scores.jsonl` | A run's score in the record store: one per case, scorer, scoring job and source, so a person's answer named like a check or a judge is a line beside that scorer's | `project_id`, `score`: `Score` |
 | `scoring_jobs.jsonl` | Scoring job | `project_id`, `job`: `ScoringJob` |
 | `reviews.jsonl` | Review, each after the review it replaces | `project_id`, `review`: `Review` |
 | `queues.jsonl` | Review queue | `project_id`, `queue`: `ReviewQueue`, `items`: a list of `QueueItem`, one per case with its trace and status |
@@ -150,7 +150,7 @@ need no new references.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 4,
+  "version": 5,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -162,11 +162,16 @@ need no new references.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `4`): a new
-file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
-Version 2 added the six monitoring files, version 3 added `manifests.jsonl`, and version 4 added
-`calibrations.jsonl` and `rechecks.jsonl`. An export of an earlier version is refused: import it
-with the SDK that wrote it, and export again with this one.
+`null` for the single local user. `version` is the format's version (`VERSION`, here `5`): a new
+file, or a change to a file, to a line's shape or to what a file's lines can hold, is a new
+version, and an import reads only its own. Version 2 added the six monitoring files, version 3
+added `manifests.jsonl`, version 4 added `calibrations.jsonl` and `rechecks.jsonl`, and version 5
+let `scores.jsonl` hold a score of each source for one case, scorer and scoring job: a person's
+answer named like a check or a judge is a line beside that scorer's, where version 4 had one line
+per case, scorer and scoring job. Its lines keep their shape, so an SDK that reads version 4
+would import such a pair as one score; it refuses version 5 instead. An export of an earlier
+version, version 4 too, is refused: import it with the SDK that wrote it, and export again with
+this one.
 
 ## Exporting and resuming
 
@@ -260,7 +265,8 @@ Four changes are the import's own:
 
 Every other field of every object comes back as it was exported.
 
-`tests/evals/test_data_export.py` fills an organisation with every kind of object, exports it,
+`tests/evals/test_data_export.py` fills an organisation with every kind of object, a person's
+answer named like a run's judge among its scores, exports it,
 imports it into a fresh install and exports that again, and compares the two exports field by
 field with only the fields above set aside (a monitor's and a schedule's `state` too, which it
 checks went from active to paused, and an unfinished re-check's state, error and `finished_at`,
@@ -272,7 +278,8 @@ first two it also checks that every table the export carries holds rows in the s
 in the fresh install, that the outbox's deliveries stay behind, that the import queued nothing,
 and that no file of the export holds the threshold's webhook secret (a canary), which the fresh
 install does not have until it is given again, once; on the in-memory store, that the published
-version is still pinned by its manifest in the fresh install. It checks that every table of the
+version is still pinned by its manifest in the fresh install, and that the person's answer named
+like the judge comes back beside the judge's score in both exports. It checks that every table of the
 record store and every kind of object of the two interfaces is exported or left out with a reason.
 It interrupts an export inside a run's step, inside the monitoring step and on a page of traces,
 resumes it and compares the files byte for byte with an uninterrupted export, and covers what an
