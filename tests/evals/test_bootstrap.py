@@ -83,7 +83,7 @@ def test_the_local_edition_answers_with_its_fixed_principal_in_community():
             "platform_admin": False,
         },
         "edition": {"key": "community", "name": "Community"},
-        "entitlements": {"features": [], "limits": {}},
+        "entitlements": {"features": [], "limits": {"concurrent_runs": 1, "concurrent_scoring_jobs": 1}},
         "capabilities": {name: name in ADMINS - PAID for name in ADMINS},
         "status": {
             "status": "ready",
@@ -120,7 +120,10 @@ def test_each_edition_and_role_gets_its_capabilities(edition, role):
         "platform_admin": False,
     }
     assert body["edition"]["key"] == edition
-    assert body["entitlements"] == {"features": sorted(EDITIONS[edition].features), "limits": {}}
+    assert body["entitlements"] == {
+        "features": sorted(EDITIONS[edition].features),
+        "limits": dict(EDITIONS[edition].limits),
+    }
     assert {name for name, allowed in body["capabilities"].items() if allowed} == EXPECTED[(edition, role)]
     assert set(body["capabilities"]) == ADMINS
     assert (body["status"]["status"], body["status"]["ready"]) == ("provisioning", False)
