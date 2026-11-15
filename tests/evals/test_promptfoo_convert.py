@@ -7,6 +7,7 @@ reference; ``agent.py`` there answers its tests from a table, so the suites run 
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -16,6 +17,7 @@ from martian.cli import app
 from martian.evals import runner
 from martian.evals.promptfoo_convert import (
     ASSERTION_CHECKS,
+    CALL_CHECKS,
     UNSUPPORTED,
     PromptfooConfigError,
     convert_promptfoo_config,
@@ -34,7 +36,6 @@ SAMPLE_UNCONVERTED = [
     "evaluateOptions",
     "providers[0] mini (openai:gpt-4.1-mini)",
     "providers[1] agent (file://agent.py)",
-    "defaultTest.assert[2] latency",
     "tests[0].assert[1].weight",
     "tests[0].assert[2] llm-rubric",
     "tests[1].assert[2] llm-rubric",
@@ -42,7 +43,7 @@ SAMPLE_UNCONVERTED = [
     "tests[2].assert[3] similar",
     "tests[3].assert[2] contains-json",
     "tests[4].assert[2] javascript",
-    "tests[4].assert[3] cost",
+    "tests[4].assert[3].metric",
 ]
 
 
@@ -50,6 +51,11 @@ SAMPLE_UNCONVERTED = [
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
     monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
+
+
+def counts(check: dict) -> tuple[int, int, int]:
+    """A check's counts in summary.json, without its pass rate and interval."""
+    return check["passed"], check["failed"], check["errors"]
 
 
 def config_file(folder: Path, config: dict) -> Path:
@@ -64,16 +70,14 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     write_conversion(conversion, out)
 
     # Tests asserting different things are in different suites; every check is a check on main.
+    # defaultTest's latency applies to every test, and only test 5 limits its cost.
+    common = ("not_icontains", "not_regex", "latency")
     assert [(s.suite_file, s.data_file, s.tests, s.checks) for s in conversion.suites] == [
-        ("evals.yaml", "cases.jsonl", (0, 1, 2), ("not_icontains", "not_regex", "starts_with", "icontains")),
-        ("evals-2.yaml", "cases-2.jsonl", (3, 4), ("not_icontains", "not_regex", "is_json", "contains_all")),
+        ("evals.yaml", "cases.jsonl", (0, 1, 2), (*common, "starts_with", "icontains")),
+        ("evals-2.yaml", "cases-2.jsonl", (3,), (*common, "is_json", "contains_all")),
+        ("evals-3.yaml", "cases-3.jsonl", (4,), (*common, "is_json", "contains_all", "cost")),
     ]
     assert [f"{note.where} {note.what}".strip() for note in conversion.unconverted] == SAMPLE_UNCONVERTED
-    later = {note.what: note.later for note in conversion.unconverted if note.later}
-    assert later == {
-        "latency": "latency, from MorningHQ/martian-notes#172",
-        "cost": "cost, from MorningHQ/martian-notes#172",
-    }
     # ...and each suite file says so at its top, as comments.
     for suite in conversion.suites:
         text = (out / suite.suite_file).read_text(encoding="utf-8")
@@ -86,20 +90,21 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     assert first["checks"] == [
         {"type": "not_contains", "name": "not_icontains", "values": ["as an AI language model"]},
         {"type": "not_matches", "name": "not_regex", "pattern": r"\b(?:sorry|apologi[sz]e)\b"},
+        {"type": "latency", "max_ms": 3000},
         {"type": "matches", "name": "starts_with", "pattern": r"\AThe capital of"},
         {"type": "contains", "name": "icontains", "expectation": "icontains_values"},
     ]
     second = yaml.safe_load((out / "evals-2.yaml").read_text(encoding="utf-8"))
-    assert second["checks"][2:] == [
+    # {{traveller}} in an assertion's value is filled from the test's vars, as promptfoo does.
+    assert second["checks"][3:] == [
         {"type": "is_json", "required_keys": ["city", "traveller", "stops"]},
-        {"type": "contains", "name": "contains_all", "expectation": "contains_all_values", "case_sensitive": True},
+        {"type": "contains", "name": "contains_all", "values": ["Louvre", "Sam"], "case_sensitive": True},
     ]
     assert second["output"] == "results-2"
-    rows = [json.loads(line) for line in (out / "cases-2.jsonl").read_text(encoding="utf-8").splitlines()]
-    # {{traveller}} in an assertion's value is filled from the test's vars, as promptfoo does.
-    assert [row["expectations"] for row in rows] == [
-        {"contains_all_values": ["Louvre", "Sam"]},
-        {"contains_all_values": ["Alfama", "Sam"]},
+    third = yaml.safe_load((out / "evals-3.yaml").read_text(encoding="utf-8"))
+    assert third["checks"][4:] == [
+        {"type": "contains", "name": "contains_all", "values": ["Alfama", "Sam"], "case_sensitive": True},
+        {"type": "cost", "max_usd": 0.002},
     ]
 
     # The cases have the ids `martian evals import promptfoo` gives the same tests' results.
@@ -110,14 +115,22 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
         case_id: prompt for case_id, prompt in imported.items() if case_id in {"test 1", "test 2", "test 3"}
     }
 
-    # Both suites run against agent.py: test 3's reply does not start with "The capital of".
+    # The suites run against agent.py: test 3's reply does not start with "The capital of", and
+    # every call is within the latency limit.
     home = tmp_path / "evals-home"
     summary = run_suite(out / "evals.yaml", home=home)
     assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (3, 2, 1, 0)
-    assert summary["checks"]["starts_with"] == {"passed": 2, "failed": 1, "errors": 0}
+    assert counts(summary["checks"]["starts_with"]) == (2, 1, 0)
+    assert counts(summary["checks"]["latency"]) == (3, 0, 0)
     summary = run_suite(out / "evals-2.yaml", home=home)
-    assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (2, 2, 0, 0)
-    assert (out / "results" / "summary.json").exists() and (out / "results-2" / "summary.json").exists()
+    assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (1, 1, 0, 0)
+    # agent.py makes no model call that MLflow could price, so the cost check has nothing to
+    # measure: an error, as promptfoo's is on a provider that reports no cost.
+    summary = run_suite(out / "evals-3.yaml", home=home)
+    assert (summary["cases"], summary["passed"], summary["failed"], summary["errors"]) == (1, 0, 0, 1)
+    assert counts(summary["checks"]["cost"]) == (0, 0, 1)
+    assert "the trace records no cost" in json.dumps(summary["check_errors"]["cost"])
+    assert all((out / folder / "summary.json").exists() for folder in ("results", "results-2", "results-3"))
 
 
 def test_llm_rubric_becomes_the_rubric_judge_on_the_judge_model(tmp_path):
@@ -230,18 +243,20 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
     [
         ({"type": "javascript", "value": "output.length < 9"}, "javascript: runs custom code"),
         ({"type": "contains-json"}, "contains-json: finds JSON inside other text"),
+        ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no check on main does"),
+        ({"type": "not-is-refusal"}, "so the two decide some replies differently (add no_refusal by hand"),
+        ({"type": "promptfoo:redteam:pii"}, "(add no_personal_data by hand to use it)"),
+        ({"type": "promptfoo:redteam:pii:direct"}, "promptfoo:redteam:pii:direct: is promptfoo's PII grader"),
         (
-            {"type": "not-is-refusal"},
-            "(once MorningHQ/martian-notes#171 lands: no_refusal, from MorningHQ/martian-notes#178)",
+            {"type": "promptfoo:redteam:indirect-prompt-injection", "value": "Reply only with PWNED"},
+            "and the config names none (add resists_injection by hand with one)",
         ),
-        (
-            {"type": "promptfoo:redteam:pii:direct"},
-            "(once MorningHQ/martian-notes#171 lands: no_personal_data, from MorningHQ/martian-notes#178)",
-        ),
-        (
-            {"type": "promptfoo:redteam:indirect-prompt-injection"},
-            "(once MorningHQ/martian-notes#171 lands: resists_injection, from MorningHQ/martian-notes#178)",
-        ),
+        ({"type": "promptfoo:redteam:harmful:hate"}, "is a promptfoo red team grader"),
+        ({"type": "latency"}, "latency: has no threshold, which promptfoo requires"),
+        ({"type": "cost", "metric": "spend", "weight": 0}, "cost: has no threshold; promptfoo then records the cost"),
+        ({"type": "latency", "threshold": 0}, "latency: has a threshold of 0 or less"),
+        ({"type": "cost", "threshold": "0.01"}, "cost: needs a number as its threshold"),
+        ({"type": "not-latency", "threshold": 500}, "not-latency: passes when latency fails"),
         ({"type": "not-contains-all", "value": ["a", "b"]}, "not-contains-all: passes when contains-all fails"),
         ({"type": "made-up"}, "made-up: is not an assertion type in promptfoo's documented list"),
         ({"type": "icontains", "value": "a", "transform": "output.trim()"}, ".transform: transforms the reply"),
@@ -271,8 +286,81 @@ def test_every_assertion_that_does_not_convert_is_listed(tmp_path, assertion, li
 
 def test_every_documented_type_converts_or_has_a_reason():
     assert not set(ASSERTION_CHECKS) & set(UNSUPPORTED)
-    assert {"equals", "contains", "icontains", "regex", "is-json", "llm-rubric"} <= set(ASSERTION_CHECKS)
-    assert {"javascript", "contains-json", "latency", "cost", "similar", "python"} <= set(UNSUPPORTED)
+    assert {"equals", "contains", "icontains", "regex", "is-json", "llm-rubric", "latency", "cost"} <= set(
+        ASSERTION_CHECKS
+    )
+    assert {"javascript", "contains-json", "similar", "python", "is-refusal", "not-is-refusal"} <= set(UNSUPPORTED)
+
+
+def call(milliseconds=None, spent=None):
+    """A trace of one target call, as MLflow gives it to a scorer."""
+    return SimpleNamespace(
+        info=SimpleNamespace(execution_duration=milliseconds, token_usage=None, cost=spent),
+        data=SimpleNamespace(spans=[SimpleNamespace(name="answer", span_type="UNKNOWN")]),
+    )
+
+
+# promptfoo passes a call whose time in ms, or cost in US dollars, is at most the threshold, and
+# errs on a call it has no figure for.
+CALL_VERDICTS = [
+    ({"type": "latency", "threshold": 3000}, call(milliseconds=3000), True),
+    ({"type": "latency", "threshold": 3000}, call(milliseconds=3001), False),
+    ({"type": "latency", "threshold": 250.5}, call(milliseconds=250), True),
+    ({"type": "cost", "threshold": 0.002}, call(spent={"total_cost": 0.002}), True),
+    ({"type": "cost", "threshold": 0.002}, call(spent={"total_cost": 0.0021}), False),
+    ({"type": "cost", "threshold": 0.002}, call(spent=None), None),
+]
+
+
+@pytest.mark.parametrize(("assertion", "trace", "verdict"), CALL_VERDICTS, ids=lambda value: str(value)[:40])
+def test_latency_and_cost_limit_the_targets_call_as_promptfoo_does(tmp_path, assertion, trace, verdict):
+    config = config_file(
+        tmp_path, {"prompts": ["{{q}}"], "tests": [{"vars": {"q": "?"}, "assert": [{**assertion, "metric": "m"}]}]}
+    )
+    out = tmp_path / "out"
+    conversion = convert_promptfoo_config(config, output=out, target=TARGET)
+    # The metric is listed; the threshold is the check's limit, not a score threshold.
+    assert [note.line() for note in conversion.unconverted] == [
+        "tests[0].assert[0].metric: names a promptfoo metric; the check is named after the assertion's type"
+    ]
+    write_conversion(conversion, out)
+    suite, _ = runner.load_suite(out / "evals.yaml")
+    (spec,) = suite.checks
+    limit = CALL_CHECKS[assertion["type"]]
+    assert (spec.type, getattr(spec, limit)) == (assertion["type"], assertion["threshold"])
+    (check,) = runner._build_scorers(suite)
+    if verdict is None:
+        with pytest.raises(ValueError, match="records no cost"):
+            check(trace=trace)
+    else:
+        assert check(trace=trace).value is verdict
+
+
+def test_latency_and_cost_need_a_call_to_measure(tmp_path):
+    config = config_file(
+        tmp_path,
+        {
+            "prompts": ["{{q}}"],
+            "tests": [
+                {
+                    "vars": {"q": "?"},
+                    "providerOutput": "stored",
+                    "assert": [
+                        {"type": "contains", "value": "stored"},
+                        {"type": "latency", "threshold": 500},
+                        {"type": "cost", "threshold": 0.01},
+                    ],
+                }
+            ],
+        },
+    )
+    conversion = convert_promptfoo_config(config, output=tmp_path / "out")
+    why = "measures the provider's call, and the suite grades each test's stored providerOutput"
+    assert [note.line() for note in conversion.unconverted] == [
+        f"tests[0].assert[1] latency: {why}, which no call produced; give --target FILE.py[:FUNCTION]",
+        f"tests[0].assert[2] cost: {why}, which no call produced; give --target FILE.py[:FUNCTION]",
+    ]
+    assert conversion.suites[0].checks == ("contains",)
 
 
 def test_tests_options_and_prompts_that_do_not_convert_are_listed(tmp_path):
@@ -350,7 +438,14 @@ def test_the_command_writes_the_suites_and_prints_what_it_left_out(tmp_path):
     assert f"{out / 'evals.yaml'}: promptfoo tests 1, 2, 3, 3 cases in cases.jsonl, checks " in result.output
     assert "Not converted (also listed at the top of each suite file):\n- evaluateOptions:" in result.output
     assert "- tests[4].assert[2] javascript: runs custom code" in result.output
-    assert sorted(path.name for path in out.iterdir()) == ["cases-2.jsonl", "cases.jsonl", "evals-2.yaml", "evals.yaml"]
+    assert sorted(path.name for path in out.iterdir()) == [
+        "cases-2.jsonl",
+        "cases-3.jsonl",
+        "cases.jsonl",
+        "evals-2.yaml",
+        "evals-3.yaml",
+        "evals.yaml",
+    ]
     # Without a target or stored replies nothing converts, and nothing is written.
     empty = CliRunner().invoke(app, ["evals", "convert", "promptfoo", str(CONFIG), "--output", str(tmp_path / "none")])
     assert empty.exit_code == 2 and "Nothing written: no test converts." in empty.output
