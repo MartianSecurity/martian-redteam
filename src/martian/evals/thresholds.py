@@ -225,23 +225,24 @@ def interval_verdict(direction: str, value: float, interval: tuple[float, float]
     return "undecided"
 
 
+def measured(measure: str, values: Sequence[Value]) -> tuple[int, float | None, tuple[float, float] | None]:
+    """A measure of ``values`` as a threshold, and a monitor's trend, reads them: the count it
+    counts, its estimate and its 95% interval. ``pass_rate`` counts the booleans, with the Wilson
+    interval; ``mean`` averages the other finite numbers, with the Student t interval, which needs
+    two of them."""
+    if measure == "pass_rate":
+        outcomes = [v for v in values if isinstance(v, bool)]
+        count = len(outcomes)
+        return count, sum(outcomes) / count if count else None, stats.wilson(sum(outcomes), count)
+    numbers = [
+        float(v) for v in values if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(float(v))
+    ]
+    return len(numbers), fmean(numbers) if numbers else None, stats.mean_interval(numbers)
+
+
 def observe(threshold: Threshold, window: Window) -> Observation:
     """The threshold's measure over ``window``, its 95% interval, and the verdict."""
-    found: tuple[float, float] | None
-    if threshold.measure == "pass_rate":
-        outcomes = [v for v in window.values if isinstance(v, bool)]
-        count = len(outcomes)
-        estimate = sum(outcomes) / count if count else None
-        found = stats.wilson(sum(outcomes), count)
-    else:
-        numbers = [
-            float(v)
-            for v in window.values
-            if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(float(v))
-        ]
-        count = len(numbers)
-        estimate = fmean(numbers) if numbers else None
-        found = stats.mean_interval(numbers)
+    count, estimate, found = measured(threshold.measure, window.values)
     verdict: Verdict = "insufficient"
     if count >= threshold.min_count and found is not None:
         verdict = interval_verdict(threshold.direction, threshold.value, found)
@@ -384,6 +385,7 @@ __all__ = [
     "channels",
     "evaluate_thresholds",
     "interval_verdict",
+    "measured",
     "next_state",
     "observe",
     "raised_event",
