@@ -41,12 +41,13 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
-from martian.evals.records import SavedView
+from martian.evals.records import JudgeCalibration, SavedView
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
     dataset_draft_cases,
     dataset_drafts,
+    judge_calibrations,
     reviews,
     runs,
     saved_views,
@@ -920,3 +921,57 @@ class SqlRecordStore:
 
         await self._run(principal, work)
         self._emit(principal, "view", project_id, view_id)
+
+    # --- judge calibrations --------------------------------------------------------------------
+
+    async def save_calibration(
+        self, principal: Principal, project_id: str, calibration: JudgeCalibration
+    ) -> JudgeCalibration:
+        if calibration.project_id != project_id:
+            raise StoreError("invalid", "the calibration belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[JudgeCalibration, bool]:
+            if stored := self._one(connection, judge_calibrations, space, project_id, id=calibration.id):
+                return JudgeCalibration.model_validate(stored), False
+            saved = calibration.model_copy(update={"created_at": calibration.created_at or _now()})
+            connection.execute(
+                insert(judge_calibrations).values(
+                    space=space,
+                    project_id=project_id,
+                    id=saved.id,
+                    judge=saved.judge,
+                    version=saved.version,
+                    created_at=saved.created_at,
+                    record=_json(saved),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "calibration", project_id, saved.id)
+        return saved
+
+    async def get_calibration(
+        self, principal: Principal, project_id: str, calibration_id: str
+    ) -> JudgeCalibration | None:
+        def work(connection: Connection, space: str) -> JudgeCalibration | None:
+            stored = self._one(connection, judge_calibrations, space, project_id, id=calibration_id)
+            return JudgeCalibration.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_calibrations(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[JudgeCalibration]:
+        def work(connection: Connection, space: str) -> list[JudgeCalibration]:
+            query = select(judge_calibrations.c.record).where(
+                judge_calibrations.c.space == space, judge_calibrations.c.project_id == project_id
+            )
+            if judge is not None:
+                query = query.where(judge_calibrations.c.judge == judge)
+            order = (judge_calibrations.c.created_at.desc(), judge_calibrations.c.id.desc())
+            rows: Sequence[Any] = connection.execute(query.order_by(*order)).scalars().all()
+            return [JudgeCalibration.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)

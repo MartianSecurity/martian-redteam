@@ -21,7 +21,7 @@ from martian.evals.model import (
     Suite,
     digest,
 )
-from martian.evals.records import EventsLost, RecordStore, SavedView
+from martian.evals.records import EventsLost, JudgeCalibration, RecordStore, SavedView
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -228,6 +228,38 @@ class RecordContract:
         await records.delete_view(ORG_A, "p1", "v1", expected_revision=2)
         assert await records.get_view(ORG_A, "p1", "v1") is None
         await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
+
+    async def test_every_calibration_is_kept_and_listed_newest_first(self, records: RecordStore) -> None:
+        def calibration(id: str, judge: str, minutes: int) -> JudgeCalibration:
+            return JudgeCalibration(
+                id=id,
+                project_id="p1",
+                judge=judge,
+                version="2",
+                model="openai:/judge",
+                labelled=30,
+                report={"status": "measured", "agreement": 0.9},
+                created_at=T0 + timedelta(minutes=minutes),
+            )
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 0))
+            assert await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("calibration", "k1")
+        finally:
+            listener.close()
+        await records.save_calibration(ORG_A, "p1", calibration("k2", "tone", 1))
+        await records.save_calibration(ORG_A, "p1", calibration("k3", "brevity", 2))
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1")] == ["k3", "k2", "k1"]
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1", judge="tone")] == ["k2", "k1"]
+        assert await records.get_calibration(ORG_A, "p1", "k1") == first
+        assert first.report == {"status": "measured", "agreement": 0.9}
+        await refused("invalid", records.save_calibration(ORG_A, "p2", calibration("k4", "tone", 3)))
+        assert await records.list_calibrations(ORG_B, "p1") == []
+        assert await records.get_calibration(ORG_B, "p1", "k1") is None
+        assert await records.list_calibrations(ORG_A, "p2") == []
 
     async def test_organisations_and_the_local_user_never_see_each_other(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))

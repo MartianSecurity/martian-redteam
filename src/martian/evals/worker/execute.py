@@ -11,8 +11,10 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   the setting to check, anything else with its type.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
   scorers: code scorers here, judge scorers through the worker's judge, one request per model the
-  job's judges are pinned to. Each judge score records the model and version that produced it.
-  Its scores sit beside the run's own, and each scored value is also kept on the case's trace.
+  job's judges are pinned to. Each judge score records the model and version that produced it,
+  and the judge version's calibration that applied (``martian.evals.calibration``): its newest
+  when the job starts, if measured on the model the job runs it on. Its scores sit beside the
+  run's own, and each scored value is also kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Every move from one state to the next names the state it expects, so two workers never both take
@@ -29,6 +31,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+from martian.evals.calibration import CALIBRATION_KEY, applied_calibration, latest_calibrations
 from martian.evals.model import (
     Case,
     CaseResult,
@@ -478,6 +481,14 @@ async def _score_results(
         if scorer.kind == "llm_judge":
             by_model.setdefault((scorer.model, scorer.endpoint), []).append(scorer)
     definition = job_config(job)["definition_digest"]
+    # The calibration each judge version had when the job started, if it checks the model the job
+    # runs the judge on.
+    calibrations = await latest_calibrations(records, principal, project)
+    applied = {
+        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s.model, s.endpoint)
+        for s in job.scorers
+        if s.kind == "llm_judge"
+    }
     succeeded = errors = 0
     for result in results:
         current = await _job(records, principal, project, job.run_id, job.id)
@@ -528,6 +539,7 @@ async def _score_results(
             answer = answers.get((scorer.model, scorer.endpoint))
             if scorer.kind == "llm_judge":
                 metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
+                metadata[CALIBRATION_KEY] = applied[(scorer.name, scorer.version)]
             if not finished:
                 error = NO_OUTPUT
             elif scorer.kind != "llm_judge":

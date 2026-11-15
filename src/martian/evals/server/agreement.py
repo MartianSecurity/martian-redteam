@@ -119,6 +119,26 @@ async def _registered(
     return found
 
 
+async def project_agreement(
+    store: EvalStore, records: RecordStore, principal: Principal, key: str, name: str | None = None
+) -> dict[str, Any]:
+    """The agreement report of a project that exists, by its store id, or of one judge's versions,
+    as the route answers it. A judge version's calibration is its item of this report
+    (``martian.evals.server.calibration``)."""
+    verdicts, reviews, case_traces = await _from_records(records, principal, key)
+    traced, annotations, examined, truncated = await _from_traces(store, principal, key, case_traces)
+    kinds = await _registered(store, principal, key, name)
+    found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
+    reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
+    return {
+        "project_id": project_out(key),
+        "minimum": MINIMUM_LABELLED,
+        "traces_examined": examined,
+        "traces_truncated": truncated,
+        "items": [r.as_dict() for r in reports],
+    }
+
+
 @explorer.get("/judge-agreement", response_model=None)
 async def judge_agreement_report(
     principal: PrincipalDep,
@@ -128,24 +148,17 @@ async def judge_agreement_report(
     name: Annotated[str | None, Query(pattern=r"^[a-z][a-z0-9_]{0,59}$")] = None,
 ) -> dict[str, Any]:
     key = project_key(project_id)
-    report: dict[str, Any] = {
-        "project_id": project_out(key),
-        "minimum": MINIMUM_LABELLED,
-        "traces_examined": 0,
-        "traces_truncated": False,
-        "items": [],
-    }
     if await store.get_project(principal, key) is None:
         if key != DEFAULT_PROJECT:
             raise HTTPException(404, "Not found")
-        return report
-    verdicts, reviews, case_traces = await _from_records(records, principal, key)
-    traced, annotations, examined, truncated = await _from_traces(store, principal, key, case_traces)
-    kinds = await _registered(store, principal, key, name)
-    found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
-    reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
-    report.update(traces_examined=examined, traces_truncated=truncated, items=[r.as_dict() for r in reports])
-    return report
+        return {
+            "project_id": project_out(key),
+            "minimum": MINIMUM_LABELLED,
+            "traces_examined": 0,
+            "traces_truncated": False,
+            "items": [],
+        }
+    return await project_agreement(store, records, principal, key, name)
 
 
-__all__ = ["TRACE_LIMIT", "explorer", "is_label"]
+__all__ = ["TRACE_LIMIT", "explorer", "is_label", "project_agreement"]

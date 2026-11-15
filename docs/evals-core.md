@@ -183,12 +183,14 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
 
-The core adds two read routes of its own, which the server's contract does not have:
+The core adds read routes of its own, which the server's contract does not have:
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
 | `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models`, `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and complete reviews. Store: the registered judges, and the newest 1,000 traces |
+| `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `status` (`checked` or `unchecked`), `reason` (`null`, `none` when it has no calibration, or `model_changed` when it runs on another model than its calibration was measured on) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
+| `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `labelled`, `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved), `actor_id` and `created_at`. `project_id` names its project | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -245,6 +247,10 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   anything. Traces are read newest first, at most 1,000 (`traces_examined`); `traces_truncated`
   says older ones were left out. Runs, their scores and their reviews are read in full. The
   report is the core's own because the judges' responses are typed in the frozen contract.
+- **Judge calibrations.** A judge version is `checked` while its newest calibration was measured
+  on the model it runs on now, as a scoring job admitted now would pin it; the routes are the
+  core's own for the same reason as the agreement report. `POST /judge-calibrations` saves one
+  ([write routes](#write-routes)).
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -306,7 +312,8 @@ The reads that come with their writes (saved views, scorers, judges, suites, rev
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`;
-`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics.
+`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics, and
+`tests/evals/test_calibration.py` the calibration routes.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
@@ -333,10 +340,16 @@ contract:
 | `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
 | `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
 
+The core adds one write route of its own, which the server's contract does not have:
+
+| Route | What it does | Module |
+| --- | --- | --- |
+| `POST /judge-calibrations` | Save a judge version's current item of the agreement report as its [calibration](evals.md#calibration), with the model it runs on now. The body is `request_id`, `project_id` (optional), `name` and `version` (`"2"`, or `"v1"` for a built-in model judge); the answer (`201`) is the calibration as `GET /judge-calibrations/{calibration_id}` gives it. A judge version the project has not registered and that is no built-in model judge is `404`; a report that is not measured, below 30 labelled items or of a free-text judge, is `422`. It needs `manageJudges`, and an archived project takes none (`409`) | `calibration` |
+
 All paths are under `/v1/evals`. How the core carries them out:
 
 - **Requests are idempotent by their `request_id`.** The id of what a request creates (a run, a
-  scoring job, a review, a queue, a suite, a project, a view) is a UUID derived from its
+  scoring job, a review, a queue, a suite, a project, a view, a calibration) is a UUID derived from its
   `request_id` (`projection.derived_id`), so the same request again returns the same object, and
   the same `request_id` with other content is `409`, as on the server. A judge version keeps its
   `request_id` as `operation_id` in its criteria, and a trace annotation in its score's metadata.
@@ -666,7 +679,10 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   `martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint` and
   `martian.judge.version`, the judge's own version (`response-rubrics-v1` for the SDK judge,
   `martian-eval-judge-v1` or `v2` for Agents); a judge score with no verdict still names the model
-  it was pinned to. The same values are on the case's trace.
+  it was pinned to. It also names, as `martian.calibration_id`, the judge version's
+  [calibration](evals.md#calibration) that applied: its newest when the job started, if it was
+  measured on the model the job runs the judge on, else `none`. The same values are on the case's
+  trace.
 - **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
   its own environment, and a per-organisation key store is MorningHQ/martian-notes#135. An
   endpoint is a plain `http` or `https` address, so one with a user name, password, query or
@@ -696,7 +712,8 @@ endpoint, and keeps the local edition's default in its data folder.
   in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own routes for the attempts of repeated cases, with the run's reliability and its
-  flaky cases, and for each judge version's agreement with people's labels.
+  flaky cases, for each judge version's agreement with people's labels, and for each judge
+  version's calibration, which the core's own write route saves.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
@@ -891,8 +908,8 @@ written by one MLflow release reads back the same on the next.
 
 MLflow keeps datasets, traces, assessments, registered scorers and review queues. The core also
 needs records MLflow does not keep: runs with their lifecycle, case results, the scores it gates
-on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and the Traces
-page's saved views.
+on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the Traces
+page's saved views and judge calibrations.
 `RecordStore` (`martian.evals.records`) is that interface. `SqlRecordStore` keeps the records in
 SQLite or Postgres, with one Alembic history for both:
 
@@ -925,6 +942,13 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   is not part of the shared model: `save_view` creates one or, naming the revision it read,
   replaces it; `get_view`, `list_views` and `delete_view` read and remove them. Migration `0002`
   adds its table.
+- A judge calibration (`JudgeCalibration` in `martian.evals.records`) is the core's own record,
+  not part of the shared model: `save_calibration` records one, or returns the stored one with
+  the same id; `get_calibration` reads one and `list_calibrations` lists a project's, or one
+  judge's, newest first. A calibration is never changed, so a score that names one can always
+  read it. Migration `0003` adds its table. It is kept here, not with the registered judge in
+  MLflow: a registered judge version is immutable there, so a calibration on it would need a new
+  version, and every earlier calibration must stay readable by the scores that name it.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed.
   `InProcessEvents` delivers events within one process, which is enough for the local edition.
   The server delivers them between processes. A listener that falls too far behind gets
@@ -1365,7 +1389,7 @@ reliability and flaky cases, a resumed run, a run that stops early, and a data f
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_agreement.py`, `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
+`test_agreement.py`, `test_calibration.py`, `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_no_outbound.py`, `test_worker_judges.py` and the store and
 record tests run the core
 without the backend. The `Evals core`
