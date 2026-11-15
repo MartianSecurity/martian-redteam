@@ -151,6 +151,12 @@ LEFT_OUT_TABLES = {
         "interrupted when the local edition opens the data folder it was imported into; a monitor "
         "or a schedule is imported paused, and resuming it puts its turn back in the queue"
     ),
+    "martian_suite_audits": (
+        "the latest audit of each saved suite version: derived, not data of its own. It grades the "
+        "built-in do-nothing and cheating replies to a published dataset with the suite version's "
+        "checks, calling no target and no model, so auditing the imported suite version again over "
+        "the same dataset (POST /v1/evals/suites/{suite_version_id}/audit) gives it back"
+    ),
 }
 """Each table of the record store that an export leaves out, and why."""
 
@@ -192,6 +198,8 @@ LEFT_OUT_KINDS = {
     "TraceQuery": "a trace search, not data",
     "SessionSearch": "sessions grouped from a search's traces; the export writes the traces",
     "Counts": "a run's counts, written with its run",
+    "SuiteAudit": "a suite version's latest audit, derived from the suite version and a dataset "
+    "(martian_suite_audits in LEFT_OUT_TABLES)",
 }
 """Each model class the two interfaces take or return that is not a kind of object an export
 carries, and why."""

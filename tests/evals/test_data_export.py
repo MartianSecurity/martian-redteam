@@ -82,6 +82,7 @@ from martian.evals.records import (
     ScheduledRun,
     ScheduleGates,
     ScheduleProgress,
+    SuiteAudit,
     Threshold,
     ThresholdStatus,
     WebhookChannel,
@@ -164,6 +165,17 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     await records.save_suite(principal, project, suite.model_copy(update={"digest": suite_digest(suite)}))
     changed = suite.model_copy(update={"input_key": "prompt"})
     await records.save_suite(principal, project, changed.model_copy(update={"digest": suite_digest(changed)}))
+    # The first version's audit, which an export leaves out: it is derived (LEFT_OUT_TABLES).
+    audit = SuiteAudit(
+        suite_id="suite-1",
+        suite_version=1,
+        suite_digest=suite_digest(suite),
+        dataset_name="support",
+        dataset_digest=first.digest,
+        flagged=False,
+        result={"audit": "martian-suite-audit-v1", "cases": 3},
+    )
+    await records.put_suite_audit(principal, project, audit)
 
     # A completed run, in the store and the record store, with traces, scores and reviews.
     run_id, _ = ids()
@@ -767,6 +779,9 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
     assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
+    # A suite version's audit is left out: the fresh install has none until it audits again.
+    assert await source_records.get_suite_audit(ORG_A, "default", "suite-1", 1) is not None
+    assert await target_records.get_suite_audit(ORG_A, "default", "suite-1", 1) is None
     assert again.lines("runs.jsonl") == 2
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())

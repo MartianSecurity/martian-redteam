@@ -62,8 +62,10 @@ describe, and what the two stores do not hold:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
-- A suite version's [audit](evals-core.md#suite-audits): an import holds none, so audit the suite
-  versions again.
+- A suite version's [audit](evals-core.md#suite-audits) (the record store's `martian_suite_audits`
+  table): it is derived, the suite version's checks grading the built-in do-nothing and cheating
+  replies to a published dataset, with no target or model called. An import holds none; audit a
+  suite version again over the same dataset to have it back.
 - A threshold's webhook secret. The record store keeps it apart from the threshold
   (`martian_thresholds.secret`) and the export never reads it, so a threshold with a webhook comes
   back without it and its secret is given again (see Importing). The SMTP server's login and the
@@ -76,10 +78,11 @@ describe, and what the two stores do not hold:
 `martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
 store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store
 and the record store take or return to its files; `LEFT_OUT_TABLES` and `LEFT_OUT_KINDS` give
-the rest, each with why. Every table but the worker's queue is exported, and every kind of
-object; the model classes left out are not data of their own (the store's status, a trace search
-and the sessions it groups, a page of a listing, a run's counts). The webhook secret is a column,
-not an object, and no file carries it. A table or a kind added to
+the rest, each with why. Every table but the worker's queue and the suite audits is exported, and
+every kind of object but a suite audit; the other model classes left out are not data of their own
+(the store's status, a trace search and the sessions it groups, a page of a listing, a run's
+counts). The webhook secret is a column, not an object, and no file carries it. A table or a kind
+added to
 either store fails `tests/evals/test_data_export.py` until the export carries it, in a new file
 of a new format version, or names it as left out and why.
 
