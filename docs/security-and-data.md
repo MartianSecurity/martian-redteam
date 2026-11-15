@@ -100,7 +100,8 @@ loads nothing from another host.
 ## The local edition has no login
 
 `martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
-that reaches its port can read and change all of its data. On a laptop it listens on 127.0.0.1
+that reaches its port can read and change all of its data, and send it traces over OpenTelemetry
+(`POST /v1/traces`) without credentials. On a laptop it listens on 127.0.0.1
 and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
 and a web page cannot reach it through a name that resolves to the laptop. The container image
 listens on the container's interfaces, keeps the same `Host` check and prints a warning when it

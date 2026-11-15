@@ -227,7 +227,12 @@ Evals objects is in [command-line runs](evals-core.md#command-line-runs).
 **Traces from your application.** An application instrumented with MLflow tracing can record into
 the same data folder, so its traces show in **Traces** and its conversations in **Sessions**. Set
 `MLFLOW_TRACKING_URI` to the data folder's `mlflow.db` and three MLflow settings beside it, as in
-[traces from an application](evals-core.md#traces-from-an-application).
+[traces from an application](evals-core.md#traces-from-an-application). An application
+instrumented with OpenTelemetry instead sends its traces to the running `martian ui`: point its
+OTLP/HTTP exporter at `http://127.0.0.1:7600/v1/traces`
+([over OpenTelemetry](evals-core.md#over-opentelemetry)). Spans that carry OpenTelemetry GenAI or
+OpenInference attributes show their model, tokens, inputs and tool calls too
+([trace conventions](evals-core.md#trace-conventions)).
 
 **Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
 to the suite file to have MLflow's evaluation harness log there instead of the local store, then
