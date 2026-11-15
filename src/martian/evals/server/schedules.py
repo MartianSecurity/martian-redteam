@@ -392,6 +392,7 @@ class _History:
             "pass_rate": None,
             "counts": None,
             "scoring": None,
+            "gate": entry.gate,
             "comparison": None,
         }
         run = await self.run(entry.run_id) if entry.run_id else None

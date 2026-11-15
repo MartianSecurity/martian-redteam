@@ -76,6 +76,14 @@ OWN_NAMES |= {
     ("post", "/v1/evals/monitors/{monitor_id}/resume"),
     ("delete", "/v1/evals/monitors/{monitor_id}"),
 }
+# And its threshold routes (MorningHQ/martian-notes#198).
+OWN_NAMES |= {
+    ("get", "/v1/evals/thresholds"),
+    ("post", "/v1/evals/thresholds"),
+    ("get", "/v1/evals/thresholds/{threshold_id}"),
+    ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
+    ("delete", "/v1/evals/thresholds/{threshold_id}"),
+}
 # And its schedule routes (MorningHQ/martian-notes#197).
 OWN_NAMES |= {
     ("get", "/v1/evals/schedules"),

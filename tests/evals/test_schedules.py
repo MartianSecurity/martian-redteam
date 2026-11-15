@@ -6,8 +6,10 @@ durable queue's worker takes a turn at each of its slots, every so many seconds 
 expression in UTC, admitting the slot's run as a launch is admitted. A run that cannot be admitted
 is recorded as skipped with the reason; slots missed while no worker ran are run once; each
 schedule keeps its history, with each run's state, pass rate, suite scorecard and the paired
-comparison with its previous completed run. A fake target and a fake judge stand in for the agent
-and the model; nothing calls a model or a network target.
+comparison with its previous completed run; and each scored run's gate result feeds the thresholds
+on the schedule's gate results (MorningHQ/martian-notes#198), which breach and recover. A fake
+target and a fake judge stand in for the agent and the model; nothing calls a model or a network
+target.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import martian.evals.worker.schedule as schedule_module
 from martian.evals import slots
 from martian.evals.judge_settings import MemoryJudgeSettings
 from martian.evals.model import Case, Policy, Project, RunLimits, Suite, Target, suite_digest
-from martian.evals.records import Schedule, ScheduledRun
+from martian.evals.records import Schedule, ScheduledRun, ScheduleGates, Threshold, WebhookChannel
 from martian.evals.records.queue import SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER, Entitlements, Principal, create_app
@@ -386,6 +388,61 @@ async def test_a_scheduled_run_that_does_not_complete_cancels_its_suite_job(
     assert [(w.kind, w.job_id) for w in follow.submitted] == [("scoring", suite_job_id(done.run_id))]
 
 
+async def test_a_threshold_on_a_schedule_s_gate_results_breaches_and_recovers(
+    records: SqlRecordStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, target = MemoryStore(), Answers(right=0)  # wrong, until it is fixed
+    worker = InProcessWorker(store, records, targets={AGENT: target}, judge=judge)
+    services = ScheduleServices(store, lambda _p: ONE_RUN)
+    work = await make_schedule(store, records, since=T0 - timedelta(seconds=30))
+    gates = Threshold(
+        id="t1",
+        project_id=DEFAULT_PROJECT,
+        name="Regression gate",
+        source=ScheduleGates(schedule_id="sc1"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.5,
+        window_seconds=600,
+        min_count=4,
+        webhook=WebhookChannel(url="https://alerts.example/hook"),
+    )
+    await records.create_threshold(SINGLE_USER, DEFAULT_PROJECT, gates, webhook_secret="s" * 16)
+    states = []
+    for minute in range(14):
+        if minute == 4:
+            target.right = 10**6  # the system under test is fixed
+        at(monkeypatch, T0 + timedelta(minutes=minute, seconds=1))
+        await execute_schedule(services, records, worker, work)
+        await worker.drain()
+        entry = (await history(records))[-1]
+        assert entry.run_id is not None
+        # The run's suite scores it, as the queue's worker queues its suite job once it completes.
+        scoring = Work(
+            kind="scoring",
+            principal=SINGLE_USER,
+            project_id=DEFAULT_PROJECT,
+            run_id=entry.run_id,
+            job_id=suite_job_id(entry.run_id),
+        )
+        await worker.run(scoring)
+        status = await records.threshold_status(SINGLE_USER, DEFAULT_PROJECT, "t1")
+        assert status is not None
+        states.append(status.state)
+    # Each slot records its run's gate: failed while the target was wrong, passed once it was fixed.
+    assert [e.gate for e in await history(records)] == ["failed"] * 4 + ["passed"] * 10
+    # Four failed gates in the window breach it; it recovers once its interval clears the value,
+    # with nine of the window's ten gates passed. One alert per change of state.
+    assert states == ["unknown"] * 3 + ["breached"] * 9 + ["ok"] * 2
+    alerts = (await records.list_alerts(SINGLE_USER, DEFAULT_PROJECT, "t1")).items
+    assert [(a.event, a.sequence, a.channel) for a in alerts] == [
+        ("recovered", 2, "webhook"),
+        ("breached", 1, "webhook"),
+    ]
+    assert alerts[1].payload["threshold"]["source"] == {"kind": "gate", "schedule_id": "sc1"}
+    assert alerts[1].payload["observation"]["count"] == 4 and alerts[1].payload["observation"]["estimate"] == 0.0
+
+
 # --- through the routes and the durable queue ----------------------------------------------------
 
 
@@ -587,6 +644,31 @@ def test_a_schedule_refuses_what_it_cannot_run(core_on: Callable[..., Core]) -> 
             )
 
 
+def test_a_threshold_names_a_schedule_s_gate_results_through_its_routes(core_on: Callable[..., Core]) -> None:
+    core = core_on(Answers())
+    with core.client:
+        made = core.create(suite_version_id=core.suite())
+        body = {"request_id": str(uuid.uuid4()), "name": "Nightly gate", "measure": "pass_rate", "value": 0.8}
+        source = {"kind": "gate", "schedule_id": made["id"]}
+        gate = core.call("POST", "/v1/evals/thresholds", 201, json={**body, "source": source, "min_count": 5})
+        assert gate["source"] == source and gate["status"]["state"] == "unknown"
+        mean = {**body, "request_id": str(uuid.uuid4()), "measure": "mean", "min_count": 5, "source": source}
+        assert core.call("POST", "/v1/evals/thresholds", 422, json=mean)["detail"] == (
+            "A schedule's gate results are measured by their pass_rate"
+        )
+        missing = {
+            **body,
+            "request_id": str(uuid.uuid4()),
+            "source": {"kind": "gate", "schedule_id": str(uuid.uuid4())},
+        }
+        assert core.call("POST", "/v1/evals/thresholds", 404, json=missing)["detail"] == "Schedule not found"
+        listed = core.call("GET", f"/v1/evals/thresholds?schedule_id={made['id']}", 200)["items"]
+        assert [t["id"] for t in listed] == [gate["id"]]
+        # Deleting the schedule deletes the thresholds on its gate results.
+        core.call("DELETE", f"/v1/evals/schedules/{made['id']}", 204)
+        core.call("GET", f"/v1/evals/thresholds/{gate['id']}", 404)
+
+
 @pytest.mark.usefixtures("every_second")
 def test_a_scheduled_suite_runs_unattended_and_its_history_compares_each_run_with_the_last(
     core_on: Callable[..., Core],
@@ -625,6 +707,7 @@ def test_a_scheduled_suite_runs_unattended_and_its_history_compares_each_run_wit
         "correctness": 1.0,
     }
     assert (second["pass_rate"], second["scoring"]["gate"]) == (0.0, "failed")
+    assert (first["gate"], second["gate"]) == ("passed", "failed")
     # The paired comparison with the previous completed run of the schedule: every case regressed.
     comparison = second["comparison"]
     assert (comparison["baseline_id"], comparison["candidate_id"]) == (first["run_id"], second["run_id"])

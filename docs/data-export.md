@@ -54,10 +54,13 @@ It leaves out what the interfaces cannot list or the model does not describe:
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
 - Monitors, their progress and their record of the traces they took
-  ([monitors](evals-core.md#monitors)); exporting them is not built yet. The scores they stored are
-  on their traces, which are exported.
-- Schedules, their progress and their history of slots ([schedules](evals-core.md#schedules));
-  exporting them is not built yet. The runs they started, and their scoring jobs, are exported.
+  ([monitors](evals-core.md#monitors)), and the thresholds on their scores with their status and
+  alerts ([thresholds](evals-core.md#thresholds-and-alerts)); exporting them is not built yet. The
+  scores monitors stored are on their traces, which are exported. A threshold's webhook secret is
+  never exported.
+- Schedules, their progress and their history of slots ([schedules](evals-core.md#schedules)), and
+  the thresholds on their gate results; exporting them is not built yet. The runs they started,
+  and their scoring jobs, are exported.
 
 ## The format
 

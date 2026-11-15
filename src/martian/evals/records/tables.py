@@ -172,7 +172,42 @@ monitored_traces = Table(
     Index("ix_martian_monitored_traces_created", "space", "project_id", "monitor_id", "created_at"),
 )
 
-# Schedules (migration 0006): ``record`` is the schedule as its routes write it, ``progress`` when
+# Thresholds (migration 0006): ``record`` is the threshold as its route writes it, ``status`` its
+# state machine, which only its evaluations write, with ``sequence`` the number of its changes of
+# state that a change is conditioned on. ``secret`` signs its webhook alerts; no route reads it.
+thresholds = Table(
+    "martian_thresholds",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("source_kind", String(16), nullable=False),
+    Column("source_id", String(ID), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("status", JSON, nullable=False),
+    Column("secret", String(256), nullable=True),
+    Index("ix_martian_thresholds_source", "space", "project_id", "source_kind", "source_id"),
+)
+
+# Each alert a threshold's change of state raised, one per channel, kept after delivery: the key is
+# what keeps a change from raising an alert twice. A ``pending`` row is tried at ``next_attempt_at``.
+threshold_alerts = Table(
+    "martian_threshold_alerts",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("threshold_id", String(ID), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_threshold_alerts_due", "space", "project_id", "threshold_id", "state", "next_attempt_at"),
+    Index("ix_martian_threshold_alerts_created", "space", "project_id", "threshold_id", "created_at"),
+)
+
+# Schedules (migration 0007): ``record`` is the schedule as its routes write it, ``progress`` when
 # its next run is due, which only the worker writes.
 schedules = Table(
     "martian_schedules",
@@ -234,6 +269,8 @@ TABLES = (
     work_queue,
     monitors,
     monitored_traces,
+    thresholds,
+    threshold_alerts,
     schedules,
     schedule_runs,
 )

@@ -46,8 +46,9 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
   (:class:`~martian.evals.worker.RunsMonitors`). Each claim of it is one pass over the monitor's
   new traces (:mod:`martian.evals.worker.monitor`), after which the worker gives the row back, due
   ``monitor_seconds`` later, or at once when the pass stopped at its read bound with more to read
-  (:meth:`~martian.evals.records.queue.SqlWorkQueue.reschedule`). A paused monitor's passes do
-  nothing; a deleted monitor's row is removed at its next pass. A monitor whose worker stopped
+  (:meth:`~martian.evals.records.queue.SqlWorkQueue.reschedule`). A paused monitor's passes
+  score nothing and only deliver its thresholds' due alerts; a deleted monitor's row is removed at
+  its next pass. A monitor whose worker stopped
   during its pass ``max_attempts`` times is paused, with :data:`MONITOR_STOPPED_TOO_OFTEN` as its
   progress's error.
 - **Schedules.** A schedule's work also stays in the queue for as long as the schedule exists
@@ -78,7 +79,7 @@ from martian.evals.model import Run, Target
 from martian.evals.records import RecordStore
 from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
 from martian.evals.store import StoreError
-from martian.evals.worker import Runner, Work
+from martian.evals.worker import Runner, Work, alert_channels
 from martian.evals.worker.execute import fail_unfinished, interrupt, take_over
 from martian.evals.worker.process import dump_work, load_work
 from martian.evals.worker.schedule import ScheduleServices, after_scheduled_run, execute_schedule, next_due
@@ -157,6 +158,11 @@ class QueueWorker:
     @property
     def judges(self) -> bool:
         return self._runner.judges
+
+    @property
+    def alert_channels(self) -> frozenset[str]:
+        """The channels its runner sends thresholds' alerts on (``SendsAlerts``)."""
+        return alert_channels(self._runner)
 
     @property
     def concurrency(self) -> int:

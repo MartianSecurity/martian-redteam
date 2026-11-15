@@ -4,7 +4,8 @@ MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, re
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
 Traces page's saved views, the monitors that score a project's live traces with what each has
-scored, and the schedules that run a suite against a target with the slots each has run.
+scored, the thresholds on their scores with the alerts they raise, and the schedules that run a
+suite against a target with the slots each has run.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -16,10 +17,11 @@ records apart. A refused request raises ``martian.evals.store.StoreError``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from martian.evals.model import (
     Case,
@@ -226,7 +228,10 @@ class ScheduledRun(_Record):
     """One slot of a schedule, as its turn left it: ``admitted`` with the run it started
     (``run_id``), or ``skipped`` with the ``reason`` the run was not admitted. ``missed`` counts
     the later slots that were also due when the turn came, run by this one turn instead of one
-    each, and ``created_at`` is when the turn came."""
+    each, and ``created_at`` is when the turn came. ``gate`` is its run's gate result once the
+    run's suite has scored it: the suite scorecard's gate, ``passed``, ``failed``,
+    ``insufficient_coverage`` or ``unconfigured``; None until then, and for a run that did not
+    complete."""
 
     schedule_id: Identifier
     slot: datetime
@@ -235,12 +240,170 @@ class ScheduledRun(_Record):
     reason: str = ""
     missed: int = Field(default=0, ge=0)
     created_at: datetime | None = None
+    gate: Literal["passed", "failed", "insufficient_coverage", "unconfigured"] | None = None
 
     @model_validator(mode="after")
     def run_when_admitted(self) -> ScheduledRun:
         if (self.state == "admitted") != (self.run_id is not None):
             raise ValueError("an admitted slot names its run, and a skipped one none")
         return self
+
+
+THRESHOLD_WINDOW_BOUND = 5000
+"""The most scores one evaluation of a threshold reads from its window: the newest."""
+
+
+class MonitorScores(_Record):
+    """What a threshold judges: the scores one scorer of a monitor stored in the window."""
+
+    kind: Literal["monitor"] = "monitor"
+    monitor_id: Identifier
+    scorer: str = Field(min_length=1, max_length=120)
+
+    @property
+    def source_id(self) -> str:
+        return self.monitor_id
+
+
+class ScheduleGates(_Record):
+    """What a threshold judges, the second kind of source (MorningHQ/martian-notes#197): the gate
+    results of a schedule's runs whose slots are in the window, each ``passed`` as True and
+    ``failed`` or ``insufficient_coverage`` as False (:class:`ScheduledRun`). A pass rate is the
+    share of its runs that passed their suite's gate."""
+
+    kind: Literal["gate"] = "gate"
+    schedule_id: Identifier
+
+    @property
+    def source_id(self) -> str:
+        return self.schedule_id
+
+
+class WebhookChannel(_Record):
+    """Where a threshold's webhook alerts go. The secret they are signed with is kept beside the
+    threshold, never in it (:meth:`RecordStore.threshold_secret`)."""
+
+    url: str = Field(min_length=1, max_length=2000)
+
+
+class EmailChannel(_Record):
+    """Who a threshold's email alerts go to."""
+
+    to: list[str] = Field(min_length=1, max_length=10)
+
+    @field_validator("to")
+    @classmethod
+    def addresses(cls, to: list[str]) -> list[str]:
+        for address in to:
+            local, at, domain = address.partition("@")
+            if not (at and local and "." in domain and len(address) <= 254) or any(
+                c.isspace() or ord(c) < 32 or c in '<>,;"' for c in address
+            ):
+                raise ValueError("Give each recipient as one plain address, such as oncall@example.com")
+        if len(set(to)) != len(to):
+            raise ValueError("Give each recipient once")
+        return to
+
+
+class Threshold(_Record):
+    """A threshold on a measure of scores over a window (MorningHQ/martian-notes#198): healthy
+    while ``measure`` is ``direction`` ``value``, judged on the 95% interval of the scores in the
+    last ``window_seconds`` once there are ``min_count`` of them (:mod:`martian.evals.thresholds`).
+
+    ``pass_rate`` counts boolean scores; ``mean`` averages numeric ones. A pass rate's ``value`` is
+    strictly between 0 and 1, since no interval can clear 0 or 1, and a mean needs two scores for
+    an interval. ``webhook`` and ``email`` are where its alerts go; with neither it changes state
+    and sends nothing. The core's own record, as a monitor is."""
+
+    id: Identifier
+    project_id: Identifier
+    name: str = Field(min_length=1, max_length=120)
+    source: MonitorScores | ScheduleGates
+    measure: Literal["pass_rate", "mean"]
+    direction: Literal["at_least", "at_most"]
+    value: float = Field(allow_inf_nan=False)
+    window_seconds: int = Field(ge=60, le=30 * 86400)
+    min_count: int = Field(ge=1, le=THRESHOLD_WINDOW_BOUND)
+    webhook: WebhookChannel | None = None
+    email: EmailChannel | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+
+    @field_validator("name")
+    @classmethod
+    def printable(cls, name: str) -> str:
+        if any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise ValueError("A threshold's name is one line of text")
+        return name
+
+    @model_validator(mode="after")
+    def decidable(self) -> Threshold:
+        if (problem := threshold_problem(self.measure, self.value, self.min_count)) is not None:
+            raise ValueError(problem)
+        return self
+
+
+def threshold_problem(measure: str, value: float, min_count: int) -> str | None:
+    """Why a threshold could never be decided, or None: a pass rate's value is strictly between 0
+    and 1, since no interval clears 0 or 1, and a mean needs two scores for an interval."""
+    if measure == "pass_rate" and not 0 < value < 1:
+        return "A pass rate threshold is between 0 and 1, both left out"
+    if measure == "mean" and min_count < 2:
+        return "A mean threshold needs a min_count of at least 2"
+    return None
+
+
+class Observation(_Record):
+    """One evaluation of a threshold: the ``count`` scores in ``[window_start, at)``, their
+    ``estimate`` (a pass rate or a mean) and its 95% ``interval``, and the ``verdict``:
+    ``insufficient`` below ``min_count`` or with no interval, ``breach`` when the whole interval is
+    on the wrong side of the value, ``healthy`` when it is wholly on the right side, and
+    ``undecided`` while it holds the value. ``truncated`` when the window held more scores than
+    one evaluation reads (:data:`THRESHOLD_WINDOW_BOUND`)."""
+
+    at: datetime
+    window_start: datetime
+    count: int = Field(ge=0)
+    estimate: float | None = None
+    interval: list[float] | None = None
+    verdict: Literal["insufficient", "undecided", "breach", "healthy"]
+    truncated: bool = False
+
+
+class ThresholdStatus(_Record):
+    """Where a threshold's state machine is, written only by its evaluations: ``unknown`` until a
+    verdict first decides it, then ``ok`` or ``breached``. ``sequence`` counts its changes of state,
+    and an alert names the one it is for. ``since`` is when the state began; ``last`` the latest
+    evaluation."""
+
+    state: Literal["unknown", "ok", "breached"] = "unknown"
+    sequence: int = Field(default=0, ge=0)
+    since: datetime | None = None
+    last: Observation | None = None
+
+
+class Alert(_Record):
+    """One alert of a threshold to one channel: a breach (``breached``) or a recovery
+    (``recovered``), the threshold's change of state number ``sequence``. Its id is derived from the
+    threshold, the sequence and the channel, so each change has one alert per channel.
+
+    ``payload`` is what is sent, without the webhook's secret. It is ``pending`` until a delivery
+    succeeds (``delivered``) or the last attempt fails (``failed``); ``next_attempt_at`` is when a
+    pending alert is next tried, ``attempts`` how often it was, and ``last_error`` why the last
+    attempt failed, naming a status or an error class, never an address, a body or a secret."""
+
+    id: Identifier
+    threshold_id: Identifier
+    channel: Literal["webhook", "email"]
+    event: Literal["breached", "recovered"]
+    sequence: int = Field(ge=1)
+    payload: dict[str, Any]
+    state: Literal["pending", "delivered", "failed"] = "pending"
+    attempts: int = Field(default=0, ge=0)
+    next_attempt_at: datetime | None = None
+    last_error: str = ""
+    created_at: datetime | None = None
+    delivered_at: datetime | None = None
 
 
 @runtime_checkable
@@ -434,8 +597,8 @@ class RecordStore(Protocol):
         ...
 
     async def delete_monitor(self, principal: Principal, project_id: str, monitor_id: str) -> None:
-        """Remove the monitor, its progress and its record of the traces it scored. The scores it
-        stored on traces stay there."""
+        """Remove the monitor, its progress, its record of the traces it scored, and the
+        thresholds on its scores with their alerts. The scores it stored on traces stay there."""
         ...
 
     async def monitor_progress(self, principal: Principal, project_id: str, monitor_id: str) -> MonitorProgress | None:
@@ -467,6 +630,87 @@ class RecordStore(Protocol):
         """The traces the monitor took, most recently taken first."""
         ...
 
+    async def scored_monitored_traces(
+        self, principal: Principal, project_id: str, monitor_id: str, *, since: datetime, until: datetime, limit: int
+    ) -> list[MonitoredTrace]:
+        """The monitor's ``scored`` traces it took in ``[since, until)``, newest first, at most
+        ``limit``: the window a threshold on its scores reads."""
+        ...
+
+    # Thresholds on scores, their state, and the alerts they raise.
+    async def create_threshold(
+        self, principal: Principal, project_id: str, threshold: Threshold, *, webhook_secret: str | None
+    ) -> Threshold:
+        """Create the threshold, with status ``unknown``, or return the stored one with the same
+        id. ``webhook_secret`` is kept beside it for signing its webhook alerts, and only
+        :meth:`threshold_secret` returns it: a threshold with a webhook has one, and one without
+        has none."""
+        ...
+
+    async def get_threshold(self, principal: Principal, project_id: str, threshold_id: str) -> Threshold | None: ...
+
+    async def list_thresholds(
+        self, principal: Principal, project_id: str, *, source_kind: str | None = None, source_id: str | None = None
+    ) -> list[Threshold]:
+        """By name; only those on one source when ``source_kind`` and ``source_id`` name it."""
+        ...
+
+    async def delete_threshold(self, principal: Principal, project_id: str, threshold_id: str) -> None:
+        """Remove the threshold, its status, its secret and its alerts, delivered or not."""
+        ...
+
+    async def threshold_status(
+        self, principal: Principal, project_id: str, threshold_id: str
+    ) -> ThresholdStatus | None:
+        """The threshold's status, or None for a threshold that does not exist."""
+        ...
+
+    async def set_threshold_status(
+        self,
+        principal: Principal,
+        project_id: str,
+        threshold_id: str,
+        status: ThresholdStatus,
+        *,
+        expected_sequence: int,
+        alerts: Sequence[Alert] = (),
+    ) -> bool:
+        """In one transaction, replace the status and add ``alerts``, while the stored status's
+        ``sequence`` is ``expected_sequence``. True when it was; False when another evaluation
+        changed the state first or the threshold is gone, which leaves everything as it was. So a
+        change of state and its alerts are written together, once."""
+        ...
+
+    async def threshold_secret(self, principal: Principal, project_id: str, threshold_id: str) -> str | None:
+        """The secret the threshold's webhook alerts are signed with, for the worker that signs
+        them. No route calls it."""
+        ...
+
+    async def take_due_alerts(
+        self,
+        principal: Principal,
+        project_id: str,
+        threshold_ids: Sequence[str],
+        *,
+        now: datetime,
+        hold_until: datetime,
+        limit: int = 20,
+    ) -> list[Alert]:
+        """The ``pending`` alerts of these thresholds due by ``now``, oldest first, at most
+        ``limit``, each taken by moving its ``next_attempt_at`` to ``hold_until``, so that no other
+        delivery takes it before then."""
+        ...
+
+    async def finish_alert(self, principal: Principal, project_id: str, alert: Alert) -> None:
+        """Record the alert as a delivery attempt left it. Nothing happens once it is gone."""
+        ...
+
+    async def list_alerts(
+        self, principal: Principal, project_id: str, threshold_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[Alert]:
+        """The threshold's alerts, newest first."""
+        ...
+
     # Schedules: suites run against a target on a schedule, and the slots each has run.
     async def create_schedule(self, principal: Principal, project_id: str, schedule: Schedule) -> Schedule:
         """Create the schedule, or return the stored one with the same id."""
@@ -486,7 +730,8 @@ class RecordStore(Protocol):
         ...
 
     async def delete_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> None:
-        """Remove the schedule, its progress and its slots. The runs it started stay."""
+        """Remove the schedule, its progress, its slots, and the thresholds on its gate results with
+        their alerts. The runs it started stay."""
         ...
 
     async def schedule_progress(
@@ -516,6 +761,12 @@ class RecordStore(Protocol):
         """The schedule's slots, the latest first."""
         ...
 
+    async def set_scheduled_run_gate(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime, gate: str
+    ) -> ScheduledRun | None:
+        """Record the gate result of the slot's run, or None when the slot or the schedule is gone."""
+        ...
+
 
 RECORD_METHODS = frozenset(
     name for name in vars(RecordStore) if not name.startswith("_") and callable(getattr(RecordStore, name))
@@ -523,6 +774,9 @@ RECORD_METHODS = frozenset(
 
 __all__ = [
     "RECORD_METHODS",
+    "THRESHOLD_WINDOW_BOUND",
+    "Alert",
+    "EmailChannel",
     "Event",
     "EventBus",
     "EventsLost",
@@ -530,11 +784,18 @@ __all__ = [
     "Monitor",
     "MonitorFilter",
     "MonitorProgress",
+    "MonitorScores",
     "MonitoredTrace",
+    "Observation",
     "RecordStore",
     "SavedView",
     "Schedule",
+    "ScheduleGates",
     "ScheduleProgress",
     "ScheduledRun",
     "Subscription",
+    "Threshold",
+    "ThresholdStatus",
+    "WebhookChannel",
+    "threshold_problem",
 ]

@@ -27,6 +27,11 @@ model. One turn, :func:`execute_schedule`:
   when the schedule was created. Once the run's work has ended, :func:`after_scheduled_run` queues
   the job if the run completed and cancels it otherwise. As with the local edition's suite job,
   the job is admitted with its run, under ``concurrent_runs``.
+
+Once a scheduled run's suite job has scored it, the worker that ran the job records the run's
+gate result on its slot and evaluates the thresholds on the schedule's gate results, then delivers
+their due alerts (:func:`record_gate`, :class:`~martian.evals.thresholds.GateSource`), as a
+monitor's pass does for the thresholds on its scores.
 """
 
 from __future__ import annotations
@@ -40,11 +45,13 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
+from martian.evals.alerts import AlertSender
 from martian.evals.model import ScoringJob, Target
 from martian.evals.records import RecordStore, Schedule, ScheduledRun, ScheduleProgress
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id
 from martian.evals.slots import Cron, Interval, timing
 from martian.evals.store import EvalStore, StoreError
+from martian.evals.thresholds import GateSource, evaluate_thresholds
 
 # The package defines these before it imports this module.
 from martian.evals.worker import Work, Worker
@@ -299,6 +306,48 @@ async def after_scheduled_run(records: RecordStore, worker: Worker, work: Work) 
         await worker.submit(scoring)
 
 
+async def record_gate(records: RecordStore, work: Work, *, alerts: AlertSender) -> None:
+    """After a scoring job's work: when it is the suite job of a run a schedule admitted and it
+    has scored the run, record the run's gate result, its suite scorecard's gate, on its slot,
+    evaluate the thresholds on the schedule's gate results and deliver their due alerts, those
+    just raised and those an earlier attempt left to retry. A job that was cancelled or stopped
+    gives no gate result. A failure here is logged; the schedule's next scored run evaluates
+    again."""
+    try:
+        await _record_gate(records, work, alerts)
+    except Exception:  # noqa: BLE001 - the run and its scores stand; the next scored run evaluates again
+        log.exception("The gate of scheduled run %s was not recorded or its thresholds not evaluated", work.run_id)
+
+
+async def _record_gate(records: RecordStore, work: Work, alerts: AlertSender) -> None:
+    # The routes' modules import the worker package, so they are imported when a gate needs them.
+    from martian.evals.server.projection import Assessment, item_out, job_config
+    from martian.evals.server.quality import scorecard
+    from martian.evals.server.runs import run_results
+
+    principal, project = work.principal, work.project_id
+    run = await records.get_run(principal, project, work.run_id)
+    scheduled = run.provenance.get(SCHEDULE_KEY) if run is not None else None
+    if run is None or not isinstance(scheduled, dict) or work.job_id != suite_job_id(run.id):
+        return
+    job = next((j for j in await records.list_scoring_jobs(principal, project, run.id) if j.id == work.job_id), None)
+    if job is None or job.state not in ("completed", "partial", "failed"):
+        return
+    items = [item_out(result) for result in await run_results(records, principal, run)]
+    scores = [
+        Assessment.of(s) for s in await records.list_scores(principal, project, run.id) if s.scoring_job_id == job.id
+    ]
+    gate = scorecard(items, scores, job_config(job))["gate"]
+    schedule_id, slot = str(scheduled["id"]), datetime.fromisoformat(str(scheduled["slot"]))
+    if await records.set_scheduled_run_gate(principal, project, schedule_id, slot, gate) is None:
+        return  # the schedule, or its slot, is gone
+    on_gates = await records.list_thresholds(principal, project, source_kind="gate", source_id=schedule_id)
+    if not on_gates:
+        return
+    await evaluate_thresholds(records, principal, project, on_gates, GateSource(records), now=_now())
+    await alerts.deliver_due(records, principal, project, [t.id for t in on_gates])
+
+
 __all__ = [
     "DATASET_GONE",
     "MISSED_UP_TO",
@@ -310,6 +359,7 @@ __all__ = [
     "due_slot",
     "execute_schedule",
     "next_due",
+    "record_gate",
     "schedule_timing",
     "scheduled_run_id",
     "suite_job_id",

@@ -25,6 +25,9 @@ their own worker without changing the routes:
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
+- A worker given alert settings (:class:`martian.evals.alerts.AlertSettings`) delivers the alerts
+  of thresholds on its monitors' scores after each pass, and says which channels it sends
+  (:class:`SendsAlerts`). Without them it sends no alert.
 
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
@@ -268,6 +271,21 @@ class RunsMonitors(Protocol):
 
 
 @runtime_checkable
+class SendsAlerts(Protocol):
+    """What a worker adds when it delivers thresholds' alerts (:mod:`martian.evals.alerts`): the
+    channels its installation configured, ``webhook`` and ``email``, or none. The threshold routes
+    refuse a channel the worker does not send; a worker without it sends none."""
+
+    @property
+    def alert_channels(self) -> frozenset[str]: ...
+
+
+def alert_channels(worker: object) -> frozenset[str]:
+    """The channels ``worker`` sends alerts on: none unless it is :class:`SendsAlerts`."""
+    return worker.alert_channels if isinstance(worker, SendsAlerts) else frozenset()
+
+
+@runtime_checkable
 class RunsSchedules(Protocol):
     """What a worker adds when it runs schedules: it takes a schedule's work (``kind="schedule"``)
     again at each of its slots for as long as the schedule exists, and admits the schedule's run
@@ -304,12 +322,14 @@ __all__ = [
     "RunsMonitors",
     "RunsSchedules",
     "ScheduleServices",
+    "SendsAlerts",
     "TargetCall",
     "Verdict",
     "Work",
     "Worker",
     "WorkerServices",
     "agents_judge",
+    "alert_channels",
     "dump_work",
     "execute_monitor",
     "execute_run",
