@@ -341,6 +341,39 @@ results, with a message naming the setting to check, and the rest of the run car
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
+### Push runs to a server
+
+`martian evals push` sends the local Evals UI's finished runs to a Martian server, each with its
+case results, scores, scoring jobs and traces, so your team sees them there as you see them in
+`martian ui`. It signs in as `martian ci` does: `MARTIAN_API_URL` is the server's origin and
+`MARTIAN_API_TOKEN` an organisation API key with `evals:write`
+([one customer connection](sdk-and-ci.md#one-customer-connection)).
+
+```bash
+export MARTIAN_API_URL=https://martian.example.com MARTIAN_API_TOKEN=...
+martian evals push                       # every finished run in the data folder
+martian evals push evals-3 EV-1002       # these runs, by code or id
+martian evals push --data-dir ./evals-data
+```
+
+```text
+Pushed 3 runs to https://martian.example.com (Acme): 2 new, 1 there already.
+  evals-3: 12 of 12 cases sent, 12 traces
+  EV-1002: 40 of 40 cases sent, 40 traces
+  evals-2: 0 of 5 cases sent, 0 traces
+```
+
+Run it as often as you like. The server keeps one of everything, so pushing again sends only what
+it lacks, such as a run since or a scoring job that has finished, and a push that was interrupted
+continues where it stopped (exit code `130` for Ctrl+C, `2` for a server it could not reach: run
+the same command again). A run still running is left for a later push. Runs of the default project
+go with any key that may write evals; a run of another project creates that project on the server,
+which needs an admin, and the Martian server's API keys and service accounts write as members, so
+it pushes those runs only into projects the server already has. A service account limited to one
+project pushes that project's runs only. The command names each run the server refused and why, and exits `2`: one that changed
+here after it was pushed, for example. Reviews, artifacts and the dataset version a run read stay
+here. What goes and how the ids map: [pushed runs](evals-core.md#pushed-runs).
+
 ## Audit a suite
 
 A suite can hold cases that pass with no work, or by a shortcut, and its pass rate does not show
