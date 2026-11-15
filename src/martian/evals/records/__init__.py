@@ -2,12 +2,13 @@
 
 MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, registered judges
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
-it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
-Traces page's saved views, each judge version's calibrations and their re-checks, the monitors
-that score a project's live traces with what each has scored, the thresholds on their scores
-with the alerts they raise, and the schedules that run a suite against a target with the slots
-each has run, and with how far each has watched the model behind its target; also what
-publishing each dataset version wrote, and the outbox of store writes not yet delivered.
+it gates on, scoring jobs, the human review chain, versioned suites and their audits, editable
+dataset drafts, the Traces page's saved views, each judge version's calibrations and their
+re-checks, the monitors that score a project's live traces with what each has scored, the
+thresholds on their scores with the alerts they raise, and the schedules that run a suite against
+a target with the slots each has run, and with how far each has watched the model behind its
+target; also what publishing each dataset version wrote, and the outbox of store writes not yet
+delivered.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -69,6 +70,24 @@ class SavedView(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class SuiteAudit(BaseModel):
+    """The latest audit of one saved suite version (``martian.evals.audit``): the dataset it was
+    run over, whether it flagged the suite, and the whole result. The evals core's own record: the
+    server keeps no audits, so the shared model has no object for one."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    suite_id: Identifier
+    suite_version: int = Field(ge=1)
+    suite_digest: Digest
+    dataset_name: str = Field(min_length=1, max_length=200)
+    dataset_digest: Digest
+    flagged: bool
+    result: dict[str, Any]
+    created_at: datetime | None = None
+    created_by: str | None = None
 
 
 class DatasetManifest(BaseModel):
@@ -748,6 +767,15 @@ class RecordStore(Protocol):
         """The latest version of each suite."""
         ...
 
+    async def put_suite_audit(self, principal: Principal, project_id: str, audit: SuiteAudit) -> SuiteAudit:
+        """Store the audit with its suite version, replacing an earlier audit of that version. A
+        suite version not saved raises ``not_found``."""
+        ...
+
+    async def get_suite_audit(
+        self, principal: Principal, project_id: str, suite_id: str, version: int
+    ) -> SuiteAudit | None: ...
+
     # Dataset drafts: editable until published.
     async def create_draft(self, principal: Principal, project_id: str, draft: DatasetDraft) -> DatasetDraft: ...
 
@@ -1142,6 +1170,7 @@ __all__ = [
     "ScheduleProgress",
     "ScheduledRun",
     "Subscription",
+    "SuiteAudit",
     "Threshold",
     "ThresholdStatus",
     "WebhookChannel",

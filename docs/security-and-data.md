@@ -34,8 +34,10 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 Martian. Its outbound calls are the ones the suite file names:
 
 - **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
-  suite repeats its cases, carrying that case's input, and for each combination of the suite's
-  [matrix](evals.md#a-matrix-of-prompts-and-models) once more, with that combination's values.
+  suite repeats its cases, carrying that case's inputs and never its expectations
+  ([the target and the grader](#the-target-and-the-grader)), and for each combination of the
+  suite's [matrix](evals.md#a-matrix-of-prompts-and-models) once more, with that combination's
+  values.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -49,6 +51,10 @@ Martian. Its outbound calls are the ones the suite file names:
   never stored. A literal value is stored as it is: keep credentials in the environment.
 - **An LLM judge** receives the case's input, the reply and your criteria at the provider you
   configure.
+- **The cheating inspection's judge**, only with `martian evals inspect-cheating --judge MODEL
+  --accept-judge-cost`, receives each transcript no signal flagged: the case's inputs, the
+  target's steps with what each was asked and returned, and the reply, each cut to 600
+  characters, never the expectations ([the judge](evals.md#the-judge)).
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
 
@@ -131,6 +137,52 @@ the run is given `--cache`. With it on, `martian evals run` stores model replies
   older than `cache.ttl_seconds` is not used, but stays on disk until a successful call replaces
   it or the folder is deleted.
 
+## The target and the grader
+
+An agent under test that can reach its grader can read its answers or change its results. So the
+SDK sends a target each case's inputs and nothing else, and keeps what grades it, the expectations,
+the checks and their criteria, custom scorers' code, the results and the stores, where the target
+cannot reach them. How far that goes depends on the kind of target:
+
+| Target | Given | Runs | Cannot reach | Can still reach |
+| --- | --- | --- | --- | --- |
+| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments; in a conversation's turn also its history and session id, as far as its parameters take them | In a process of its own, started with the run (`python -P`), which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri` and the local Evals UI's data folder: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
+| A suite file's URL target | One JSON `POST` per case, its body filled from the case's inputs and `{{uuid}}`; a placeholder that names anything else is refused when the suite loads | Wherever the endpoint runs | Nothing of the run's process: it receives the request and nothing else | Whatever its own host lets it. An endpoint on this machine that runs as your user can read the suite's files |
+| A function in the pytest gate (`evaluate`, `predict_fn`) | The case's inputs, as keyword arguments | In the test's own process | Nothing is hidden from it | The test's memory, which holds the dataset's expected values, and its files |
+| A function target in the evals core's worker (`Target(kind="function")`) | The case's inputs, as keyword arguments | In a process of its own for each run, started before its first case | The work's process, which holds the stores and every case's expectations. On Linux with Landlock, the worker's private paths (`WorkerServices.private_paths`), which the setup names: its stores' files | As a suite file's function target. A store on a server, such as Postgres, is reachable over the network by anything that has its address and credentials, which the target's process is not given unless they are in a variable it keeps |
+| A function in the worker's own process (`TargetCall`) | A `Case` with the case's id and inputs only | In the work's process | Nothing is hidden from it: for tests and for code the installation trusts with its stores | The stores, the work's memory and its files |
+| An HTTP target of the worker | As a suite file's URL target; a placeholder that names anything else is refused when the worker checks the target | Wherever the endpoint runs | As a suite file's URL target | As a suite file's URL target |
+| A registered agent | A `Case` with the case's id and inputs only, to the `AgentExecutor` | Through martian-agents | The worker's process and stores | What its own sandbox lets it |
+
+Scorers run after the target replies, in the process that grades: the command's process for a suite
+file, and the work's process in the worker. A judge is given the input, the reply and its
+criteria, and never calls the target.
+
+An edition's [case hooks](evals-core.md#case-hooks-and-installed-checks-in-the-worker) run in the
+work's process too, and are given each case without its expectations or stored output, so they
+cannot hand the target its answers. What a hook adds to the target's inputs
+(`CaseState.target_inputs`) is the edition's to keep free of them; its other state reaches only the
+installed checks and the teardown, and neither is recorded.
+
+`tests/evals/test_grader_isolation.py` proves the function targets' part. Its target looks for the
+answers everywhere it can: in its arguments, in the suite file, the data file, the scorer's file,
+the results folder, MLflow's store and the local Evals UI's data folder, in its environment, in its
+own memory and in the memory of the process that started it. Each answer is a random value placed
+in the data file, the suite file and the scorer, and the test checks that the files and stores hold
+them. The target finds none, in a suite file run and in the worker, though it finds a control value
+in a file beside it and another in its environment, and it can neither change the results and the
+stores nor plant a file beside them.
+
+What isolation leaves reachable, and what an agent tries anyway, shows in its transcript.
+[`martian evals inspect-cheating`](evals.md#inspect-a-run-for-cheating), and the evals core's
+[route for a run](evals-core.md#runs-inspected-for-cheating), read each case's trace and reply for
+signs that the agent reached for its answers, tests or grader: a step that names the run's hidden
+files, an answer key, results or a grader's file, the evals or MLflow API, the run's environment
+variables or another process, a refusal by isolation, an expected answer it had before any step
+produced it, or a reply that writes to the grader. Isolation records nothing itself, so a refused
+attempt shows only where the target's own step records its error. Its miss and false-alarm rates on
+a labelled set are in [how well it catches cheating](evals.md#how-well-it-catches-cheating).
+
 ## Custom Python scorers
 
 A [custom Python check](evals.md#custom-python-checks) is code, and it is **not sandboxed**. It
@@ -143,9 +195,9 @@ how long it runs or how much memory it takes.
 
 | Where | Who adds it | Where the code runs |
 | --- | --- | --- |
-| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
+| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts, where the run's function target cannot reach it ([above](#the-target-and-the-grader)), and in the `martian evals audit` process, which runs it on the [audit's replies](evals.md#audit-a-suite). Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process, on a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so a custom scorer never sees a project's production traces: the `Monitor` record refuses a scorer of kind `code` |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`), and an edition's case hooks and installed checks the same way (`WorkerServices.hooks`, `WorkerServices.checks`) | Only in each piece of work's own process: a custom scorer on a scoring job's saved outputs, an installed check on a run's answered cases and a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so neither sees a project's production traces: the `Monitor` record refuses a scorer of kind `code`, which both are |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -179,7 +231,9 @@ holds; beside the setup's store and record store, whose databases hold every org
 records; and with the same files and network. There is no time or memory limit: a scorer that
 never returns holds its scoring job, and one that ends its process fails the work ("The worker
 process ended before this work finished"). Installing a custom scorer on a server is deploying
-code into the worker, with the worker's privileges; review it as such.
+code into the worker, with the worker's privileges; review it as such. The same holds for an
+edition's case hooks and installed checks: they are the edition's code in each work's process, with
+no time limit, and a suite or a record names an installed check by name only.
 
 ## Telemetry
 

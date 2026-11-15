@@ -471,6 +471,67 @@ def test_a_scoring_job_grades_a_panel_judge_and_an_installed_python_scorer_side_
     assert sorted({model for model, _ in asked}) == [f"openai:/{m}" for m in "abc"]
 
 
+def test_a_scoring_job_grades_a_panel_judge_and_an_installed_check_side_by_side(tmp_path):
+    """A check the worker installs by name (MartianSecurity/martian-notes#216) beside a panel judge
+    and its calibration in one scoring job: the check is graded once, with no state and nothing of
+    the panel's or a calibration's; only the panel's members are asked, each for the judge only."""
+    from fastapi.testclient import TestClient
+
+    from martian.evals.server import create_app
+    from martian.evals.worker import InProcessWorker, Work
+    from martian.evals.worker.execute import NO_OUTPUT
+    from martian.evals.worker.hooks import installed_check
+    from martian.evals.worker.scorers import builtin_scorer
+    from tests.evals.test_custom_scorers import scoring_job
+    from tests.evals.write_fixture import AGENT, agent, judge, publish
+
+    asked: list[tuple[str | None, tuple[str, ...]]] = []
+    given: list[Any] = []
+
+    async def recording(request: JudgeRequest) -> JudgeResult:
+        asked.append((request.model, tuple(s.name for s in request.scorers)))
+        return await judge(request)
+
+    def had_state(state, options):
+        given.append(state)
+        return state is None and options == {"strict": True}, "graded with no state"
+
+    members = [PanelMember(model=f"openai:/{m}") for m in "abc"]
+    panel = builtin_scorer("correctness").model_copy(update={"model": None, "endpoint": None, "panel": members})
+    store, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    asyncio.run(publish(store))
+    worker = InProcessWorker(store, records, targets={AGENT: agent}, judge=recording, checks={"had_state": had_state})
+    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=worker)
+    with TestClient(app) as client:
+        assert client.portal is not None
+        body = {"agent_id": AGENT, "dataset_name": "support-faq", "request_id": request_id()}
+        run_id = client.post("/v1/evals", json=body).json()["id"]
+        client.portal.call(worker.drain)
+        job = scoring_job(run_id, [installed_check("had_state", {"strict": True}), panel])
+        client.portal.call(records.create_scoring_job, SINGLE_USER, DEFAULT_PROJECT, job)
+        work = Work(kind="scoring", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run_id, job_id=job.id)
+        client.portal.call(worker.submit, work)
+        client.portal.call(worker.drain)
+        bench = client.get(f"/v1/evals/{run_id}/workbench").json()
+    records.close()
+    found: dict[str, list[dict[str, Any]]] = {}
+    for assessment in bench["assessments"]:
+        if assessment["error"] != NO_OUTPUT:
+            found.setdefault(assessment["name"], []).append(assessment)
+    checked = found["had_state"]
+    assert {(a["value"], a["rationale"], a["source_id"]) for a in checked} == {
+        (True, "graded with no state", "installed:had_state")
+    }
+    assert len(given) == len(checked) == 2 and given == [None, None]
+    kept = {key for a in checked for key in a["provenance"]}
+    assert CALIBRATION_KEY not in kept and not any(key.startswith("martian.panel.") for key in kept)
+    votes = found["correctness"][0]["provenance"]
+    assert [votes[f"martian.panel.{n}.model"] for n in (1, 2, 3)] == [f"openai:/{m}" for m in "abc"]
+    assert votes[CALIBRATION_KEY] == NO_CALIBRATION
+    assert {names for _, names in asked} == {("correctness",)}
+    assert sorted({model for model, _ in asked}) == [f"openai:/{m}" for m in "abc"]
+
+
 def test_a_registered_panel_with_no_majority_is_an_error_never_a_pass(core):
     register_panel(core, "tone", MEMBERS["tone"])
     register_panel(core, "strict", MEMBERS["strict"])

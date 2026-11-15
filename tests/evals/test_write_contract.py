@@ -71,6 +71,13 @@ OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post
 # (MartianSecurity/martian-notes#189), each judge version's calibration (MartianSecurity/martian-notes#186)
 # and prompt versions (MartianSecurity/martian-notes#207).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
+# The core's suite audits (MartianSecurity/martian-notes#214).
+OWN_NAMES |= {
+    ("get", "/v1/evals/suites/{suite_version_id}/audit"),
+    ("post", "/v1/evals/suites/{suite_version_id}/audit"),
+}
+# The core's inspection of a run for cheating (MartianSecurity/martian-notes#217).
+OWN_NAMES |= {("get", "/v1/evals/{run_id}/cheating"), ("post", "/v1/evals/{run_id}/cheating/review-queue")}
 OWN_NAMES |= {("get", "/v1/evals/judge-agreement"), ("get", "/v1/evals/reviewer-agreement")}
 OWN_NAMES |= {
     ("get", "/v1/evals/judge-calibrations"),

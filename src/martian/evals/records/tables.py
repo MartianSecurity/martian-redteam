@@ -113,6 +113,18 @@ suites = Table(
     Column("record", JSON, nullable=False),
 )
 
+# The latest audit of each saved suite version (martian.evals.audit).
+suite_audits = Table(
+    "martian_suite_audits",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("suite_id", String(ID), primary_key=True),
+    Column("suite_version", Integer, primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
 dataset_drafts = Table(
     "martian_dataset_drafts",
     metadata,
@@ -324,6 +336,7 @@ TABLES = (
     scoring_jobs,
     reviews,
     suites,
+    suite_audits,
     dataset_drafts,
     dataset_draft_cases,
     saved_views,

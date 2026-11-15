@@ -1378,11 +1378,18 @@ def write_cases(folder, count, **case):
 
 
 def calls_of(folder):
-    calls = folder / "calls"
+    calls = folder / "log" / "calls"
     return calls.read_text(encoding="utf-8").split() if calls.exists() else []
 
 
-# Each call is noted in `calls`; `question 0` takes SECONDS to answer.
+def write_counted_agent(folder, agent):
+    """Write ``agent`` beside the suite, and the folder its calls are noted in: a function target
+    cannot create files in the suite's own folder, which holds the suite file and its data."""
+    (folder / "agent.py").write_text(agent, encoding="utf-8")
+    (folder / "log").mkdir(exist_ok=True)
+
+
+# Each call is noted in `log/calls`; `question 0` takes SECONDS to answer.
 COUNTED_AGENT = """
 import pathlib
 import time
@@ -1391,7 +1398,7 @@ SECONDS = {seconds}
 
 
 def target(message):
-    with (pathlib.Path(__file__).parent / "calls").open("a", encoding="utf-8") as calls:
+    with (pathlib.Path(__file__).parent / "log" / "calls").open("a", encoding="utf-8") as calls:
         calls.write(message.replace(" ", "-") + "\\n")
     if message == "question 0":
         time.sleep(SECONDS)
@@ -1401,7 +1408,7 @@ def target(message):
 
 def test_a_hung_function_target_is_a_timed_out_case_and_the_run_finishes(tmp_path):
     write_cases(tmp_path, 2)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=20), encoding="utf-8")
+    write_counted_agent(tmp_path, COUNTED_AGENT.format(seconds=20))
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\n  timeout_seconds: 1\n")
     started = time.monotonic()
     summary = run_suite(suite)
@@ -1424,7 +1431,7 @@ def test_a_run_stops_at_its_time_limit_keeps_its_finished_cases_and_resumes(tmp_
     real = time.monotonic
     monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * bool(calls_of(tmp_path)))
     write_cases(tmp_path, 3)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    write_counted_agent(tmp_path, COUNTED_AGENT.format(seconds=0))
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
     result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
     # The case in flight finished, and the run stopped before the next one.
@@ -1507,7 +1514,7 @@ def test_a_repeated_run_stopped_in_the_middle_of_a_cases_attempts_runs_them_all_
     real = time.monotonic
     monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * (len(calls_of(tmp_path)) >= 4))
     write_cases(tmp_path, 3)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    write_counted_agent(tmp_path, COUNTED_AGENT.format(seconds=0))
     extra = "  - type: no_secrets\ntarget:\n  file: agent.py\nrepeats: 3\nbatch: 1\nconcurrency: 1\n"
     suite = write_suite(tmp_path, extra=extra)
     result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
@@ -1549,7 +1556,7 @@ def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished
 
     write_cases(tmp_path, 4)
     agent = COUNTED_AGENT.format(seconds=0).replace("return ", "time.sleep(1)\n    return ")
-    (tmp_path / "agent.py").write_text(agent, encoding="utf-8")
+    write_counted_agent(tmp_path, agent)
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
     ended: dict = {}
     running = threading.Thread(target=lambda: ended.setdefault("summary", run_suite(suite)))
