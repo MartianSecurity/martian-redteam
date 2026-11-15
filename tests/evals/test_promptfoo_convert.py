@@ -24,13 +24,15 @@ from martian.evals.promptfoo_convert import (
     convert_promptfoo_config,
     write_conversion,
 )
-from martian.evals.promptfoo_import import read_promptfoo_results
+from martian.evals.promptfoo_import import promptfoo_runs, read_promptfoo_results
 from martian.evals.runner import run_suite
 from martian.evals.suite_file import load_suite_file
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "promptfoo"
 CONFIG = EXAMPLE / "promptfooconfig.yaml"
 TARGET = f"{EXAMPLE / 'agent.py'}:answer"
+# A config with two prompts and two providers, and the results promptfoo 0.125.1 wrote for it.
+WRITTEN = Path(__file__).resolve().parent / "promptfoo"
 
 # Everything in the sample config the suites leave out, by where it is in the config.
 SAMPLE_UNCONVERTED = [
@@ -70,7 +72,7 @@ def test_the_sample_config_converts_and_its_suites_run_against_a_function(tmp_pa
     conversion = convert_promptfoo_config(CONFIG, output=out, target=TARGET)
     write_conversion(conversion, out)
 
-    # Tests asserting different things are in different suites; every check is a check on main.
+    # Tests asserting different things are in different suites; every check is a built-in check.
     # defaultTest's latency applies to every test, and only test 5 limits its cost.
     common = ("not_icontains", "not_regex", "latency")
     assert [(s.suite_file, s.data_file, s.tests, s.checks) for s in conversion.suites] == [
@@ -190,6 +192,18 @@ def test_without_a_target_the_suite_grades_each_tests_provider_output(tmp_path):
     assert (summary["cases"], summary["passed"], summary["failed"]) == (4, 2, 2)
 
 
+def test_cases_have_the_ids_each_providers_imported_results_give(tmp_path):
+    conversion = convert_promptfoo_config(WRITTEN / "promptfooconfig.yaml", output=tmp_path / "out", target=TARGET)
+    rows = [json.loads(line) for suite in conversion.suites for line in suite.data.splitlines()]
+    converted = {row["id"]: row["inputs"]["prompt"] for row in rows}
+    assert len(converted) == 6
+    # promptfoo numbers bot-v2's prompt columns after bot-v1's; both providers' cases still have
+    # the converted cases' ids, each on the same prompt.
+    runs = promptfoo_runs(read_promptfoo_results(WRITTEN / "results.json"), codes={"bot-v1": "v1", "bot-v2": "v2"})
+    for run in runs:
+        assert {case.result.case_id: case.result.inputs["prompt"] for case in run.cases} == converted
+
+
 # Each assertion type that converts, a reply, and promptfoo's verdict on it.
 VERDICTS = [
     ({"type": "contains", "value": "Paris"}, "Paris, France", True),
@@ -255,7 +269,7 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
         ({"type": "trajectory:tool-sequence", "value": ["a", "b"]}, "in parallel in one turn are in order"),
         ({"type": "finish-reason", "value": "stop"}, "reads the provider's trace or metadata"),
         ({"type": "contains-json"}, "contains-json: finds JSON inside other text"),
-        ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no check on main does"),
+        ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no built-in check does"),
         ({"type": "not-is-refusal"}, "so the two decide some replies differently (add no_refusal by hand"),
         ({"type": "promptfoo:redteam:pii"}, "(add no_personal_data by hand to use it)"),
         ({"type": "promptfoo:redteam:pii:direct"}, "promptfoo:redteam:pii:direct: is promptfoo's PII grader"),
@@ -268,12 +282,12 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
         ({"type": "cost", "metric": "spend", "weight": 0}, "cost: has no threshold; promptfoo then records the cost"),
         ({"type": "latency", "threshold": 0}, "latency: has a threshold of 0 or less"),
         ({"type": "cost", "threshold": "0.01"}, "cost: needs a number as its threshold"),
-        ({"type": "not-latency", "threshold": 500}, "not-latency: passes when latency fails"),
+        ({"type": "not-latency", "threshold": 500}, "not-latency: passes when latency fails; no built-in check does"),
         ({"type": "not-contains-all", "value": ["a", "b"]}, "not-contains-all: passes when contains-all fails"),
         ({"type": "made-up"}, "made-up: is not an assertion type in promptfoo's documented list"),
         ({"type": "icontains", "value": "a", "transform": "output.trim()"}, ".transform: transforms the reply"),
         ({"type": "llm-rubric", "value": "Polite", "threshold": 0.8}, ".threshold: sets a score threshold"),
-        ({"type": "equals", "value": {"a": 1}}, "equals: compares JSON values"),
+        ({"type": "equals", "value": {"a": 1}}, "equals: compares JSON values; no built-in check does"),
         ({"type": "equals", "value": "file://expected.json"}, "equals: reads its value from a file"),
         ({"type": "regex", "value": "(?<name>x)"}, "regex: is not a regular expression Python reads"),
         ({"type": "icontains", "value": "{{ name | upper }}"}, "icontains: uses Nunjucks beyond"),
@@ -310,6 +324,8 @@ def test_every_documented_type_converts_or_has_a_reason():
         assert f"closest check is {check}" in UNSUPPORTED[kind]
         assert f"(add {check} by hand to use it)" in UNSUPPORTED[kind]
     assert not [kind for kind, why in UNSUPPORTED.items() if "release" in why]
+    # The checks are the SDK's built-in ones, not a branch's.
+    assert not [kind for kind, why in UNSUPPORTED.items() if "on main" in why]
 
 
 def call(milliseconds=None, spent=None):
