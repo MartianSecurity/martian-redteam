@@ -1,13 +1,15 @@
 """The in-process mlflow-skinny binding passes the store contract on SQLite, and on Postgres when
 MARTIAN_TEST_POSTGRES_URL names a database it may create schemas in."""
 
+import contextlib
 import os
 import time
 import uuid
+from collections.abc import Iterator
 
 import pytest
 
-from martian.evals.model import Project, TraceQuery
+from martian.evals.model import Project, Run, Trace, TraceQuery
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore
 from tests.evals.store_contract import ORG_A, StoreContract
@@ -21,6 +23,30 @@ def no_telemetry(monkeypatch):
     monkeypatch.delenv("MLFLOW_WORKSPACE", raising=False)
 
 
+@contextlib.contextmanager
+def application_tracing(monkeypatch, tracking_uri: str, project: Project) -> Iterator[None]:
+    """MLflow tracing in this process recording into the local user's workspace and the project's
+    experiment, as an application does; the traces are sent before it ends."""
+    import mlflow
+
+    monkeypatch.setenv("MLFLOW_ENABLE_WORKSPACES", "true")
+    monkeypatch.setenv("MLFLOW_WORKSPACE", "local")
+    monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
+    old_uri = mlflow.get_tracking_uri()
+    # MLflow also writes these two to the environment; monkeypatch puts them back afterwards.
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+    monkeypatch.setenv("MLFLOW_EXPERIMENT_ID", str(project.store.experiment_id))
+    mlflow.set_tracking_uri(tracking_uri)
+    try:
+        mlflow.set_experiment(experiment_id=project.store.experiment_id)
+        yield
+        mlflow.flush_trace_async_logging()
+    finally:
+        mlflow.set_tracking_uri(old_uri)
+    monkeypatch.delenv("MLFLOW_ENABLE_WORKSPACES")
+    monkeypatch.delenv("MLFLOW_WORKSPACE")
+
+
 class MlflowTracingContract:
     """Traces an application records with MLflow tracing itself, read through the binding. A
     binding's class provides ``tracking_uri``: the database the store keeps MLflow's tables in."""
@@ -31,18 +57,8 @@ class MlflowTracingContract:
         import mlflow
 
         project = await store.create_project(SINGLE_USER, Project(id="p1", name="Support agent"))
-        # How an application records traces into the local user's workspace with MLflow tracing.
-        monkeypatch.setenv("MLFLOW_ENABLE_WORKSPACES", "true")
-        monkeypatch.setenv("MLFLOW_WORKSPACE", "local")
-        monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
-        old_uri = mlflow.get_tracking_uri()
-        # MLflow also writes these two to the environment; monkeypatch puts them back afterwards.
-        monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
-        monkeypatch.setenv("MLFLOW_EXPERIMENT_ID", str(project.store.experiment_id))
-        mlflow.set_tracking_uri(tracking_uri)
         recorded: dict[str, list[str]] = {}
-        try:
-            mlflow.set_experiment(experiment_id=project.store.experiment_id)
+        with application_tracing(monkeypatch, tracking_uri, project):
 
             def turn(message: str, **trace_fields: object) -> None:
                 with mlflow.start_span(name="chat") as span:
@@ -57,11 +73,6 @@ class MlflowTracingContract:
             turn("nobody here")
             # The metadata keys MLflow's documentation gives for users and sessions.
             turn("bob hi", metadata={"mlflow.trace.session": "conversation-2", "mlflow.trace.user": "bob"})
-            mlflow.flush_trace_async_logging()
-        finally:
-            mlflow.set_tracking_uri(old_uri)
-        monkeypatch.delenv("MLFLOW_ENABLE_WORKSPACES")
-        monkeypatch.delenv("MLFLOW_WORKSPACE")
 
         found = await store.search_sessions(SINGLE_USER, TraceQuery(project_id="p1"))
         assert (found.traces_examined, found.ungrouped, found.has_more) == (4, 1, False)
@@ -80,6 +91,46 @@ class MlflowTracingContract:
         assert [t.id for t in by_user.items] == recorded["bob"]
         bob_sessions = await store.search_sessions(SINGLE_USER, TraceQuery(project_id="p1", user_id="bob"))
         assert [s.id for s in bob_sessions.items] == ["conversation-2"]
+
+    async def test_a_trace_recorded_inside_a_runs_mlflow_run_belongs_to_the_run(
+        self, store: EvalStore, tracking_uri: str, monkeypatch
+    ) -> None:
+        import mlflow
+
+        project = await store.create_project(SINGLE_USER, Project(id="p1", name="Support agent"))
+        run = await store.start_run(SINGLE_USER, Run(id="r1", project_id="p1", source="local", state="running"))
+        tagged = await store.record_trace(
+            SINGLE_USER, Trace(id="case-1", project_id="p1", name="case 1", run_id="r1", request="hi")
+        )
+        recorded: dict[str, str] = {}
+        with application_tracing(monkeypatch, tracking_uri, project):
+
+            def call(name: str) -> None:
+                with mlflow.start_span(name=name) as span:
+                    span.set_inputs({"message": name})
+                recorded[name] = span.trace_id
+
+            # MLflow tracing names the active MLflow run in the trace's `mlflow.sourceRun`.
+            with mlflow.start_run(run_id=run.store.run_id):
+                call("in the run")
+            with mlflow.start_run():  # the application's own MLflow run, which is no run of ours
+                call("in its own run")
+            call("in no run")
+
+        found = await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1"))
+        assert {t.id: t.run_id for t in found.items} == {
+            tagged.id: "r1",
+            recorded["in the run"]: "r1",
+            recorded["in its own run"]: None,
+            recorded["in no run"]: None,
+        }
+        in_run = await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r1", oldest_first=True))
+        assert [t.id for t in in_run.items] == [tagged.id, recorded["in the run"]]
+        read = await store.get_trace(SINGLE_USER, "p1", recorded["in the run"])
+        assert read is not None and read.run_id == "r1" and [s.name for s in read.spans] == ["in the run"]
+        own = await store.get_trace(SINGLE_USER, "p1", recorded["in its own run"])
+        assert own is not None and own.run_id is None
+        assert (await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r2"))).items == []
 
 
 class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract):

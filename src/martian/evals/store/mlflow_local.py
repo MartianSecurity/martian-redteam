@@ -17,6 +17,10 @@ How the shared model sits in MLflow:
   spans, with the same rule for span ids. A trace's session and user are the trace metadata keys
   MLflow tracing records them in, ``mlflow.trace.session`` and ``mlflow.trace.user``, so traces an
   application records with MLflow tracing group into sessions without Martian's help.
+- A trace belongs to the run its ``martian.run_id`` tag names. A trace without the tag that MLflow
+  tracing recorded while a run's MLflow run was active names that MLflow run in its
+  ``mlflow.sourceRun`` metadata, and belongs to that run; one recorded inside an MLflow run that is
+  not a run's belongs to no run.
 - A score is a feedback assessment on its trace.
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
 - A review question is a label schema; a review queue is an MLflow review queue named by the
@@ -24,8 +28,9 @@ How the shared model sits in MLflow:
 - Run artifacts are files under the run's artifact folder. The artifact root must be local.
 
 Text search over traces is applied in this process after MLflow's own filters, so a search reads
-every trace those filters match. A session search reads the same traces and groups the first of
-them in this process.
+every trace those filters match. A search for a run's traces is two MLflow searches, one on the
+tag and one on ``mlflow.sourceRun``. A session search reads the same traces and groups the first
+of them in this process.
 """
 
 from __future__ import annotations
@@ -102,8 +107,11 @@ SESSION_KEY = "mlflow.trace.session"
 """The trace metadata key MLflow tracing records a session id in (``TraceMetadataKey.TRACE_SESSION``)."""
 USER_KEY = "mlflow.trace.user"
 """The trace metadata key MLflow tracing records the application's user in (``TraceMetadataKey.TRACE_USER``)."""
+SOURCE_RUN_KEY = "mlflow.sourceRun"
+"""The trace metadata key MLflow tracing records the active MLflow run in (``TraceMetadataKey.SOURCE_RUN``)."""
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
+_MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
 _MLFLOW_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
 _SAFE_FILTER_VALUE = re.compile(r"^[^'`\\]*$")
 _QUESTION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,59}$")
@@ -204,13 +212,17 @@ class MlflowStore:
             raise StoreError("conflict", "the project is archived")
         return experiment
 
-    def _mlflow_run(self, experiment_id: str, run_id: str) -> Any:
+    def _find_mlflow_run(self, experiment_id: str, run_id: str) -> Any | None:
         runs = self._store.search_runs(
             [experiment_id], f"tags.`martian.run_id` = '{_quoted(run_id)}'", ViewType.ACTIVE_ONLY, max_results=2
         )
-        if not runs:
+        return runs[0] if runs else None
+
+    def _mlflow_run(self, experiment_id: str, run_id: str) -> Any:
+        found = self._find_mlflow_run(experiment_id, run_id)
+        if found is None:
             raise StoreError("not_found", "run not found")
-        return runs[0]
+        return found
 
     def _run_file(self, mlflow_run: Any) -> Path:
         return self._local_artifacts(mlflow_run) / "martian" / "run.json"
@@ -243,6 +255,10 @@ class MlflowStore:
         def work() -> Project:
             existing = self._store.get_experiment_by_name(project.id)
             if existing is not None:
+                if "martian.project.name" not in existing.tags:
+                    # Such as one MLflow tracing created for an application that named the
+                    # experiment before the project existed.
+                    raise StoreError("conflict", "an MLflow experiment with this id exists and is not a project")
                 if existing.tags.get("martian.project.name") != project.name:
                     raise StoreError("conflict", "a project with this id has another name")
                 return _project(existing)
@@ -518,12 +534,31 @@ class MlflowStore:
         assert saved is not None
         return saved
 
+    def _run_ids(self, experiment_id: str, infos: list[TraceInfo]) -> dict[str, str]:
+        """The run id of each MLflow run that the traces without a ``martian.run_id`` tag name in
+        ``mlflow.sourceRun``, when that MLflow run is a run's in the same experiment."""
+        sources = sorted(
+            {
+                source
+                for info in infos
+                if "martian.run_id" not in (info.tags or {})
+                and _MLFLOW_RUN_ID.match(source := (info.trace_metadata or {}).get(SOURCE_RUN_KEY, ""))
+            }
+        )
+        found: dict[str, str] = {}
+        for start in range(0, len(sources), 100):
+            listed = ", ".join(f"'{source}'" for source in sources[start : start + 100])
+            for mlflow_run in self._store.search_runs(
+                [experiment_id], f"attributes.run_id IN ({listed})", ViewType.ACTIVE_ONLY, max_results=100
+            ):
+                if run_id := mlflow_run.data.tags.get("martian.run_id"):
+                    found[mlflow_run.info.run_id] = run_id
+        return found
+
     def _matching(self, query: TraceQuery) -> list[Trace]:
         """Every trace the query matches, in its order."""
         experiment = self._experiment(query.project_id)
         filters = []
-        if query.run_id is not None and _SAFE_FILTER_VALUE.match(query.run_id):
-            filters.append(f"tags.`martian.run_id` = '{query.run_id}'")
         for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id)):
             if value is not None and _SAFE_FILTER_VALUE.match(value):
                 filters.append(f"metadata.`{key}` = '{value}'")
@@ -534,18 +569,30 @@ class MlflowStore:
             filters.append(f"trace.timestamp_ms >= {_ms(query.since)}")
         if query.until is not None:
             filters.append(f"trace.timestamp_ms < {_ms(query.until)}")
-        infos, token = [], None
-        while True:
-            page, token = self._store.search_traces(
-                locations=[experiment.experiment_id],
-                filter_string=" AND ".join(filters) or None,
-                max_results=500,
-                page_token=token,
-            )
-            infos += page
-            if not token:
-                break
-        found = [t for t in (_trace(info, query.project_id) for info in infos) if _matches(t, query)]
+        searches = [filters]
+        if query.run_id is not None and _SAFE_FILTER_VALUE.match(query.run_id):
+            # A run's traces are the ones tagged with it and the ones MLflow tracing recorded in
+            # its MLflow run; MLflow's filters have no OR, so each is a search of its own.
+            searches = [[*filters, f"tags.`martian.run_id` = '{query.run_id}'"]]
+            if (mlflow_run := self._find_mlflow_run(experiment.experiment_id, query.run_id)) is not None:
+                searches.append([*filters, f"metadata.`{SOURCE_RUN_KEY}` = '{mlflow_run.info.run_id}'"])
+        infos: dict[str, TraceInfo] = {}
+        for search in searches:
+            token = None
+            while True:
+                page, token = self._store.search_traces(
+                    locations=[experiment.experiment_id],
+                    filter_string=" AND ".join(search) or None,
+                    max_results=500,
+                    page_token=token,
+                )
+                infos.update((info.trace_id, info) for info in page)
+                if not token:
+                    break
+        runs = self._run_ids(experiment.experiment_id, list(infos.values()))
+        found = [
+            t for t in (_trace(info, query.project_id, runs=runs) for info in infos.values()) if _matches(t, query)
+        ]
         epoch = datetime.min.replace(tzinfo=UTC)
         found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
         return found
@@ -580,7 +627,8 @@ class MlflowStore:
                 return None
             # A trace recorded without spans has no spans to wait for, so a partial read is complete.
             full: MlflowTrace = self._store.get_trace(info.trace_id, allow_partial=True)
-            return _trace(info, project_id, spans=[_span(s) for s in full.data.spans])
+            runs = self._run_ids(experiment.experiment_id, [info])
+            return _trace(info, project_id, spans=[_span(s) for s in full.data.spans], runs=runs)
 
         return await self._call(principal, work)
 
@@ -1022,13 +1070,19 @@ def _score(feedback: Any, project_id: str, trace_id: str) -> Score:
     )
 
 
-def _trace(info: TraceInfo, project_id: str, *, spans: list[Span] | None = None) -> Trace:
+def _trace(
+    info: TraceInfo, project_id: str, *, spans: list[Span] | None = None, runs: dict[str, str] | None = None
+) -> Trace:
+    """The trace in the model. ``runs`` maps the MLflow run ids traces name in
+    ``mlflow.sourceRun`` to run ids, for a trace without a ``martian.run_id`` tag."""
     metadata = dict(info.trace_metadata or {})
     tags = dict(info.tags or {})
     usage = json.loads(metadata.get("mlflow.trace.tokenUsage", "null") or "null")
     cost = json.loads(metadata.get("mlflow.trace.cost", "null") or "null")
     trace_id = tags.pop("martian.trace_id", info.trace_id)
     run_id = tags.pop("martian.run_id", None)
+    if run_id is None and runs:
+        run_id = runs.get(metadata.get(SOURCE_RUN_KEY, ""))
     name = tags.pop("mlflow.traceName", "")
     known = {
         SESSION_KEY,

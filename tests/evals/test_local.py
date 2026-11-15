@@ -1,7 +1,10 @@
 """`martian ui`: the evals core on SQLite and the Evals UI from one local process, with no login."""
 
+import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -281,3 +284,75 @@ def test_the_command_says_how_to_name_a_ui_when_the_package_has_none(monkeypatch
     assert result.exit_code == 2
     assert "there is no built Evals UI in" in result.output
     assert "has lost the Evals UI it ships: reinstall it, or pass --ui-dir" in result.output
+
+
+TRACED_APPLICATION = """
+import mlflow
+
+
+@mlflow.trace(span_type="AGENT")
+def answer(message, session, user):
+    mlflow.update_current_trace(session_id=session, user=user)
+    return "echo " + message
+
+
+answer("Where is my order?", "conversation-1", "alice")
+answer("And the invoice?", "conversation-1", "alice")
+answer("Hello", "conversation-2", "bob")
+"""
+
+
+def tracing_settings(home: Path) -> dict[str, str]:
+    """What docs/evals-core.md tells an application to set to record into the data folder."""
+    return {
+        "MLFLOW_TRACKING_URI": f"sqlite:///{home / 'mlflow.db'}",
+        "MLFLOW_ENABLE_WORKSPACES": "true",
+        "MLFLOW_WORKSPACE": "local",
+        "MLFLOW_EXPERIMENT_NAME": "default",
+    }
+
+
+def test_an_application_using_mlflow_tracing_shows_in_traces_and_sessions(tmp_path, ui):
+    home = tmp_path / "home"
+    client = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    app = tmp_path / "application"
+    app.mkdir()
+    (app / "app.py").write_text(TRACED_APPLICATION, encoding="utf-8")
+    # The application in a process of its own, with only MLflow and the documented settings.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("MLFLOW_")}
+    environment.update(tracing_settings(home), MLFLOW_DISABLE_TELEMETRY="true")
+    done = subprocess.run(
+        [sys.executable, "app.py"], cwd=app, env=environment, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+
+    traces = client.post("/v1/evals/traces/search", json={"order": "oldest"}).json()["items"]
+    assert [(t["name"], t["session_id"], t["user_id"], t["state"]) for t in traces] == [
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-2", "bob", "OK"),
+    ]
+    assert traces[0]["response"] == '"echo Where is my order?"' and traces[0]["run_id"] is None
+    sessions = client.post("/v1/evals/sessions/search", json={}).json()
+    assert [(s["id"], s["turns"]) for s in sessions["items"]] == [("conversation-2", 1), ("conversation-1", 2)]
+    detail = client.get(f"/v1/evals/traces/{traces[0]['id']}").json()
+    assert [(span["name"], span["type"]) for span in detail["spans"]] == [("answer", "AGENT")]
+    assert detail["info"]["trace_metadata"]["mlflow.trace.user"] == "alice"
+    # The project's experiment existed, so MLflow kept the traces' artifacts in the data folder.
+    assert not (app / "mlruns").exists()
+
+
+def test_a_data_folder_whose_default_experiment_mlflow_created_is_refused(tmp_path, ui):
+    from martian.evals._mlflow import ServerWorkspaceContext
+    from martian.evals.server.principal import SINGLE_USER
+    from martian.evals.store.mlflow_local import MlflowStore
+
+    # What MLflow tracing leaves when an application names the experiment before the project exists.
+    home = tmp_path / "home"
+    home.mkdir()
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    store._workspace(SINGLE_USER)
+    with ServerWorkspaceContext("local"):
+        store._store.create_experiment("default")
+    with pytest.raises(LocalEditionError, match="cannot hold the default project: an MLflow experiment with this id"):
+        create_local_app(home, ui)
