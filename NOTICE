@@ -9,7 +9,7 @@ Simulation and evaluation prompts in this project are authored by Martian
 Security and are not copies of DeepTeam template corpora.
 
 The Evals UI in martian/ui/ is a build of the @martian/evals,
-@martian/design-system and @martian/client packages of MorningHQ/MartianFrontend,
+@martian/design-system and @martian/client packages of MartianSecurity/MartianFrontend,
 Copyright 2026 MorningHQ / Martian Security, licensed under the Apache License,
 Version 2.0. The third-party packages bundled in it are listed with their
 licences in martian/ui/third-party-licenses.md.

@@ -55,7 +55,7 @@ Martian Evals comes in three editions, all serving this core:
 | --- | --- | --- | --- |
 | Community, open source | Your machine: `martian evals run`, and [`martian ui`](#the-local-edition-martian-ui) for one user with no login, from this repository alone | `community` | Always Community |
 | Martian Cloud | The hosted platform, which mounts this core in its own server | `community` or `enterprise` | The organisation's plan |
-| On-Premises | A customer's own infrastructure, under contract | `on_premises` | A verified licence (MorningHQ/martian-notes#131, not built yet) |
+| On-Premises | A customer's own infrastructure, under contract | `on_premises` | A verified licence (MartianSecurity/martian-notes#131, not built yet) |
 
 This repository is public under Apache-2.0 and holds the whole core, the paid features included:
 every edition runs the same code, and an edition's `entitlements` decide which paid features it
