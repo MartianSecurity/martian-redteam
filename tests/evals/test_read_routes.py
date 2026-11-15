@@ -151,10 +151,27 @@ def test_comparing_two_runs_pairs_their_cases(served):
     assert result["compatible"] and result["coverage"]["paired"] == 3
     assert [i["change"] for i in result["items"]] == ["unchanged", "improved", "not_comparable"]
     assert result["changes"] == {"improved": 1, "regressed": 0, "unchanged": 1, "not_comparable": 1}
+    # Two comparable pairs and one change: far too few to tell from noise.
+    found = result["significance"]
+    assert (found["label"], found["test"], found["compared"], found["improved"], found["p_value"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+        1.0,
+    )
+    assert found["minimum_detectable_effect"] is None
     with_jobs = {**pair, "baseline_job_id": seeded.baseline_job.id, "candidate_job_id": seeded.candidate_job.id}
     scored = client.get("/v1/evals/compare", params=with_jobs).json()
     assert scored["criteria"] == {"correctness": {"unchanged": 1, "improved": 1, "not_comparable": 1}}
     assert scored["items"][1]["criteria"]["correctness"]["delta"] == 1.0
+    judged = scored["criteria_significance"]["correctness"]
+    assert (judged["label"], judged["test"], judged["compared"], judged["improved"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+    )
     one_job = {**pair, "baseline_job_id": seeded.baseline_job.id}
     assert client.get("/v1/evals/compare", params=one_job).status_code == 422
 
@@ -167,6 +184,7 @@ def test_runs_of_different_datasets_are_not_comparable(served):
         "/v1/evals/compare", params={"baseline_id": other.id, "candidate_id": seeded.candidate.id}
     ).json()
     assert not result["compatible"] and "different dataset identities" in result["reason"]
+    assert result["significance"] is None
     running = client.get(
         "/v1/evals/compare", params={"baseline_id": seeded.running.id, "candidate_id": seeded.candidate.id}
     )

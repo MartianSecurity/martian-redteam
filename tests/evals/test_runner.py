@@ -1,6 +1,7 @@
 """The standalone suite runner: files in, local results out, no platform call."""
 
 import json
+import random
 import xml.etree.ElementTree as ET
 
 import mlflow
@@ -634,6 +635,72 @@ def test_two_command_line_runs_compare_case_by_case(tmp_path):
         "safe": "unchanged",
         "leak": "improved",
     }
+
+
+FAKE_SYSTEM = """
+# A deterministic fake system: it answers question n with "Answer n.", except every fifth.
+BROKEN = {BROKEN}
+FIXED = {FIXED}
+
+
+def target(message):
+    n = int(message.split()[-1])
+    if n in BROKEN or (n % 5 == 0 and n not in FIXED):
+        return "I am not sure."
+    return f"Answer {{n}}."
+"""
+
+
+def fake_system_suite(folder, *, broken=(), fixed=()):
+    """Forty questions and a contains check of each one's answer, for the fake system above."""
+    rows = [{"id": f"q{n}", "input": f"Question {n}", "expectations": {"answer": f"Answer {n}."}} for n in range(40)]
+    (folder / "cases.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (folder / "agent.py").write_text(FAKE_SYSTEM.format(BROKEN=set(broken), FIXED=set(fixed)), encoding="utf-8")
+    (folder / "evals.yaml").write_text(
+        "data: cases.jsonl\ntarget:\n  file: agent.py\nchecks:\n  - type: contains\n    expectation: answer\n",
+        encoding="utf-8",
+    )
+    return folder / "evals.yaml"
+
+
+def compare_recorded(folder, first, second):
+    client = local_ui(folder)
+    pair = {"baseline_id": first["run"]["id"], "candidate_id": second["run"]["id"]}
+    return client.get("/v1/evals/compare", params=pair).json()
+
+
+def test_two_runs_of_the_same_deterministic_system_are_within_noise(tmp_path):
+    suite = fake_system_suite(tmp_path)
+    first = run_suite(suite)
+    second = run_suite(suite, resume=False)
+    assert (first["passed"], second["passed"]) == (32, 32)
+    found = compare_recorded(tmp_path, first, second)["significance"]
+    assert (found["label"], found["test"], found["p_value"], found["compared"], found["changed"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        1.0,
+        40,
+        0,
+    )
+    assert found["minimum_detectable_effect"] == 6 / 40
+
+
+def test_a_seeded_regression_of_the_system_is_worse(tmp_path):
+    suite = fake_system_suite(tmp_path)
+    first = run_suite(suite)
+    # The candidate breaks twelve answers that passed, chosen by a fixed seed, and fixes two.
+    rng = random.Random(182)
+    broken = rng.sample([n for n in range(40) if n % 5], 12)
+    fixed = rng.sample([n for n in range(40) if n % 5 == 0], 2)
+    fake_system_suite(tmp_path, broken=broken, fixed=fixed)
+    second = run_suite(suite, resume=False)
+    assert second["passed"] == 32 - 12 + 2
+    compared = compare_recorded(tmp_path, first, second)
+    assert (compared["changes"]["improved"], compared["changes"]["regressed"]) == (2, 12)
+    found = compared["significance"]
+    assert (found["label"], found["improved"], found["regressed"]) == ("worse", 2, 12)
+    assert found["p_value"] == 212 / 16384  # 2 × (1 + 14 + 91) / 2¹⁴
+    assert found["effect"] == pytest.approx(-10 / 40)
 
 
 def test_a_resumed_run_keeps_reused_verdicts_without_their_traces(tmp_path):

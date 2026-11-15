@@ -1,14 +1,31 @@
-"""Confidence intervals for pass rates and scores (martian.evals.stats) and where the core reports them."""
+"""Confidence intervals and paired comparisons of pass rates and scores (martian.evals.stats), and
+where the core reports them."""
 
 import math
+import random
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
+from martian.evals.model import Run
 from martian.evals.server.projection import Assessment
-from martian.evals.server.quality import scorecard
+from martian.evals.server.quality import compare_assessments, compare_runs, scorecard
 from martian.evals.server.schemas import EvalItemOut
-from martian.evals.stats import design_effect, mean_interval, proportion_interval, rate_text, t_quantile, wilson
+from martian.evals.stats import (
+    MINIMUM_CHANGED,
+    SIGNIFICANCE,
+    compare_outcomes,
+    compare_scores,
+    design_effect,
+    mcnemar_exact,
+    mean_interval,
+    paired_t,
+    proportion_interval,
+    rate_text,
+    t_quantile,
+    wilson,
+)
 
 Z = 1.959963984540054  # the 97.5% normal quantile
 
@@ -151,15 +168,145 @@ def test_a_rate_is_rounded_to_the_nearest_percent_and_its_bounds_outward():
     assert rate_text(None, None) == "—"
 
 
-# --- the core's scorecard -------------------------------------------------------------------
+# --- paired comparison ----------------------------------------------------------------------
 
 
-def item(position):
+@pytest.mark.parametrize(
+    ("improved", "regressed", "expected"),
+    [
+        (0, 0, 1.0),
+        (3, 3, 1.0),  # twice the tail is 42/32, held at 1
+        (0, 5, 2 / 32),  # five all one way: 0.0625, never below 5%
+        (0, 6, 2 / 64),  # six all one way: 0.03125, the fewest that is
+        (1, 9, 22 / 1024),  # 2 × (1 + 10) / 2¹⁰
+        (2, 8, 112 / 1024),  # 2 × (1 + 10 + 45) / 2¹⁰
+        (2, 10, 158 / 4096),  # 2 × (1 + 12 + 66) / 2¹², R's binom.test(2, 12) = 0.03857
+        (10, 2, 158 / 4096),
+        (7, 3, 0.34375),  # 2 × (1 + 10 + 45 + 120) / 2¹⁰
+    ],
+)
+def test_the_exact_mcnemar_test_gives_the_binomial_tail(improved, regressed, expected):
+    assert mcnemar_exact(improved, regressed) == expected
+
+
+def test_the_exact_mcnemar_test_stays_exact_for_many_changes_and_refuses_negative_counts():
+    # 500 one way and 500 the other: the two tails meet at the middle and the p-value is 1.
+    assert mcnemar_exact(500, 500) == 1.0
+    close(mcnemar_exact(400, 600), 2 * math.fsum(math.comb(1000, i) for i in range(401)) / 2**1000, 1e-15)
+    with pytest.raises(ValueError):
+        mcnemar_exact(-1, 3)
+
+
+def test_the_paired_t_test_matches_students_sleep_data():
+    # Cushny and Peebles' extra hours of sleep, drug 2 minus drug 1: t = 4.0621 on 9 df, and R's
+    # t.test(extra ~ group, data = sleep, paired = TRUE) gives p = 0.002833.
+    differences = [1.2, 2.4, 1.3, 1.3, 0.0, 1.0, 1.8, 0.8, 4.6, 1.4]
+    close(paired_t(differences), 0.0028328902, 1e-9)
+    # 1..5: t = 3 / √(2.5 / 5) = 4.2426 on 4 df.
+    close(paired_t([1, 2, 3, 4, 5]), 0.0132355996, 1e-9)
+    # It agrees with the t interval of the mean difference: significant exactly when 0 is outside.
+    low, high = mean_interval(differences)
+    assert low > 0
+
+
+def test_the_paired_t_test_needs_two_differences_and_reads_no_spread_plainly():
+    assert paired_t([]) is None and paired_t([0.5]) is None
+    assert paired_t([0.0, 0.0, 0.0]) == 1.0
+    assert paired_t([-0.2, -0.2, -0.2]) == 0.0
+
+
+def test_two_runs_of_a_deterministic_system_are_within_noise():
+    outcomes = [position % 5 != 0 for position in range(40)]
+    found = compare_outcomes(outcomes, list(outcomes))
+    assert (found.label, found.test, found.p_value, found.changed, found.effect) == (
+        "within_noise",
+        "mcnemar_exact",
+        1.0,
+        0,
+        0.0,
+    )
+    scores = [position / 40 for position in range(40)]
+    same = compare_scores(scores, list(scores))
+    assert (same.label, same.test, same.p_value, same.changed) == ("within_noise", "paired_t", 1.0, 0)
+
+
+def test_a_seeded_regression_is_worse_and_its_reverse_better():
+    rng = random.Random(182)
+    baseline = [position % 5 != 0 for position in range(40)]
+    broken = set(rng.sample([p for p in range(40) if baseline[p]], 12))
+    fixed = set(rng.sample([p for p in range(40) if not baseline[p]], 2))
+    candidate = [(ok and p not in broken) or p in fixed for p, ok in enumerate(baseline)]
+    worse = compare_outcomes(baseline, candidate)
+    assert (worse.label, worse.improved, worse.regressed, worse.compared) == ("worse", 2, 12, 40)
+    assert worse.p_value == 212 / 16384 < SIGNIFICANCE  # 2 × (1 + 14 + 91) / 2¹⁴
+    close((worse.baseline, worse.candidate, worse.effect), (32 / 40, 22 / 40, -10 / 40), 1e-12)
+    assert compare_outcomes(candidate, baseline).label == "better"
+
+
+def test_fewer_than_six_changes_are_within_noise_whatever_the_test_says():
+    # Five regressions out of five: the exact test cannot reach 5%.
+    assert compare_outcomes([True] * 5, [False] * 5).label == "within_noise"
+    # Five scores that each drop by the same 0.1 out of 100: the t test alone would call it.
+    baseline = [0.5] * 100
+    candidate = [0.4] * 5 + [0.5] * 95
+    assert paired_t([b - a for a, b in zip(baseline, candidate, strict=True)]) < SIGNIFICANCE
+    five = compare_scores(baseline, candidate)
+    assert (five.label, five.changed) == ("within_noise", 5)
+    six = compare_scores(baseline, [0.4] * 6 + [0.5] * 94)
+    assert (six.label, six.changed, MINIMUM_CHANGED) == ("worse", 6, 6)
+
+
+def test_a_flaky_system_compared_with_itself_is_rarely_labelled():
+    # The same system, each case passing nine times in ten, run twice under 200 seeds: at a 5%
+    # level at most one comparison in twenty may be labelled, and the exact test keeps under it.
+    labelled = 0
+    for seed in range(200):
+        rng = random.Random(seed)
+        first = [rng.random() < 0.9 for _ in range(60)]
+        second = [rng.random() < 0.9 for _ in range(60)]
+        labelled += compare_outcomes(first, second).label != "within_noise"
+    assert labelled <= 10
+
+
+def test_the_minimum_detectable_effect_is_six_cases_or_the_t_half_width():
+    assert compare_outcomes([True] * 40, [True] * 40).minimum_detectable_effect == 6 / 40
+    # Too few pairs to label any change.
+    assert compare_outcomes([True] * 5, [True] * 5).minimum_detectable_effect is None
+    baseline = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    candidate = [1.5, 2.0, 2.5, 4.5, 5.0, 5.5]
+    differences = [b - a for a, b in zip(baseline, candidate, strict=True)]
+    low, high = mean_interval(differences)
+    found = compare_scores(baseline, candidate)
+    close(found.minimum_detectable_effect, (high - low) / 2, 1e-12)
+    assert found.label == "within_noise" and abs(found.effect) < found.minimum_detectable_effect
+    # Differences with no spread give no estimate of the noise.
+    assert compare_scores([1.0] * 6, [1.0] * 6).minimum_detectable_effect is None
+
+
+def test_a_lower_is_better_measure_flips_the_label():
+    falls = compare_scores([float(p) for p in range(10)], [p - 1.0 for p in range(10)], higher_is_better=False)
+    assert (falls.label, falls.improved, falls.regressed, falls.effect) == ("better", 10, 0, -1.0)
+    leaks = compare_outcomes([False] * 10, [True] * 10, higher_is_better=False)
+    assert (leaks.label, leaks.regressed) == ("worse", 10)
+
+
+def test_a_comparison_needs_pairs_of_the_same_length():
+    assert compare_outcomes([], []) is None and compare_scores([], []) is None
+    with pytest.raises(ValueError):
+        compare_outcomes([True], [])
+    with pytest.raises(ValueError):
+        compare_scores([1.0], [1.0, 2.0])
+
+
+# --- the core's scorecard and comparison ----------------------------------------------------
+
+
+def item(position, status="passed"):
     return EvalItemOut(
         id=uuid.uuid4(),
         dataset_item_id=f"case-{position}",
         position=position,
-        status="passed",
+        status=status,
         prompt="",
         expected="",
         output="",
@@ -207,3 +354,90 @@ def test_a_scorecard_of_one_value_has_no_mean_interval_and_one_verdict_a_wide_on
     close(found["confidence_95"], wilson(1, 1))
     length = scorecard(items, [score(items[0], "response_length", 7.0)], {"scorers": ["response_length"]})
     assert length["criteria"][0]["mean_confidence_95"] is None
+
+
+def completed_run(run_id):
+    at = datetime(2026, 11, 15, tzinfo=UTC)
+    return Run(
+        id=run_id,
+        project_id="default",
+        code=run_id,
+        source="local",
+        state="completed",
+        dataset_name="cases",
+        dataset_digest="d" * 64,
+        created_at=at,
+        provenance={"dataset": {"digest": "d" * 64}},
+    )
+
+
+def job(run_id, policies):
+    return {"id": f"job-{run_id}", "config": {"scorers": ["correct", "latency", "tone"], "policies": policies}}
+
+
+def test_a_comparison_labels_the_exact_match_and_each_scorer():
+    # Twelve cases: the candidate breaks eight exact matches, answers about a second faster
+    # everywhere (lower latency is better), and changes the tone of none.
+    left = [item(p) for p in range(12)]
+    right = [item(p, "failed" if p < 8 else "passed") for p in range(12)]
+    for i in right:
+        i.dataset_item_id = f"case-{i.position}"
+    result = compare_runs(completed_run("a"), left, completed_run("b"), right)
+    assert result["changes"]["regressed"] == 8
+    canonical = result["significance"]
+    assert (canonical["label"], canonical["test"], canonical["regressed"], canonical["alpha"]) == (
+        "worse",
+        "mcnemar_exact",
+        8,
+        0.05,
+    )
+    assert canonical["p_value"] == 2 / 256
+    assert set(canonical) == {
+        "label",
+        "test",
+        "p_value",
+        "alpha",
+        "compared",
+        "changed",
+        "improved",
+        "regressed",
+        "baseline",
+        "candidate",
+        "effect",
+        "minimum_detectable_effect",
+    }
+
+    def scores(items, correct, latency):
+        return [
+            row
+            for p, i in enumerate(items)
+            for row in (score(i, "correct", correct(p)), score(i, "latency", latency(p)), score(i, "tone", "calm"))
+        ]
+
+    policies = [{"name": "latency", "direction": "lower", "minimum_coverage": 1, "threshold": None}]
+    scored = compare_assessments(
+        result,
+        left,
+        right,
+        job("a", policies),
+        job("b", policies),
+        scores(left, lambda p: True, lambda p: 3.0 + p % 3),
+        scores(right, lambda p: p >= 1, lambda p: 2.0 + p % 3 + 0.25 * (p % 2)),
+    )
+    by_name = scored["criteria_significance"]
+    assert (by_name["correct"]["label"], by_name["correct"]["regressed"]) == ("within_noise", 1)
+    assert (by_name["latency"]["label"], by_name["latency"]["test"], by_name["latency"]["improved"]) == (
+        "better",
+        "paired_t",
+        12,
+    )
+    assert by_name["latency"]["effect"] == pytest.approx(-0.875)
+    assert by_name["latency"]["p_value"] < 1e-6 and by_name["latency"]["minimum_detectable_effect"] > 0
+    assert by_name["tone"] is None  # categorical values have no direction to test
+
+
+def test_an_incompatible_comparison_has_no_label():
+    left = [item(p) for p in range(8)]
+    other = completed_run("b").model_copy(update={"dataset_digest": "e" * 64, "provenance": {}})
+    result = compare_runs(completed_run("a"), left, other, [item(p, "failed") for p in range(8)])
+    assert not result["compatible"] and result["significance"] is None

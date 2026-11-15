@@ -14,7 +14,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/config.py` | Immutable origin/token and separate CI attribution |
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
-| `src/martian/evals/stats.py` | Confidence intervals for pass rates and mean scores, grouped or not ([evals](evals.md#pass-rates-and-confidence-intervals)) |
+| `src/martian/evals/stats.py` | Confidence intervals for pass rates and mean scores, grouped or not ([evals](evals.md#pass-rates-and-confidence-intervals)), and the paired tests and label of a comparison of two runs ([comparing two runs](evals.md#comparing-two-runs)) |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
 | `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`) and the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), shaped by `projection.py` and `quality.py` |
