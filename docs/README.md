@@ -14,7 +14,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 2. [Setup](setup.md) — install, environment, first local run
 3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, conversation cases graded per turn and as a whole, simulated users, personas from real conversations and the simulator's fidelity, pass rates and their confidence intervals, comparing two runs, the judges, a panel of judges decided by a strict majority, their agreement with human labels, people's agreement with each other, and their calibration and its re-check, the deterministic checks and custom Python checks, and the dataset regression gate
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
-   - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, its OpenTelemetry traces endpoint, and the worker interface
+   - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, the three [editions](evals-core.md#editions-and-entitlements) (Community open source, Martian Cloud, On-Premises) and the feature keys each enforces, with the principal, entitlements, store, record store, worker and judge settings an edition injects, its read and write routes, its OpenTelemetry traces endpoint, and the worker interface
    - [Data export](data-export.md) — an organisation's data as JSON Lines files with a manifest, `martian evals export` resuming an interrupted export, and `martian evals import martian` loading it into a fresh install
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
@@ -36,6 +36,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 
 - GitHub: https://github.com/MartianSecurity/martian-redteam
 - License: Apache-2.0 (`LICENSE`, `NOTICE`). This repository is the home of the open-source
-  evals core; see [its names and layout](architecture.md#open-source-evals-core).
+  evals core; see [its names and layout](architecture.md#open-source-evals-core) and
+  [its editions](evals-core.md#editions-and-entitlements).
 - Distribution: `martian-sdk` (Python 3.12+, uv)
 - Modules: `martian.evals`, `martian.redteam`; legacy imports remain supported

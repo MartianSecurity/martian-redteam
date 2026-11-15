@@ -1,21 +1,23 @@
 # Evals core
 
-`martian.evals.server` is the evals core: the `/v1/evals` API that the local edition and the
-Martian server will both serve, and OpenTelemetry's `POST /v1/traces`
+`martian.evals.server` is the evals core: the `/v1/evals` API that every edition of Martian Evals
+serves ([editions](#editions-and-entitlements)), and OpenTelemetry's `POST /v1/traces`
 ([OpenTelemetry traces](#opentelemetry-traces)). It runs on its own, with no Martian backend, and
 needs only `martian-sdk[evals]`.
 
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
-builds it with `create_app` and supplies these:
+supplies these plug points; the local edition builds the core with `create_app`, and Martian
+Cloud, the hosted platform, mounts the core's routers in its own server and binds the same
+dependencies:
 
-| Argument | What it is | Local edition | Martian server |
+| Argument | What it is | Local edition | Martian Cloud |
 | --- | --- | --- | --- |
-| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST (planned) |
+| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its own `EvalStore` binding |
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
-| `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | A `QueueWorker` whose worker process runs each piece of work with `ProcessWorker`, so that a restart loses no run and no two organisations' runs share a process ([the worker](#the-worker)) |
-| `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
+| `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan ([editions](#editions-and-entitlements)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | Its own `Worker`, which runs each run or scoring job in a process of its own (`ProcessWorker`), so no two organisations' runs share a process ([the worker](#the-worker)) |
+| `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Each organisation's setting |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -46,6 +48,19 @@ request the store or the record store refuses with a `StoreError` is answered `4
 operation and never a value written ([what store errors contain](security-and-data.md#what-store-errors-contain)).
 
 ## Editions and entitlements
+
+Martian Evals comes in three editions, all serving this core:
+
+| Edition | Where it runs | Edition key | Decided by |
+| --- | --- | --- | --- |
+| Community, open source | Your machine: `martian evals run`, and [`martian ui`](#the-local-edition-martian-ui) for one user with no login, from this repository alone | `community` | Always Community |
+| Martian Cloud | The hosted platform, which mounts this core in its own server | `community` or `enterprise` | The organisation's plan |
+| On-Premises | A customer's own infrastructure, under contract | `on_premises` | A verified licence (MartianSecurity/martian-notes#131, not built yet) |
+
+This repository is public under Apache-2.0 and holds the whole core, the paid features included:
+every edition runs the same code, and an edition's `entitlements` decide which paid features it
+serves. Features made only for Martian Cloud and On-Premises are built outside this repository and
+are not part of the open core.
 
 `martian.evals.server.entitlements` is the one map from edition to feature keys and limits. Every
 edition serves the whole core; a feature key exists only for a feature that some edition leaves
@@ -102,11 +117,20 @@ own routes this way: the review queue routes, the question library, answering a 
 the reviewers' agreement (`GET /v1/evals/reviewer-agreement`) need `review_queues`, and
 `GET /v1/evals/monitoring` and every monitor, threshold and schedule route need `monitoring`
 ([write routes](#write-routes), [monitors](#monitors), [thresholds](#thresholds-and-alerts),
-[schedules](#schedules)). The Martian server gates its own routes the same way until it
-mounts the core (MartianSecurity/martian-notes#102); its copy of the map is `app/entitlements.py` in
-MartianSecurity/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
-`concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
-side of this map.
+[schedules](#schedules)).
+
+How each edition enforces the keys and the limits:
+
+- **Community, open source.** The local edition supplies Community, so it serves neither
+  `review_queues` nor `monitoring`; its limits are the ones its user sets.
+- **Martian Cloud.** It supplies the entitlements of each organisation's plan, so the core's
+  routes refuse a paid feature to an organisation on the `community` plan. Its server imports this
+  map and the capability table below and gates the routes it serves itself the same way.
+- **On-Premises.** It supplies the entitlements of the edition its verified licence names, for the
+  whole installation.
+
+The Evals UI reads the edition and its feature keys from the [bootstrap](#bootstrap-response) and
+shows a paid page only when the edition includes its key.
 
 ## Capabilities
 
@@ -124,8 +148,7 @@ place of its own role table.
 
 `review` covers answering a review and annotating a trace, both free; answering an item of a
 review queue also needs `review_queues`, which the route checks. Pages such as Monitoring have no
-capability: the UI shows them from the edition's feature keys. The server's copy of the table is in
-`app/entitlements.py` in MartianSecurity/MartianBackend.
+capability: the UI shows them from the edition's feature keys. Martian Cloud uses this table too.
 
 Every write route declares the capability it needs with
 `dependencies=[Depends(require_capability(name))]`. A principal whose most privileged role is not
