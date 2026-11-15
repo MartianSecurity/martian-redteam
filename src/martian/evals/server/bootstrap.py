@@ -2,7 +2,7 @@
 principal may do, and whether the store is ready.
 
 The shape is ``EvalsBootstrapOut`` in the server's frozen evals contract (``contracts/evals-api.json``
-in MorningHQ/MartianBackend); both servers answer ``GET /v1/evals/bootstrap`` with it.
+in MartianSecurity/MartianBackend); both servers answer ``GET /v1/evals/bootstrap`` with it.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Evaluating again when the model behind an agent changes (MorningHQ/martian-notes#200).
+"""Evaluating again when the model behind an agent changes (MartianSecurity/martian-notes#200).
 
 The model is recorded on every trace (mapped from its spans' attributes, kept by the store and a
 filter of the trace search: the store contract) and on every run, as the target reports it: an

@@ -111,7 +111,7 @@ path that could reach one:
 - **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
   scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
   scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
-  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+  custom scorer there needs a contract change (MartianSecurity/martian-notes#334).
 - **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
   custom scorer.
 - **The worker's setup** is imported by module in the API process, to check that a new process can
@@ -245,8 +245,8 @@ They can still remove targets and define new ones. See [local targets](evals-cor
 
 ## What store errors contain
 
-An error of the evals store or the record store never quotes what was written. When either
-refuses a request, its `StoreError` names the operation, the store method such as
+An error of the evals store, the record store or the work queue never quotes what was written.
+When any of them refuses a request, its `StoreError` names the operation, the store method such as
 `record_trace`, and what was refused. For a write the database refused, that is the table, the
 column or constraint when Postgres names one, and the driver's error class and code:
 `record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
@@ -261,10 +261,14 @@ line.
 - A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
   so no traceback or error reporter reaches the values. The names above are what an operator
   debugs with.
-- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+- The work queue (`SqlWorkQueue`, in the record store's database) maps its refusals the same way:
+  `put: the database refused a value for martian_work_queue (...)`. Holding an entry that is in the
+  queue already raises `AlreadyHeld`, a `conflict` `StoreError` of the same kind, never the
+  driver's `IntegrityError`, which Postgres fills with the entry's id and organisation.
+- The stores' and the queue's database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
   database failure that is not a refusal holds none either. The record store raises such a
   failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
-  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  such as SQLite's "database is locked". The queue raises such a failure as SQLAlchemy's own error too. What they carry is the statement, with placeholders, and
   the database's own message for the failure.
 - Not covered: MLflow shortens a trace tag value over 8,000 characters given to
   `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
@@ -275,8 +279,9 @@ line.
 database refuses, directly for a metadata value over 8,000 characters and through a run of the
 worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
 refuses, a case result, a run two writers create at once, a draft case through its route, and a
-score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
-included, on SQLite and on Postgres.
+score whose write fails. `tests/evals/test_queue_errors.py` does the same for a duplicate `hold` and
+a kind the database refuses, in the queue's errors and in an API answer carrying them. Each finds
+the canary in no error, API answer or log line, MLflow's included, on SQLite and on Postgres.
 
 ## Runtime reporting data boundary
 
@@ -344,9 +349,9 @@ The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes
   `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
   (`tr-` and 32 hex digits) and derives one from any other id.
   `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
-- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+- **The hosted MLflow server** (MartianSecurity/martian-evals) runs its own pinned release on Postgres,
   not the file store. Only Backend holds credentials for it, and Backend sends only derived
-  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
+  `tr-` ids; MartianSecurity/MartianBackend's evals workbench guide states that side.
 
 ## Licence, attribution and vulnerability reports
 

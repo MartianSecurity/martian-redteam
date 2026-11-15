@@ -1,4 +1,4 @@
-"""One process per evaluation run (MorningHQ/martian-notes#140).
+"""One process per evaluation run (MartianSecurity/martian-notes#140).
 
 Two organisations' runs in flight at once, each calling an agent traced with MLflow tracing, keep
 every trace in their own organisation's workspace when each run has a process of its own. The

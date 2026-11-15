@@ -1,4 +1,4 @@
-"""Conversation suites (MorningHQ/martian-notes#191): a case of several user turns, sent in order to a
+"""Conversation suites (MartianSecurity/martian-notes#191): a case of several user turns, sent in order to a
 target that keeps the conversation, graded per turn and as a whole, and recorded per turn with the
 turns' traces grouped by session. Function targets are local code and URL targets a loopback
 server; nothing calls a model."""

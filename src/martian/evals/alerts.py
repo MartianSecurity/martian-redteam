@@ -1,8 +1,8 @@
-"""Delivering a threshold's alerts by signed webhook and by email (MorningHQ/martian-notes#198).
+"""Delivering a threshold's alerts by signed webhook and by email (MartianSecurity/martian-notes#198).
 
 An installation sends nothing unless it is configured to: :class:`AlertSettings` with no channel,
 the default, sends no alert at all, so an on-premises install makes no outbound call for alerts
-until its operator sets a webhook or an SMTP server (MorningHQ/martian-notes#169). A threshold may
+until its operator sets a webhook or an SMTP server (MartianSecurity/martian-notes#169). A threshold may
 name only the channels its installation's worker sends (the routes refuse the others), and an alert
 for a channel the installation stopped sending fails without a call.
 

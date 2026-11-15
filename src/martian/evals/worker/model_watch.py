@@ -1,4 +1,4 @@
-"""Watching the model behind a schedule's target (MorningHQ/martian-notes#200).
+"""Watching the model behind a schedule's target (MartianSecurity/martian-notes#200).
 
 A provider can change the model behind an agent without notice, and a regression suite should run
 again when it does. A schedule with ``on_model_change`` (:class:`~martian.evals.records.ModelWatch`)

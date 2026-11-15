@@ -1,5 +1,5 @@
 """Schedules: a saved suite run against a target unattended, every so many seconds or on a cron
-expression, in UTC (MorningHQ/martian-notes#197). The core's own routes; the server's frozen
+expression, in UTC (MartianSecurity/martian-notes#197). The core's own routes; the server's frozen
 contract has none.
 
 A schedule names a saved suite version, a target the worker knows, a published dataset and a case
