@@ -15,7 +15,8 @@ promptfoo, and writes suite files and their data files where the features map:
   whose value differs between the tests of a group reads it from each case's expectations.
 - The target is ``--target FILE.py[:FUNCTION]``, called as ``FUNCTION(prompt=..., vars=...)``;
   without it, each test's ``providerOutput`` is the stored reply the checks grade. promptfoo's
-  providers are not called. ``llm-rubric`` becomes the rubric judge on ``--judge-model``.
+  providers are not called. ``llm-rubric`` becomes the rubric judge on ``--judge-model``, and
+  ``latency`` and ``cost`` limit the target's call as the checks of the same name do.
 
 Every assertion, provider and option that does not convert is in the conversion's ``unconverted``
 list, printed by the command and written as comments at the top of each suite file, never dropped
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -39,9 +41,6 @@ from martian.evals.model import Case, RunSettings, ScorerVersion, Suite, Target,
 from martian.evals.promptfoo_import import case_id
 from martian.evals.suite_file import cases_to_jsonl, suite_to_yaml
 
-LATER = "MorningHQ/martian-notes#171"
-"""The scorer library epic. Its checks would convert more assertions once it lands on main."""
-
 
 class PromptfooConfigError(Exception):
     """A file this converter cannot read as a promptfoo config, or a conversion it cannot write."""
@@ -50,17 +49,14 @@ class PromptfooConfigError(Exception):
 @dataclass(frozen=True)
 class Unconverted:
     """Something in the config the suite files leave out: where (a path into the config, such as
-    ``tests[2].assert[1]``), what (an assertion type, a provider, an option), and why. ``later``
-    names the check of the scorer library epic that would convert it once that lands."""
+    ``tests[2].assert[1]``), what (an assertion type, a provider, an option), and why."""
 
     where: str
     what: str
     why: str
-    later: str = ""
 
     def line(self) -> str:
-        text = f"{self.where} {self.what}: {self.why}" if self.what else f"{self.where}: {self.why}"
-        return f"{text} (once {LATER} lands: {self.later})" if self.later else text
+        return f"{self.where} {self.what}: {self.why}" if self.what else f"{self.where}: {self.why}"
 
 
 @dataclass(frozen=True)
@@ -118,11 +114,16 @@ PATTERN_CHECKS = {
     "not-starts-with": ("not_matches", r"\A{}"),
 }
 
+# promptfoo passes the provider's call when its time in milliseconds, or its cost in US dollars,
+# is at most the assertion's threshold: the check of the same name with that limit.
+CALL_CHECKS = {"latency": "max_ms", "cost": "max_usd"}
+
 ASSERTION_CHECKS = {
     **{kind: text.check for kind, text in TEXT_CHECKS.items()},
     **{kind: check for kind, (check, _) in PATTERN_CHECKS.items()},
     "is-json": "is_json",
     "llm-rubric": "rubric",
+    **{kind: kind for kind in CALL_CHECKS},
 }
 """Each promptfoo assertion type that converts, and the suite check it becomes."""
 
@@ -191,9 +192,18 @@ UNSUPPORTED: dict[str, str] = {
     **dict.fromkeys(
         _CALL_DATA, "reads the provider's tool calls, trace or metadata, which a suite file's checks do not see"
     ),
-    "latency": "limits the provider call's time; no check on main does",
-    "cost": "limits the provider call's cost; no check on main does",
-    "is-refusal": "passes only a refusal; no check on main detects refusals",
+    "is-refusal": "passes only a refusal; no check on main does (no_refusal passes the opposite)",
+    "not-is-refusal": "is promptfoo's refusal test, which counts a reply as a refusal when it starts with one of "
+    'its refusal phrases, such as "I\'m sorry", or holds one anywhere, such as "as an AI"; no_refusal reads '
+    "the reply's opening and passes a decline that goes on to answer, so the two decide some replies "
+    "differently (add no_refusal by hand to use it)",
+    "promptfoo:redteam:pii": "is promptfoo's PII grader: a model judges whether the reply discloses personal "
+    "data, names, addresses and records included, and allows what the user gave or the purpose permits; "
+    "no_personal_data finds email addresses and phone, card, IBAN and national id numbers by their form, with "
+    "no context, so the two decide some replies differently (add no_personal_data by hand to use it)",
+    "promptfoo:redteam:indirect-prompt-injection": "is promptfoo's grader: a model judges whether the reply "
+    "followed the injected instructions its value holds; resists_injection looks for a marker that only "
+    "following them produces, and the config names none (add resists_injection by hand with one)",
     "word-count": "counts words; no check on main does",
     "assert-set": "groups assertions under a threshold and weights of its own; a suite's case passes when every "
     "check passes",
@@ -202,17 +212,8 @@ UNSUPPORTED: dict[str, str] = {
     ),
     "human": "is a person's grade in promptfoo's viewer",
 }
-"""promptfoo's documented assertion types that do not convert, and why."""
-
-LATER_CHECKS = {
-    "latency": "latency, from MorningHQ/martian-notes#172",
-    "cost": "cost, from MorningHQ/martian-notes#172",
-    "not-is-refusal": "no_refusal, from MorningHQ/martian-notes#178",
-    "promptfoo:redteam:pii": "no_personal_data, from MorningHQ/martian-notes#178",
-    "promptfoo:redteam:indirect-prompt-injection": "resists_injection, from MorningHQ/martian-notes#178",
-}
-"""The scorer library epic's checks that would convert these assertion types (``promptfoo:redteam:pii``
-includes its ``:direct``, ``:session`` and other variants)."""
+"""promptfoo's documented assertion types that do not convert, and why (``promptfoo:redteam:pii``
+stands for its ``:direct``, ``:session`` and other variants too)."""
 
 # Assertion options that do not change the verdict: listed, and the assertion converts.
 _KEPT_OPTIONS = {
@@ -287,13 +288,6 @@ class _Note:
     where: str
     what: str
     why: str
-    later: str = ""
-
-
-def _later(kind: str) -> str:
-    if kind.startswith("promptfoo:redteam:pii"):
-        return LATER_CHECKS["promptfoo:redteam:pii"]
-    return LATER_CHECKS.get(kind, "")
 
 
 def _refusal(kind: str) -> str | None:
@@ -302,12 +296,12 @@ def _refusal(kind: str) -> str | None:
         return None
     if kind in UNSUPPORTED:
         return UNSUPPORTED[kind]
+    if kind.startswith("promptfoo:redteam:pii:"):
+        return UNSUPPORTED["promptfoo:redteam:pii"]
     if kind.startswith("promptfoo:redteam:"):
         return "is a promptfoo red team grader, which a model grades with its own prompt"
     base = kind.removeprefix("not-")
     if base != kind and (base in UNSUPPORTED or base in ASSERTION_CHECKS):
-        if base == "is-refusal":
-            return "passes when the reply is not a refusal; no check on main detects refusals"
         return f"passes when {base} fails; no check on main does that"
     return "is not an assertion type in promptfoo's documented list"
 
@@ -375,14 +369,18 @@ def _values(value: Any, variables: dict[str, Any], *, many: bool) -> tuple[str, 
     return texts
 
 
-def _assertion(assertion: Any, variables: dict[str, Any], judge_model: str | None) -> tuple[_Check | None, list[_Note]]:
+def _assertion(
+    assertion: Any, variables: dict[str, Any], judge_model: str | None, *, stored: bool
+) -> tuple[_Check | None, list[_Note]]:
     """One assertion of one test as a check, and the notes on what of it does not convert."""
     if not isinstance(assertion, dict) or not isinstance(assertion.get("type"), str):
         return None, [_Note("", "", "is not an assertion with a type")]
     kind: str = assertion["type"]
     if (refused := _refusal(kind)) is not None:
-        return None, [_Note("", kind, refused, _later(kind))]
+        return None, [_Note("", kind, refused)]
     notes = [_Note(f".{key}", "", reason) for key, reason in _KEPT_OPTIONS.items() if key in assertion]
+    # A call check's threshold is its limit, not a score threshold; promptfoo reads no value for it.
+    own = {"type", "value", *_KEPT_OPTIONS} | ({"threshold"} if kind in CALL_CHECKS else set())
     blocking = [
         _Note(
             f".{key}",
@@ -391,17 +389,38 @@ def _assertion(assertion: Any, variables: dict[str, Any], judge_model: str | Non
             "the assertion is not converted",
         )
         for key in assertion
-        if key not in {"type", "value", *_KEPT_OPTIONS} and not (key == "normalizeUnicode" and assertion[key] is False)
+        if key not in own and not (key == "normalizeUnicode" and assertion[key] is False)
     ]
     if blocking:
         return None, notes + blocking
+    if kind in CALL_CHECKS:
+        found = _call_check(kind, assertion.get("threshold"), stored=stored)
+        return (None, [*notes, _Note("", kind, found)]) if isinstance(found, str) else (found, notes)
     value = assertion.get("value")
     if isinstance(value, str) and value.startswith(_FILE):
         return None, [*notes, _Note("", kind, "reads its value from a file, which this converter does not read")]
     found = _check(kind, value, variables, judge_model)
     if isinstance(found, str):
-        return None, [*notes, _Note("", kind, found, _later(kind))]
+        return None, [*notes, _Note("", kind, found)]
     return found, notes
+
+
+def _call_check(kind: str, threshold: Any, *, stored: bool) -> _Check | str:
+    """``latency`` or ``cost`` as the check of the same name, limited to the threshold, or why not."""
+    if stored:
+        return (
+            "measures the provider's call, and the suite grades each test's stored providerOutput, which no "
+            "call produced; give --target FILE.py[:FUNCTION]"
+        )
+    if threshold is None:
+        if kind == "cost":
+            return "has no threshold; promptfoo then records the cost as a metric, which no check does"
+        return "has no threshold, which promptfoo requires"
+    if isinstance(threshold, bool) or not isinstance(threshold, int | float) or not math.isfinite(threshold):
+        return "needs a number as its threshold"
+    if threshold <= 0:
+        return "has a threshold of 0 or less, and the check's limit is above 0"
+    return _Check(kind, kind, ((CALL_CHECKS[kind], threshold),))
 
 
 def _check(kind: str, value: Any, variables: dict[str, Any], judge_model: str | None) -> _Check | str:
@@ -466,8 +485,8 @@ def _check(kind: str, value: Any, variables: dict[str, Any], judge_model: str | 
 class _Notes:
     found: list[Unconverted] = field(default_factory=list)
 
-    def add(self, where: str, what: str, why: str, later: str = "") -> None:
-        note = Unconverted(_one_line(where), _one_line(what)[:80], _one_line(why), later)
+    def add(self, where: str, what: str, why: str) -> None:
+        note = Unconverted(_one_line(where), _one_line(what)[:80], _one_line(why))
         if note not in self.found:
             self.found.append(note)
 
@@ -714,9 +733,9 @@ def _test(
     seen: dict[str, int] = {}
     judged = False
     for at, assertion in [*default_asserts, *own_asserts]:
-        check, found = _assertion(assertion, variables, judge_model)
+        check, found = _assertion(assertion, variables, judge_model, stored=stored)
         for note in found:
-            notes.add(at + note.where, note.what, note.why, note.later)
+            notes.add(at + note.where, note.what, note.why)
         if check is None:
             continue
         if check.check == "rubric":
@@ -885,7 +904,7 @@ def report_lines(conversion: Conversion, folder: Path) -> list[str]:
 
 __all__ = [
     "ASSERTION_CHECKS",
-    "LATER_CHECKS",
+    "CALL_CHECKS",
     "UNSUPPORTED",
     "Conversion",
     "ConvertedSuite",

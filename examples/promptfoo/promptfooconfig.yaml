@@ -6,6 +6,9 @@
 #     --target examples/promptfoo/agent.py:answer --output converted
 #   martian evals run converted/evals.yaml
 #   martian evals run converted/evals-2.yaml
+#   martian evals run converted/evals-3.yaml
+#
+# The cost check in evals-3.yaml gives an error: agent.py makes no model call for MLflow to price.
 #
 # results.json is what `promptfoo eval -o results.json` writes for this config, written by hand the
 # same way: martian evals import promptfoo examples/promptfoo/results.json

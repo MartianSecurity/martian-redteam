@@ -1436,32 +1436,43 @@ everything else is listed:
 | `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
 | `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
 | `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+| `latency` with a `threshold` above 0, and `--target` | `latency`, `max_ms` the threshold: the target's call took at most that many milliseconds |
+| `cost` with a `threshold` above 0, and `--target` | `cost`, `max_usd` the threshold: the target's call cost at most that many US dollars |
 
 Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
-`-any` or `-all` type given as text is split on commas, as promptfoo splits it.
+`-any` or `-all` type given as text is split on commas, as promptfoo splits it. `latency` and
+`cost` pass at the threshold, as promptfoo's do, and a call with no figure to compare is an error
+in both. promptfoo times and prices its provider's call; the checks read the trace MLflow records
+for the target's call, so `cost` needs the target's model calls traced with their token use (a
+target that makes none, such as `examples/promptfoo/agent.py`, gives the check an error, where
+promptfoo takes a cost the provider reports itself). A `threshold` is the limit of these two, not
+a score threshold.
 
-| Listed, not converted | Why | Once MorningHQ/martian-notes#171 lands |
-| --- | --- | --- |
-| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none | |
-| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON | |
-| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values | |
-| `latency`, `cost` | No check on main limits the call's time or cost | `latency` and `cost` (MorningHQ/martian-notes#172) |
-| `not-is-refusal`, `is-refusal` | No check on main detects refusals | `no_refusal` (MorningHQ/martian-notes#178) for `not-is-refusal`; none passes only a refusal |
-| `promptfoo:redteam:pii` and its variants, `promptfoo:redteam:indirect-prompt-injection`, other red team graders | promptfoo's red team graders, graded by a model with their own prompts | `no_personal_data` and `resists_injection` (MorningHQ/martian-notes#178) for the first two; none for the others |
-| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity | |
-| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts | |
-| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata | |
-| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them | |
-| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them | |
+| Listed, not converted | Why |
+| --- | --- |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
+| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
+| `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
+| `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
+| `promptfoo:redteam:pii` and its variants | A model judges whether the reply discloses personal data, names, addresses and records included, and allows what the user gave or the purpose permits. `no_personal_data` finds email addresses and phone, card, IBAN and national id numbers by their form, with no context; add it by hand to use it |
+| `promptfoo:redteam:indirect-prompt-injection` | A model judges whether the reply followed the injected instructions, the assertion's value. `resists_injection` looks for a marker that only following them produces, which a config does not name; add it by hand with one |
+| Other red team graders | Graded by a model with their own prompts |
+| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
+| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
+| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 
-`not-contains`, `not-icontains` and their `-any` forms convert today; once
-MorningHQ/martian-notes#178 lands, `no_prohibited_phrases` also matches a phrase through case,
-spacing and disguises, which `not_contains` does not.
+`not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
+value as written, as promptfoo does. `no_prohibited_phrases`, added by hand, also matches a phrase
+through case, spacing and disguises.
 
 Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
 verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
-`threshold`, `rubricPrompt`, `normalizeUnicode`, `config` and unknown options would, so the
-assertion is listed and not converted, as is one whose value is a `file://` reference or uses
+`threshold` (except on `latency` and `cost`), `rubricPrompt`, `normalizeUnicode`, `config` and
+unknown options would, so the assertion is listed and not converted, as is one whose value is a `file://` reference or uses
 Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
 `providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
 var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
@@ -1474,9 +1485,10 @@ through the local edition's routes: both providers' runs, their cases and verdic
 assertion's pass and score against the file, the provenance, a trace, and Compare of the two
 providers; it also covers repeated and nested assertions, grader errors, and the files the command
 refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
-file and the list of what it left out, and runs both suites against `agent.py`; it runs a
-stored-reply suite, checks that each converted assertion type decides a reply as promptfoo does,
-and that every assertion, option, prompt and test that does not convert is listed.
+file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
+stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
+and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
+convert is listed.
 
 ## Copied MLflow stores
 
