@@ -41,10 +41,10 @@ rejects unknown fields.
 | `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`. Never a key | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
-| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds` (each target call, whatever the target), `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder, the MLflow location and the run's `limits`. Unset means the runner's default. Unset `limits` are left out when the settings are written, so a suite without them keeps its digest | none |
+| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds` (each target call, whatever the target), `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder, the MLflow location, the run's `limits`, and `cache` (`CacheSettings`: `folder` as written, `ttl_seconds`, `functions`), set when the suite turns the [cache of model calls](evals.md#a-cache-of-model-calls) on. Unset means the runner's default. Unset `limits` and `cache` are left out when the settings are written, so a suite without them keeps its digest | none |
 | `RunLimits` | When a run stops before its last case: `max_seconds` of wall time, or `max_judge_tokens`, the tokens its judges may use, input and output together, as the provider reported them. `None` is no limit, and each start or resume of a run has its limits afresh. `stop(limit, used)` is what a run that reached one records: the limit, its value, what was used and a message | none |
 | `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Its `matrix` holds the axes of values the suite runs every combination of, each a list of values or a mapping of names to values, as the suite file writes them ([a matrix](evals.md#a-matrix-of-prompts-and-models)); it is left out when empty, so a suite without one keeps its digest too. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
-| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`, `stopped`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it. A run of one combination of a suite's matrix has it in `provenance.matrix`. A run that reached one of its limits is `stopped`: it keeps its finished cases, the others have no result, and it can be resumed. With repeats a case is finished only when all of its attempts ran. Its limits are in `provenance.limits` and the one it reached, `RunLimits.stop`, in `provenance.stopped` and, as a message, in `error` | Run |
+| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`, `stopped`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it. A run of one combination of a suite's matrix has it in `provenance.matrix`. A run that reached one of its limits is `stopped`: it keeps its finished cases, the others have no result, and it can be resumed. With repeats a case is finished only when all of its attempts ran. Its limits are in `provenance.limits` and the one it reached, `RunLimits.stop`, in `provenance.stopped` and, as a message, in `error`. A run with the cache of model calls on has `provenance.cache` | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint`. A case its suite runs more than once has every attempt in `attempts` (`Attempt`: `number`, `status`, `checks` with one `CheckVerdict` per check, `output`, `error`, `latency_ms`, `trace_id`); its own `status` and scores are the attempts combined ([repeated attempts](evals.md#repeated-attempts)). `attempts` is left out when empty | Trace; each attempt's own trace too |
 | `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `source_id`, `trace_id`, `metadata`. A judge score made by the evals core's worker has the model and version that produced it as `source_id` (`model@version`) and in `metadata` (`martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint`), with the judge's own version in `martian.judge.version` | Assessment (feedback) |
 | `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them. A job that applies a saved suite names it (`suite_id`, `suite_version`) and carries its `policies`; `cancel_requested_at` as for a run. A policy judge's guidelines are in its scorer's `criteria`. It runs under its run's limits, and one that reached one is `stopped`, with the limit in `error` | none |
@@ -90,6 +90,7 @@ and its data give them again on the next load.
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
 | `mlflow.tracking_uri`, `mlflow.experiment` | `RunSettings.mlflow_tracking_uri`, `mlflow_experiment` |
 | `limits.max_seconds`, `limits.max_judge_tokens` | `RunSettings.limits` (`RunLimits`) |
+| `cache`, `cache.folder`, `cache.ttl_seconds`, `cache.functions` | `RunSettings.cache`, a `CacheSettings` with the fields the block gives; an empty block is a `CacheSettings` with none, which turns the cache on with its defaults. `cache.functions` is refused for a target that is not a function |
 | `input_key` | `Suite.input_key` |
 
 `RunSettings` holds only what the file sets, so an unset setting stays the runner's default and
@@ -134,6 +135,15 @@ combination on each case result, keeps every combination a run as the model and 
 core's typed run responses already have it, with its own counts, resume, repeats and baseline;
 a `CaseResult` has no field for a combination, and the contract's item responses none either.
 
+A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on, from the suite file's
+`cache` or from `--cache`, has it in `provenance.cache`: `folder` (the cache's absolute path),
+`ttl_seconds` and `functions` from the start, then, once the run ends (finished, `stopped` at a
+limit or `cancelled`), `target` and
+`judge`, each that run's `hits`, `calls` and `stored`, or null when the suite makes no such call
+that the cache holds. A replayed reply is a reply an earlier run received, so the provenance is
+where a reader of the run learns that it was not called fresh; `CaseResult` and `Score` carry
+nothing new.
+
 ## Local results
 
 Every field of a `results.jsonl` record has a place. `martian.evals.model.RESULTS_RECORD_FIELDS`
@@ -158,7 +168,8 @@ counts and `target_errors` are counted from scores and case results; `pass_rate`
 `repeats` is the run's `provenance.repeats`, and `attempts` and `reliability` are counted from
 the case results' attempts; `false_refusals`, for a suite with a policy check, is counted from
 the cases' `no_refusal` verdicts, with repeats their attempts combined
-([false refusals](evals.md#false-refusals)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
+([false refusals](evals.md#false-refusals)); `cache`, with the cache on, is the run's
+`provenance.cache`; `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
 

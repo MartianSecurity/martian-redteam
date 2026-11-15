@@ -13,7 +13,8 @@ fails the gate whatever the noise label, then each other case that went from pas
 their failed checks and the reasons the SDK keeps only when they cannot quote the reply; or it
 says that there is no baseline yet. A suite with a matrix gets one row per combination
 (matrix.json), each compared with the same combination of the baseline, then the cases of each
-combination that went from pass to fail, failed or have no verdict.
+combination that went from pass to fail, failed or have no verdict. A run with the cache of
+model calls on says so under the headline, with how many replies came from the cache.
 """
 
 from __future__ import annotations
@@ -201,6 +202,10 @@ def render(
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
         ]
+        # A run that replayed replies from the cache says so first, so its result is never taken
+        # for a fresh one.
+        if (used := summary.get("cache")) is not None:
+            lines += [cache_used(used), ""]
         # A run stopped at a limit, or cancelled, counts only the cases it finished.
         if not_run := summary.get("not_run"):
             why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
@@ -308,6 +313,8 @@ def _matrix(outcome: Outcome, *, suite: str, key: str, baseline: Baseline | None
         f"{first['cases']} cases each; {counted}.",
         "",
     ]
+    if used := [one.summary["cache"] for one in combinations if "cache" in one.summary]:
+        lines += [cache_used(_combined(used)), ""]
     shown_against = baseline is not None or bool(compared)
     if baseline is not None and not compared:
         lines += [
@@ -404,6 +411,31 @@ def _details(one: Combination) -> list[str]:
         lines.append(_flaky(reliable["flaky"]))
     # One paragraph: the lines end as sentences.
     return [" ".join(line if line.endswith(".") else line + "." for line in lines)] if lines else []
+
+
+def cache_used(found: Mapping[str, Any]) -> str:
+    """The run's use of the cache of model calls, as `martian evals run` prints it, in bold: of
+    each kind of call, how many replayed a reply an earlier run stored."""
+    kinds = [kind for kind in ("target", "judge") if found[kind] is not None]
+    if not kinds:
+        return "**Cache: on**, but this suite makes no model call that the cache holds."
+    shown = " and ".join(
+        f"{found[kind]['hits']} of {found[kind]['hits'] + found[kind]['calls']} {kind} calls" for kind in kinds
+    )
+    sent = sum(found[kind]["calls"] for kind in kinds)
+    return (
+        f"**Cache: {shown} replayed replies stored by an earlier run**; "
+        f"{sent} model {'call' if sent == 1 else 'calls'} made."
+    )
+
+
+def _combined(reports: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """The cache's counts of every combination added up."""
+    combined = dict(reports[0])
+    for kind in ("target", "judge"):
+        if combined[kind] is not None:
+            combined[kind] = {name: sum(report[kind][name] for report in reports) for name in combined[kind]}
+    return combined
 
 
 def _refused(found: Mapping[str, Any]) -> str:

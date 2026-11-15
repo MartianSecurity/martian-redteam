@@ -100,7 +100,10 @@ prompts.
   [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
   that stopped says how many cases it did not run and which limit it reached;
   its counts, rates and reliability are of the cases it finished.
-  A suite with a [policy check](evals.md#false-refusals) adds how many of its
+  A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on
+  says so first, in bold, with how many target and judge calls replayed a
+  reply an earlier run stored. A suite with a
+  [policy check](evals.md#false-refusals) adds how many of its
   benign cases were refused, so a model that refuses everything cannot look
   as if it passed. Below it are per-check counts, each pass rate with its 95%
   interval ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),

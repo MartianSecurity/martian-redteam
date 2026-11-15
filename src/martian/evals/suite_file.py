@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from martian.config import ConfigError
 from martian.evals import runner
 from martian.evals.model import (
+    CacheSettings,
     Case,
     Repeats,
     RunLimits,
@@ -100,6 +101,10 @@ SUITE_FILE_FIELDS = {
     "limits": "RunSettings.limits",
     "limits.max_seconds": "RunSettings.limits.max_seconds (RunLimits)",
     "limits.max_judge_tokens": "RunSettings.limits.max_judge_tokens (RunLimits)",
+    "cache": "RunSettings.cache; a cache block, even an empty one, turns the cache of model calls on",
+    "cache.folder": "RunSettings.cache.folder, as written",
+    "cache.ttl_seconds": "RunSettings.cache.ttl_seconds",
+    "cache.functions": "RunSettings.cache.functions (function target only)",
 }
 
 # The fields every check type takes: its type, its label and the rule its attempts combine by.
@@ -311,6 +316,8 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
     if limits := {name: getattr(file_suite.limits, name) for name in file_suite.limits.model_fields_set}:
         values["limits"] = RunLimits(**limits)
+    if (cache := file_suite.cache) is not None:
+        values["cache"] = CacheSettings(**{name: getattr(cache, name) for name in cache.model_fields_set})
     return RunSettings(**values)
 
 
@@ -401,6 +408,8 @@ def _file(suite: Suite) -> dict[str, Any]:
         file["mlflow"] = mlflow
     if settings.limits is not None:
         file["limits"] = settings.limits.model_dump(exclude_none=True)
+    if settings.cache is not None:
+        file["cache"] = {name: value for name, value in settings.cache.model_dump().items() if value is not None}
     return file
 
 
