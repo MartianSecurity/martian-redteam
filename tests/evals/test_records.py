@@ -234,16 +234,18 @@ KEYED_TO_A_RUN = {
     "martian_work_queue",
     "martian_deliveries",
     "martian_schedule_runs",
+    "martian_blind_queues",
 }
 
 
 async def _everything_of_a_run(records: SqlRecordStore, queue: SqlWorkQueue, run_id: str, day: int) -> None:
     """A finished run with a row in every table keyed to a run: results, its own scores, a
     cancelled scoring job's scores, a person's answer, a review chain, the answer's delivery, the
-    schedule slot that started it, and work for it a worker has not yet removed from the queue."""
+    schedule slot that started it, the blind mode of its review queue, and work for it a worker has
+    not yet removed from the queue."""
     from martian.evals.model import CaseResult, Review, ScoringJob
     from martian.evals.outbox import score_delivery
-    from martian.evals.records import ScheduledRun
+    from martian.evals.records import BlindQueue, ScheduledRun
     from martian.evals.worker import Work
     from martian.evals.worker.process import dump_work
     from martian.evals.worker.queue import entry_id
@@ -264,6 +266,7 @@ async def _everything_of_a_run(records: SqlRecordStore, queue: SqlWorkQueue, run
     await records.put_delivery(ORG_A, "p1", score_delivery("p1", answer))
     slot = ScheduledRun(schedule_id="sc1", slot=T0 + timedelta(days=day), state="admitted", run_id=run_id)
     await records.add_scheduled_run(ORG_A, "p1", slot)
+    await records.add_blind_queue(ORG_A, "p1", BlindQueue(id=f"{run_id}-queue", run_id=run_id))
     for work in (
         Work(kind="run", principal=ORG_A, project_id="p1", run_id=run_id),
         Work(kind="scoring", principal=ORG_A, project_id="p1", run_id=run_id, job_id=job.id),

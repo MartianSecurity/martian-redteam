@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import socket
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -19,7 +20,7 @@ import httpx
 import pytest
 import requests
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from google.rpc.status_pb2 import Status as RpcStatus
 from opentelemetry.exporter.otlp.proto.http import Compression
@@ -37,6 +38,7 @@ from martian.evals.local import create_local_app
 from martian.evals.model import Project, Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app, organisation_principal, otlp
+from martian.evals.server.dependencies import PrincipalDep
 from martian.evals.store import REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED, MemoryStore, StoreError
 from martian.evals.store.mlflow_local import TRACE_SPAN_KEY, MlflowStore
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
@@ -45,6 +47,7 @@ from tests.evals.trace_samples import MODEL, QUESTION, STYLES, UNKNOWN, sample_s
 PROTOBUF = {"content-type": "application/x-protobuf"}
 JSON = {"content-type": "application/json"}
 TRACE = "5b8efff798038103d269b633813fc60c"
+ANOTHER = "6c9f0008a9149214e370c744924d71fd"
 ROOT, CHILD, TOOL = "eee19b7ec3c1b173", "eee19b7ec3c1b174", "eee19b7ec3c1b175"
 NANOS = 1_763_200_000_000_000_000
 
@@ -216,6 +219,41 @@ def signed_in(authorization: Annotated[str | None, Header()] = None) -> Principa
     return TOKENS[token]
 
 
+class Hold:
+    """The next write of a trace, held inside the store until released."""
+
+    def __init__(self) -> None:
+        self.entered, self.released = asyncio.Event(), asyncio.Event()
+
+    def release(self) -> None:
+        self.released.set()
+
+
+class HeldStore(MemoryStore):
+    """A store whose next write of a trace, for an organisation, can be held, to see which other
+    writes wait for it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._holds: dict[tuple[str | None, str], Hold] = {}
+
+    def hold(self, organisation: str | None, trace_id: str) -> Hold:
+        return self._holds.setdefault((organisation, trace_id), Hold())
+
+    async def record_trace(self, principal: Principal, trace: Trace) -> Trace:
+        if held := self._holds.pop((principal.organisation_id, trace.id), None):
+            held.entered.set()
+            await held.released.wait()
+        return await super().record_trace(principal, trace)
+
+
+@asynccontextmanager
+async def concurrent(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """A client whose requests run in this event loop at once, as an exporter's do on a server."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core") as client:
+        yield client
+
+
 def test_a_request_without_credentials_is_refused(records):
     app = create_app(store=MemoryStore(), records=records, principal=signed_in)
     bearer = {"Authorization": "Bearer token-a"}
@@ -242,6 +280,50 @@ def test_a_request_without_credentials_is_refused(records):
     client = TestClient(app)
     assert [t["id"] for t in search(client, bearer)] == [trace_id_of(span)]
     assert search(client, {"Authorization": "Bearer token-b"}) == []
+
+
+def test_an_edition_serving_its_own_route_maps_trace_ids_and_limits_the_body(records):
+    """``otlp.export`` is the endpoint for an edition that signs exporters in on a route of its
+    own: the trace ids are the edition's mapping of the OpenTelemetry ids, the body limit is the
+    edition's, and the rest is the core's."""
+    store = MemoryStore()
+    mapped: list[tuple[str | None, str, bytes]] = []
+
+    def per_organisation(principal: Principal, project: str, trace_id: bytes) -> str:
+        mapped.append((principal.organisation_id, project, trace_id))
+        return "tr-" + hashlib.sha256(f"{principal.organisation_id}:{project}:".encode() + trace_id).hexdigest()[:32]
+
+    app = create_app(store=store, records=records, principal=signed_in)
+    exporters = APIRouter(route_class=otlp.OtlpRoute)
+
+    @exporters.post("/ingest", response_model=None)
+    async def ingest(request: Request, principal: PrincipalDep) -> Response:
+        return await otlp.export(request, principal, store, trace_ids=per_organisation, max_body_bytes=2048)
+
+    app.include_router(exporters)
+    client = TestClient(app)
+    a, b = {"Authorization": "Bearer token-a"}, {"Authorization": "Bearer token-b"}
+    child, root = json_span(CHILD, parent=ROOT, offset_ms=10), json_span(ROOT, name="answer")
+    for headers, body in ((a, json_body(child)), (a, json_body(root, child)), (b, json_body(root))):
+        sent = client.post("/ingest", content=body, headers={**JSON, **headers})
+        assert (sent.status_code, sent.json()) == (200, {})
+
+    assert set(mapped) == {("org-a", "default", bytes.fromhex(TRACE)), ("org-b", "default", bytes.fromhex(TRACE))}
+    ours = per_organisation(TOKENS["token-a"], "default", bytes.fromhex(TRACE))
+    theirs = per_organisation(TOKENS["token-b"], "default", bytes.fromhex(TRACE))
+    # The two requests of org-a's trace merge under the mapped id, apart from org-b's.
+    assert [(t["id"], t["name"], t["state"]) for t in search(client, a)] == [(ours, "answer", "OK")]
+    assert [(t["id"], t["name"]) for t in search(client, b)] == [(theirs, "answer")]
+    detail = client.get(f"/v1/evals/traces/{ours}", headers=a).json()
+    assert [s["id"] for s in detail["spans"]] == [ROOT, CHILD]
+
+    large = client.post("/ingest", content=json_body(root) + " " * 2048, headers={**JSON, **a})
+    assert (large.status_code, large.json()) == (413, {"message": "The body is larger than 2048 bytes"})
+    viewer = client.post("/ingest", content=json_body(root), headers={**JSON, "Authorization": "Bearer token-viewer"})
+    assert (viewer.status_code, viewer.json()) == (403, {"message": "Requires member role"})
+    # The core's own route keeps MLflow's form of the OpenTelemetry id.
+    assert client.post("/v1/traces", content=json_body(root), headers={**JSON, **b}).status_code == 200
+    assert {t["id"] for t in search(client, b)} == {theirs, "tr-" + TRACE}
 
 
 def test_spans_of_one_trace_in_several_requests_make_one_trace(store, records):
@@ -282,6 +364,79 @@ def test_spans_of_one_trace_in_several_requests_make_one_trace(store, records):
         (CHILD, ROOT, "CHAT_MODEL"),
     ]
     assert detail["info"]["trace_metadata"][MAPPING_KEY] == MAPPING_VERSION
+
+
+A, B = {"Authorization": "Bearer token-a"}, {"Authorization": "Bearer token-b"}
+WAIT = 5  # seconds a write that should not be held up may take
+
+
+@pytest.mark.parametrize(
+    ("other", "trace"),
+    [(B, TRACE), (A, ANOTHER)],
+    ids=["another organisation, the same OpenTelemetry trace id", "the same organisation, another trace"],
+)
+async def test_a_write_does_not_wait_for_the_write_of_another_trace(records, other, trace):
+    store = HeldStore()
+    held = store.hold("org-a", "tr-" + TRACE)
+    async with concurrent(create_app(store=store, records=records, principal=signed_in)) as client:
+        slow = asyncio.create_task(client.post("/v1/traces", content=json_body(json_span(ROOT)), headers={**JSON, **A}))
+        await asyncio.wait_for(held.entered.wait(), WAIT)  # org-a's trace is being written, and held
+        other_write = client.post(
+            "/v1/traces", content=json_body(json_span(ROOT, traceId=trace)), headers={**JSON, **other}
+        )
+        answered = await asyncio.wait_for(other_write, WAIT)
+        assert (answered.status_code, answered.json()) == (200, {})
+        assert not slow.done()
+        held.release()
+        assert (await asyncio.wait_for(slow, WAIT)).status_code == 200
+
+
+async def test_concurrent_requests_with_spans_of_one_trace_still_merge(records):
+    store = HeldStore()
+    held = store.hold("org-a", "tr-" + TRACE)
+    child, root = json_span(CHILD, parent=ROOT, offset_ms=10), json_span(ROOT, name="answer")
+    async with concurrent(create_app(store=store, records=records, principal=signed_in)) as client:
+        first = asyncio.create_task(client.post("/v1/traces", content=json_body(child), headers={**JSON, **A}))
+        await asyncio.wait_for(held.entered.wait(), WAIT)  # the child's write has read the trace and is held
+        second = asyncio.create_task(client.post("/v1/traces", content=json_body(root), headers={**JSON, **A}))
+        await asyncio.sleep(0.2)
+        assert not second.done()  # it waits for the write of its own trace
+        held.release()
+        answers = await asyncio.wait_for(asyncio.gather(first, second), WAIT)
+        assert [(a.status_code, a.json()) for a in answers] == [(200, {})] * 2
+        (found,) = (await client.post("/v1/evals/traces/search", json={"order": "oldest"}, headers=A)).json()["items"]
+        assert (found["id"], found["name"], found["state"]) == ("tr-" + TRACE, "answer", "OK")
+        detail = (await client.get(f"/v1/evals/traces/tr-{TRACE}", headers=A)).json()
+        assert [span["id"] for span in detail["spans"]] == [ROOT, CHILD]
+
+
+async def test_an_edition_s_own_application_needs_no_lock_set_up_to_export(records):
+    """An application ``create_app`` did not make serves ``otlp.export`` and merges a trace's
+    requests; the lock an edition set on ``state.martian_evals_trace_writes`` before per-trace
+    locks is no longer read."""
+    store = HeldStore()
+    app = FastAPI()
+    app.state.martian_evals_trace_writes = asyncio.Lock()
+    exporters = APIRouter(route_class=otlp.OtlpRoute)
+
+    @exporters.post("/ingest", response_model=None)
+    async def ingest(request: Request) -> Response:
+        return await otlp.export(request, TOKENS["token-a"], store)
+
+    app.include_router(exporters)
+    held = store.hold("org-a", "tr-" + TRACE)
+    child, root = json_span(CHILD, parent=ROOT, offset_ms=10), json_span(ROOT, name="answer")
+    async with concurrent(app) as client:
+        first = asyncio.create_task(client.post("/ingest", content=json_body(child), headers=JSON))
+        await asyncio.wait_for(held.entered.wait(), WAIT)
+        second = asyncio.create_task(client.post("/ingest", content=json_body(root), headers=JSON))
+        await asyncio.sleep(0.2)
+        assert not second.done()
+        held.release()
+        answers = await asyncio.wait_for(asyncio.gather(first, second), WAIT)
+    assert [(a.status_code, a.json()) for a in answers] == [(200, {})] * 2
+    found = await store.get_trace(TOKENS["token-a"], "default", "tr-" + TRACE)
+    assert found is not None and [span.id for span in found.spans] == [ROOT, CHILD]
 
 
 def test_a_long_request_stays_whole_in_one_root_span_as_batches_arrive(tmp_path, records):

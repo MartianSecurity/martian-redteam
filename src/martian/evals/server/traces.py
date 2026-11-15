@@ -60,7 +60,8 @@ def _from_ms(value: int | None) -> datetime | None:
     return None if value is None else datetime.fromtimestamp(value / 1000, UTC)
 
 
-def _store_query(body: TraceQuery, project: str) -> StoreQuery:
+def store_query(body: TraceQuery, project: str) -> StoreQuery:
+    """The store's query for a request's ``TraceQuery`` in ``project``."""
     return StoreQuery(
         project_id=project,
         session_id=body.session_id or None,
@@ -114,7 +115,7 @@ async def trace_search(body: TraceQuery, principal: PrincipalDep, store: StoreDe
     cursor = _position(body, project).get("page")
     if not (cursor is None or isinstance(cursor, str)):
         raise HTTPException(409, EXPIRED)
-    page = await store.search_traces(principal, _store_query(body, project).model_copy(update={"cursor": cursor}))
+    page = await store.search_traces(principal, store_query(body, project).model_copy(update={"cursor": cursor}))
     after = _cursor(body, project, page=page.next_cursor) if page.next_cursor is not None else None
     return {"items": [trace_row(t) for t in page.items], "next_cursor": after, "limit": body.limit}
 
@@ -127,7 +128,7 @@ async def session_search(body: TraceQuery, principal: PrincipalDep, store: Store
     if project is None:
         found = SessionSearch(items=[], traces_examined=0, ungrouped=0)
     else:
-        found = await store.search_sessions(principal, _store_query(body, project))
+        found = await store.search_sessions(principal, store_query(body, project))
     return found.model_dump(mode="json")
 
 

@@ -3,11 +3,13 @@ and exported again with nothing lost, on the in-memory store and on the local ed
 store; every table of the record store and every kind of object of the two store interfaces either
 exported or left out with a reason; monitors and schedules imported paused, and a threshold's
 webhook secret in no export; a judge calibration's re-check exported unfinished imported failed;
-an interrupted export resumed to the same files; and what an import refuses."""
+prompt versions imported with their authors and times; an interrupted export resumed to the same
+files; and what an import refuses."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import typing
 import uuid
@@ -69,6 +71,7 @@ from martian.evals.outbox import save_queue_item
 from martian.evals.records import (
     RECORD_METHODS,
     Alert,
+    BlindQueue,
     CalibrationRecheck,
     EmailChannel,
     JudgeCalibration,
@@ -315,6 +318,10 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         created_by=principal.user_id,
         created_at=T0,
     )
+    # Its reviewers answer blind: each without the others' answers until they have given theirs.
+    await records.add_blind_queue(
+        principal, project, BlindQueue(id=queue.id, run_id=run_id, created_by=principal.user_id)
+    )
     await store.create_queue(principal, project, queue, traced[:2])
     pending = Review(
         id=str(uuid.uuid4()),
@@ -334,6 +341,7 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
             "comment": "Fine.",
             "reviewer": principal.user_id,
             "previous_id": pending.id,
+            "blind": True,
             "created_at": T0 + timedelta(hours=3),
         }
     )
@@ -509,6 +517,15 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     )
     await records.create_recheck(principal, project, queued)
     await store.archive_project(principal, retired.id)
+
+    # The organisation's prompts, added by another member: an import keeps who added each version
+    # and when, and the version numbers, which a run's provenance.prompts names.
+    editor = dataclasses.replace(principal, user_id="user-e")
+    await store.create_prompt(editor, "support.terse", description="The terse support prompt")
+    await store.add_prompt_version(editor, "support.terse", "Answer in one sentence.", message="First")
+    await store.add_prompt_version(editor, "support.terse", "Answer in one short sentence.\n")
+    await store.create_prompt(editor, "friendly")
+    await store.add_prompt_version(editor, "friendly", "Greet the customer, then answer.")
 
 
 async def monitoring(
@@ -904,6 +921,10 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     after = await target_records.list_rechecks(ORG_A, "default")
     assert before == ["queued", "completed"]
     assert [(r.state, r.error) for r in after] == [("failed", data_export.RECHECK_INTERRUPTED), ("completed", "")]
+    # Prompt versions keep their numbers, who added them (not the importing user) and when.
+    kept = await target.prompt_versions(ORG_A, "support.terse")
+    assert kept == await source.prompt_versions(ORG_A, "support.terse")
+    assert [(v.version, v.created_by) for v in kept] == [(1, "user-e"), (2, "user-e")]
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
     # The published version is still pinned by its manifest: a run reads it only as published.
@@ -1104,15 +1125,30 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
         await import_data(store, records, ORG_A, folder)
 
     fresh = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'fresh.db'}")
+    whole = (folder / "scores.jsonl").read_bytes()
     with (folder / "scores.jsonl").open("ab") as handle:
         handle.write(b'{"project_id":"default"}\n')
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
+    # The files are checked in the format's order, so put it right before the later files are tried.
+    (folder / "scores.jsonl").write_bytes(whole)
     found = manifest(folder)
-    # An export of the fourth format, which kept one score per case, scorer and scoring job.
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 4}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 4; this SDK reads version 5"):
-        await import_data(*fresh, ORG_A, folder)
+    # Version 3 was two formats, one with the dataset publications and one with the prompts, and
+    # versions 4 (the judge calibrations), 5 (a score of each source) and 6 (the prompts) came
+    # without the review queues with blind double review: version 7 holds all of them, and an
+    # export of any of those is refused.
+    for older in (3, 4, 5, 6):
+        (folder / MANIFEST).write_text(json.dumps({**found, "version": older}), encoding="utf-8")
+        with pytest.raises(ExportError, match=f"format version {older}; this SDK reads version 7"):
+            await import_data(*fresh, ORG_A, folder)
+    # A version 7 folder without the prompt files, the dataset publications or the blind queues is
+    # refused.
+    (folder / MANIFEST).write_text(json.dumps(found), encoding="utf-8")
+    for name in ("prompts.jsonl", "manifests.jsonl", "blind_queues.jsonl"):
+        (folder / name).rename(folder / f"{name}.away")
+        with pytest.raises(ExportError, match=f"is missing {name}"):
+            await import_data(*fresh, ORG_A, folder)
+        (folder / f"{name}.away").rename(folder / name)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
     with pytest.raises(ExportError, match="is not finished"):
