@@ -40,6 +40,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian_redteam/catalog/` | IDs only |
 | `tests/fixtures/` | Recorded `/runs/wait` graph state; Inspect AI logs and the task that wrote them (`inspect/`); the script that writes a test MLflow tracking store with MLflow itself (`mlflow/write_store.py`) |
 | `docs/` | Architecture and contracts |
+| `cla/` | The individual and corporate Contributor License Agreements with MartianSecurity, and the corporations that signed (`corporations.md`); [CONTRIBUTING.md](../CONTRIBUTING.md#contributor-license-agreement) describes signing |
 
 ## Commands
 
@@ -80,6 +81,61 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
 
 `test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_TOKEN` or `OPENAI_API_KEY`, and does not run `martian redteam run`.
+
+## Contributor License Agreement check
+
+`.github/workflows/cla.yml` asks the author of every commit in a pull request to sign the
+[individual agreement](../cla/individual.md) and records the signatures;
+[CONTRIBUTING.md](../CONTRIBUTING.md#how-signing-works) describes it from the contributor's side.
+It runs `contributor-assistant/github-action` v2.6.1, pinned to
+`ca4a40a7d1004f18d9960b404b97e5f30a505a08`. That repository is archived and read-only, so the
+pinned code cannot change and no later release will come. The action declares `node20`; runners
+no longer have Node 20 and run JavaScript actions on Node 24.
+
+- **Events.** `pull_request_target` (opened, synchronize, closed) and `issue_comment` (created).
+  A comment starts the job only on a pull request, and only when it is the signature line or
+  `recheck`. On `closed` the action locks the pull request's conversation instead of checking.
+- **Default branch only.** Both events run the workflow file from `main`, whatever the pull
+  request's base or changes, so the check exists once this file is on `main`, and a pull request
+  cannot change what it runs.
+- **Never the pull request's code.** The job has a write token, so it has no checkout, no script
+  and no other action: the pinned action reads the pull request's commits and comments through the
+  API and writes its comment and the signatures file. Keep it that way.
+- **Permissions.** None at workflow level. The job has `contents: write` for the signatures file,
+  `pull-requests: write` to comment and lock, and `actions: write` to re-run the failed check after
+  a signature. It needs no `statuses` permission and no personal access token.
+- **Signatures.** `signatures/cla.json` on the `cla-signatures` branch, written with the workflow
+  token. Branch protection or a ruleset on that branch blocks the writes.
+- **Allowlist.** `kloudd`, `dependabot[bot]` and `github-actions[bot]`, by exact name. The
+  action's `*` pattern is unanchored, so do not use one. The action matches a commit's GitHub
+  login, or its git author name when the commit's e-mail is linked to no account, so a commit with
+  an unlinked e-mail and an allowlisted name skips the check: check that such commits on a pull
+  request are linked to the account (GitHub shows an unlinked author without a profile link).
+- **Agreement versions.** A signature records when it was made, not which text it signed; the Git
+  history of `cla/individual.md` gives the text at that time. To have everyone sign a changed
+  agreement, point `path-to-signatures` at a new file.
+
+Before the first outside pull request, a maintainer sets up two things once:
+
+1. **The signatures branch, with an empty file.** v2.6.1 does not create a missing file: it fails
+   with `Could not retrieve repository contents. Status: 404`
+   ([contributor-assistant/github-action#155](https://github.com/contributor-assistant/github-action/issues/155)).
+
+   ```bash
+   git switch --orphan cla-signatures
+   mkdir -p signatures
+   printf '{\n  "signedContributors": []\n}\n' > signatures/cla.json
+   git add signatures/cla.json
+   git commit -m "Start the CLA signatures file"
+   git push origin cla-signatures
+   git switch main
+   ```
+
+2. **An Actions policy that allows `pull_request_target`.** GitHub blocks `pull_request_target`
+   in public repositories unless an Actions policy allows it (enforced from 2 December 2026). In the
+   repository's **Settings**, **Actions**, **Policies**, add an active policy that targets
+   `.github/workflows/cla.yml` and whose event rule allows `pull_request_target` and
+   `issue_comment`.
 
 ## Testing this library
 
@@ -150,6 +206,10 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   provider's key and address in the environment) makes one call per case, about 75 in all, and
   prints each judge's false pass and false fail rates for [the evals guide](evals.md#grounding-and-retrieval-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
+- `tests/test_cla_workflow.py` reads `.github/workflows/cla.yml`: its two events and the comments
+  that start it, one step that is the SHA-pinned action with no checkout or script, its
+  permissions, the signatures branch and the exact allowlist, and that the agreements the bot links
+  are in `cla/` and give its signature line ([the check](#contributor-license-agreement-check)).
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
 

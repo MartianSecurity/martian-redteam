@@ -138,6 +138,14 @@ The existing eval regression suite has moved into this SDK's CI. Tests use
 local MLflow and loopback service fixtures; hosted/paid execution is a separate
 qualification. See [development](https://github.com/MorningHQ/martian-redteam/blob/main/docs/development.md).
 
+## Contributing
+
+Contributions are welcome under a Contributor License Agreement with MartianSecurity, signed by a
+comment on your first pull request.
+[CONTRIBUTING.md](https://github.com/MorningHQ/martian-redteam/blob/main/CONTRIBUTING.md) covers
+issues, pull requests, the checks to run and the agreement. Report a vulnerability privately, as
+[SECURITY.md](https://github.com/MorningHQ/martian-redteam/blob/main/SECURITY.md) describes.
+
 ## License
 
 Apache-2.0. See [LICENSE](https://github.com/MorningHQ/martian-redteam/blob/main/LICENSE)
