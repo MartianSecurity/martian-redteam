@@ -69,6 +69,13 @@ listens on the container's interfaces, keeps the same `Host` check and prints a 
 starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through an SSH tunnel.
 Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).
 
+The targets a user defines in its UI keep their keys in `target-keys.json` in the data folder, a
+file with mode `0600` that only the user can read. No answer of the server, no log line and no
+other file in the folder holds a key; a run records the key only as the reference
+`${MARTIAN_TARGET_KEY}`. Anyone who can reach the port cannot read a key back through it, and
+cannot point an existing target, and so its key, at another address: a target cannot be edited.
+They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
+
 ## Runtime reporting data boundary
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
