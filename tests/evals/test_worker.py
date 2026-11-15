@@ -29,6 +29,10 @@ def test_work_names_a_job_exactly_when_it_is_scoring():
     for kind, job in (("run", "j"), ("scoring", None)):
         with pytest.raises(ValueError, match="scoring work names its job"):
             Work(kind=kind, principal=SINGLE_USER, project_id="p", run_id="r", job_id=job)  # type: ignore[arg-type]
+    # A re-check of a calibration names its re-check as its job, and no run.
+    Work(kind="recheck", principal=SINGLE_USER, project_id="p", run_id="", job_id="k")
+    with pytest.raises(ValueError, match="re-check work names no run"):
+        Work(kind="recheck", principal=SINGLE_USER, project_id="p", run_id="r", job_id="k")
 
 
 def test_both_workers_implement_the_interface(records):

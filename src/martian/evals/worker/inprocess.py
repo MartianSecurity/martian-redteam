@@ -25,6 +25,7 @@ from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import execute_run, execute_scoring
+from martian.evals.worker.recheck import execute_recheck
 from martian.evals.worker.targets import http_target, target_call, target_pin
 
 if TYPE_CHECKING:
@@ -102,5 +103,7 @@ class InProcessWorker:
                 call_for=lambda run: self._call_for(work.principal, run),
                 timeout_seconds=self._timeout,
             )
-        else:
+        elif work.kind == "scoring":
             await execute_scoring(self._store, self._records, work, judge=self._judge)
+        else:
+            await execute_recheck(self._store, self._records, work, judge=self._judge)

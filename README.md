@@ -59,8 +59,9 @@ push and keeps one comment with the result, also without a Martian account. See
   a panel of several judge models decided by a strict majority (`judge_panel`),
   twenty-four deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, and the call's latency and
-  cost, each judge version's agreement with human labels and its saved calibration, pinned
-  datasets, Backend-scored regression gates and recorded CI sessions.
+  cost, each judge version's agreement with human labels and its saved calibration, re-checked
+  on request after its model or rubric changes, pinned datasets, Backend-scored regression gates
+  and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside

@@ -13,7 +13,7 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   scorers: code scorers here, judge scorers through the worker's judge, one request per model the
   job's judges are pinned to. Each judge score records the model and version that produced it,
   and the judge version's calibration that applied (``martian.evals.calibration``): its newest
-  when the job starts, if measured on the model the job runs it on. Its scores sit beside the
+  when the job starts, if it checks the version as the job runs it. Its scores sit beside the
   run's own, and each scored value is also kept on the case's trace.
 - A judge graded by a panel is in the request of each of its members' models, so each member
   grades it on its own, and its score is decided by the strict majority of the members that gave
@@ -529,11 +529,11 @@ async def _score_results(
             for seat in seats(scorer):
                 by_model.setdefault(seat, []).append(scorer)
     definition = job_config(job)["definition_digest"]
-    # The calibration each judge version had when the job started, if it checks the model the job
-    # runs the judge on, or the members of its panel.
+    # The calibration each judge version had when the job started, if it checks the version as the
+    # job runs it: on the model the job runs it on, or its panel's members, and as it is defined now.
     calibrations = await latest_calibrations(records, principal, project)
     applied = {
-        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s.model, s.endpoint, s.panel)
+        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s)
         for s in job.scorers
         if s.kind == "llm_judge"
     }
@@ -652,10 +652,21 @@ async def _score_results(
 
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
-    as a run's process that exited early: a run or scoring job still queued or running becomes
-    ``failed``. A finished record is left alone."""
+    as a run's process that exited early: a run, scoring job or re-check still queued or running
+    becomes ``failed``. A finished record is left alone."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "recheck":
+        recheck = await records.get_recheck(principal, project, work.job_id or "")
+        if recheck is not None and recheck.state in ("queued", "running"):
+            try:
+                await records.update_recheck(
+                    principal, project, recheck.model_copy(update=changes), expected_state=recheck.state
+                )
+            except StoreError as error:
+                if error.kind != "conflict":
+                    raise
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state in ("queued", "running"):

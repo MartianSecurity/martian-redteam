@@ -154,6 +154,20 @@ judge_calibrations = Table(
     Index("ix_martian_judge_calibrations_judge", "space", "project_id", "judge", "version", "created_at"),
 )
 
+calibration_rechecks = Table(
+    "martian_calibration_rechecks",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("judge", String(ID), nullable=False),
+    Column("version", String(40), nullable=False),
+    Column("state", String(20), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_calibration_rechecks_judge", "space", "project_id", "judge", "created_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -165,4 +179,5 @@ TABLES = (
     dataset_draft_cases,
     saved_views,
     judge_calibrations,
+    calibration_rechecks,
 )

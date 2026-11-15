@@ -17,7 +17,9 @@ from pydantic import BaseModel, ConfigDict
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
-EventKind = Literal["run", "case_results", "scores", "scoring_job", "review", "suite", "draft", "view", "calibration"]
+EventKind = Literal[
+    "run", "case_results", "scores", "scoring_job", "review", "suite", "draft", "view", "calibration", "recheck"
+]
 
 
 class Event(BaseModel):

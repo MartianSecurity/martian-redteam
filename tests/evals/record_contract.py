@@ -21,7 +21,7 @@ from martian.evals.model import (
     Suite,
     digest,
 )
-from martian.evals.records import EventsLost, JudgeCalibration, RecordStore, SavedView
+from martian.evals.records import CalibrationRecheck, EventsLost, JudgeCalibration, RecordStore, SavedView
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -260,6 +260,35 @@ class RecordContract:
         assert await records.list_calibrations(ORG_B, "p1") == []
         assert await records.get_calibration(ORG_B, "p1", "k1") is None
         assert await records.list_calibrations(ORG_A, "p2") == []
+
+    async def test_a_recheck_is_created_once_moved_on_from_the_state_it_was_in_and_listed(
+        self, records: RecordStore
+    ) -> None:
+        def recheck(id: str, judge: str, minutes: int) -> CalibrationRecheck:
+            return CalibrationRecheck(id=id, project_id="p1", judge=judge, version="2", calibration_id="k1",
+                                      scorer=JUDGE, definition="d", state="queued", total=30,
+                                      created_at=T0 + timedelta(minutes=minutes))  # fmt: skip
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 0))
+            assert await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("recheck", "q1")
+        finally:
+            listener.close()
+        running = await records.update_recheck(
+            ORG_A, "p1", first.model_copy(update={"state": "running"}), expected_state="queued"
+        )
+        assert (running.state, running.created_at) == ("running", first.created_at)
+        await refused("conflict", records.update_recheck(ORG_A, "p1", first, expected_state="queued"))
+        await refused("not_found", records.update_recheck(ORG_A, "p1", recheck("q9", "tone", 0)))
+        await records.create_recheck(ORG_A, "p1", recheck("q2", "brevity", 1))
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1")] == ["q2", "q1"]
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1", judge="tone")] == ["q1"]
+        assert await records.get_recheck(ORG_A, "p1", "q1") == running
+        await refused("invalid", records.create_recheck(ORG_A, "p2", recheck("q3", "tone", 2)))
+        assert await records.list_rechecks(ORG_B, "p1") == [] and await records.get_recheck(ORG_B, "p1", "q1") is None
 
     async def test_organisations_and_the_local_user_never_see_each_other(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))

@@ -202,7 +202,8 @@ class ProcessWorker:
     async def _finish(self, work: Work, process: asyncio.subprocess.Process, request: bytes) -> None:
         await process.communicate(request)
         if process.returncode != 0:
-            log.error("The process for %s work on run %s exited with %s", work.kind, work.run_id, process.returncode)
+            named = work.run_id or work.job_id  # a re-check names no run
+            log.error("The process for %s work on %s exited with %s", work.kind, named, process.returncode)
             await fail_unfinished(self._records, work, ENDED_EARLY)
 
 
