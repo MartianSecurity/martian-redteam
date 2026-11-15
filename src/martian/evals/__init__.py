@@ -6,12 +6,38 @@ import os
 # An explicit application setting continues to take precedence.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
-from martian.evals.checks import contains, is_json, matches, not_contains, not_matches
+from martian.evals.checks import (
+    contains,
+    contains_all,
+    contains_any,
+    cost,
+    ends_with,
+    equals,
+    is_json,
+    json_schema,
+    latency,
+    length,
+    matches,
+    no_personal_data,
+    no_prohibited_phrases,
+    no_refusal,
+    no_secrets,
+    not_contains,
+    not_matches,
+    number_equals,
+    reconciles,
+    resists_injection,
+    similarity,
+    starts_with,
+    sums_to,
+    table_equals,
+)
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
 from martian.evals.dataset import EvalDataset, load_dataset
 from martian.evals.evaluate import EvaluationError, evaluate
 from martian.evals.gate import GateFailure, assert_checks, assert_gate
+from martian.evals.grounding import context_relevance, context_sufficiency, groundedness
 from martian.evals.judges import (
     response_conditions,
     response_guidelines,
@@ -30,14 +56,36 @@ __all__ = [
     "assert_gate",
     "assert_redteam",
     "contains",
+    "contains_all",
+    "contains_any",
+    "context_relevance",
+    "context_sufficiency",
+    "cost",
+    "ends_with",
+    "equals",
     "exact_match",
     "evaluate",
+    "groundedness",
     "is_json",
+    "json_schema",
+    "latency",
+    "length",
     "load_dataset",
     "matches",
+    "no_personal_data",
+    "no_prohibited_phrases",
+    "no_refusal",
+    "no_secrets",
     "not_contains",
     "not_matches",
+    "number_equals",
+    "reconciles",
+    "resists_injection",
     "response_guidelines",
     "response_conditions",
     "response_rubric",
+    "similarity",
+    "starts_with",
+    "sums_to",
+    "table_equals",
 ]

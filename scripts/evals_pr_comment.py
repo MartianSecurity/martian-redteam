@@ -102,6 +102,12 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases, {summary['passed']} passed, "
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
+        ]
+        # A suite whose checks a refusal passes says how many benign cases were refused, next to
+        # the pass count, so a model that refuses everything cannot look as if it passed.
+        if (refusals := summary.get("false_refusals")) is not None:
+            lines += [false_refusals(refusals), ""]
+        lines += [
             "| Check | Passed | Failed | Errors |",
             "| --- | ---: | ---: | ---: |",
         ]
@@ -126,6 +132,24 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
     footer.append("Updated on every push")
     lines.append(" · ".join(footer))
     return "\n".join(lines) + "\n"
+
+
+def false_refusals(found: dict[str, Any]) -> str:
+    """The same line `martian evals run` prints under its table."""
+    if not found["checks"]:
+        return (
+            "False refusals: not measured. A reply that refuses everything passes these checks; "
+            "add a no_refusal check and mark the benign cases."
+        )
+    if not found["benign"] and not found["errors"]:
+        return "False refusals: not measured. No case is marked benign."
+    line = "False refusals: not measured"
+    if found["benign"]:
+        case = "case" if found["benign"] == 1 else "cases"
+        line = f"False refusals: {found['refused']} of {found['benign']} benign {case} refused ({found['rate']:.1%})"
+    if found["errors"]:
+        line += f"; {found['errors']} benign {'case' if found['errors'] == 1 else 'cases'} without a verdict"
+    return line + "."
 
 
 def _table(
