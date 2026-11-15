@@ -25,6 +25,9 @@ passing local results. Keep its typed receipt, report and probe checkpoints with
   threshold affects required pass rates; it never excuses absent scores/errors.
 - The persisted runner rejects ignored target/infrastructure failures, skipped or
   deselected coverage and empty required suites. Caught gate exceptions still fail.
+- The pytest gate's `evaluate(...)` gives each `predict_fn` call a time limit,
+  `target_timeout_seconds` (default 120); a call that outlasts it is that case's error and the
+  gate fails closed on it. See [Evals](evals.md).
 - Dataset outputs are canonically re-scored by Backend. Inline checks and redteam
   judgments remain declared client-executed/client-scored evidence, with catalog,
   graph/policy revisions and operation IDs; a CI upload is not binary attestation.
