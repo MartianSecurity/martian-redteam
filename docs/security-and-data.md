@@ -115,6 +115,28 @@ included; a run records the key only as the reference `${MARTIAN_TARGET_KEY}`. A
 cannot point an existing target, and so its key, at another address: a target cannot be edited.
 They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
 
+## What a run response shows
+
+The record store keeps a run's whole provenance for the server; the evals core's routes show
+only what a run's readers may see, through one allowlist of keys
+([run provenance](evals-core.md#run-provenance)). Every route that answers with a run or with
+its provenance, in the hosted server's core and in the local edition alike, leaves out:
+
+- the CI token that uploaded a CI run, its id and its name (`token_id`, `token_name`), and the
+  digests of the upload request and of its items (`request_digest`, `items_digest`), which the
+  server's CI gate records in the run's `provenance.ci`. A CI run's attribution is shown as its
+  `ci` with the public keys only: commit, ref, repository, workflow run URL, kit version,
+  threshold and minimum coverage;
+- anything a worker pins with a target beyond its kind, id, name and digest, such as a registered
+  agent's connection and approval;
+- any key the allowlist does not name, whoever writes it.
+
+Other things the routes show whole are what the server shows as well: a score's metadata (an
+assessment's `provenance`: the judge's model, versions, digests of what it read and its usage,
+never a key, which a judge request does not carry) and a trace's tags and metadata, which the
+traced application or the worker records. A target's URL and headers, a suite's run settings and
+a judge model's endpoint are not in a run response.
+
 ## What store errors contain
 
 An error of the evals store or the record store never quotes what was written. When either

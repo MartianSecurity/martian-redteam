@@ -11,6 +11,9 @@ stay a port of the server's and the mapping is in one place:
   each is the same in every response.
 - A person is named by a UUID (``user_out``): their id when it is one, else one derived from it,
   so the local user ``local`` has an id the routes that take a user accept.
+- A run's provenance is shown only through an allowlist of what its readers see
+  (``reader_provenance``); the record store keeps the rest, such as a CI run's token and digests,
+  for the server.
 - A case's text (``prompt``, ``expected``, ``output``) is what the server shows: the first text
   under ``message``, ``prompt``, ``question`` or ``content`` of the inputs, and under
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
@@ -244,6 +247,40 @@ def agent_of(run: Run) -> str | None:
     return target.agent_id if target and target.kind == "agent" and target.agent_id else None
 
 
+READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
+    "dataset": ("id", "name", "digest", "content_sha256"),
+    "agent": ("id", "artifact_revision", "revision_source"),
+    "model_version": None,
+    "prompt_version": None,
+    "target": ("kind", "agent_id", "name", "digest"),
+    "suite": ("id", "version", "version_id", "name", "digest", "model_judges"),
+    "repeats": ("attempts", "combine", "checks"),
+    "repeat_of": None,
+    "sdk_version": None,
+}
+"""What of a run's provenance its readers see: each key, with the keys of its object, or None for a
+key whose value is text, a number, a boolean or null. Anything else a run's provenance holds stays
+in the record store for the server's own use: a CI run's ``ci``, with the CI token's id and name and
+the digests of the upload request and its items (the run routes show its public keys as ``ci``),
+and whatever else a worker pins with a target, such as a registered agent's connection and
+approval."""
+
+
+def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
+    """The part of a run's provenance that its readers see (:data:`READER_PROVENANCE`). Every route
+    that answers with a run, or with its provenance, shows this and never the rest."""
+    shown: dict[str, Any] = {}
+    for key, keys in READER_PROVENANCE.items():
+        if key not in provenance:
+            continue
+        value = provenance[key]
+        if keys is None and (value is None or isinstance(value, str | int | float | bool)):
+            shown[key] = value
+        elif keys is not None and isinstance(value, dict):
+            shown[key] = {name: value[name] for name in keys if name in value}
+    return shown
+
+
 def _run_fields(run: Run, agent_name: str | None) -> dict[str, Any]:
     target = run.target
     ci = run.provenance.get("ci") if isinstance(run.provenance.get("ci"), dict) else dict(run.provenance)
@@ -260,7 +297,7 @@ def _run_fields(run: Run, agent_name: str | None) -> dict[str, Any]:
         "project_id": project_out(run.project_id),
         "max_items": run.max_cases if run.max_cases is not None else run.counts.cases,
         "planned_count": run.counts.cases,
-        "provenance": dict(run.provenance),
+        "provenance": reader_provenance(run.provenance),
         "truncated": run.truncated,
         "passed": run.counts.passed,
         "failed": run.counts.failed,
@@ -280,7 +317,8 @@ def _run_fields(run: Run, agent_name: str | None) -> dict[str, Any]:
 
 def run_out(run: Run, agent_name: str | None = None) -> EvalRunOut:
     """A run in the contract's shape. ``agent_name`` is its agent's display name, when the edition
-    can name it; a CI run's ``ci`` is its provenance's ``ci``, or its whole provenance."""
+    can name it; ``provenance`` is :func:`reader_provenance`; a CI run's ``ci`` is the public keys
+    of its provenance's ``ci``, or of its whole provenance (``EvalRunOut.public_ci``)."""
     return EvalRunOut(**_run_fields(run, agent_name))
 
 

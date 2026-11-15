@@ -40,6 +40,7 @@ from martian.evals.server.projection import (
     project_key,
     public_job,
     queue_out,
+    reader_provenance,
     reliability_out,
     result_id,
     run_detail,
@@ -297,7 +298,7 @@ async def attempts(
     # their responses are typed in the frozen contract.
     run = await find_run(store, records, principal, run_id)
     results = await run_results(records, principal, run)
-    repeats = run.provenance.get("repeats")
+    repeats = reader_provenance(run.provenance).get("repeats")
     items = [attempts_out(result) for result in results]
     return {
         "run_id": run.id,
@@ -403,8 +404,9 @@ async def workbench(
 async def provenance(
     run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep
 ) -> dict[str, Any]:
-    # The run as it was admitted, and its run in the store.
+    # The run as it was admitted, as far as its readers see it, and its run in the store.
     run = await find_run(store, records, principal, run_id)
+    admission = reader_provenance(run.provenance)
     try:
         native = await store.get_run(principal, run.project_id, run.id)
     except StoreError as error:
@@ -412,11 +414,11 @@ async def provenance(
             raise
         native = None
     if native is None:
-        return {"admission": run.provenance, "native": None, "note": NOT_PERSISTED}
+        return {"admission": admission, "native": None, "note": NOT_PERSISTED}
     if native.id != run.id or native.dataset_digest != run.dataset_digest:
         raise HTTPException(409, "Native run provenance differs from its admission")
     return {
-        "admission": run.provenance,
+        "admission": admission,
         "native": {
             "id": native.store.run_id or native.id,
             "status": RUN_STATUS[native.state],
