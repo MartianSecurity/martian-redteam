@@ -46,6 +46,10 @@ def isolated_martian_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     patch = pytest.MonkeyPatch()
     patch.setenv("HOME", str(home))
     patch.setenv("MARTIAN_EVALS_HOME", str(base / "evals"))
+    # CI runners force coloured output (FORCE_COLOR); the command line's help and error text
+    # would then carry ANSI codes that split the words tests look for.
+    patch.delenv("FORCE_COLOR", raising=False)
+    patch.setenv("NO_COLOR", "1")
     try:
         yield home
     finally:
