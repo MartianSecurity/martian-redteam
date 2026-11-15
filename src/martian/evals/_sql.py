@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 
+from martian.evals._digits import ascii_digits
 from martian.evals.store import StoreError
 
 _SCHEMA = re.compile(r"[a-z_][a-z0-9_]{0,62}")
@@ -89,7 +90,7 @@ def database_refusal(operation: str, error: DBAPIError) -> StoreError:
             where += f".{column}"
     reason = [type(original).__name__]
     if isinstance(code, str) and _CODE.fullmatch(code):
-        reason.append(f"SQLSTATE {code}" if code[0].isdigit() else code)
+        reason.append(f"SQLSTATE {code}" if ascii_digits(code[0]) else code)
     if isinstance(constraint, str) and _NAME.fullmatch(constraint):
         reason.append(f"constraint {constraint}")
     said, table_name = ", ".join(reason), where or "a table"
