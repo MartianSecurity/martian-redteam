@@ -17,7 +17,9 @@ Replace `<version>` with a release listed on PyPI.
 the hosted MLflow server, so this pin is independent of the server's version,
 which MartianSecurity/martian-evals sets. The base installation supports redteam
 callbacks and local reports. The SDK reaches MLflow internals only through
-`src/martian/evals/_mlflow.py`, which lists each one. Before moving the pin, run
+`src/martian/evals/_mlflow.py`, which lists each one. The exception is the process
+a function target runs in, which never imports the evals package and imports the
+two its tracing needs itself; `_mlflow.py` lists those too. Before moving the pin, run
 the [MLflow compatibility suite](development.md#mlflow-upgrades) on the
 candidate release.
 The separate `mcp` extra adds the existing customer MCP integration.
