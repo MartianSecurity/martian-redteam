@@ -232,7 +232,7 @@ The core adds two read routes of its own, which the server's contract does not h
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
-| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
+| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case, not a person's answer of the same name) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -248,7 +248,9 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   and review queues, and MLflow's form (`tr-` and 32 hex digits) for traces, so the objects these
   routes serve need ids in those forms; a run with another id cannot be read through them. A case
   result has no id of its own: its `id` is a UUID derived from its run and case ids, and a score's
-  `id` one derived from its run, case, scorer and scoring job (`result_id`, `score_id`). A run is
+  `id` one derived from its key in the record store: run, case, scorer, scoring job and source
+  (`result_id`, `score_id`). A person's score leaves the source out, so the `assessment_id` a
+  review recorded for its answer before the source joined the key still names it. A run is
   found by id in the default project, then in each of the store's projects. The run routes match
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
 - **Users.** The API names a person by a UUID (`projection.user_out`): their id when it is one, as
@@ -495,7 +497,10 @@ All paths are under `/v1/evals`. How the core carries them out:
   names, so any other is `422`, and `GET /scorers` does not offer one (MartianSecurity/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
-  complete review also stores the answer as a human score, on the case's trace too. Only a role
+  complete review also stores the answer as a human score, on the case's trace too. That score
+  sits beside the run's own check or judge score of the same name, such as a queue question named
+  like a check, and never replaces it: the workbench lists both, each with its own `id` and
+  `source`, and the review's `assessment_id` names the person's. Only a role
   with `assignReviews` gives another person's work to someone; the core knows no membership, so
   an assignee is any user, named as **Users** above says.
 - **Review queues and questions.** A queue lives in the store with one item per case's trace, so
@@ -555,7 +560,9 @@ serves its own `/monitors` routes ([monitors](#monitors)) and `/schedules` route
 
 `tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
-deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
+deterministic judge; it answers a review question named like the run's exact-match check with
+the record store on SQLite, and on Postgres when `MARTIAN_TEST_POSTGRES_URL` is set, and checks
+that both scores stay. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
 operation of the contract but the ones above. `tests/evals/test_user_ids.py` saves a review from
 `martian ui`'s application with the UI's default reviewer, the session's user, and checks that
@@ -2443,6 +2450,13 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   case has both or neither: the worker's checkpoint of each finished case
   ([checkpoints and resuming](#checkpoints-and-resuming)), and how `martian evals run` records each
   batch.
+- A case keeps one score per scorer, scoring job and source (`martian_scores`' key): a scoring
+  job's scores sit beside the run's own, and a person's answer beside a check's or a judge's score
+  of the same name, so neither replaces the other. Migration `0010` adds `source` to the key,
+  filled from each score's record in every organisation (on Postgres the table stops forcing
+  row-level security for that, in the migration's transaction). Going back keeps one score per
+  scorer and scoring job: of scores that differ only by source, a judge's, else a check's; a
+  person's goes, and its review still holds the answer.
 - A write the database refuses is a `StoreError` naming the method and the table: a duplicate
   key, such as a run two writers create at once, is a `conflict`, and any other refused value,
   such as a case position beyond Postgres's `integer`, is `invalid`. Any other database failure,
