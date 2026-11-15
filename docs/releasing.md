@@ -94,8 +94,6 @@ publish.** Before dispatching a release with `publish: true` for a version that 
    The first push creates `ghcr.io/morninghq/martian-evals`, linked to this repository by its
    `org.opencontainers.image.source` label, and private like the repository. Make it public at
    the open-source launch.
-3. Settle the UI's licence ([below](#the-evals-ui-in-the-wheel)); the image ships the same UI as
-   the wheel.
 
 ## The Evals UI in the wheel
 
@@ -145,11 +143,12 @@ any file that differs.
 to about 640 KB, and the sdist from about 410 KB to about 860 KB. `ls -l dist` after `uv build`
 shows the current figures.
 
-**Licences.** `third-party-licenses.md` in the build holds the licences of the packages bundled in
-it: MIT, ISC and Apache-2.0, and OFL-1.1 for the Inter font. The wheel's bill of materials lists
-those packages from it ([below](#bills-of-materials-and-the-licence-check)). The Evals app's own
-packages in the frontend carry no licence yet (MorningHQ/martian-notes#220); settle that before
-publishing a release that ships the UI.
+**Licences.** The build's own code is the `@martian/evals`, `@martian/design-system` and
+`@martian/client` packages of the frontend, which are Apache-2.0; `NOTICE` attributes them, with the
+MIT notice of the shadcn/ui code in the design system. `third-party-licenses.md` in the build holds
+the licences of the third-party packages bundled in it: MIT, ISC and Apache-2.0, and OFL-1.1 for the
+Inter font. The wheel's bill of materials lists the UI under Apache-2.0 and those packages from
+that file ([below](#bills-of-materials-and-the-licence-check)). The image ships the same UI.
 
 ## Bills of materials and the licence check
 
@@ -180,7 +179,9 @@ CI's `packaging` job runs `sbom.py wheel` on every pull request. The policy has,
   licence the metadata does not name (such as "BSD License", which names no variant) and no
   licence all fail.
 - **`first_party`**: `martian-sdk` and the `@martian/*` packages of the Evals UI, which are ours and
-  not checked.
+  not held to the allowed list. The `@martian/*` entry names Apache-2.0: the build's
+  `ui-version.json` names no licence, so the bill records the UI under that one, and a `@martian/*`
+  component that declared another licence would fail.
 - **`concluded`**: a component whose metadata does not name an SPDX licence, with the licence read
   from its licence file. It applies only while the metadata declares the text it was reviewed
   against, and the concluded licence must itself be allowed. Today: `gitdb`, `pyasn1-modules` and
