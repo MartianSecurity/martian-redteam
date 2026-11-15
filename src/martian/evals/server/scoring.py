@@ -55,7 +55,9 @@ from martian.evals.server.quality import definition_digest, scorecard
 from martian.evals.server.runs import find_run, project_runs, run_results, writable_key
 from martian.evals.server.write_schemas import ScoreRequest
 from martian.evals.store import EvalStore, StoreError
-from martian.evals.worker import Work, Worker
+
+# `execute` as a module: the worker package imports these routes while it is importing it.
+from martian.evals.worker import Work, Worker, execute
 from martian.evals.worker.scorers import BUILTIN_SCORERS, CODE_SCORERS, JUDGE_SCORERS, builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -230,8 +232,10 @@ async def score(
     )
     if job.run_id != run.id:
         raise HTTPException(409, "request_id belongs to a different scoring request")
-    await worker.submit(
-        Work(kind="scoring", principal=principal, project_id=run.project_id, run_id=run.id, job_id=job.id)
+    await execute.submit_or_fail(
+        worker,
+        records,
+        Work(kind="scoring", principal=principal, project_id=run.project_id, run_id=run.id, job_id=job.id),
     )
     return public_job(job)
 

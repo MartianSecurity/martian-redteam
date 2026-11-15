@@ -24,9 +24,17 @@ Each process builds what it runs the work with by calling the worker's *setup*: 
 function, named by its import path so that the new process can import it, which takes the
 worker's ``options`` (JSON) as keyword arguments and returns :class:`WorkerServices`. The work
 reaches the process as JSON on its standard input (:func:`dump_work`), never on its command line,
-with the worker's HTTP targets as written. Their credentials come from the setup's
+with the HTTP target its run names, as written. Its credentials come from the setup's
 ``credentials``, in that process. A process that exits with an error leaves no work queued or
 running: the worker marks it ``failed``.
+
+Under a :class:`~martian.evals.worker.queue.QueueWorker`, which calls :meth:`ProcessWorker.run`,
+the run's process ends with the process that started it, the one holding the work's claim in the
+queue: it keeps the read end of a pipe from that process open as its standard input, and exits
+as soon as the pipe closes, however that process ended. It runs in a session of its own, so a
+signal meant for that process, such as the terminal's Ctrl+C, reaches only that process, which
+ends it. So the run's process never outlives the claim, and the worker that takes the work next
+is the only one running it.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +70,9 @@ UNSELECTED = ("MLFLOW_EXPERIMENT_ID", "MLFLOW_EXPERIMENT_NAME")
 """Selections a run's process never inherits from the process that starts it."""
 
 ENDED_EARLY = "The worker process ended before this work finished"
+NOT_STARTED = "The worker could not start a process for this work"
+PARENT_GONE = 3
+"""The exit status of a run's process that stopped because the process that started it ended."""
 WRONG_WORKSPACE = (
     "martian.evals.worker: this process's MLflow workspace is not the work's organisation's; "
     "ProcessWorker fixes it when it starts the process"
@@ -137,9 +149,10 @@ class ProcessWorker:
     the ids of the functions its targets call, which :meth:`check_target` accepts, and ``judges``
     says whether it gives a judge. ``targets`` are the HTTP targets the worker calls itself, by
     id; they are read at each check and each run, so they may be a live view, and each run's
-    process receives them with its work. ``executor`` admits the registered agents, which each
+    process receives the one its run names with its work. ``executor`` admits the registered agents, which each
     run's process calls through its setup's executor. ``records`` is this process's record store,
-    used only to mark work failed when its process exits with an error.
+    used to find the target a run names and to mark work failed when its process exits with an
+    error.
     """
 
     def __init__(
@@ -174,13 +187,64 @@ class ProcessWorker:
 
     async def submit(self, work: Work) -> None:
         """Start the work's process and return; the process runs the work."""
-        targets = {key: http_target(value).model_dump(mode="json") for key, value in self._targets.items()}
+        process, request = await self._start(work, tied=False)
+        task = asyncio.get_running_loop().create_task(self._finish(work, process, request))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def run(self, work: Work) -> None:
+        """Run the work in a process of its own and return once that process has ended
+        (:class:`~martian.evals.worker.Runner`). The process ends with this one, and when ``run``
+        is cancelled it is ended at once and the work is left as it is, for the queue to give to
+        the next worker. A process that exits with an error fails the work, as with ``submit``, and
+        so does one that cannot start, such as for a target the worker now refuses."""
+        try:
+            process, request = await self._start(work, tied=True)
+        except Exception:  # noqa: BLE001 - work that cannot start must not wait in the queue
+            log.exception("The process for %s work on run %s could not start", work.kind, work.run_id)
+            await fail_unfinished(self._records, work, NOT_STARTED)
+            return
+        assert process.stdin is not None
+        try:
+            process.stdin.write(request + b"\n")
+            await process.stdin.drain()
+            await process.wait()
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        finally:
+            process.stdin.close()
+        await self._check_exit(work, process)
+
+    async def drain(self) -> None:
+        """Wait until every process started so far has exited."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks))
+
+    async def _named_target(self, work: Work) -> dict[str, Any]:
+        """The HTTP target the work's run names, as written, when it is one of this worker's: the
+        only target the run's process receives, so a target the run does not name is never read or
+        checked. ``check_target`` checked this one before the run was recorded."""
+        if work.kind != "run":
+            return {}
+        run = await self._records.get_run(work.principal, work.project_id, work.run_id)
+        named = run.target.agent_id if run is not None and run.target is not None else None
+        if named is None or named not in self._targets:
+            return {}
+        return {named: http_target(self._targets[named]).model_dump(mode="json")}
+
+    async def _start(self, work: Work, *, tied: bool) -> tuple[asyncio.subprocess.Process, bytes]:
+        """Start the work's process and return it with the request to send it. A ``tied`` process
+        has a session of its own and ends when its standard input closes."""
         request = json.dumps(
             {
                 "setup": self._setup,
                 "options": self._options,
                 "work": dump_work(work),
-                "targets": targets if work.kind == "run" else {},
+                "targets": await self._named_target(work),
+                "tied": tied,
             }
         )
         process = await asyncio.create_subprocess_exec(
@@ -189,18 +253,15 @@ class ProcessWorker:
             "martian.evals.worker",
             stdin=asyncio.subprocess.PIPE,
             env=_environment(work.principal),
+            start_new_session=tied,
         )
-        task = asyncio.get_running_loop().create_task(self._finish(work, process, request.encode()))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def drain(self) -> None:
-        """Wait until every process started so far has exited."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks))
+        return process, request.encode()
 
     async def _finish(self, work: Work, process: asyncio.subprocess.Process, request: bytes) -> None:
         await process.communicate(request)
+        await self._check_exit(work, process)
+
+    async def _check_exit(self, work: Work, process: asyncio.subprocess.Process) -> None:
         if process.returncode != 0:
             log.error("The process for %s work on run %s exited with %s", work.kind, work.run_id, process.returncode)
             await fail_unfinished(self._records, work, ENDED_EARLY)
@@ -226,11 +287,21 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
     await worker.drain()
 
 
+def _end_with_parent() -> None:
+    """Exit with :data:`PARENT_GONE` once standard input closes: the process that started this one
+    has ended."""
+    sys.stdin.read()
+    os._exit(PARENT_GONE)
+
+
 def main() -> int:
     """``python -m martian.evals.worker``: run the piece of work on standard input in this process,
     then exit. ``ProcessWorker`` starts it. Exit status 0 means the work ran, whatever its outcome,
-    which its record holds; 2 means this process's workspace is not the work's organisation's."""
-    request = json.loads(sys.stdin.read())
+    which its record holds; 2 means this process's workspace is not the work's organisation's, and
+    3 that it stopped because the process that started it ended (a tied process)."""
+    request = json.loads(sys.stdin.readline())
+    if request.get("tied"):
+        threading.Thread(target=_end_with_parent, name="martian-parent-watch", daemon=True).start()
     work = load_work(request["work"])
     if os.environ.get(WORKSPACE_ENV) != workspace_name(work.principal):
         print(WRONG_WORKSPACE, file=sys.stderr)

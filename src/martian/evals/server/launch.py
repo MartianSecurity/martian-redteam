@@ -46,7 +46,9 @@ from martian.evals.server.runs import find_run, lookup_run, project_keys, projec
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
-from martian.evals.worker import InterruptedRuns, Work, Worker
+
+# `execute` as a module: the worker package imports these routes while it is importing it.
+from martian.evals.worker import InterruptedRuns, Work, Worker, execute
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -152,7 +154,9 @@ async def admit_run(
         store=StoreRef(dataset_id=dataset.id),
     )
     run = await records.create_run(principal, run)
-    await worker.submit(Work(kind="run", principal=principal, project_id=project, run_id=run.id))
+    await execute.submit_or_fail(
+        worker, records, Work(kind="run", principal=principal, project_id=project, run_id=run.id)
+    )
     return run
 
 

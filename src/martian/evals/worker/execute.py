@@ -17,6 +17,8 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   is no longer running (someone else failed or finished it) ends it without another write.
 - Every move from one state to the next names the state it expects, so two workers never both take
   the same work. Work that fails part way is marked ``failed`` with the reason, never left running.
+  Work whose worker stopped part way is queued again by the queue's next worker (:func:`take_over`),
+  or failed when there is no queue to take it again (:func:`fail_unfinished`).
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_
 from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
-from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work
+from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work, Worker
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
 
 if TYPE_CHECKING:
@@ -69,6 +71,8 @@ JUDGE_MODEL_VERSION_KEY = "martian.judge.model_version"
 JUDGE_ENDPOINT_KEY = "martian.judge.endpoint"
 JUDGE_VERSION_KEY = "martian.judge.version"
 JUDGE_ERROR_LENGTH = 500
+INTERRUPTED = "Interrupted: the process working on this run stopped before it finished"
+NOT_ACCEPTED = "The worker did not accept this work, so nothing ran"
 
 
 def _now() -> datetime:
@@ -107,7 +111,9 @@ async def execute_run(
     if run is None or run.state != "queued":
         return
     if run.cancel_requested_at is not None:
-        await _move_run(records, principal, run, {"state": "cancelled", "finished_at": _now()}, "queued")
+        moved = await _move_run(records, principal, run, {"state": "cancelled", "finished_at": _now()}, "queued")
+        if moved is not None and run.store.run_id is not None:  # started by a worker that stopped (take_over)
+            await store.finish_run(principal, run.project_id, run.id, state="cancelled", counts=run.counts)
         return
     try:
         run = await records.update_run(
@@ -583,6 +589,48 @@ async def _score_results(
 
 
 # --- work whose worker stopped --------------------------------------------------------------
+
+
+async def take_over(records: RecordStore, work: Work) -> None:
+    """Queue ``work`` again when the worker that was running it stopped before it finished, such as
+    one whose process died: a run or scoring job still ``running`` becomes ``queued``, so the
+    worker taking it now runs it from the start. A run's cases are called again and replace the
+    results its first worker recorded (case-level checkpoints are MorningHQ/martian-notes#141).
+
+    Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
+    A finished or queued record is left alone."""
+    principal, project = work.principal, work.project_id
+    if work.kind == "run":
+        run = await records.get_run(principal, project, work.run_id)
+        if run is not None and run.state == "running":
+            await _move_run(records, principal, run, {"state": "queued"}, "running")
+        return
+    job = await _job(records, principal, project, work.run_id, work.job_id or "")
+    if job is not None and job.state == "running":
+        await _move_job(records, principal, project, job, {"state": "queued"}, "running")
+
+
+async def interrupt(records: RecordStore, principal: Principal, run: Run, state: RunState) -> Run:
+    """Finish ``run``, queued or running, which nothing is working on any more, as ``state``
+    (``failed``, or ``cancelled`` when someone asked to stop it) with :data:`INTERRUPTED` as its
+    error. Raises ``StoreError`` (``conflict``) when the run changed meanwhile."""
+    now = _now()
+    changes: dict[str, Any] = {"state": state, "error": INTERRUPTED, "finished_at": now}
+    if state == "cancelled":
+        changes["cancel_requested_at"] = run.cancel_requested_at or now
+    return await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
+
+
+async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> None:
+    """``worker.submit(work)``, for a route that has just recorded the work ``queued``. If the worker
+    refuses it or fails, the record is marked ``failed`` with :data:`NOT_ACCEPTED` and the error is
+    raised again, so a failed submit never leaves a run or scoring job queued, which would block
+    the next launch or scoring request."""
+    try:
+        await worker.submit(work)
+    except Exception:
+        await fail_unfinished(records, work, NOT_ACCEPTED)
+        raise
 
 
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:

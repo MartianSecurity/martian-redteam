@@ -132,8 +132,11 @@ class SqlRecordStore:
 
         return await asyncio.to_thread(transaction)
 
-    def _emit(self, principal: Principal, kind: Any, project_id: str, record_id: str) -> None:
-        self.events.publish(space_of(principal), Event(kind=kind, project_id=project_id, id=record_id))
+    def _emit(
+        self, principal: Principal, kind: Any, project_id: str, record_id: str, *, run_id: str | None = None
+    ) -> None:
+        event = Event(kind=kind, project_id=project_id, id=record_id, run_id=run_id)
+        self.events.publish(space_of(principal), event)
 
     @staticmethod
     def _one(connection: Connection, table: Table, space: str, project_id: str, **keys: Any) -> Any:
@@ -361,7 +364,7 @@ class SqlRecordStore:
 
         saved, created = await self._run(principal, work)
         if created:
-            self._emit(principal, "scoring_job", project_id, job.id)
+            self._emit(principal, "scoring_job", project_id, job.id, run_id=job.run_id)
         return saved
 
     async def update_scoring_job(
@@ -382,7 +385,7 @@ class SqlRecordStore:
             return saved
 
         saved = await self._run(principal, work)
-        self._emit(principal, "scoring_job", project_id, job.id)
+        self._emit(principal, "scoring_job", project_id, job.id, run_id=job.run_id)
         return saved
 
     async def list_scoring_jobs(self, principal: Principal, project_id: str, run_id: str) -> list[ScoringJob]:
