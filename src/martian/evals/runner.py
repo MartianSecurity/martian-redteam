@@ -677,12 +677,6 @@ def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any]
     return call
 
 
-def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
-    if reference.url is not None:
-        return _http_target(reference, input_key)
-    return _load_function(reference, base)
-
-
 def _load_function(reference: TargetRef, base: Path) -> Callable[..., Any]:
     """A function target's function, its file imported once."""
     file = Path(reference.file or "")
