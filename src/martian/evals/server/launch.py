@@ -9,6 +9,9 @@ read, and submits it to the worker. The worker calls the target later; the reque
   request again returns the same run, and the same ``request_id`` with other parameters is ``409``.
 - One run at a time per organisation: another queued or running run is ``409``.
 - Run codes count up from ``EV-1001``, as on the server.
+- Cancelling a queued run finishes it at once. A running one gets ``cancel_requested_at``, which its
+  worker reads before the next case, or is cancelled at once when its worker says that nothing is
+  working on it any more (:class:`~martian.evals.worker.InterruptedRuns`).
 
 :func:`admit_run` is the admission itself, which the local edition's launch and run again share
 (:mod:`martian.evals.local_runs`).
@@ -30,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from martian.evals.model import DatasetVersion, Run, RunState, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
+    OptionalWorkerDep,
     PrincipalDep,
     RecordsDep,
     StoreDep,
@@ -42,7 +46,7 @@ from martian.evals.server.runs import find_run, lookup_run, project_keys, projec
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
-from martian.evals.worker import Work, Worker
+from martian.evals.worker import InterruptedRuns, Work, Worker
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -182,25 +186,38 @@ async def request_run(
     return run_out(run)
 
 
+async def _cancel_interrupted(worker: Worker | None, principal: Principal, run: Run) -> Run | None:
+    """The running ``run`` cancelled at once, when its worker says nothing is working on it any
+    more (``InterruptedRuns``), or None."""
+    if run.state != "running" or run.finished_at is not None or not isinstance(worker, InterruptedRuns):
+        return None
+    return await worker.cancel_interrupted(principal, run)
+
+
 @router.post(
     "/{run_id:uuid}/cancel",
     response_model=EvalRunOut,
     status_code=202,
     dependencies=[Depends(require_capability("run"))],
 )
-async def cancel_eval(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunOut:
-    # A queued run is cancelled at once; a running one when its worker reaches the next case.
+async def cancel_eval(
+    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: OptionalWorkerDep
+) -> EvalRunOut:
+    # A queued run is cancelled at once; a running one when its worker reaches the next case, or at
+    # once when its worker says nothing is working on it any more, even if a stop was asked before.
     run = await find_run(store, records, principal, run_id)
     for _ in range(3):
-        if run.cancel_requested_at is not None:
-            return run_out(run)
-        if run.state not in ACTIVE or run.finished_at is not None:
-            raise HTTPException(409, "Execution has finished; its recorded results remain available")
-        now = _now()
-        changes: dict[str, object] = {"cancel_requested_at": now}
-        if run.state == "queued":
-            changes |= {"state": "cancelled", "finished_at": now}
         try:
+            if (stopped := await _cancel_interrupted(worker, principal, run)) is not None:
+                return run_out(stopped)
+            if run.cancel_requested_at is not None:
+                return run_out(run)
+            if run.state not in ACTIVE or run.finished_at is not None:
+                raise HTTPException(409, "Execution has finished; its recorded results remain available")
+            now = _now()
+            changes: dict[str, object] = {"cancel_requested_at": now}
+            if run.state == "queued":
+                changes |= {"state": "cancelled", "finished_at": now}
             return run_out(
                 await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
             )
