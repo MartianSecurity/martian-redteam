@@ -17,6 +17,14 @@ How the shared model sits in MLflow:
   spans, with the same rule for span ids. A trace's session and user are the trace metadata keys
   MLflow tracing records them in, ``mlflow.trace.session`` and ``mlflow.trace.user``, so traces an
   application records with MLflow tracing group into sessions without Martian's help.
+- A trace's request and response are kept as MLflow tracing keeps them: whole as the inputs and
+  outputs of the trace's root span, which the binding writes and does not read back as one of the
+  trace's spans, and as MLflow's previews in ``trace_info``, shortened to
+  :data:`TRACE_PREVIEW_LENGTH` characters. The trace's own spans are that root span's children in
+  MLflow. A search reads only the previews, so its text filter matches only them, and the trace's
+  metadata says which were shortened (``REQUEST_PREVIEW_TRUNCATED``). A trace an earlier release
+  wrote keeps its request and response whole in ``martian.request`` and ``martian.response``
+  metadata instead.
 - A trace belongs to the run its ``martian.run_id`` tag names. A trace without the tag that MLflow
   tracing recorded while a run's MLflow run was active names that MLflow run in its
   ``mlflow.sourceRun`` metadata, and belongs to that run; one recorded inside an MLflow run that is
@@ -39,6 +47,7 @@ of them in this process.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import re
@@ -68,6 +77,7 @@ from mlflow.genai.label_schemas import InputCategorical, InputNumeric, InputPass
 
 from martian.evals._mlflow import (
     RUN_ARTIFACT_URI_LENGTH,
+    TRACE_PREVIEW_LENGTH,
     ServerWorkspaceContext,
     SpansLocation,
     TraceTagKey,
@@ -109,7 +119,13 @@ from martian.evals.model import (
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import (
+    REQUEST_PREVIEW_TRUNCATED,
+    RESPONSE_PREVIEW_TRUNCATED,
+    StoreError,
+    StoreStatus,
+    check_session_search,
+)
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -126,6 +142,9 @@ LONGEST_ARTIFACT_ROOT = RUN_ARTIFACT_URI_LENGTH - len(f"/{'0' * 32}/artifacts")
 """The longest artifact root the store takes on Postgres, 157 characters: a run's artifact folder,
 the root and ``/<MLflow run id>/artifacts``, must fit in MLflow's ``runs.artifact_uri``. SQLite does
 not enforce the column's length, so it takes any root."""
+TRACE_SPAN_KEY = "martian.trace_span"
+"""The attribute that marks a trace's root span, the one the binding writes to hold the trace's
+request and response whole."""
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -529,7 +548,12 @@ class MlflowStore:
             if trace.run_id is not None:
                 self._mlflow_run(experiment.experiment_id, trace.run_id)
             mlflow_id = _mlflow_trace_id(trace.id)
-            metadata = dict(trace.metadata)
+            request_preview, request_shortened = _preview(trace.request)
+            response_preview, response_shortened = _preview(trace.response)
+            # The binding says which previews it shortened; a trace read back and recorded again
+            # brings the keys of the previews it had.
+            shortened = {REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED}
+            metadata = {key: value for key, value in trace.metadata.items() if key not in shortened}
             for key, value in (
                 (SESSION_KEY, trace.session_id),
                 (USER_KEY, trace.user_id),
@@ -539,8 +563,8 @@ class MlflowStore:
                     None if trace.tokens is None else json.dumps({"total_tokens": trace.tokens}),
                 ),
                 ("mlflow.trace.cost", None if trace.cost is None else json.dumps({"total_cost": trace.cost})),
-                ("martian.request", trace.request),
-                ("martian.response", trace.response),
+                (REQUEST_PREVIEW_TRUNCATED, "true" if request_shortened else None),
+                (RESPONSE_PREVIEW_TRUNCATED, "true" if response_shortened else None),
             ):
                 if value is not None:
                     metadata[key] = value
@@ -560,15 +584,24 @@ class MlflowStore:
                 request_time=_ms(trace.request_time) or _ms(datetime.now(UTC)) or 0,
                 state=TraceState(_TRACE_STATE[trace.state]),
                 execution_duration=None if trace.latency_ms is None else int(trace.latency_ms),
-                request_preview=trace.request[:1000],
-                response_preview=trace.response[:1000],
+                request_preview=request_preview,
+                response_preview=response_preview,
                 trace_metadata=metadata,
                 tags=tags,
             )
             self._store.start_trace(info)
-            if trace.spans:
-                spans = [_mlflow_span(mlflow_id, s, info.request_time) for s in trace.spans]
-                self._store.log_spans(experiment.experiment_id, spans)
+            root = _root_span(mlflow_id, trace, info.request_time)
+            spans = [_mlflow_span(mlflow_id, s, info.request_time, root.span_id) for s in trace.spans]
+            self._store.log_spans(experiment.experiment_id, [root, *spans])
+            if info.state in (TraceState.IN_PROGRESS, TraceState.STATE_UNSPECIFIED):
+                # MLflow gives a trace in either state the state of its root span. Written again,
+                # with the times MLflow took from the spans, the trace keeps its own.
+                spanned = self._store.get_trace_info(mlflow_id)
+                self._store.start_trace(
+                    dataclasses.replace(
+                        info, request_time=spanned.request_time, execution_duration=spanned.execution_duration
+                    )
+                )
 
         await self._call(principal, work)
         for score in trace.scores:
@@ -668,10 +701,17 @@ class MlflowStore:
                 info = self._trace_info(experiment.experiment_id, trace_id)
             except StoreError:
                 return None
-            # A trace recorded without spans has no spans to wait for, so a partial read is complete.
+            # The binding writes a trace's spans with it, so a partial read is complete.
             full: MlflowTrace = self._store.get_trace(info.trace_id, allow_partial=True)
             runs = self._run_ids(experiment.experiment_id, [info])
-            return _trace(info, project_id, spans=[_span(s) for s in full.data.spans], runs=runs)
+            root = next((s for s in full.data.spans if s.get_attribute(TRACE_SPAN_KEY) is True), None)
+            # MLflow orders spans root first, then by start time. Below the trace's root span the
+            # trace's own spans without a parent are no roots there, so they are put first again.
+            spans = sorted((_span(s) for s in full.data.spans if s is not root), key=lambda s: s.parent_id is not None)
+            found = _trace(info, project_id, spans=spans, runs=runs)
+            if root is None:  # written by an earlier release, or by MLflow tracing itself
+                return found
+            return found.model_copy(update={"request": root.inputs, "response": root.outputs})
 
         return await self._call(principal, work)
 
@@ -1033,7 +1073,47 @@ def _case(record: Any) -> tuple[int, Case]:
     )
 
 
-def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int) -> MlflowSpan:
+def _preview(text: str) -> tuple[str, bool]:
+    """MLflow's preview of a request or a response, and whether it is shortened: the text itself
+    when it fits MLflow's preview columns, otherwise its start and ``...``, as MLflow tracing
+    shortens its own previews (``mlflow.tracing.utils.truncation``)."""
+    if len(text) <= TRACE_PREVIEW_LENGTH:
+        return text, False
+    return text[: TRACE_PREVIEW_LENGTH - 3] + "...", True
+
+
+def _root_span(trace_id: str, trace: Trace, trace_start_ms: int) -> MlflowSpan:
+    """The trace's root span, as MLflow tracing records one: its inputs are the trace's request
+    and its outputs its response, whole, and its status the trace's state. It starts at the trace's
+    request time and ends after its latency, or stays open without one, so it moves neither."""
+    start = trace_start_ms * 1_000_000
+    code = {"ok": "STATUS_CODE_OK", "error": "STATUS_CODE_ERROR"}.get(trace.state, "STATUS_CODE_UNSET")
+    return MlflowSpan.from_dict(
+        {
+            "trace_id": trace_id,
+            "span_id": _hex(f"{trace_id}/root", 16),
+            "parent_span_id": None,
+            "name": trace.name,
+            "start_time_unix_nano": start,
+            "end_time_unix_nano": None if trace.latency_ms is None else start + int(trace.latency_ms * 1_000_000),
+            "status": {"code": code, "message": ""},
+            "attributes": {
+                "mlflow.traceRequestId": json.dumps(trace_id),
+                "mlflow.spanType": json.dumps("UNKNOWN"),
+                # Serialized as MLflow tracing serializes inputs and outputs.
+                "mlflow.spanInputs": json.dumps(trace.request, ensure_ascii=False),
+                "mlflow.spanOutputs": json.dumps(trace.response, ensure_ascii=False),
+                TRACE_SPAN_KEY: json.dumps(True),
+            },
+            "events": [],
+        }
+    )
+
+
+def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int, root_id: str) -> MlflowSpan:
+    """The span in MLflow. A span without a parent is a child of the trace's root span there, and
+    reads back without one (``martian.parent_id``)."""
+
     def span_id(value: str) -> str:
         return value if _MLFLOW_SPAN_ID.match(value) else _hex(value, 16)
 
@@ -1057,7 +1137,7 @@ def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int) -> MlflowSpan:
         {
             "trace_id": trace_id,
             "span_id": span_id(span.id),
-            "parent_span_id": span_id(span.parent_id) if span.parent_id else None,
+            "parent_span_id": span_id(span.parent_id) if span.parent_id else root_id,
             "name": span.name,
             "start_time_unix_nano": start,
             "end_time_unix_nano": int(span.end_ms * 1_000_000) if span.end_ms is not None else start,

@@ -2,18 +2,20 @@
 MARTIAN_TEST_POSTGRES_URL names a database it may create schemas in."""
 
 import contextlib
+import json
 import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from martian.evals.model import Counts, Project, Run, Trace, TraceQuery
+from martian.evals.model import Counts, Project, Run, Span, Trace, TraceQuery
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore
-from tests.evals.store_contract import ORG_A, StoreContract
+from tests.evals.store_contract import LONG_REQUEST, LONG_RESPONSE, ORG_A, StoreContract
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
 LONGEST_ARTIFACT_ROOT = 157
@@ -145,6 +147,60 @@ class MlflowTracingContract:
         assert (await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1", run_id="r2"))).items == []
 
 
+class TraceLayoutContract:
+    """Where the binding keeps a trace's request and response in MLflow, as MLflow tracing keeps
+    them: whole as the inputs and outputs of the trace's root span, and shortened to MLflow's
+    previews of 1,000 characters in ``trace_info``, whose columns Postgres limits to that."""
+
+    async def test_the_request_and_response_are_whole_in_the_root_span_and_previewed_in_the_trace(
+        self, store: EvalStore
+    ) -> None:
+        from martian.evals.store.mlflow_local import MlflowStore, _mlflow_trace_id
+
+        assert isinstance(store, MlflowStore)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        span = Span(id="s1", name="model call", kind="LLM", status="ok", inputs={"q": 1}, outputs="a")
+        for trace_id, request, response, spans in (
+            ("long", LONG_REQUEST, LONG_RESPONSE, [span]),
+            ("short", "hi", "hello", []),
+        ):
+            fields = {"request": request, "response": response, "spans": spans}
+            await store.record_trace(ORG_A, Trace(id=trace_id, project_id="p1", name="chat", state="ok", **fields))
+
+        def native(trace_id: str) -> Any:
+            """The trace as MLflow itself reads it."""
+            return store._store.get_trace(_mlflow_trace_id(trace_id), allow_partial=True)
+
+        long = await store._call(ORG_A, lambda: native("long"))
+        # MLflow's previews, shortened as MLflow tracing shortens its own: 997 characters and "...".
+        assert long.info.request_preview == LONG_REQUEST[:997] + "..."
+        assert long.info.response_preview == LONG_RESPONSE[:997] + "..."
+        # Whole as the root span's inputs and outputs, where MLflow's own reader finds a trace's request.
+        assert json.loads(long.data.request) == LONG_REQUEST
+        assert json.loads(long.data.response) == LONG_RESPONSE
+        (root,) = [s for s in long.data.spans if s.parent_id is None]
+        assert [(s.name, s.parent_id) for s in long.data.spans if s is not root] == [("model call", root.span_id)]
+        # Not a second time in trace metadata, whose values Postgres limits to 8,000 characters.
+        assert all(len(value) <= 1000 for value in long.info.trace_metadata.values())
+        short = await store._call(ORG_A, lambda: native("short"))
+        assert (short.info.request_preview, short.info.response_preview) == ("hi", "hello")
+        assert (json.loads(short.data.request), json.loads(short.data.response)) == ("hi", "hello")
+
+        # Through the binding: whole when read, MLflow's previews in a search, and the trace's
+        # metadata says which previews were shortened.
+        read = await store.get_trace(ORG_A, "p1", "long")
+        assert read is not None
+        assert (read.request, read.response, read.spans) == (LONG_REQUEST, LONG_RESPONSE, [span])
+        shortened = {"martian.request_preview_truncated": "true", "martian.response_preview_truncated": "true"}
+        assert read.metadata == shortened
+        found = {t.id: t for t in (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items}
+        previews = (long.info.request_preview, long.info.response_preview)
+        assert (found["long"].request, found["long"].response) == previews
+        assert found["long"].metadata == shortened
+        assert (found["short"].request, found["short"].response, found["short"].metadata) == ("hi", "hello", {})
+        assert (await store.get_trace(ORG_A, "p1", "short")).spans == []  # type: ignore[union-attr]
+
+
 def artifact_root_of_length(tmp_path: Path, length: int) -> Path:
     """A folder under ``tmp_path`` whose absolute path is ``length`` characters long."""
     root = tmp_path.resolve()
@@ -229,7 +285,7 @@ class ArtifactRootContract:
         assert await store.get_run(ORG_A, "p2", "r3") == later
 
 
-class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract, ArtifactRootContract):
+class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract, TraceLayoutContract, ArtifactRootContract):
     @pytest.fixture
     def tracking_uri(self, tmp_path) -> str:
         return f"sqlite:///{tmp_path / 'mlflow.db'}"
@@ -254,7 +310,7 @@ class TestMlflowStoreOnSqlite(StoreContract, MlflowTracingContract, ArtifactRoot
 
 @pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run the store contract on Postgres")
 @pytest.mark.usefixtures("unpooled")
-class TestMlflowStoreOnPostgres(StoreContract, MlflowTracingContract, ArtifactRootContract):
+class TestMlflowStoreOnPostgres(StoreContract, MlflowTracingContract, TraceLayoutContract, ArtifactRootContract):
     @pytest.fixture
     def schema(self) -> str:
         return f"mlflow_test_{uuid.uuid4().hex[:10]}"

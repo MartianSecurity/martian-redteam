@@ -106,7 +106,8 @@ line.
   case result keeps as its error, are the target's text.
 
 `tests/evals/test_store_errors.py` writes a canary in writes that are refused: a trace the
-database refuses, directly and through a run of the worker, a tag key and a description MLflow
+database refuses, directly for a metadata value over 8,000 characters and through a run of the
+worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
 refuses, a case result, a run two writers create at once, a draft case through its route, and a
 score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
 included, on SQLite and on Postgres.

@@ -236,7 +236,13 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
   spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
-  spans are not one tree is refused with `409`.
+  spans are not one tree is refused with `409`. A search row's `request` and `response` are what
+  the store's search returns, which on the MLflow binding are MLflow's previews of at most 1,000
+  characters. The trace's detail has them whole, in `info.request_preview` and
+  `info.response_preview`, and when a search shows a shortened preview, the detail's
+  `info.trace_metadata` says so: `martian.request_preview_truncated` or
+  `martian.response_preview_truncated` is `"true"`. The frozen contract has no field for it, so it
+  is trace metadata.
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
   time and orders by time. The core applies the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
@@ -748,6 +754,12 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     metadata keys, [above](#sessions-and-users). MLflow needs every span's start time and starts
     a trace at its earliest span, so a span with no start time is written at its trace's request
     time and reads back with no times; it never moves the trace's request time or latency.
+  - A trace's request and response are kept as MLflow tracing keeps them: whole as the inputs
+    and outputs of the trace's root span, and as MLflow's previews in `trace_info`. The binding
+    writes that root span, named after the trace, at the trace's request time and state, with the
+    trace's own spans as its children; it does not read it back as one of the trace's spans. A
+    trace recorded in progress or in an unknown state keeps that state, which MLflow would
+    otherwise take from the root span.
   - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
     a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
@@ -773,10 +785,18 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   page: the Traces page with no filters reads the whole project. MLflow's filters have
   no "or", so a search for a run's traces is two searches, on the tag and on `mlflow.sourceRun`.
   A session search reads the same traces and groups the first of them in this process.
-- On Postgres, a trace's request and its response are each at most 8,000 characters: the binding
-  keeps them whole in MLflow's trace metadata, a `varchar(8000)` column, and a longer one is
-  refused as `invalid`, naming `record_trace` and MLflow's `trace_request_metadata` table, not the
-  text. SQLite does not enforce the length.
+- A trace's request and response have no length limit of their own. MLflow's previews hold the
+  first 997 characters and `...` of a longer one, as MLflow tracing shortens its own, because
+  Postgres limits `trace_info.request_preview` and `response_preview` to 1,000 characters
+  (`TRACE_PREVIEW_LENGTH`). `get_trace` reads them whole from the root span. A search reads only
+  `trace_info`, so its results carry the previews and its text filter matches only them; such a
+  trace's metadata says so (`martian.request_preview_truncated` and
+  `martian.response_preview_truncated`, `"true"`, from `martian.evals.store`). A trace an earlier
+  release wrote has them whole in `martian.request` and `martian.response` metadata and reads
+  back as before.
+- On Postgres, a value of a trace's own metadata is still at most 8,000 characters, MLflow's
+  `trace_request_metadata.value`; a longer one is refused as `invalid`, naming `record_trace` and
+  that table, not the text. SQLite does not enforce the length.
 - An error MLflow raises is a `StoreError` that names the method: not found is `not_found`, an
   object that exists `conflict`, and anything else `invalid`, with the table and the database's
   error code when the database refused it. MLflow's own message is not passed on, except its
@@ -790,7 +810,9 @@ The store contract runs on this binding with SQLite in every test run, and on Po
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
 database and reads back through the binding their sessions, turns and users, and the run of a
-trace recorded inside a run's MLflow run. It starts a run with a 157-character artifact root,
+trace recorded inside a run's MLflow run. It records a trace whose request and response are
+100,000 characters each and checks, in MLflow's own reading, that they are whole in the root
+span and shortened in the previews. It starts a run with a 157-character artifact root,
 reads runs an earlier release wrote in MLflow's layout, and checks that Postgres refuses a
 longer root before writing. That module belongs to the
 [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store

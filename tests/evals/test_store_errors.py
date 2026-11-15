@@ -8,8 +8,10 @@ Postgres refuses two of these writes itself: a trace metadata value over 8,000 c
 (MLflow's ``varchar(8000)``) and a case position beyond its ``integer`` column. SQLite takes any
 length and any integer, so there a trigger refuses the same writes. The trace's trigger fails with
 an error of SQLite's own, the kind MLflow logs itself, as it logs "database is locked"; the case's
-aborts, as a constraint does. On both, a trigger refuses a draft case holding the canary, and
-another fails a score holding it with an error that is no refusal, as a lost connection is not.
+aborts, as a constraint does. On both, a trigger refuses a span holding the canary, so the trace
+of a run whose prompt holds it is refused, as the run writes the prompt whole in the trace's root
+span; another refuses a draft case holding it, and a third fails a score holding it with an error
+that is no refusal, as a lost connection is not.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
 CANARY = "CANARY42"
 """Short, so that any part of a refused value an error could quote holds it whole."""
 LONG = " ".join([CANARY] * 1000)
-"""A request of 8,999 characters: more than MLflow's trace metadata holds on Postgres."""
+"""8,999 characters: more than a value of MLflow's trace metadata holds on Postgres."""
 OUT_OF_RANGE = 2**31
 """A case position beyond Postgres's ``integer``."""
 DATABASES = [
@@ -52,6 +54,19 @@ DATABASES = [
 SQLITE_MLFLOW_TRIGGERS = [
     """CREATE TRIGGER refuse_long_metadata BEFORE INSERT ON trace_request_metadata
     WHEN length(NEW.value) > 8000 BEGIN SELECT json('refused: longer than 8000 characters'); END""",
+    f"""CREATE TRIGGER refuse_canary_span BEFORE INSERT ON spans
+    WHEN instr(NEW.content, '{CANARY}') > 0 BEGIN SELECT json('refused'); END""",
+]
+POSTGRES_MLFLOW_TRIGGERS = [
+    f"""CREATE FUNCTION refuse_canary_span() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF position('{CANARY}' in NEW.content) > 0 THEN
+            RAISE EXCEPTION 'refused' USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+    END $$""",
+    """CREATE TRIGGER refuse_canary_span BEFORE INSERT ON spans
+    FOR EACH ROW EXECUTE FUNCTION refuse_canary_span()""",
 ]
 SQLITE_RECORD_TRIGGERS = [
     """CREATE TRIGGER refuse_large_position BEFORE INSERT ON martian_case_results
@@ -125,6 +140,7 @@ def databases(request, tmp_path, monkeypatch) -> Iterator[Databases]:
             MlflowStore(POSTGRES_URL, tmp_path / "artifacts", schema=schemas[0]),
             SqlRecordStore(POSTGRES_URL, schema=schemas[1]),
         )
+        _execute(postgres_url(POSTGRES_URL, schemas[0]), POSTGRES_MLFLOW_TRIGGERS)
         _execute(postgres_url(POSTGRES_URL, schemas[1]), POSTGRES_RECORD_TRIGGERS)
         yield found
         found.records.close()
@@ -175,10 +191,13 @@ def assert_quotes_nothing(error: StoreError, logs: Logs) -> None:
 
 
 async def test_a_trace_the_database_refuses_is_reported_without_its_text(databases: Databases, logs: Logs) -> None:
+    """A metadata value is refused; the request and the response, which the store keeps whole,
+    hold the canary too."""
     store = databases.store
     await store.create_project(SINGLE_USER, Project(id="p1", name="Agent"))
+    refusable = Trace(id="t1", project_id="p1", name="chat", request=LONG, response=LONG, metadata={"context": LONG})
     with pytest.raises(StoreError) as refused:
-        await store.record_trace(SINGLE_USER, Trace(id="t1", project_id="p1", name="chat", request=LONG, response=LONG))
+        await store.record_trace(SINGLE_USER, refusable)
     assert refused.value.kind == "invalid"
     assert_names(refused.value.detail, "record_trace", "trace_request_metadata")
     assert_quotes_nothing(refused.value, logs)
@@ -282,7 +301,7 @@ def test_a_run_whose_trace_is_refused_fails_without_quoting_it(databases: Databa
         response = client.get(f"/v1/evals/{launched['id']}")
     run = response.json()
     assert run["state"] == "failed", run
-    assert_names(run["error"], "record_trace", "trace_request_metadata")
+    assert_names(run["error"], "record_trace", "spans")
     assert CANARY not in response.text
     assert "Eval run" in logs.text, "the worker logged the failure, with its traceback"
     assert CANARY not in logs.text
