@@ -133,6 +133,16 @@ martian evals run evals.yaml --output results/pr --baseline results/main
 martian evals prompts push evals.yaml -m "Shorter greeting"
 # The Evals UI on this machine, one user and no login (see the evals core guide):
 martian ui
+# Inspect AI logs as runs in that UI (see the evals core guide):
+martian evals import inspect logs/*.eval
+# promptfoo results as runs in that UI, and a promptfoo config as suite files (see the evals core guide):
+martian evals import promptfoo results.json
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+# An MLflow tracking store copied into that UI, after a schema version check:
+martian evals import mlflow ./mlflow.db
+# All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):
+martian evals export ./evals-export
+martian evals import martian ./evals-export --data-dir ./new-data
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

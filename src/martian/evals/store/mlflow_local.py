@@ -29,6 +29,12 @@ How the shared model sits in MLflow:
   tracing recorded while a run's MLflow run was active names that MLflow run in its
   ``mlflow.sourceRun`` metadata, and belongs to that run; one recorded inside an MLflow run that is
   not a run's belongs to no run.
+- ``record_trace`` maps a trace's GenAI attributes onto its fields (``martian.evals.trace_conventions``)
+  and keeps the mapping version in its ``martian.trace_mapping`` metadata; a trace read without
+  one, such as one MLflow tracing recorded, is mapped as it is read. The mapping reads the trace's
+  own spans only: ``record_trace`` maps before it writes the root span, so the root span holds the
+  request and response the mapping gave, and ``get_trace`` sets the root span aside, and takes the
+  request and response from it, before it maps.
 - A score is a feedback assessment on its trace.
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
 - A prompt is a prompt of MLflow's prompt registry, in the workspace, with its creator in the
@@ -142,6 +148,7 @@ from martian.evals.store import (
     check_prompt,
     check_session_search,
 )
+from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -197,6 +204,7 @@ _RUN_STATUS = {
     "partial": "FINISHED",
     "failed": "FAILED",
     "cancelled": "KILLED",
+    "stopped": "KILLED",
 }
 _TRACE_STATE = {"ok": "OK", "error": "ERROR", "in_progress": "IN_PROGRESS", "unknown": "STATE_UNSPECIFIED"}
 _TRACE_STATE_BACK: dict[str, ModelTraceState] = {
@@ -265,7 +273,7 @@ class MlflowStore:
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]
         hide_sql_parameters(self._store)
-        self._prompts: Any = PromptRegistryStore(url)
+        self._prompts: Any = PromptRegistryStore(url)  # type: ignore[no-untyped-call]
         hide_sql_parameters(self._prompts)
         self._ready: set[str] = set()
 
@@ -581,6 +589,8 @@ class MlflowStore:
     # --- traces ------------------------------------------------------------------------------
 
     async def record_trace(self, principal: Principal, trace: Trace) -> Trace:
+        trace = map_trace(trace)
+
         def work() -> None:
             experiment = self._experiment(trace.project_id, writable=True)
             if trace.run_id is not None:
@@ -619,7 +629,8 @@ class MlflowStore:
             info = TraceInfo(
                 trace_id=mlflow_id,
                 trace_location=TraceLocation.from_experiment_id(experiment.experiment_id),
-                request_time=_ms(trace.request_time) or _ms(datetime.now(UTC)) or 0,
+                # A given time is kept even at the epoch, where MLflow puts a trace whose span had no start.
+                request_time=_ms(trace.request_time or datetime.now(UTC)) or 0,
                 state=TraceState(_TRACE_STATE[trace.state]),
                 execution_duration=None if trace.latency_ms is None else int(trace.latency_ms),
                 request_preview=request_preview,
@@ -782,10 +793,8 @@ class MlflowStore:
             # MLflow orders spans root first, then by start time. Below the trace's root span the
             # trace's own spans without a parent are no roots there, so they are put first again.
             spans = sorted((_span(s) for s in full.data.spans if s is not root), key=lambda s: s.parent_id is not None)
-            found = _trace(info, project_id, spans=spans, runs=runs)
-            if root is None:  # written by an earlier release, or by MLflow tracing itself
-                return found
-            return found.model_copy(update={"request": root.inputs, "response": root.outputs})
+            # A trace an earlier release or MLflow tracing itself wrote has no root span of the binding's.
+            return _trace(info, project_id, spans=spans, runs=runs, root=root)
 
         return await self._call(principal, work)
 
@@ -843,6 +852,8 @@ class MlflowStore:
                 error=AssessmentError(error_code="MARTIAN_SCORE_ERROR", error_message=score.error)
                 if score.error
                 else None,
+                # A score keeps the time it was given, as an imported one must; MLflow stamps one without.
+                create_time_ms=_ms(score.created_at),
             )
             created = self._store.create_assessment(feedback)
             return _score(created, project_id, trace_id)
@@ -1269,7 +1280,10 @@ def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int, root_id: str) -
     def span_id(value: str) -> str:
         return value if _MLFLOW_SPAN_ID.match(value) else _hex(value, 16)
 
+    # The span's own attributes first: its kind, inputs and outputs are MLflow's span type, inputs
+    # and outputs attributes, and the store's keys must not be overwritten by an attribute.
     attributes = {
+        **{key: json.dumps(value, default=str) for key, value in span.attributes.items()},
         "mlflow.traceRequestId": json.dumps(trace_id),
         "mlflow.spanType": json.dumps(span.kind or "UNKNOWN"),
         "mlflow.spanInputs": json.dumps(span.inputs, default=str),
@@ -1280,7 +1294,6 @@ def _mlflow_span(trace_id: str, span: Span, trace_start_ms: int, root_id: str) -
         # MLflow needs a start time; the span's own times, missing or not, are kept here.
         "martian.start_ms": json.dumps(span.start_ms),
         "martian.end_ms": json.dumps(span.end_ms),
-        **{key: json.dumps(value, default=str) for key, value in span.attributes.items()},
     }
     code = {"ok": "STATUS_CODE_OK", "error": "STATUS_CODE_ERROR"}.get(span.status, "STATUS_CODE_UNSET")
     # MLflow starts a trace at its earliest span, so a span with no start time starts with its trace.
@@ -1356,10 +1369,19 @@ def _score(feedback: Any, project_id: str, trace_id: str) -> Score:
 
 
 def _trace(
-    info: TraceInfo, project_id: str, *, spans: list[Span] | None = None, runs: dict[str, str] | None = None
+    info: TraceInfo,
+    project_id: str,
+    *,
+    spans: list[Span] | None = None,
+    runs: dict[str, str] | None = None,
+    root: MlflowSpan | None = None,
 ) -> Trace:
     """The trace in the model. ``runs`` maps the MLflow run ids traces name in
-    ``mlflow.sourceRun`` to run ids, for a trace without a ``martian.run_id`` tag."""
+    ``mlflow.sourceRun`` to run ids, for a trace without a ``martian.run_id`` tag. ``root`` is the
+    root span the binding wrote, whose inputs and outputs are the trace's request and response
+    whole; without it they are MLflow's previews. A trace that names no mapping version, such as
+    one MLflow tracing recorded, is mapped as it is read, after its request and response are read,
+    from ``spans``, which never hold the binding's root span."""
     metadata = dict(info.trace_metadata or {})
     tags = dict(info.tags or {})
     usage = json.loads(metadata.get("mlflow.trace.tokenUsage", "null") or "null")
@@ -1379,15 +1401,15 @@ def _trace(
         "martian.response",
     }
     state = str(getattr(info.state, "value", info.state))
-    return Trace(
+    trace = Trace(
         id=trace_id,
         project_id=project_id,
         name=name,
         state=_TRACE_STATE_BACK.get(state, "unknown"),
         request_time=_from_ms(info.request_time),
         latency_ms=float(info.execution_duration) if info.execution_duration is not None else None,
-        request=metadata.get("martian.request", info.request_preview or ""),
-        response=metadata.get("martian.response", info.response_preview or ""),
+        request=root.inputs if root is not None else metadata.get("martian.request", info.request_preview or ""),
+        response=root.outputs if root is not None else metadata.get("martian.response", info.response_preview or ""),
         run_id=run_id,
         session_id=metadata.get(SESSION_KEY),
         user_id=metadata.get(USER_KEY),
@@ -1399,6 +1421,7 @@ def _trace(
         scores=_scores(info, project_id, trace_id),
         spans=spans or [],
     )
+    return map_trace(trace)
 
 
 def trace_from_mlflow(trace: MlflowTrace, project_id: str) -> Trace:

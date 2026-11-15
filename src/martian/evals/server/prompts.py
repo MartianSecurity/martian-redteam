@@ -101,7 +101,7 @@ async def prompted_runs(
 ) -> list[tuple[Run, dict[str, Any]]]:
     """Every run of every project that names a prompt version, newest first, once for each version
     it names."""
-    found = []
+    found: list[tuple[Run, dict[str, Any]]] = []
     for key in await project_keys(store, principal):
         for run in await project_runs(records, principal, key):
             found.extend((run, entry) for entry in used(run))

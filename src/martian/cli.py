@@ -17,10 +17,20 @@ from martian_redteam.cli import app as redteam_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
+import_app = typer.Typer(no_args_is_help=True, add_completion=False)
+convert_app = typer.Typer(no_args_is_help=True, add_completion=False)
 prompts_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer checks.")
+evals_app.add_typer(
+    import_app, name="import", help="Bring runs from other eval tools, or a Martian export, into the local Evals UI."
+)
+evals_app.add_typer(convert_app, name="convert", help="Turn another eval tool's config into suite files.")
 evals_app.add_typer(prompts_app, name="prompts", help="Prompt versions in the local Evals UI.")
 app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
+
+DATA_DIR_HELP = (
+    "The local Evals UI's data folder, as for `martian ui`. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals."
+)
 
 
 @app.callback(invoke_without_command=True)
@@ -81,6 +91,26 @@ def run_evals(
             "or on a failed case it has no result for.",
         ),
     ] = None,
+    max_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--max-seconds",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run after this many seconds; run it again to resume. "
+            "Replaces limits.max_seconds.",
+        ),
+    ] = None,
+    max_judge_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-judge-tokens",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run once its LLM judges have used this many tokens; run it again "
+            "to resume. Replaces limits.max_judge_tokens.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -104,12 +134,15 @@ def run_evals(
             fresh=fresh,
             home=data_dir,
             baseline=baseline,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
         return
-    if any(value is not None for value in (output, concurrency, limit, repeats, baseline, data_dir)) or fresh:
+    suite_only = (output, concurrency, limit, repeats, baseline, data_dir, max_seconds, max_judge_tokens)
+    if fresh or any(option is not None for option in suite_only):
         typer.echo(
-            "--output, --concurrency, --limit, --repeats, --fresh, --baseline and --data-dir apply to a suite "
-            "file (evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh, --max-seconds, --max-judge-tokens, --baseline "
+            "and --data-dir apply to a suite file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -173,6 +206,8 @@ def _run_suite(
     fresh: bool,
     home: Path | None,
     baseline: Path | None = None,
+    max_seconds: float | None = None,
+    max_judge_tokens: int | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -195,6 +230,8 @@ def _run_suite(
             home=home,
             repeats=repeats,
             baseline=baseline,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -210,10 +247,10 @@ def _run_suite(
             "security check (security), or the suite's rule (suite). Reliability counts the cases that "
             "passed every attempt"
         )
-    table = Table(
-        title=f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else ""),
-        caption="; ".join(notes) or None,
-    )
+    title = f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else "")
+    if summary["not_run"]:
+        title += f", {summary['not_run']} not run"
+    table = Table(title=title, caption="; ".join(notes) or None)
     columns = ["Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"]
     for column in [*columns, "Combined by"] if plan else columns:
         table.add_column(column)
@@ -255,6 +292,17 @@ def _run_suite(
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
             console.print(f"{count} {unit}, {label}: {reason}", markup=False, highlight=False)
+    if summary["not_run"]:
+        # A run stopped at a limit, or cancelled, counts only the cases it finished above.
+        why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+        partly = " A case the run stopped in the middle of runs all of its attempts again." if plan else ""
+        console.print(
+            f"{why}: {summary['not_run']} case(s) not run. Run the same command again to resume after the cases "
+            f"it finished.{partly}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     comparison = summary.get("comparison")
     if comparison is not None:
         for line in _comparison_lines(comparison):
@@ -271,8 +319,9 @@ def _run_suite(
     console.print(
         f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
     )
-    # With a baseline the comparison is the gate; a case without a verdict still fails the run.
-    if summary["errors"]:
+    # A case with no verdict, or one the run stopped before, is never a pass. With a baseline the
+    # comparison is the gate.
+    if summary["errors"] or summary["not_run"]:
         raise typer.Exit(code=2)
     if comparison is not None:
         raise typer.Exit(code=1 if comparison["gate"] == "failed" else 0)
@@ -286,7 +335,7 @@ _LABELS = {"better": "better", "worse": "worse, beyond noise", "within_noise": "
 def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: Path | None) -> int:
     """What ``martian evals run`` prints for a suite with a matrix: one row per combination, then
     what each combination has to say, and the exit code: 2 when a combination has a case without a
-    verdict, else 1 when one failed its gate (:func:`martian.evals.runner.combination_gate`)."""
+    verdict or stopped before one, else 1 when one failed its gate (:func:`martian.evals.runner.combination_gate`)."""
     from rich.table import Table
 
     from martian.evals.local import data_folder
@@ -342,6 +391,13 @@ def _print_matrix(console: Any, path: Path, found: dict[str, Any], *, baseline: 
         lines += [f"{count} {unit}: {reason}" for reason, count in list(summary["target_errors"].items())[:5]]
         for label, reasons in summary["check_errors"].items():
             lines += [f"{count} {unit}, {label}: {reason}" for reason, count in list(reasons.items())[:5]]
+        if summary.get("not_run"):
+            # A combination stopped at a limit, or cancelled, counts only the cases it finished.
+            why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+            lines.append(
+                f"{why}: {summary['not_run']} case(s) not run. Run the same command again to resume after the "
+                "cases it finished."
+            )
         if comparison is not None:
             lines += _comparison_lines(comparison)
         elif compared:
@@ -407,6 +463,304 @@ def _comparison_lines(found: dict[str, Any]) -> list[str]:
     return lines
 
 
+@import_app.command("inspect")
+def import_inspect(
+    logs: Annotated[
+        list[Path], typer.Argument(dir_okay=False, show_default=False, help="Inspect AI log files, .eval or .json.")
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="The local Evals UI's data folder to import into, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+) -> None:
+    """Import Inspect AI logs as runs in the local Evals UI: one run per log.
+
+    martian evals import inspect logs/*.eval    every log Inspect wrote to logs/
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy", "zstandard")):
+        typer.echo("Importing Inspect logs needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.inspect_import import InspectLogError, import_inspect_logs
+    from martian.evals.local import LocalEditionError, data_folder
+
+    home = data_folder(data_dir)
+    try:
+        runs = import_inspect_logs(logs, home)
+    except (InspectLogError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for log, run in zip(logs, runs, strict=True):
+        counts = run.counts
+        typer.echo(
+            f"{log.name}: run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
+            f"{counts.errors} errors, {counts.skipped} without a verdict"
+        )
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@import_app.command("promptfoo")
+def import_promptfoo(
+    files: Annotated[
+        list[Path],
+        typer.Argument(
+            dir_okay=False,
+            show_default=False,
+            help="promptfoo results files, as `promptfoo eval -o results.json` writes.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Import promptfoo results as runs in the local Evals UI: one run per provider in each file.
+
+    martian evals import promptfoo results.json
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Importing promptfoo results needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.promptfoo_import import PromptfooResultsError, import_promptfoo_results
+
+    home = data_folder(data_dir)
+    try:
+        runs = import_promptfoo_results(files, home)
+    except (PromptfooResultsError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for run in runs:
+        counts, source = run.counts, run.provenance["promptfoo"]
+        typer.echo(
+            f"{Path(source['results']).name}: provider {source['provider']['label'] or source['provider']['id']}, "
+            f"run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
+            f"{counts.errors} errors"
+        )
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@convert_app.command("promptfoo")
+def convert_promptfoo(
+    config: Annotated[
+        Path, typer.Argument(dir_okay=False, show_default=False, help="A promptfoo config, promptfooconfig.yaml.")
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output", file_okay=False, show_default=False, help="The folder to write the suite and data files to."
+        ),
+    ],
+    target: Annotated[
+        str | None,
+        typer.Option(
+            "--target",
+            show_default=False,
+            help="FILE.py[:FUNCTION], called as FUNCTION(prompt=..., vars=...) for each case (default function: "
+            "target). Without it, the suite grades each test's providerOutput.",
+        ),
+    ] = None,
+    judge_model: Annotated[
+        str | None,
+        typer.Option(
+            "--judge-model",
+            show_default=False,
+            help="The model the rubric judge calls for llm-rubric assertions, such as openai:/gpt-4.1-mini. "
+            "Without it, llm-rubric assertions are not converted.",
+        ),
+    ] = None,
+) -> None:
+    """Convert a promptfoo config into suite files for `martian evals run`, where its features map,
+    and list everything that does not.
+
+    martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "zstandard")):
+        typer.echo("Converting a promptfoo config needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.promptfoo_convert import (
+        PromptfooConfigError,
+        convert_promptfoo_config,
+        report_lines,
+        write_conversion,
+    )
+
+    try:
+        conversion = convert_promptfoo_config(config, output=output, target=target, judge_model=judge_model)
+        if conversion.suites:
+            write_conversion(conversion, output)
+    except PromptfooConfigError as error:
+        typer.echo(f"Conversion failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for line in report_lines(conversion, output):
+        typer.echo(line)
+    if not conversion.suites:
+        typer.echo("Nothing written: no test converts.", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"Run each with `martian evals run`, such as: martian evals run {output / conversion.suites[0].suite_file}"
+    )
+
+
+@import_app.command("mlflow")
+def import_mlflow(
+    source: Annotated[
+        str,
+        typer.Argument(
+            show_default=False,
+            help="The MLflow tracking store: its SQLite database file (mlflow.db), or a sqlite:/// or "
+            "postgresql:// URL.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="The local Evals UI's data folder to copy into, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+    experiment: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--experiment",
+            show_default=False,
+            help="Copy only this experiment, by name or id. Repeat for more. Default: every active experiment.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Check and read the store, and report what would be copied.")
+    ] = False,
+) -> None:
+    """Copy an MLflow tracking store into the local Evals UI: experiments, traces, datasets,
+    assessments and evaluation runs. The store is only read, and only at the schema revision this
+    release's MLflow writes; any other is refused before anything is copied.
+
+    martian evals import mlflow ./mlflow.db
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Copying an MLflow store needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.mlflow_import import MlflowSourceError, import_mlflow_store, report_lines
+
+    home = data_folder(data_dir)
+    try:
+        report = import_mlflow_store(source, home, experiments=experiment or None, dry_run=dry_run)
+    except (MlflowSourceError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except ImportError as error:  # a postgresql:// source without the driver
+        typer.echo(f"Import failed: {error}. A Postgres store needs martian-sdk[postgres].", err=True)
+        raise typer.Exit(code=2) from None
+    for line in report_lines(report, written=not dry_run):
+        typer.echo(line)
+    if not dry_run:
+        ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+        typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+def _export_counts(lines: dict[str, Any]) -> str:
+    """The main counts of an export's manifest, for one line of output."""
+    shown = (
+        ("projects.jsonl", "project"),
+        ("datasets.jsonl", "dataset version"),
+        ("runs.jsonl", "run"),
+        ("case_results.jsonl", "case result"),
+        ("scores.jsonl", "score"),
+        ("reviews.jsonl", "review"),
+        ("traces.jsonl", "trace"),
+        ("artifacts.jsonl", "artifact"),
+    )
+    counts = [(int(lines[name]["lines"]), noun) for name, noun in shown]
+    return ", ".join(f"{count} {noun}{'' if count == 1 else 's'}" for count, noun in counts)
+
+
+@evals_app.command("export")
+def export_evals(
+    folder: Annotated[
+        Path,
+        typer.Argument(
+            file_okay=False,
+            show_default=False,
+            help="A new or empty folder to write the export to, or the folder of an interrupted export to resume.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Export everything in the local Evals UI's data folder: runs, case results, scores, datasets,
+    reviews and annotations, traces and the rest, as JSON Lines files with a manifest.
+
+    martian evals export ./evals-export    run it again with the same folder to resume an interrupted export
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Exporting the local Evals UI's data needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.data_export import ExportError, export_local
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.store import StoreError
+
+    home = data_folder(data_dir)
+    try:
+        summary = export_local(home, folder)
+    except (ExportError, LocalEditionError) as error:
+        typer.echo(f"Export failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except StoreError as error:
+        typer.echo(f"Export stopped: {error.detail}. Run the same command again to resume it.", err=True)
+        raise typer.Exit(code=2) from None
+    except KeyboardInterrupt:
+        typer.echo("Export interrupted. Run the same command again to resume it.", err=True)
+        raise typer.Exit(code=130) from None
+    finished = "Resumed and finished exporting" if summary.resumed else "Exported"
+    typer.echo(f"{finished} {home} into {summary.folder}: {_export_counts(summary.manifest['files'])}.")
+
+
+@import_app.command("martian")
+def import_martian(
+    folder: Annotated[
+        Path,
+        typer.Argument(file_okay=False, show_default=False, help="A folder `martian evals export` wrote."),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Import a `martian evals export` into a data folder that holds no data yet.
+
+    martian evals import martian ./evals-export --data-dir ./evals-data
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Importing an export needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.data_export import ExportError, import_local
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.store import StoreError
+
+    home = data_folder(data_dir)
+    try:
+        summary = import_local(folder, home)
+    except (ExportError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except StoreError as error:
+        typer.echo(f"Import stopped: {error.detail}. Import into a fresh data folder again.", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"Imported into {home}: {_export_counts(summary.manifest['files'])}.")
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
 @app.command("ui")
 def run_ui(
     port: Annotated[int, typer.Option("--port", min=1, max=65535, help="The port to listen on.")] = 7600,
@@ -431,6 +785,16 @@ def run_ui(
         ),
     ] = None,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the UI in the default browser.")] = True,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            envvar="MARTIAN_EVALS_CONCURRENCY",
+            min=1,
+            help="How many runs, and how many scoring jobs, may be in progress at once; each runs in a process of "
+            "its own.",
+        ),
+    ] = 1,
 ) -> None:
     """Open the Evals UI on this machine: one user, no login, everything stored locally on SQLite."""
     if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
@@ -453,7 +817,7 @@ def run_ui(
     try:
         # The container image's settings (see BIND_ENV); unset, the server stays on 127.0.0.1.
         host = listen_address(os.environ.get(BIND_ENV))
-        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)))
+        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)), concurrency=concurrency)
         serve(
             local,
             host=host,

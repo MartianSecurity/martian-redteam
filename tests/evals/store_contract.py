@@ -28,6 +28,8 @@ from martian.evals.model import (
 )
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore, StoreError
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
+from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, UNKNOWN, sample_trace
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -237,6 +239,33 @@ class StoreContract:
         await refused("invalid", store.search_sessions(ORG_A, TraceQuery(project_id="p1"), max_traces=1001))
         await refused("not_found", store.search_sessions(ORG_A, TraceQuery(project_id="missing")))
 
+    async def test_traces_in_each_convention_are_mapped_and_keep_their_attributes(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        for minutes, style in enumerate(STYLES):
+            sample = sample_trace(style, f"tr-{minutes + 1:032x}", project_id="p1")
+            saved = await store.record_trace(
+                ORG_A, sample.model_copy(update={"request_time": T0 + timedelta(minutes=minutes)})
+            )
+            assert saved.metadata[MAPPING_KEY] == MAPPING_VERSION, style
+            assert (saved.model, saved.tokens, saved.session_id, saved.user_id) == (
+                MODEL,
+                20,
+                "conversation-1",
+                "alice",
+            )
+            assert QUESTION in saved.request and [s.kind for s in saved.spans][::2] == ["AGENT", "TOOL"]
+            assert (saved.spans[2].inputs, saved.spans[2].outputs) == (ARGUMENTS, RESULT)
+            assert saved.spans[0].attributes.items() >= UNKNOWN.items(), style
+        page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", oldest_first=True))
+        assert [(t.model, t.tokens, t.metadata.get(MAPPING_KEY)) for t in page.items] == [
+            (MODEL, 20, MAPPING_VERSION)
+        ] * 3
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1"))
+        assert [(s.id, s.turns, s.tokens) for s in sessions.items] == [("conversation-1", 3, 60)]
+        alice = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="alice"))
+        assert len(alice.items) == 3
+
     async def test_traces_take_tags_and_join_runs(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
         await store.record_trace(ORG_A, trace("t1"))
@@ -359,6 +388,21 @@ class StoreContract:
         (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
         assert found.scores == [judged, human]
         await refused("not_found", store.log_score(ORG_A, "p1", "missing", Score(scorer="s", source="code")))
+
+    async def test_a_trace_keeps_the_time_it_was_given_even_at_the_epoch(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        await store.record_trace(ORG_A, trace("t1", request_time=epoch))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.request_time == epoch
+
+    async def test_a_score_keeps_the_time_it_was_given(self, store: EvalStore, project: Project) -> None:
+        # As an imported score does: the time it was scored, not the time it was written.
+        await store.record_trace(ORG_A, trace("t1"))
+        given = await store.log_score(ORG_A, "p1", "t1", Score(scorer="politeness", source="human", created_at=T0))
+        assert given.created_at == T0
+        assert [s.created_at for s in await store.list_scores(ORG_A, "p1", "t1")] == [T0]
 
     async def test_registered_scorers_are_versioned_by_name(self, store: EvalStore, project: Project) -> None:
         judge = ScorerVersion(

@@ -9,8 +9,11 @@ missing. ``PRIVATE_DEPENDENCIES`` lists each internal name.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
+from mlflow.entities import Trace as MlflowTrace
+from mlflow.entities import TraceData
 from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
 from mlflow.genai.evaluation.entities import EvaluationResult
 from mlflow.genai.judges.adapters.gateway_adapter import GatewayAdapter
@@ -28,13 +31,16 @@ from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
+from mlflow.store.db.utils import _all_tables_exist, _get_alembic_config, _get_latest_schema_revision
 from mlflow.store.model_registry.sqlalchemy_workspace_store import (
     WorkspaceAwareSqlAlchemyStore as WorkspaceAwareRegistryStore,
 )
 from mlflow.store.tracking.dbmodels.models import SqlRun, SqlTraceInfo
+from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
+from mlflow.tracing.utils.artifact_utils import TRACE_DATA_FILE_NAME, get_artifact_uri_for_trace
 from mlflow.tracking import fluent as _fluent
 from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
@@ -44,6 +50,8 @@ if TYPE_CHECKING:
     from mlflow.genai.evaluation.utils import EvaluationDatasetTypes as EvaluationDatasetTypes
 
 PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
+    ("mlflow.entities", "Trace"),  # public, imported here to build a trace from its artifact file
+    ("mlflow.entities", "TraceData.from_dict"),
     ("mlflow.gateway.constants", "MLFLOW_GATEWAY_CALLER_HEADER"),
     ("mlflow.gateway.constants", "GatewayCaller"),
     ("mlflow.genai.evaluation.entities", "EvaluationResult"),
@@ -63,9 +71,15 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.prompt.constants", "IS_PROMPT_TAG_KEY"),
     ("mlflow.pytest.decorator", "MLFLOW_TEST_ATTR"),
     ("mlflow.pytest.plugin", ""),  # loaded by name as a pytest plugin
+    ("mlflow.store.db.utils", "_all_tables_exist"),
+    ("mlflow.store.db.utils", "_get_alembic_config"),
+    ("mlflow.store.db.utils", "_get_latest_schema_revision"),
     ("mlflow.tracing.constant", "AssessmentMetadataKey"),
     ("mlflow.tracing.constant", "TraceTagKey.SPANS_LOCATION"),
     ("mlflow.tracing.constant", "SpansLocation.TRACKING_STORE"),
+    ("mlflow.tracing.constant", "SpansLocation.ARCHIVE_REPO"),
+    ("mlflow.tracing.utils.artifact_utils", "TRACE_DATA_FILE_NAME"),
+    ("mlflow.tracing.utils.artifact_utils", "get_artifact_uri_for_trace"),
     ("mlflow.tracking.fluent", "_active_experiment_id"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
@@ -84,6 +98,8 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
     ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
+    ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._get_or_create_engine"),
+    ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._initialize_store_state"),
     ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
     ("mlflow.utils.search_utils", "SearchTraceUtils.create_page_token"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
@@ -186,6 +202,70 @@ def trace_page_token(offset: int) -> str | None:
     return token.decode("ascii")
 
 
+# --- reading another MLflow's tracking store (martian.evals.mlflow_import) --------------------
+
+
+def schema_head() -> str:
+    """The schema revision of MLflow's tracking store that this MLflow writes and reads: the head
+    of its Alembic history."""
+    head: str = _get_latest_schema_revision()  # type: ignore[no-untyped-call]
+    return head
+
+
+def schema_history() -> list[str]:
+    """Every schema revision of MLflow's tracking store this MLflow knows, newest first."""
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(_get_alembic_config(""))  # type: ignore[no-untyped-call]
+    return [revision.revision for revision in script.walk_revisions()]
+
+
+def has_every_table(engine: Any) -> bool:
+    """Whether the database holds every table this MLflow's tracking store defines. Opening one
+    that lacks a table makes MLflow create the tables and migrate the database."""
+    found: bool = _all_tables_exist(engine)  # type: ignore[no-untyped-call]
+    return found
+
+
+class ReadOnlyTrackingStore(SqlAlchemyStore):
+    """MLflow's SQL tracking store over ``engine``, which only reads, for a database whose schema
+    revision is :func:`schema_head`.
+
+    MLflow's constructor can write: it creates and migrates the tables of a database that lacks
+    one, and creates the default experiment when it is missing. Here the engine is the caller's,
+    so every statement that would write fails, and the default experiment is never created.
+    ``url`` is the database's URL, from which MLflow reads its dialect.
+    """
+
+    def __init__(self, engine: Any, url: str) -> None:
+        self._read_only_engine = engine
+        super().__init__(url, "unused")  # type: ignore[no-untyped-call]  # the artifact root takes no writes
+
+    def _get_or_create_engine(self, db_uri: str) -> Any:  # type: ignore[override]
+        return self._read_only_engine
+
+    def _initialize_store_state(self) -> None:
+        """MLflow checks the workspaces and creates the default experiment here; the importer
+        checks the workspaces itself, and a store that is only read needs no default experiment."""
+
+
+def trace_artifact_file(info: Any) -> str | None:
+    """The URI of the file holding a trace's spans when MLflow keeps them among the trace's
+    artifacts, as releases before the spans table did; ``None`` when the tracking store reads
+    them itself, from its tables or from its trace archive. Raises ``MlflowException`` for a trace
+    that names no artifact location."""
+    stored = (SpansLocation.TRACKING_STORE.value, SpansLocation.ARCHIVE_REPO.value)
+    if (info.tags or {}).get(TraceTagKey.SPANS_LOCATION) in stored:
+        return None
+    location: str = get_artifact_uri_for_trace(info)
+    return location.rstrip("/") + "/" + TRACE_DATA_FILE_NAME
+
+
+def trace_from_file(info: Any, content: str) -> MlflowTrace:
+    """A trace with the spans of its artifact file's ``content``, MLflow's ``TraceData`` JSON."""
+    return MlflowTrace(info=info, data=TraceData.from_dict(json.loads(content)))
+
+
 def mlflow_test_attr() -> str:
     """The attribute ``@mlflow.test`` sets on a test function. Imported late: it loads pytest."""
     from mlflow.pytest.decorator import MLFLOW_TEST_ATTR
@@ -199,6 +279,7 @@ __all__ = [
     "MLFLOW_PYTEST_PLUGIN",
     "PRIVATE_DEPENDENCIES",
     "RUN_ARTIFACT_URI_LENGTH",
+    "ReadOnlyTrackingStore",
     "TRACE_PREVIEW_LENGTH",
     "TYPE_ONLY",
     "WORKSPACE_HEADER_NAME",
@@ -220,6 +301,7 @@ __all__ = [
     "error_text",
     "get_adapter",
     "get_request_workspace",
+    "has_every_table",
     "hide_sql_parameters",
     "invoke_litellm",
     "is_context_window_error",
@@ -230,5 +312,9 @@ __all__ = [
     "parse_model_uri",
     "provider_instance",
     "restore_active_experiment_id",
+    "schema_head",
+    "schema_history",
+    "trace_artifact_file",
+    "trace_from_file",
     "trace_page_token",
 ]
