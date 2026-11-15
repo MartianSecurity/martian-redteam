@@ -729,8 +729,17 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   - A score is a feedback assessment, and a registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
-- Run artifacts are files under the run's folder in the artifact root, which must be a local
-  folder.
+- Run artifacts, `martian/run.json` among them, are files in the run's folder,
+  `<artifact root>/<MLflow run id>/artifacts`. The artifact root must be a local folder. A
+  project's experiment keeps its artifacts in the root itself rather than in MLflow's
+  `workspaces/<workspace>/<experiment id>` under it, because MLflow keeps a run's folder in
+  `runs.artifact_uri`, 200 characters, and for an organisation, whose workspace name is 44
+  characters, that layout would take 58 or more of them. On Postgres, which enforces the length,
+  the store therefore takes an artifact root of at most 157 characters (`LONGEST_ARTIFACT_ROOT`)
+  and refuses a longer one with `ValueError` before it writes anything. SQLite does not enforce
+  the length and takes any root. A project whose
+  experiment an earlier SDK release created keeps MLflow's layout, for its earlier runs and its
+  new ones, so a data folder an earlier release wrote reads back unchanged.
 - Trace search applies MLflow's own filters (run, session, user, tags, time), then the text filter
   in this process, so a text search reads every trace the other filters match. MLflow's filters
   have no "or", so a search for a run's traces is two searches, on the tag and on
@@ -744,8 +753,10 @@ The store contract runs on this binding with SQLite in every test run, and on Po
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
 database and reads back through the binding their sessions, turns and users, and the run of a
-trace recorded inside a run's MLflow run. That module belongs
-to the [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
+trace recorded inside a run's MLflow run. It starts a run with a 157-character artifact root,
+reads runs an earlier release wrote in MLflow's layout, and checks that Postgres refuses a
+longer root before writing. That module belongs to the
+[MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
 written by one MLflow release reads back the same on the next.
 
 ## The record store
