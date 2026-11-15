@@ -925,7 +925,9 @@ while the run is in flight.
 
 Each piece of work runs under limits (`RunLimits` in the [shared model](eval-model.md)):
 `max_seconds` of wall time and `max_judge_tokens`, the tokens its judges may use, input and output
-together. `None` is no limit.
+together. `None` is no limit. `martian evals run` counts its simulated users' tokens against
+`max_judge_tokens` too ([run limits](evals.md#run-a-suite-file-locally)); the worker skips simulated
+conversations, so here it counts judges only.
 
 - **Whose limits.** A run's own, in `provenance.limits`: those its launch gave, else its suite
   version's (`Suite.settings.limits`). Without either, the worker's (`InProcessWorker(limits=...)`,
