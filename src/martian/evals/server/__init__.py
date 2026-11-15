@@ -25,8 +25,8 @@ the capability it needs with ``require_capability(name)``. Every route is in the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
 ``projects``, ``views`` and ``drafts``. Some routes are the core's own, which the contract does
-not have: a run's attempts in ``runs``, the judges' agreement with people in ``agreement``, and
-each judge version's calibration in ``calibration``.
+not have: a run's attempts in ``runs``, the judges' agreement with people and people's agreement
+with each other in ``agreement``, and each judge version's calibration in ``calibration``.
 """
 
 from __future__ import annotations
