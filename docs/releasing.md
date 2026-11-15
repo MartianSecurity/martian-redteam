@@ -140,8 +140,9 @@ any file that differs.
 
 A new build can call a route the core does not serve yet. `tests/evals/test_local.py` reads every
 `/v1` path the vendored build's JavaScript names and fails when the local edition does not serve
-one, or serves one of the gaps it lists (`UI_ROUTES_NOT_SERVED`; the pages they break are in
-[the local edition](evals-core.md#the-local-edition-martian-ui)). It reads paths, not pages, so also
+one that is outside the views the local edition leaves out (`HOSTED_ROUTES`, `ADMIN_ROUTES`), or
+serves one of those; its list of known gaps, `UI_ROUTES_NOT_SERVED`, is empty ([the local
+edition](evals-core.md#the-local-edition-martian-ui)). It reads paths, not pages, so also
 open each page with `martian ui --data-dir <a scratch folder>` and look for failed `/v1` requests
 before committing the build.
 
