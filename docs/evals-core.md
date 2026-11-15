@@ -390,7 +390,9 @@ All paths are under `/v1/evals`. How the core carries them out:
   is already in progress" at a limit of 1, else "5 scoring jobs are already in progress, as many as
   this organisation may have at once". The count reads the jobs of each completed run, since the
   record store has no query across runs. A job's scores sit beside the run's own, and each scored
-  value is also kept on its case's trace.
+  value is also kept on its case's trace. A request cannot name a
+  [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
+  names, so any other is `422`, and `GET /scorers` does not offer one (MorningHQ/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. Only a role
@@ -477,7 +479,7 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None, limits=None,
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None,
   monitor_settle_seconds=20)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
@@ -648,8 +650,9 @@ The new process:
 3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
    function, named by its import path so that the new process can import it, and returns
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
-   timeout, the HTTP targets' `credentials`, the registered agents' `executor` and the `limits` of
-   a run that has none of its own. `options` must be JSON;
+   timeout, the HTTP targets' `credentials`, the registered agents' `executor`, the custom
+   Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)) and the `limits` of a
+   run that has none of its own. `options` must be JSON;
 4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
    organisation, and exits.
 
@@ -979,6 +982,55 @@ the Agents judge against a loopback judge route (the request body, the checks on
 judge's allowed model recorded on its scores, a model Agents refuses, an endpoint, Agents'
 failures).
 
+### Custom scorers in the worker
+
+A worker runs a team's own Python scorers, the functions of a suite file's
+[`python` check](evals.md#custom-python-checks), when its setup installs them: whoever deploys the
+worker imports each function in the setup and names it in `WorkerServices.scorers`
+(`InProcessWorker(scorers={name: function})`). A scoring job's scorer of kind `code` and type
+`python` runs the function installed under its name, over each saved output; the record names the
+scorer, never code or a file.
+
+```python
+def worker_services(**options) -> WorkerServices:  # a module-level function, named by import path
+    from team_rules import refund_share  # imported here, in the work's own process
+
+    store, records = open_installation_stores(**options)  # the installation's own stores
+    return WorkerServices(store, records, scorers={"refund_within_order": refund_share})
+
+
+worker = ProcessWorker(worker_services, records, options={...})
+```
+
+- **What a scorer is given and returns.** The rules of a `python` check, without a trace: the
+  function reads, by name, the case's `inputs`, the saved `outputs` and the case's `expectations`,
+  and returns `True` or `False`, a number or `(value, reason)`. The score's `value` is what it
+  returned, so a number is a numeric score, as `response_length` is, which a suite's policy can
+  gate; its `rationale` is the reason, and its `source_id` `python:<name>`. A function that reads
+  `trace` or anything else it is not given is refused when the worker is built: `InProcessWorker`
+  raises, and under `ProcessWorker` the work's process ends before the work starts, so the work is
+  marked failed.
+- **No verdict, never a crash.** A scorer that raises, or returns anything else, gives that score
+  the error (`the scorer raised RuntimeError: ...`); a job's scorer the worker has not installed
+  gives each of its scores `This worker has no custom scorer named <name>`. The job carries on, and
+  those scores count as its errors: it ends `partial`, or `failed` when no score succeeded. A
+  scorer runs on a thread, so the worker's loop goes on while it does; it has no time limit.
+- **Never in the API process, and never in a judge.** With `ProcessWorker` the setup runs, and
+  imports the scorers, only in each piece of work's own process. The API process imports the
+  setup's module to check its import path, so the setup imports scorer modules inside the
+  function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
+  request or suite can name only those, so a job of custom scorers is recorded by the edition's
+  own code until the contract carries them (MorningHQ/martian-notes#334). A judge request carries
+  only judge scorers. The local edition installs none. What the worker isolates, and what it does
+  not, is in [security and data](security-and-data.md#custom-python-scorers).
+- **Scoring jobs only, never a monitor.** A [monitor](#monitors) refuses a scorer of kind `code`
+  in its record (`Monitor`), whoever writes it: a custom scorer reads a case's `inputs` and
+  `expectations`, and a production trace has a request and a response only.
+
+`tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
+values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
+through the core's routes, failing if the process that serves the API imports the scorer file.
+
 ## Judge models
 
 Each judge runs on a model of its own, or on the default judge model when it names none.
@@ -1063,7 +1115,9 @@ frozen contract has none.
   a registered judge whose instructions name `{{ expectations }}` reads an empty expected
   response. Each judge is pinned to its model when the monitor is created, its own or the default
   judge model ([judge models](#judge-models)), as a scoring job's are. Judges need a worker with a
-  judge (`422`), `acknowledge_model_cost` and a `max_judge_tokens_per_day`.
+  judge (`422`), `acknowledge_model_cost` and a `max_judge_tokens_per_day`. A monitor runs no
+  [custom Python scorer](#custom-scorers-in-the-worker): the route names none, and the `Monitor`
+  record refuses a scorer of kind `code`.
 - **`sampling_rate`**, 0 to 1, is the share of matching traces scored. A trace is in when the first
   8 bytes of the SHA-256 of its id, as a fraction of 2^64, are below the rate (`sampled` in
   `martian.evals.worker.monitor`). It depends on the trace id alone: a trace is in or out the same
@@ -1213,7 +1267,8 @@ What builds on it:
   a one-organisation in-process worker, and a durable queue in the record store's database that
   either runs from ([the durable queue](#the-durable-queue)). Every target call has a time limit,
   and a run or scoring job stops at its time or judge token limit and resumes after what it
-  finished ([limits](#limits-stopping-and-resuming)).
+  finished ([limits](#limits-stopping-and-resuming)). The workers run the
+  [custom Python scorers](#custom-scorers-in-the-worker) their setup installs.
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
 - [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
