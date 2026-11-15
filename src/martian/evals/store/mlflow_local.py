@@ -149,11 +149,13 @@ from martian.evals.model import TraceState as ModelTraceState
 from martian.evals.store import (
     REQUEST_PREVIEW_TRUNCATED,
     RESPONSE_PREVIEW_TRUNCATED,
+    TRACE_DELETE_LIMIT,
     StoreError,
     StoreStatus,
     check_imported_prompt,
     check_prompt,
     check_session_search,
+    check_trace_deletion,
     text_matches,
 )
 from martian.evals.trace_conventions import map_trace
@@ -185,6 +187,8 @@ apply, free text above all, stops after this many and returns what matched among
 cursor that reads on: a page may then hold fewer traces than its limit, or none."""
 _SCAN_CHUNK = 500
 """Traces read from MLflow at a time by a search this process filters."""
+_DELETE_CHUNK = 100
+"""Traces named in one MLflow search or delete when deleting traces."""
 _CURSOR_OFFSET = re.compile(r"[0-9]{1,18}")
 """One MLflow search's offset in a cursor: at most 18 of the digits 0-9, so it fits SQL's 64-bit
 ``OFFSET`` and ``int()`` reads it as written."""
@@ -850,6 +854,50 @@ class MlflowStore:
                 self._store.set_trace_tag(info.trace_id, "martian.run_id", run_id)
 
         await self._call(principal, work)
+
+    def _hard_delete(self, experiment_id: str, mlflow_ids: list[str]) -> None:
+        """Delete these traces of the experiment with MLflow's own delete, which removes each one's
+        row and, with it, its tags, metadata, spans and assessments, and its review queue items."""
+        for start in range(0, len(mlflow_ids), _DELETE_CHUNK):
+            self._store.delete_traces(experiment_id, trace_ids=mlflow_ids[start : start + _DELETE_CHUNK])
+
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        check_trace_deletion(trace_ids=trace_ids)
+        wanted = list(dict.fromkeys(trace_ids))
+
+        def work() -> list[str]:
+            experiment_id = self._experiment(project_id).experiment_id
+            mlflow_ids = sorted({_mlflow_trace_id(trace_id) for trace_id in wanted})
+            held: set[str] = set()
+            for start in range(0, len(mlflow_ids), _DELETE_CHUNK):
+                chunk = mlflow_ids[start : start + _DELETE_CHUNK]
+                listed = ", ".join(f"'{mlflow_id}'" for mlflow_id in chunk)
+                infos, _ = self._store.search_traces(
+                    locations=[experiment_id], filter_string=f"trace.request_id IN ({listed})", max_results=len(chunk)
+                )
+                held.update(info.trace_id for info in infos)
+            self._hard_delete(experiment_id, sorted(held))
+            return [trace_id for trace_id in wanted if _mlflow_trace_id(trace_id) in held]
+
+        return await self._call(principal, work)
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        check_trace_deletion(limit=limit)
+
+        def work() -> list[str]:
+            experiment_id = self._experiment(project_id).experiment_id
+            infos, _ = self._store.search_traces(
+                locations=[experiment_id],
+                filter_string=f"trace.timestamp_ms < {_ms_at_or_after(before)}",
+                max_results=limit,
+                order_by=["timestamp_ms ASC"],
+            )
+            self._hard_delete(experiment_id, [info.trace_id for info in infos])
+            return [(info.tags or {}).get("martian.trace_id", info.trace_id) for info in infos]
+
+        return await self._call(principal, work)
 
     # --- scores ------------------------------------------------------------------------------
 

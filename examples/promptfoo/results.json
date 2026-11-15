@@ -837,7 +837,7 @@
       },
       {
         "id": "88336e5f-4394-5374-86e1-d64f85cb808f",
-        "promptIdx": 0,
+        "promptIdx": 1,
         "testIdx": 0,
         "testCase": {
           "description": "capital of France",
@@ -999,7 +999,7 @@
       },
       {
         "id": "8f3047be-6551-5384-8c77-187433cdbc08",
-        "promptIdx": 0,
+        "promptIdx": 1,
         "testIdx": 1,
         "testCase": {
           "description": "capital of Japan",
@@ -1159,7 +1159,7 @@
       },
       {
         "id": "d12ae8e4-adc6-5ac6-948e-1aa036023353",
-        "promptIdx": 0,
+        "promptIdx": 1,
         "testIdx": 2,
         "testCase": {
           "description": "capital of Portugal",
@@ -1334,7 +1334,7 @@
       },
       {
         "id": "41895681-5dc9-5ad4-a629-9142cc3d05dd",
-        "promptIdx": 0,
+        "promptIdx": 1,
         "testIdx": 3,
         "testCase": {
           "description": "a day in Paris as JSON",
@@ -1505,7 +1505,7 @@
       },
       {
         "id": "97d6d938-0523-51e7-bc2d-afc97578a16a",
-        "promptIdx": 0,
+        "promptIdx": 1,
         "testIdx": 4,
         "testCase": {
           "description": "a day in Lisbon as JSON",

@@ -102,9 +102,11 @@ VERSION = 6
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
 alerts. Version 3 added the dataset publications (``manifests.jsonl``), version 4 the judge
-calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), version 5 a
-score's source in its key, so ``scores.jsonl`` can hold two lines for one scorer, and version 6 the
-organisation's prompts and their versions (``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), version 5 let
+``scores.jsonl`` hold a score of each source for one case, scorer and scoring job (a person's answer
+beside a check's or a judge's score of the same name), which an SDK that keeps one score per scorer
+and scoring job would import as one, and version 6 the organisation's prompts and their versions
+(``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
