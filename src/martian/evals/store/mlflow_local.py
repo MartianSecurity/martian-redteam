@@ -538,7 +538,8 @@ class MlflowStore:
             info = TraceInfo(
                 trace_id=mlflow_id,
                 trace_location=TraceLocation.from_experiment_id(experiment.experiment_id),
-                request_time=_ms(trace.request_time) or _ms(datetime.now(UTC)) or 0,
+                # A given time is kept even at the epoch, where MLflow puts a trace whose span had no start.
+                request_time=_ms(trace.request_time or datetime.now(UTC)) or 0,
                 state=TraceState(_TRACE_STATE[trace.state]),
                 execution_duration=None if trace.latency_ms is None else int(trace.latency_ms),
                 request_preview=trace.request[:1000],
@@ -709,6 +710,8 @@ class MlflowStore:
                 error=AssessmentError(error_code="MARTIAN_SCORE_ERROR", error_message=score.error)
                 if score.error
                 else None,
+                # A score keeps the time it was given, as an imported one must; MLflow stamps one without.
+                create_time_ms=_ms(score.created_at),
             )
             created = self._store.create_assessment(feedback)
             return _score(created, project_id, trace_id)

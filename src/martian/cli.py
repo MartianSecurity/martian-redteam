@@ -6,7 +6,7 @@ import importlib.util
 import ipaddress
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -19,7 +19,13 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
 import_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer checks.")
-evals_app.add_typer(import_app, name="import", help="Bring runs from other eval tools into the local Evals UI.")
+evals_app.add_typer(
+    import_app, name="import", help="Bring runs from other eval tools, or a Martian export, into the local Evals UI."
+)
+
+DATA_DIR_HELP = (
+    "The local Evals UI's data folder, as for `martian ui`. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals."
+)
 app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 
@@ -176,6 +182,99 @@ def import_inspect(
             f"{log.name}: run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
             f"{counts.errors} errors, {counts.skipped} without a verdict"
         )
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+def _export_counts(lines: dict[str, Any]) -> str:
+    """The main counts of an export's manifest, for one line of output."""
+    shown = (
+        ("projects.jsonl", "project"),
+        ("datasets.jsonl", "dataset version"),
+        ("runs.jsonl", "run"),
+        ("case_results.jsonl", "case result"),
+        ("scores.jsonl", "score"),
+        ("reviews.jsonl", "review"),
+        ("traces.jsonl", "trace"),
+        ("artifacts.jsonl", "artifact"),
+    )
+    counts = [(int(lines[name]["lines"]), noun) for name, noun in shown]
+    return ", ".join(f"{count} {noun}{'' if count == 1 else 's'}" for count, noun in counts)
+
+
+@evals_app.command("export")
+def export_evals(
+    folder: Annotated[
+        Path,
+        typer.Argument(
+            file_okay=False,
+            show_default=False,
+            help="A new or empty folder to write the export to, or the folder of an interrupted export to resume.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Export everything in the local Evals UI's data folder: runs, case results, scores, datasets,
+    reviews and annotations, traces and the rest, as JSON Lines files with a manifest.
+
+    martian evals export ./evals-export    run it again with the same folder to resume an interrupted export
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Exporting the local Evals UI's data needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.data_export import ExportError, export_local
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.store import StoreError
+
+    home = data_folder(data_dir)
+    try:
+        summary = export_local(home, folder)
+    except (ExportError, LocalEditionError) as error:
+        typer.echo(f"Export failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except StoreError as error:
+        typer.echo(f"Export stopped: {error.detail}. Run the same command again to resume it.", err=True)
+        raise typer.Exit(code=2) from None
+    except KeyboardInterrupt:
+        typer.echo("Export interrupted. Run the same command again to resume it.", err=True)
+        raise typer.Exit(code=130) from None
+    finished = "Resumed and finished exporting" if summary.resumed else "Exported"
+    typer.echo(f"{finished} {home} into {summary.folder}: {_export_counts(summary.manifest['files'])}.")
+
+
+@import_app.command("martian")
+def import_martian(
+    folder: Annotated[
+        Path,
+        typer.Argument(file_okay=False, show_default=False, help="A folder `martian evals export` wrote."),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Import a `martian evals export` into a data folder that holds no data yet.
+
+    martian evals import martian ./evals-export --data-dir ./evals-data
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Importing an export needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.data_export import ExportError, import_local
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.store import StoreError
+
+    home = data_folder(data_dir)
+    try:
+        summary = import_local(folder, home)
+    except (ExportError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except StoreError as error:
+        typer.echo(f"Import stopped: {error.detail}. Import into a fresh data folder again.", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"Imported into {home}: {_export_counts(summary.manifest['files'])}.")
     ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
     typer.echo(f"Open them in the local Evals UI: {ui}")
 
