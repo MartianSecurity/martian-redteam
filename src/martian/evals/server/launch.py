@@ -1,5 +1,5 @@
 """Launching and cancelling a run: a port of ``POST /v1/evals`` and ``POST /v1/evals/{run_id}/cancel``
-in the server's ``app/api/evals.py`` (MorningHQ/MartianBackend).
+in the server's ``app/api/evals.py`` (MartianSecurity/MartianBackend).
 
 A launch admits the run and returns at once. It checks the request, asks the worker whether it can
 call the run's target, records the run as ``queued`` with the published dataset version it will

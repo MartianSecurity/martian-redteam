@@ -1,7 +1,7 @@
 """The scorers the console offers by name, and the code scorers the worker runs itself.
 
 A port of ``code_score`` and ``exact_match`` in the server's ``app/evals_workbench.py`` and
-``app/evals_items.py`` (MorningHQ/MartianBackend). Code scorers read only the saved output and the
+``app/evals_items.py`` (MartianSecurity/MartianBackend). Code scorers read only the saved output and the
 case's expected text; the judge scorers need a model and go to the worker's judge.
 """
 
