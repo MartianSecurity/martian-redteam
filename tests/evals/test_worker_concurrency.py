@@ -1,4 +1,4 @@
-"""More than one run at a time per organisation (MorningHQ/martian-notes#145).
+"""More than one run at a time per organisation (MartianSecurity/martian-notes#145).
 
 An organisation may have its edition's ``concurrent_runs`` and ``concurrent_scoring_jobs`` in
 progress at once, a queue's worker runs ``concurrency`` pieces of work at once, and each claim takes

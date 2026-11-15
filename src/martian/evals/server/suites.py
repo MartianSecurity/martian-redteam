@@ -1,6 +1,6 @@
 """Saved suites and registered judges: a port of ``GET`` and ``POST /suites`` of the server's
 ``app/api/evals_quality.py`` and ``GET`` and ``POST /judges`` of ``app/api/evals_explorer.py``
-(MorningHQ/MartianBackend).
+(MartianSecurity/MartianBackend).
 
 - A suite here is the console's: the built-in scorers it runs and the policies that gate them. It is
   a ``Suite`` in the record store's default project, and each change is a new version. A version's

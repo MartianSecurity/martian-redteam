@@ -1,4 +1,4 @@
-"""The worker's limits (MorningHQ/martian-notes#144): every target call has a time limit, a function
+"""The worker's limits (MartianSecurity/martian-notes#144): every target call has a time limit, a function
 that blocks or never returns included, and a run or scoring job stops at its time or judge token
 limit, keeps what it finished, and resumes after it. A fake agent and a deterministic judge stand
 in for the target and the model; nothing calls a model or a network target."""

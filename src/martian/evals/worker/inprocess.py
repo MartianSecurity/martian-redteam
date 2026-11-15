@@ -3,7 +3,7 @@
 It runs one organisation's work, named when it is built (``None`` is the single local user), and
 refuses any other: MLflow keeps the workspace, the active experiment and the tracking URI for the
 whole process, so two organisations' evaluations must never share one
-(MorningHQ/martian-notes#140). That makes it right for the local edition, for tests, and inside
+(MartianSecurity/martian-notes#140). That makes it right for the local edition, for tests, and inside
 each run's own process, where :class:`~martian.evals.worker.process.ProcessWorker` uses it; an
 installation that serves organisations uses ``ProcessWorker``.
 

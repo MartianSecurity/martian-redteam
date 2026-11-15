@@ -189,7 +189,7 @@ class MonitorFilter(_Record):
 
 
 class Monitor(_Record):
-    """Scorers attached to a project's live traffic (MorningHQ/martian-notes#196): judges and
+    """Scorers attached to a project's live traffic (MartianSecurity/martian-notes#196): judges and
     deterministic checks that the worker runs on a sample of the project's new traces, storing each
     score on its trace. The core's own record: no suite file, results file or server table
     describes it, so it is not part of the shared model.
@@ -268,7 +268,7 @@ class MonitoredTrace(_Record):
 
 class ModelWatch(_Record):
     """What makes a schedule also run its suite when the model behind its target changes
-    (MorningHQ/martian-notes#200), besides its slots.
+    (MartianSecurity/martian-notes#200), besides its slots.
 
     ``source`` is where the model is read: ``traces``, the model of the project's live traces
     (not those of eval runs), read by time as a monitor reads them; or ``runs``, the model the
@@ -320,7 +320,7 @@ class ModelWatchProgress(_Record):
 
 
 class Schedule(_Record):
-    """A saved suite version run against a target on a schedule (MorningHQ/martian-notes#197): a
+    """A saved suite version run against a target on a schedule (MartianSecurity/martian-notes#197): a
     regression run, admitted by the worker at each slot as a launch is admitted. The core's own
     record, so it is not part of the shared model.
 
@@ -429,7 +429,7 @@ class MonitorScores(_Record):
 
 
 class ScheduleGates(_Record):
-    """What a threshold judges, the second kind of source (MorningHQ/martian-notes#197): the gate
+    """What a threshold judges, the second kind of source (MartianSecurity/martian-notes#197): the gate
     results of a schedule's runs whose slots are in the window, each ``passed`` as True and
     ``failed`` or ``insufficient_coverage`` as False (:class:`ScheduledRun`). A pass rate is the
     share of its runs that passed their suite's gate."""
@@ -469,7 +469,7 @@ class EmailChannel(_Record):
 
 
 class Threshold(_Record):
-    """A threshold on a measure of scores over a window (MorningHQ/martian-notes#198): healthy
+    """A threshold on a measure of scores over a window (MartianSecurity/martian-notes#198): healthy
     while ``measure`` is ``direction`` ``value``, judged on the 95% interval of the scores in the
     last ``window_seconds`` once there are ``min_count`` of them (:mod:`martian.evals.thresholds`).
 

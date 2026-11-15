@@ -268,7 +268,7 @@ class StoreContract:
     async def test_a_trace_s_model_is_stored_and_searched_by_name(self, store: EvalStore, project: Project) -> None:
         """A trace's model, given or mapped from its spans' attributes (the response's model before
         the request's), is kept, comes back in a search and is a filter of its own
-        (MorningHQ/martian-notes#200)."""
+        (MartianSecurity/martian-notes#200)."""
         span = Span(id="s1", name="chat", kind="CHAT_MODEL", status="ok")
 
         def attributes(**values: str) -> list[Span]:

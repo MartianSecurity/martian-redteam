@@ -56,7 +56,7 @@ EXPECTED = {
     ("on_premises", "viewer"): set(),
 }
 
-# The shape of EvalsBootstrapOut in contracts/evals-api.json in MorningHQ/MartianBackend: each
+# The shape of EvalsBootstrapOut in contracts/evals-api.json in MartianSecurity/MartianBackend: each
 # object's properties. The server's test pins the same shape.
 SHAPE = {
     "Bootstrap": {"principal", "edition", "entitlements", "capabilities", "status"},

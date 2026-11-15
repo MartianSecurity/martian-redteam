@@ -66,9 +66,9 @@ WRITE_OPERATIONS = [
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: a run's attempts
-# (MorningHQ/martian-notes#180) and turns (MorningHQ/martian-notes#191), the judges' agreement
-# with people (MorningHQ/martian-notes#185), people's agreement with each other
-# (MorningHQ/martian-notes#189) and each judge version's calibration (MorningHQ/martian-notes#186).
+# (MartianSecurity/martian-notes#180) and turns (MartianSecurity/martian-notes#191), the judges' agreement
+# with people (MartianSecurity/martian-notes#185), people's agreement with each other
+# (MartianSecurity/martian-notes#189) and each judge version's calibration (MartianSecurity/martian-notes#186).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
 OWN_NAMES |= {("get", "/v1/evals/judge-agreement"), ("get", "/v1/evals/reviewer-agreement")}
 OWN_NAMES |= {
@@ -76,12 +76,12 @@ OWN_NAMES |= {
     ("post", "/v1/evals/judge-calibrations"),
     ("get", "/v1/evals/judge-calibrations/{calibration_id}"),
 }
-# Registering a judge graded by a panel of judge models (MorningHQ/martian-notes#187), which the
+# Registering a judge graded by a panel of judge models (MartianSecurity/martian-notes#187), which the
 # contract's POST /judges has no field for.
 OWN_NAMES |= {("post", "/v1/evals/judge-panels")}
-# Re-checking a judge version's calibration (MorningHQ/martian-notes#188).
+# Re-checking a judge version's calibration (MartianSecurity/martian-notes#188).
 OWN_NAMES |= {("post", "/v1/evals/judge-rechecks"), ("get", "/v1/evals/judge-rechecks/{recheck_id}")}
-# The core's own monitor routes, which the contract does not have either (MorningHQ/martian-notes#196).
+# The core's own monitor routes, which the contract does not have either (MartianSecurity/martian-notes#196).
 OWN_NAMES |= {
     ("get", "/v1/evals/monitors"),
     ("post", "/v1/evals/monitors"),
@@ -90,9 +90,9 @@ OWN_NAMES |= {
     ("post", "/v1/evals/monitors/{monitor_id}/resume"),
     ("delete", "/v1/evals/monitors/{monitor_id}"),
 }
-# And its monitors' score trends (MorningHQ/martian-notes#199).
+# And its monitors' score trends (MartianSecurity/martian-notes#199).
 OWN_NAMES |= {("get", "/v1/evals/monitors/{monitor_id}/trends")}
-# And its threshold routes (MorningHQ/martian-notes#198).
+# And its threshold routes (MartianSecurity/martian-notes#198).
 OWN_NAMES |= {
     ("get", "/v1/evals/thresholds"),
     ("post", "/v1/evals/thresholds"),
@@ -100,9 +100,9 @@ OWN_NAMES |= {
     ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
     ("delete", "/v1/evals/thresholds/{threshold_id}"),
 }
-# And the route that gives an imported threshold's webhook its secret again (MorningHQ/martian-notes#361).
+# And the route that gives an imported threshold's webhook its secret again (MartianSecurity/martian-notes#361).
 OWN_NAMES |= {("post", "/v1/evals/thresholds/{threshold_id}/secret")}
-# And its schedule routes (MorningHQ/martian-notes#197).
+# And its schedule routes (MartianSecurity/martian-notes#197).
 OWN_NAMES |= {
     ("get", "/v1/evals/schedules"),
     ("post", "/v1/evals/schedules"),

@@ -554,7 +554,7 @@ input, expectations or checks, or a check's scope, grades it again.
 **Suite-file runs only.** The pytest gate evaluates one input per row, and the evals core's worker
 sends one prompt per case: it skips a conversation case, scripted or simulated, saying so. Its
 HTTP targets fill in `{{session_id}}`, `{{history}}` and `{{messages}}` as for a case of one input.
-LLM judges of a whole conversation are not built yet (MorningHQ/martian-notes#176).
+LLM judges of a whole conversation are not built yet (MartianSecurity/martian-notes#176).
 
 Every turn is recorded:
 

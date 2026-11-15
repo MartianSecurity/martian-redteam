@@ -1,7 +1,7 @@
 """The typed request and response bodies of the write routes, as the frozen evals contract has them.
 
 Each class is the schema of the same name in version 3 of ``contracts/evals-api.json`` in
-MorningHQ/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
+MartianSecurity/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
 ``app/schemas.py``, the scoring, review and suite requests from ``app/evals_workbench_schema.py``,
 the project, judge, question, annotation and view requests from ``app/evals_explorer_schema.py``,
 and the dataset authoring bodies from ``app/api/evals_datasets.py``. ``tests/evals/
