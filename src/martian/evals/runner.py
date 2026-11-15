@@ -1082,20 +1082,19 @@ class _ProcessTarget:
         return self._process.signature()
 
     def __call__(self, **inputs: Any) -> Any:
-        import mlflow
-
+        from martian.evals._mlflow import add_spans, start_span
         from martian.evals.isolation import TargetRaised
 
-        with mlflow.start_span(name=self.__name__) as span:
+        with start_span(self.__name__) as span:
             span.set_inputs(inputs)
             try:
                 value, trace = self._process.call(inputs, self._timeout)
             except TargetRaised as raised:
                 if raised.trace is not None:
-                    mlflow.add_trace(raised.trace, target=span)
+                    add_spans(raised.trace, span)
                 raise
             if trace is not None:
-                mlflow.add_trace(trace, target=span)
+                add_spans(trace, span)
             span.set_outputs(value)
             return value
 
