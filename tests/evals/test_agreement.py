@@ -423,6 +423,42 @@ def test_the_route_measures_a_judge_version_once_enough_items_are_labelled(store
     )
 
 
+async def seed_a_review_named_like_the_judge(store, records) -> None:
+    """A suite-file run's own judge verdict on one case (no scoring job), and a queue question
+    named like that judge, answered: the review and its human score, as the review route writes
+    them (MartianSecurity/martian-notes#345)."""
+    principal = SINGLE_USER
+    await store.create_project(principal, Project(id=DEFAULT_PROJECT, name="Default", created_at=T0))
+    run = Run(id=RUN, project_id=DEFAULT_PROJECT, code="EV-1", source="local", state="completed", created_at=T0)
+    await records.create_run(principal, run)
+    await store.start_run(principal, run)
+    await store.record_trace(
+        principal, Trace(id=tid(0), project_id=DEFAULT_PROJECT, name="c0", state="ok", request_time=T0, run_id=RUN)
+    )
+    result = CaseResult(run_id=RUN, case_id="c0", status="passed", store=StoreRef(trace_id=tid(0)))
+    judged = Score(run_id=RUN, case_id="c0", trace_id=tid(0), scorer="polite_tone", scorer_version="2",
+                   source="llm_judge", source_id="openai:/judge", value=True, passed=True, created_at=T0)  # fmt: skip
+    await store.log_score(principal, DEFAULT_PROJECT, tid(0), judged)
+    await records.put_results(principal, DEFAULT_PROJECT, [result], scores=[judged])
+    at = T0 + timedelta(minutes=5)
+    await records.add_review(principal, DEFAULT_PROJECT, Review(id="review-0", run_id=RUN, case_id="c0",
+                             criterion="polite_tone", state="complete", value=False, created_at=at))  # fmt: skip
+    human = Score(run_id=RUN, case_id="c0", trace_id=tid(0), scorer="polite_tone", source="human", value=False,
+                  passed=False, metadata={"martian.review_criterion": "polite_tone"}, created_at=at)  # fmt: skip
+    await records.put_scores(principal, DEFAULT_PROJECT, [human])
+    await store.log_score(principal, DEFAULT_PROJECT, tid(0), human)
+
+
+def test_a_review_named_like_a_suite_runs_judge_is_counted_beside_its_verdict(stores):
+    # The person's answer sits beside the judge's score in the record store, so the verdict is
+    # still there to compare with it.
+    store, records = stores
+    asyncio.run(seed_a_review_named_like_the_judge(store, records))
+    (found,) = report(store, records)["items"]
+    assert (found["judge"], found["version"], found["judged"], found["labelled"]) == ("polite_tone", "2", 1, 1)
+    assert found["confusion"] == {"both_pass": 0, "false_pass": 1, "false_fail": 0, "both_fail": 0}
+
+
 def test_a_project_with_nothing_yet_reports_nothing(tmp_path):
     records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
     assert report(MemoryStore(), records)["items"] == []

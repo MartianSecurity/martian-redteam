@@ -233,7 +233,7 @@ The core adds read routes of its own, which the server's contract does not have:
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
-| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
+| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case, not a person's answer of the same name) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 | `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `reviewer_agreement` is the [reviewers' agreement](evals.md#agreement-between-reviewers) on each question named like a judge of `items`, as `GET /reviewer-agreement` gives it across queues. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and reviews. Store: the registered judges, the runs' review queues and the newest 1,000 traces |
 | `GET /v1/evals/reviewer-agreement` | People's agreement with each other on the items two or more of them answered ([agreement between reviewers](evals.md#agreement-between-reviewers)): `project_id`, `minimum` (30), `queues`, one per review queue of the project, newest first, each with `queue_id`, `name`, `run_id` and `questions`, and `questions`, one per question name across every queue that asks it. A question's report has `question`, `kind`, `answered`, `shared` (the items two or more reviewers answered, the ones compared), `reviewers`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `method` (`cohen` or `lin` for two reviewers, `fleiss` or `icc` for more), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `mean_absolute_difference` and its `_confidence_95`, and `concordance`. Below `minimum` the counts and `agreed` are given and `method` and every rate, interval and coefficient are `null`. `project_id` and `queue_id` narrow it to a project and one queue; a project or queue that does not exist is `404`. It needs `review_queues` | Records: every link of each run's review chains. Store: the runs' review queues |
 | `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `panel` (the members a judge graded by a [panel](evals.md#a-panel-of-judges) runs on, each `model` and `endpoint`, in place of a model; empty for any other judge), `status` (`checked` or `unchecked`), `reason` (`null`; `none` when it has no calibration, which the `policy` judge never has; `model_changed` when it runs on another model, or panel, than its calibration was measured on; or `definition_changed` when what it means differs from what it meant then) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
@@ -254,7 +254,9 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   and review queues, and MLflow's form (`tr-` and 32 hex digits) for traces, so the objects these
   routes serve need ids in those forms; a run with another id cannot be read through them. A case
   result has no id of its own: its `id` is a UUID derived from its run and case ids, and a score's
-  `id` one derived from its run, case, scorer and scoring job (`result_id`, `score_id`). A run is
+  `id` one derived from its key in the record store: run, case, scorer, scoring job and source
+  (`result_id`, `score_id`). A person's score leaves the source out, so the `assessment_id` a
+  review recorded for its answer before the source joined the key still names it. A run is
   found by id in the default project, then in each of the store's projects. The run routes match
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
 - **Users.** The API names a person by a UUID (`projection.user_out`): their id when it is one, as
@@ -543,7 +545,10 @@ All paths are under `/v1/evals`. How the core carries them out:
   names, so any other is `422`, and `GET /scorers` does not offer one (MartianSecurity/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
-  complete review also stores the answer as a human score, on the case's trace too. Only a role
+  complete review also stores the answer as a human score, on the case's trace too. That score
+  sits beside the run's own check or judge score of the same name, such as a queue question named
+  like a check, and never replaces it: the workbench lists both, each with its own `id` and
+  `source`, and the review's `assessment_id` names the person's. Only a role
   with `assignReviews` gives another person's work to someone; the core knows no membership, so
   an assignee is any user, named as **Users** above says.
 - **Review queues and questions.** A queue lives in the store with one item per case's trace, so
@@ -603,7 +608,9 @@ serves its own `/monitors` routes ([monitors](#monitors)) and `/schedules` route
 
 `tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
-deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
+deterministic judge; it answers a review question named like the run's exact-match check with
+the record store on SQLite, and on Postgres when `MARTIAN_TEST_POSTGRES_URL` is set, and checks
+that both scores stay. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
 operation of the contract but the ones above. `tests/evals/test_user_ids.py` saves a review from
 `martian ui`'s application with the UI's default reviewer, the session's user, and checks that
@@ -2113,7 +2120,7 @@ store keeps the watch, its progress and the noted changes on both databases.
   | Projects | `create_project`, `get_project`, `list_projects`, `archive_project` |
   | Datasets | `create_dataset`, `list_datasets`, `get_dataset`, `find_dataset`, `read_cases` |
   | Run telemetry | `start_run`, `get_run`, `finish_run` |
-  | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces` |
+  | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces`, `delete_traces`, `delete_traces_before` |
   | Scores | `log_score`, `list_scores` |
   | Registered scorers | `register_scorer`, `list_scorers`, `scorer_versions` |
   | Review | `save_question`, `list_questions`, `create_queue`, `get_queue`, `queue_items`, `set_queue_item` |
@@ -2147,7 +2154,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   looks into a long request and response, alone and with those filters, sessions and users, traces in each attribute style mapped with their
   attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
-  review queues, artifact names, and organisations never seeing each other. A binding's tests
+  review queues, artifact names, traces deleted for good by id and before a cutoff
+  ([deleting runs and traces](#deleting-runs-and-traces)), and organisations never seeing each
+  other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
   route the edition leaves out, and `require_capability` a write route the role does not allow.
@@ -2542,6 +2551,13 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   case has both or neither: the worker's checkpoint of each finished case
   ([checkpoints and resuming](#checkpoints-and-resuming)), and how `martian evals run` records each
   batch.
+- A case keeps one score per scorer, scoring job and source (`martian_scores`' key): a scoring
+  job's scores sit beside the run's own, and a person's answer beside a check's or a judge's score
+  of the same name, so neither replaces the other. Migration `0012` adds `source` to the key,
+  filled from each score's record in every organisation (on Postgres the table stops forcing
+  row-level security for that, in the migration's transaction). Going back keeps one score per
+  scorer and scoring job: of scores that differ only by source, a judge's, else a check's; a
+  person's goes, and its review still holds the answer.
 - A write the database refuses is a `StoreError` naming the method and the table: a duplicate
   key, such as a run two writers create at once, is a `conflict`, and any other refused value,
   such as a case position beyond Postgres's `integer`, is `invalid`. Any other database failure,
@@ -2555,7 +2571,8 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   adds its table.
 - The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
   database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
-  method: only a `QueueWorker` uses it.
+  method: only a `QueueWorker` uses it, and `delete_run` removes a deleted run's work left in it
+  ([deleting runs and traces](#deleting-runs-and-traces)).
 - A judge calibration (`JudgeCalibration` in `martian.evals.records`) is the core's own record,
   not part of the shared model: `save_calibration` records one, or returns the stored one with
   the same id; `get_calibration` reads one and `list_calibrations` lists a project's, or one
@@ -2621,6 +2638,57 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 `tests/evals/record_contract.py` is the behaviour; it runs on SQLite always and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
 so row-level security applies.
+
+## Deleting runs and traces
+
+Both stores can remove a run or a trace for good, in every edition. They hold no policy: when to
+delete, how long to keep, and legal holds are the calling edition's (the Martian server's
+retention, MartianSecurity/martian-notes#162). No route calls them; the edition calls the stores.
+
+- `RecordStore.list_finished_runs(principal, project_id, created_before=..., limit=100, cursor=None)`
+  lists the project's runs that are neither `queued` nor `running` and were created before the
+  cutoff, oldest first, paged by offset as `list_runs` is: the candidates, without paging every
+  run. A caller that deletes what it lists asks again without a cursor.
+- `RecordStore.delete_run(principal, project_id, run_id)` removes, in one transaction, the run and
+  every row keyed to it: its case results, its scores of every source and scoring job (a person's
+  answer beside a check's score of the same name included), its scoring jobs, its reviews, its
+  work left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
+  the schedule that started it, so the schedule's history and the thresholds on its gate results
+  no longer count that run. The tables have no foreign keys, so the delete names each one. It
+  returns the rows it removed from each table, by table name, such as
+  `{"martian_runs": 1, "martian_case_results": 40, "martian_scores": 80, ...}`. It refuses with
+  `conflict` while anything still works on the run: the run or one of its scoring jobs is
+  `queued` or `running`, or a worker's claim whose lease has not run out holds its work, as one
+  does while the worker finishes its turn after the run ended. Cancel it, or let it end, first.
+  The run's own row goes last, and only while the run is still finished, so a stopped run resumed
+  meanwhile undoes the whole delete.
+- `EvalStore.delete_traces(principal, project_id, trace_ids)` and
+  `delete_traces_before(principal, project_id, before, limit=1000)` delete traces for good, at
+  most 1,000 a call (`TRACE_DELETE_LIMIT` in `martian.evals.store`): each trace, its spans, its
+  scores and its review queue items, so none of it reads back. `delete_traces` returns the ids it
+  deleted, in the order given, leaving out any the project does not hold. `delete_traces_before`
+  deletes the project's oldest traces whose request time is before the cutoff and returns their
+  ids, oldest first; a caller deletes until a call returns fewer than its `limit`. Both work in
+  an archived project.
+- `RecordStore.forget_traces(principal, project_id, trace_ids)` then removes what the records keep
+  of those traces, in one transaction: each monitor's row for them in `martian_monitored_traces`,
+  with the scores it kept there, so they leave its thresholds' windows and its score trends, and
+  the outbox's deliveries to them in any state, which would otherwise retry against a trace that
+  is gone. A run's case results and scores that name a deleted trace stay with the run.
+- On [the in-process binding](#the-in-process-binding), a trace is deleted with MLflow's own
+  tracking store delete (`delete_traces` with the traces' MLflow ids, 100 at a time), which
+  removes its `trace_info` row and, through MLflow's cascades, its tags, metadata, metrics, spans
+  and assessments, and its review queue items. MLflow keeps one row: a linked trace's
+  `entity_associations` link to its MLflow run, which holds the two ids and nothing else.
+- A deleted run's record in the store, its MLflow run with `martian/run.json` and its artifacts,
+  stays: `EvalStore` has no run delete ([not built yet](#not-built-yet)).
+
+`tests/evals/record_contract.py` deletes runs, refuses one in progress, lists the finished runs
+before a cutoff and forgets traces, on SQLite and Postgres. `tests/evals/test_records.py` gives a
+run a row in every table keyed to a run, deletes it, and reads every table of the record store's
+database to find no row that names it, on both databases. `tests/evals/store_contract.py` deletes
+traces on `MemoryStore` and `MlflowStore`, and `tests/evals/test_store_mlflow.py` reads every one
+of MLflow's tables to find nothing of a deleted trace but its run link, on SQLite and Postgres.
 
 ## The local edition (`martian ui`)
 
@@ -3574,6 +3642,8 @@ which each get their own; and covers what a push and the server refuse, and the 
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
+| Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |
+| `delete_traces` and `delete_traces_before` on the Martian server's MLflow REST binding (`ServerStore` in MartianSecurity/MartianBackend) | MartianSecurity/martian-notes#162 |
 
 ## The Martian server
 
