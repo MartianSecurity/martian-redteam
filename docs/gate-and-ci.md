@@ -99,9 +99,15 @@ suite, and the two comments they produce
   for a suite that [repeats its cases](evals.md#repeated-attempts) how many
   times each case ran, the rule each check's attempts combined by, a
   **Reliability** row under the pass rate and the
-  [flaky cases](evals.md#reliability-and-flaky-cases),
+  [flaky cases](evals.md#reliability-and-flaky-cases), for a suite with
+  [conversation cases](evals.md#conversations) a **Turns** row with the
+  turns' own counts and how many cases are conversations, for a suite with
+  [simulated users](evals.md#simulated-users) the simulated cases counted in
+  the headline, a **Simulated** row with their own counts, a `goal_reached`
+  row and the simulator's model,
   and up to 25 failed and 25 unfinished case
-  IDs with the checks that did not pass. Inputs, replies and judge reasons stay
+  IDs with the checks that did not pass, `(simulated)` beside a simulated
+  case and, for a conversation, the numbers of the turns that failed. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
   instead of repeating an earlier result. The same text goes to the job summary

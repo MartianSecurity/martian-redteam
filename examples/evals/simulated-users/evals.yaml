@@ -1,0 +1,30 @@
+# Running this example needs a model key: a model plays each case's user.
+#
+#   export OPENAI_API_KEY=...                         # your provider's key
+#   export OPENAI_API_BASE=http://localhost:4000/v1   # only for an OpenAI-compatible endpoint
+#   martian evals run examples/evals/simulated-users/evals.yaml
+#
+# Replace your-model in simulator.model with a model your provider serves. The assistant under
+# test is agent.py, with no model. Each case names a simulated user (a goal, a persona, a turn
+# budget and a stop condition) instead of scripted turns. The simulator writes each user message
+# from the conversation so far, and says at the end whether the goal was reached (goal_reached).
+# A model plays the users, so the conversations, and the verdicts, can differ from run to run.
+data: cases.jsonl
+
+target:
+  file: agent.py
+  function: reply          # called as reply(message="...", history=[...]) for each turn
+
+simulator:
+  model: "openai:/your-model"
+  inference_params:
+    temperature: 0.7
+
+checks:
+  - type: length           # every turn the simulated user sends
+    name: short
+    max_length: 300
+  - type: not_contains     # once, over every reply: no other customer's order
+    name: no_other_orders
+    expectation: other_orders
+    scope: conversation

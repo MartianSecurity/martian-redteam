@@ -42,7 +42,15 @@ PUBLIC_IMPORTS: dict[str, set[str] | None] = {
     "mlflow.environment_variables": {"MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS"},
 }
 PUBLIC_ATTRIBUTES = {
-    "mlflow": {"set_tracking_uri", "get_tracking_uri", "set_experiment", "trace", "active_run", "genai"},
+    "mlflow": {
+        "set_tracking_uri",
+        "get_tracking_uri",
+        "set_experiment",
+        "trace",
+        "active_run",
+        "genai",
+        "update_current_trace",
+    },
     "mlflow.genai": {"evaluate"},
 }
 
