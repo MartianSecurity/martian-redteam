@@ -256,6 +256,35 @@ work_queue = Table(
     Index("ix_martian_work_queue_next", "state", "created_at"),
 )
 
+# Dataset manifests (migration 0008): what publishing each dataset version wrote (``martian.evals.manifests``).
+dataset_manifests = Table(
+    "martian_dataset_manifests",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("dataset_id", String(ID), nullable=True),
+    Column("state", String(16), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_dataset_manifests_dataset", "space", "project_id", "dataset_id"),
+)
+
+# The outbox (migration 0009): store writes kept until they are delivered (``martian.evals.outbox``).
+deliveries = Table(
+    "martian_deliveries",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("kind", String(16), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("next_attempt_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_deliveries_due", "space", "state", "next_attempt_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -273,4 +302,6 @@ TABLES = (
     threshold_alerts,
     schedules,
     schedule_runs,
+    dataset_manifests,
+    deliveries,
 )

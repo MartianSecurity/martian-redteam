@@ -15,6 +15,9 @@ things the core never imports:
   scoring job answers ``503``. A worker that runs beside the app (``Lifecycle``, such as a
   :class:`~martian.evals.worker.QueueWorker` serving in this process) is started when the app
   starts serving and stopped when it stops.
+- ``agent_names``: an async function from a principal and agent ids to the agents' display
+  names, which the run routes send as ``agent_name``, such as the server's registry lookup. The
+  local edition has none, and its runs carry no agent name.
 - ``judge_settings``: :class:`~martian.evals.judge_settings.JudgeSettings`, where each
   organisation's default judge model is kept, such as the local edition's
   :class:`~martian.evals.judge_settings.FileJudgeSettings`. Without it there is no default, and
@@ -64,8 +67,10 @@ from martian.evals.server import (
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
 from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.dependencies import (
+    AgentNames,
     EntitlementsProvider,
     PrincipalProvider,
+    current_agent_names,
     current_entitlements,
     current_judge_settings,
     current_principal,
@@ -151,6 +156,7 @@ def create_app(
     entitlements: EntitlementsProvider = lambda _principal: COMMUNITY,
     worker: Worker | None = None,
     judge_settings: JudgeSettings | None = None,
+    agent_names: AgentNames | None = None,
     **fastapi_options: Any,
 ) -> FastAPI:
     """The evals core as an application. ``principal`` is a FastAPI dependency, so it can read the
@@ -172,6 +178,7 @@ def create_app(
     app.state.martian_evals_entitlements = entitlements
     app.state.martian_evals_worker = worker
     app.state.martian_evals_judge_settings = judge_settings
+    app.state.martian_evals_agent_names = agent_names
     # One OpenTelemetry trace write at a time, so that requests carrying spans of one trace merge in turn.
     app.state.martian_evals_trace_writes = asyncio.Lock()
     app.dependency_overrides[current_principal] = principal
@@ -202,6 +209,7 @@ def create_app(
 
 __all__ = [
     "CAPABILITIES",
+    "AgentNames",
     "COMMUNITY",
     "DEFAULT_PROJECT",
     "EDITIONS",
@@ -221,6 +229,7 @@ __all__ = [
     "build_bootstrap",
     "capabilities_for",
     "create_app",
+    "current_agent_names",
     "current_entitlements",
     "current_judge_settings",
     "current_principal",

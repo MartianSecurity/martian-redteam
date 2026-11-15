@@ -301,20 +301,33 @@ def walk(found: Sequence[Component]) -> Iterator[Component]:
 
 def check(found: Sequence[Component], policy: Mapping[str, Any]) -> list[str]:
     """Apply the licence policy to every component, recording how each was treated, and return one
-    line per component the policy refuses."""
+    line per component the policy refuses.
+
+    A first-party component is not held to the allowed list. When its policy entry names a licence,
+    a component that declares none takes it (the Evals UI's ``ui-version.json`` names no licence), and
+    one that declares another is refused."""
     allowed = policy["allowed"]
     concluded = {entry["component"]: entry for entry in policy["concluded"]}
     exceptions = {(entry["component"], entry["licence"]) for entry in policy["exceptions"]}
 
-    def matches(component: Component, section: str) -> bool:
-        return any(fnmatch.fnmatchcase(component.key, entry["component"]) for entry in policy[section])
+    def matching(component: Component, section: str) -> Mapping[str, Any] | None:
+        return next((e for e in policy[section] if fnmatch.fnmatchcase(component.key, e["component"])), None)
 
     refused = []
     for component in walk(found):
-        if matches(component, "first_party"):
+        if ours := matching(component, "first_party"):
             component.treatment = "first-party"
+            if licence := ours.get("licence"):
+                if component.licence is None:
+                    component.licence = licence
+                elif component.licence != licence:
+                    component.treatment = "refused"
+                    refused.append(
+                        f"{component.key} {component.version}: declares {component.licence},"
+                        f" not its first-party licence {licence}"
+                    )
             continue
-        if matches(component, "not_checked"):
+        if matching(component, "not_checked"):
             component.treatment = "not checked"
             continue
         treatment = "allowed"

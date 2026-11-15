@@ -23,6 +23,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from martian.evals._digits import ascii_digits
 from martian.evals.judge_settings import JudgeModel
 from martian.evals.model import Policy, ScorerVersion, Suite, suite_digest
 from martian.evals.server.dependencies import (
@@ -139,7 +140,7 @@ def is_judge(scorer: ScorerVersion) -> bool:
         scorer.kind == "llm_judge"
         and scorer.type == JUDGE_TYPE
         and all(field in scorer.criteria for field in JUDGE_FIELDS)
-        and scorer.version.isdigit()
+        and ascii_digits(scorer.version)
     )
 
 

@@ -23,6 +23,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import unquote
 
+from martian.evals._digits import ascii_digits
+
 TYPES = ("null", "boolean", "integer", "number", "string", "array", "object")
 # Keywords that describe a value without constraining it.
 ANNOTATIONS = frozenset(
@@ -146,7 +148,7 @@ def _resolve(reference: Any, root: Mapping[str, Any], where: str) -> Any:
         step = part.replace("~1", "/").replace("~0", "~")
         if isinstance(node, Mapping) and step in node:
             node = node[step]
-        elif isinstance(node, list) and step.isdigit() and int(step) < len(node):
+        elif isinstance(node, list) and ascii_digits(step) and int(step) < len(node):
             node = node[int(step)]
         else:
             raise ValueError(f"{where}.$ref {reference!r} points to nothing in this schema")
