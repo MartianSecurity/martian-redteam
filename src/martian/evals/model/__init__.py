@@ -768,13 +768,14 @@ class Trace(_Object):
 class TraceQuery(_Object):
     """Which traces of a project to return, newest first unless ``oldest_first``.
 
-    ``model`` keeps the traces whose model is exactly that name. ``min_latency_ms`` keeps traces
-    whose latency is at least that (a trace with no latency is left out), and ``verdicts`` keeps
-    traces with a verdict of each named scorer equal to its boolean: a feedback score, never an
-    expectation (:func:`is_expectation`). ``slowest_first`` orders by latency instead of time,
-    slowest first or, when ``False``, fastest first, with the traces that have no latency last. A
-    store applies every filter and the order before it pages, so a page is the query's, whatever
-    the project's size."""
+    ``model`` keeps the traces whose model is exactly that name. ``text`` matches, ignoring case, a
+    trace's name and its request and response up to 1,000 characters, or the first 997 of a longer
+    one (``martian.evals.store.text_matches``). ``min_latency_ms`` keeps traces whose latency is at
+    least that (a trace with no latency is left out), and ``verdicts`` keeps traces with a verdict
+    of each named scorer equal to its boolean: a feedback score, never an expectation
+    (:func:`is_expectation`). ``slowest_first`` orders by latency instead of time, slowest first or,
+    when ``False``, fastest first, with the traces that have no latency last. A store applies every
+    filter and the order before it pages, so a page is the query's, whatever the project's size."""
 
     project_id: Identifier
     run_id: str | None = None

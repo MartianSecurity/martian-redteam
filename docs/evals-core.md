@@ -375,14 +375,15 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
 - **Trace search and sessions.** Every filter and order of the contract's query is the store's
   (`TraceQuery` in the model): project, session, user, text, state, time, minimum latency
   (`min_latency_ms`), a boolean assessment (`verdicts`, feedback only) and newest, oldest, slowest
-  or fastest first (`oldest_first`, `slowest_first`). A page of results is the store's page of the
-  whole project, whatever its size, so it may hold fewer traces than its limit, or none, and
-  still have a `next_cursor`, when the store filtered in its own process (the MLflow binding does
-  for free text and the assessment filter). A cursor names the store's page and belongs to its query:
-  reused with another, it is `409`. One whose store page is not a `next_cursor` that store
-  returned, such as `²` or `١`, is `422` ("cursor is not a next_cursor this store returned"). A
-  session search is the store's `search_sessions` with the same filters and order. A session
-  search with a cursor is `422`, as on the server.
+  or fastest first (`oldest_first`, `slowest_first`). Text (`q`) matches a trace's name and the
+  start of its request and response ([free text](#the-in-process-binding)). A page of results is
+  the store's page of the whole project, whatever its size, so it may hold fewer traces than its
+  limit, or none, and still have a `next_cursor`, when the store filtered in its own process (the
+  MLflow binding does for free text and the assessment filter). A cursor names the store's page
+  and belongs to its query: reused with another, it is `409`. One whose store page is not a
+  `next_cursor` that store returned, such as `²` or `١`, is `422` ("cursor is not a next_cursor
+  this store returned"). A session search is the store's `search_sessions` with the same filters
+  and order. A session search with a cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
@@ -2121,6 +2122,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   trace search has a cursor of its own, MLflow's offsets ([below](#the-in-process-binding)),
   and refuses any other the same way. A page of `search_traces` may hold fewer traces than its
   `limit`, or none, and still have a `next_cursor`; only a `next_cursor` of `None` ends a search.
+  Its free text matches, ignoring case, a trace's name and its request and response up to 1,000
+  characters, or the first 997 of a longer one, in every binding (`TEXT_SEARCH_REACH` and
+  `text_matches`); `get_trace` gives both whole.
 - `MemoryStore` is the reference implementation, in memory.
 - [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
   OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
@@ -2132,7 +2136,8 @@ store keeps the watch, its progress and the noted changes on both databases.
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, traces in each attribute style mapped with their
+  search filters, latency and verdict filters and latency order, and paging, how far free text
+  looks into a long request and response, alone and with those filters, sessions and users, traces in each attribute style mapped with their
   attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
@@ -2454,11 +2459,20 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   first 997 characters and `...` of a longer one, as MLflow tracing shortens its own, because
   Postgres limits `trace_info.request_preview` and `response_preview` to 1,000 characters
   (`TRACE_PREVIEW_LENGTH`). `get_trace` reads them whole from the root span. A search reads only
-  `trace_info`, so its results carry the previews and its text filter matches only them; such a
-  trace's metadata says so (`martian.request_preview_truncated` and
-  `martian.response_preview_truncated`, `"true"`, from `martian.evals.store`). A trace an earlier
-  release wrote has them whole in `martian.request` and `martian.response` metadata and reads
-  back as before.
+  `trace_info`, so its results carry the previews; such a trace's metadata says so
+  (`martian.request_preview_truncated` and `martian.response_preview_truncated`, `"true"`, from
+  `martian.evals.store`). A trace an earlier release wrote has them whole in `martian.request` and
+  `martian.response` metadata and reads back as before.
+- Free text looks in a trace's name and in what the previews hold of its request and response,
+  without the `...`: the whole of one up to 1,000 characters, and the first 997 of a longer one.
+  That is the reach of every binding (`TEXT_SEARCH_REACH` and `text_matches` in
+  `martian.evals.store`; `MemoryStore` cuts its whole texts the same way), and of a trace an
+  earlier release wrote too. MLflow's own `trace.text` filter would reach the whole text, and a
+  span's inputs and outputs with it, but the database looks for it in the content of every span
+  of the project, without an index, in every call: at 100,000 traces one such search took 10
+  seconds, against 0.13 to 0.17 seconds for a call of the binding's, which reads at most 1,000
+  traces ([trace store limits](trace-store-limits.md#what-limits-what)). The binding does not use
+  it.
 - On Postgres, a value of a trace's own metadata is still at most 8,000 characters, MLflow's
   `trace_request_metadata.value`; a longer one is refused as `invalid`, naming `record_trace` and
   that table, not the text. SQLite does not enforce the length.

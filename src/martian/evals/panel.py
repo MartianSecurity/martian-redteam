@@ -278,8 +278,9 @@ def judge_panel(
     grading every case on its own, decided by :data:`RULE`.
 
     ``judge`` is one of the SDK's pass/fail judges (``response_guidelines``,
-    ``response_conditions``, ``response_rubric``, ``groundedness``, ``context_relevance`` or
-    ``context_sufficiency``), or any function that takes ``model=`` and ``name=`` and returns a
+    ``response_conditions``, ``response_rubric``, ``groundedness``, ``context_relevance``,
+    ``context_sufficiency``, ``task_completion``, ``policy_adherence`` or ``knowledge_retention``),
+    or any function that takes ``model=`` and ``name=`` and returns a
     scorer whose value is a boolean. ``models`` are from 2 to 9 different MLflow model URIs.
     ``name`` is the panel's scorer name, by default the judge's own default name. ``options`` are
     the judge's other arguments, the same for every member, and are checked now, as the judge
