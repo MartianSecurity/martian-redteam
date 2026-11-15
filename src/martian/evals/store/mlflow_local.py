@@ -146,6 +146,13 @@ def _from_ms(value: int | None) -> datetime | None:
     return datetime.fromtimestamp(value / 1000, UTC) if value is not None else None
 
 
+def workspace_name(principal: Principal) -> str:
+    """The MLflow workspace of the principal's organisation (``org-`` and a hash of its id), or
+    ``local`` for the single local user. The worker fixes it for each run's process."""
+    organisation = principal.organisation_id
+    return "local" if organisation is None else "org-" + _hex(organisation, 40)
+
+
 class MlflowStore:
     """An ``EvalStore`` on mlflow-skinny's SQL store in this process.
 
@@ -171,8 +178,7 @@ class MlflowStore:
 
     def _workspace(self, principal: Principal) -> str:
         """The MLflow workspace of an organisation, or of the single local user."""
-        organisation = principal.organisation_id
-        name = "local" if organisation is None else "org-" + _hex(organisation, 40)
+        name = workspace_name(principal)
         if name not in self._ready:
             try:
                 self._workspaces.get_workspace(name)

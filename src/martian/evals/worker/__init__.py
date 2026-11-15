@@ -9,10 +9,15 @@ process never calls a target or a model while answering a request.
 The interface is deliberately small, so the editions and the issues that follow can each supply
 their own worker without changing the routes:
 
-- :class:`InProcessWorker` runs work as tasks of the API's own event loop. It is enough for the
-  local edition and for tests; a run ends with the process that runs it.
-- A durable queue and a worker process (MorningHQ/martian-notes#139) implement ``submit`` by
-  enqueueing; one process per evaluation run (#140) executes each ``Work`` in its own process.
+- :class:`ProcessWorker` runs each piece of work in a new process of its own, with the MLflow
+  workspace of the work's organisation fixed for the life of that process. MLflow keeps its
+  workspace, active experiment and tracking URI for the whole process, so no process ever runs
+  two organisations' evaluations (:mod:`martian.evals.worker.process`).
+- :class:`InProcessWorker` runs one organisation's work as tasks of the calling process's event
+  loop and refuses any other organisation's. It is enough for the local edition and for tests,
+  and it runs the work inside each of ``ProcessWorker``'s processes.
+- A durable queue (MorningHQ/martian-notes#139) implements ``submit`` by enqueueing, and hands
+  each ``Work`` to a process of its own.
 - Calling HTTP targets from the worker (#137) and running the SDK judge in it (#133) are targets
   and a judge given to the worker; the routes do not change.
 
@@ -108,18 +113,24 @@ class Worker(Protocol):
         ...
 
 
-from martian.evals.worker.execute import execute_run, execute_scoring  # noqa: E402
+from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
+from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 
 __all__ = [
     "InProcessWorker",
     "Judge",
     "JudgeRequest",
     "JudgeResult",
+    "ProcessWorker",
     "TargetCall",
     "Verdict",
     "Work",
     "Worker",
+    "WorkerServices",
+    "dump_work",
     "execute_run",
     "execute_scoring",
+    "fail_unfinished",
+    "load_work",
 ]

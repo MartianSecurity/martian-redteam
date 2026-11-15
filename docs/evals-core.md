@@ -13,7 +13,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` with the agents it can call and, optionally, a judge | Its own worker ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the agents it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -326,7 +326,8 @@ gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overv
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
 deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
-operation of the contract but the ones above. `tests/evals/test_worker.py` covers the worker.
+operation of the contract but the ones above. `tests/evals/test_worker.py` and
+`test_worker_process.py` cover the worker.
 
 ## The worker
 
@@ -347,21 +348,77 @@ each record on only from the state it expects, so two workers never both take th
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
 marked `failed` with its reason, never left running.
 
-`InProcessWorker(store, records, targets={agent_id: call}, judge=None, target_timeout_seconds=120)`
-runs each piece of work as a task of the API's event loop. A target is an async function from a
-`Case` to its output (`TargetCall`); a judge is an async function from a `JudgeRequest` (the
-prompt, expected text, output and the judge scorers to apply) to a `JudgeResult` (the model and a
-verdict per scorer). `drain()` waits for the work submitted so far. Work is lost with the process:
-a run interrupted by a restart stays `running` until the durable queue.
+A target is an async function from a `Case` to its output (`TargetCall`); a judge is an async
+function from a `JudgeRequest` (the prompt, expected text, output and the judge scorers to apply)
+to a `JudgeResult` (the model and a verdict per scorer). There are two workers:
+
+- `InProcessWorker(store, records, organisation_id=None, targets={agent_id: call}, judge=None,
+  target_timeout_seconds=120)` runs each piece of work as a task of the calling process's event
+  loop. It runs one organisation's work, `organisation_id` (`None` is the single local user), and
+  raises `ValueError` from `check_target` and `submit` for any other's. It serves the local
+  edition and tests, and runs the work inside each of `ProcessWorker`'s processes. `drain()` waits
+  for the work submitted so far. Work is lost with the process: a run interrupted by a restart
+  stays `running` until the durable queue.
+- `ProcessWorker(setup, records, agents=[agent_id], judges=False, options={...})` runs each piece
+  of work in a new process of its own, which exits when the work is done. An installation that
+  serves organisations uses it.
+
+### One process per run
+
+MLflow keeps this state for the whole process, not for a request or a thread, so two
+organisations' evaluations must never share one:
+
+- The client workspace, in the `MLFLOW_WORKSPACE` environment variable. `mlflow.set_workspace`
+  writes it, and every thread that has not set MLflow's per-request context reads it: the threads
+  MLflow's evaluation harness calls the target on, the thread that exports traces in the
+  background, and the SDK judge's gateway call, which sends it as the workspace header.
+- The active experiment (`mlflow.set_experiment`, which also sets `MLFLOW_EXPERIMENT_ID`), where
+  every new trace and evaluation run is recorded.
+- The tracking URI (`mlflow.set_tracking_uri`) and the trace destination
+  (`mlflow.tracing.set_destination`).
+
+With two organisations' runs on threads of one process, each with its workspace and experiment
+selected, one organisation's MLflow traces land in the other's workspace while both runs report
+`completed`. Setting the workspace with `mlflow.set_workspace` instead loses them, or fails the
+evaluation. `MlflowStore`'s own calls are not affected: each sets the workspace for its own call.
+
+`ProcessWorker.submit` starts `python -m martian.evals.worker` with `MLFLOW_WORKSPACE` set to the
+work's organisation's workspace (`workspace_name(principal)` in `martian.evals.store.mlflow_local`:
+`org-` and a hash of the organisation id, or `local`) and without `MLFLOW_EXPERIMENT_ID` or
+`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's. The new
+process:
+
+1. reads the work as JSON on its standard input (`dump_work` and `load_work`), so a principal's
+   details never appear on a command line;
+2. exits with status 2 if its `MLFLOW_WORKSPACE` is not the work's organisation's;
+3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
+   function, named by its import path so that the new process can import it, and returns
+   `WorkerServices`: the store, the record store, the targets by agent id, the judge and the
+   target timeout. `options` must be JSON;
+4. runs the work with an `InProcessWorker` for the work's organisation, and exits.
+
+Whatever the setup or the work selects in MLflow inside that process, such as a tracking URI, an
+experiment or a judge's traces, stays with that organisation. `agents` are the agent ids the
+setup's targets call, which `check_target` accepts, and `judges` says whether the setup gives a
+judge. When a process exits with an error, the worker marks its run or scoring job `failed` with
+"The worker process ended before this work finished" if it is still queued or running
+(`fail_unfinished`). `drain()` waits for every process started so far. There is no limit yet on
+how many processes run at once.
+
+`tests/evals/test_worker_process.py` launches two organisations' runs at once on one SQLite store,
+each calling an agent traced with MLflow tracing, and checks where every trace landed: with a
+process each, all of them are in their own organisation's workspace. The same work on two
+threads of one process is an expected failure (`xfail`, strict), so the test turns red if it ever
+passes. The child processes import the test's setup (`tests/evals/process_fixture.py`), so run the
+tests from the repository root.
 
 What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#139 | A durable job queue and worker process: `submit` enqueues |
-| MorningHQ/martian-notes#140 | One process per evaluation run, executing each `Work` |
+| MorningHQ/martian-notes#139 | A durable job queue: `submit` enqueues, and each `Work` taken from the queue gets a process of its own |
 | MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
-| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge |
+| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge, built by the setup in each run's process |
 | MorningHQ/martian-notes#116 | Run and run again from the local UI |
 
 ## What exists
@@ -378,7 +435,8 @@ What builds on it:
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
-  [the worker](#the-worker) interface with its in-process implementation.
+  [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
+  and a one-organisation in-process worker.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -463,9 +521,12 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 ```
 
 - Each organisation gets its own MLflow workspace (`org-` and a hash of its id), and the single
-  local user gets `local`. Every call sets the workspace for its own thread through MLflow's
-  per-request context. The binding never sets `MLFLOW_ENABLE_WORKSPACES` or `MLFLOW_WORKSPACE`,
-  so other MLflow use in the same process, such as a local suite run, is unaffected.
+  local user gets `local` (`workspace_name(principal)`). Every call sets the workspace for its
+  own thread through MLflow's per-request context. The binding never sets
+  `MLFLOW_ENABLE_WORKSPACES` or `MLFLOW_WORKSPACE`, so other MLflow use in the same process, such
+  as a local suite run, is unaffected. MLflow use outside the binding, such as an evaluation or
+  a traced agent, follows the process's workspace, which is why each run gets a
+  [process of its own](#one-process-per-run).
 - On Postgres, MLflow's tables live in their own schema (`mlflow` by default), so they can
   share a database with other tables.
 - Opening a database that an older MLflow wrote migrates MLflow's tables in place, and an older
@@ -698,7 +759,7 @@ cannot be opened.
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
-| A durable worker, and one process per evaluation run | MorningHQ/martian-notes#139, #140 |
+| A durable worker | MorningHQ/martian-notes#139 |
 | HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
@@ -706,5 +767,6 @@ cannot be opened.
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py` and the store and record tests run the core without the backend. The `Evals core`
+`test_worker.py`, `test_worker_process.py` and the store and record tests run the core without
+the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.
