@@ -527,7 +527,10 @@ All paths are under `/v1/evals`. How the core carries them out:
   id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. A
   target of its `targets` the worker has but refuses, such as one that is neither `kind: http` nor
   `kind: function`, or an HTTP target whose `response_path` indexes a list with digits other than
-  0-9, is `422` with the reason, which names `targets['ID']` once, and no run is recorded. An
+  0-9, is `422` with the reason, which names `targets['ID']` once, and no run is recorded. Every
+  route and turn that pins a target answers a refused one so (`pin_target` in
+  `martian.evals.server.launch`): this launch, a schedule's creation, the local edition's launch
+  and run again; a schedule's turn records it as the slot's `reason`. None answers `500`. An
   organisation has at most its edition's `concurrent_runs` queued or running at once
   ([editions and entitlements](#editions-and-entitlements)): one more is `409`, "An eval run is
   already in progress" at a limit of 1, else "5 eval runs are already in progress, as many as this
@@ -777,7 +780,7 @@ server's background tasks. A route records the work first, as a queued `Run`, `S
 | --- | --- |
 | `Work` | `kind` (`run`, `scoring`, `recheck`, `monitor` or `schedule`), the `principal`, `project_id`, `run_id` for a run or scoring (empty for the others), `job_id` for scoring and, for a re-check, the re-check's id, `monitor_id` for a monitor's pass ([monitors](#monitors)) and `schedule_id` for a schedule's turn ([schedules](#schedules)) |
 | `Worker.judges` | Whether the worker can run model judges |
-| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`, or `TargetRefused` (a `ValueError` in `martian.evals.worker.targets`, which the launch answers `422`) for a target it has but refuses; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
+| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`, or `TargetRefused` (a `ValueError` in `martian.evals.worker.targets`) for a target it has but refuses, which `pin_target` in `martian.evals.server.launch` answers `422` for every launch and schedule route and a schedule's turn records as the slot's `reason`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
 | `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
 | `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
@@ -2159,7 +2162,8 @@ frozen contract has none.
   `min_interval_seconds` (at least 60, at most 30 days, 3600 by default)
   ([when the model changes](#when-the-model-changes)).
 - **Refused when it is created:** a suite version not saved (`404`), a dataset not published
-  (`422`), a target the worker does not know (`404`), a suite with a model judge without
+  (`422`), a target the worker does not know (`404`) or has but refuses (`422`, with the reason, as for
+  a launch), a suite with a model judge without
   `acknowledge_model_cost` or on a worker without a judge (`422`), an archived project (`409`), a
   21st schedule in a project (`409`), and a worker that does not run schedules (`503`, "This
   installation's worker does not run schedules"). The schedule's id is derived from `request_id`:
@@ -2204,8 +2208,9 @@ app = create_app(store=store, records=records, principal=principal, worker=worke
    judge, and the organisation must have a place under `concurrent_runs`
    ([editions and entitlements](#editions-and-entitlements)). A run that is not admitted is
    recorded as `skipped` with the refusal as its `reason`, such as "An eval run is already in
-   progress", "Agent not found", "The Community edition does not include monitoring" or "The
-   schedule's dataset version is no longer in the store". Nothing waits for a place: the next run
+   progress", "Agent not found", the worker's refusal of a target it has but will not call (which
+   names `targets['ID']`, as a launch's `422` does), "The Community edition does not include
+   monitoring" or "The schedule's dataset version is no longer in the store". Nothing waits for a place: the next run
    is the next slot's. The run is the schedule creator's, the principal its queue row was put
    with, under that organisation's entitlements at the slot.
 4. **Scored by its suite.** The run keeps its suite version, as a local run does
@@ -2328,13 +2333,14 @@ takes.
 the expressions it refuses; runs one turn at a time at fixed times: a turn before its first slot
 admits nothing, a turn five minutes late admits one run for the first slot and counts five missed,
 a slot due while that run is in progress is skipped with the launch's reason, a slot is skipped
-for an edition without monitoring, an unknown target, a worker without a judge and an archived
-project, a turn whose
+for an edition without monitoring, an unknown target, a target the worker refuses (the next slot
+looks again), a worker without a judge and an archived project, a turn whose
 worker stopped after admitting its run admits no second, a paused schedule admits nothing and
 resumed skips the slots of its pause, and a scheduled run stopped at its limit has its suite job
 cancelled while a completed one has it queued. Through the routes and the queue, on SQLite and on
 Postgres as an ordinary role, with a fake target and a fake judge and a schedule due every second:
-the entitlement and capability refusals and the refusals above; a suite that runs unattended,
+the entitlement and capability refusals and the refusals above, a refused target included (`422`,
+no schedule kept); a suite that runs unattended,
 with a slot skipped while a run is in progress and two runs scored by their suite, the second
 compared with the first, every case regressed and labelled `worse`; slots missed while no worker
 served the queue run once when it returns; pausing, resuming and deleting a schedule, after
@@ -3399,7 +3405,9 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
   progress at once as `--concurrency`, one unless set (`409` beyond it), run codes from
   `EV-1001`, idempotent by `request_id` (the same `request_id` with other settings is `409`). A
   target that is not defined is `404` ("Target not found"), a dataset not
-  published `422`, a suite version not saved `404`. A suite with a model judge (`correctness`,
+  published `422`, a suite version not saved `404`. A target the worker refuses, such as one whose
+  `response_path` it would not read, is `422` naming the target by its name and id, on both routes,
+  and no run is recorded. A suite with a model judge (`correctness`,
   `safety` or `policy`) calls a model for each judged case, so both routes refuse it with `422`
   ("Model scoring requires cost acknowledgement") unless `acknowledge_model_cost` is true, as a
   scoring request does.
@@ -3455,7 +3463,7 @@ with a loopback HTTP target that wants the key and a loopback OpenAI-compatible 
 default judge model, and checks that the run completes in its own process with its results,
 traces and the suite's scores, model judges included, that the server's process never reads the
 key, that run again keeps the target, dataset version, suite version and budget when newer
-versions exist, the refusals above, the suite job of a run that does not complete, that the
+versions exist, the refusals above, a refused target on a launch and on run again, the suite job of a run that does not complete, that the
 frozen launch runs too, and that a run whose target answers after its time limit stops with its
 first case, leaves its suite's job queued, and resumed with a higher limit calls only its second
 case and is then scored.

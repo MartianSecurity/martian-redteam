@@ -283,7 +283,7 @@ async def _admit(
     """Admit the slot's run under the rules of a launch, or raise the refusal."""
     # The routes' modules import the worker package, so they are imported when a turn needs them.
     from martian.evals.server.dependencies import ensure_entitled
-    from martian.evals.server.launch import admit_run
+    from martian.evals.server.launch import admit_run, pin_target
     from martian.evals.server.runs import writable_key
     from martian.evals.worker.execute import LIMITS_KEY
 
@@ -291,7 +291,7 @@ async def _admit(
     entitlements = services.entitlements(principal)
     ensure_entitled(entitlements, "monitoring")
     project = await writable_key(store, principal, schedule.project_id)
-    pin = await worker.check_target(principal, schedule.target)
+    pin = await pin_target(worker, principal, schedule.target)
     dataset = await store.get_dataset(principal, DEFAULT_PROJECT, schedule.dataset_id)
     if dataset is None or dataset.digest != schedule.dataset_digest:
         raise HTTPException(422, DATASET_GONE)
