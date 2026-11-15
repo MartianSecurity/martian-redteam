@@ -90,6 +90,7 @@ from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import metadata
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.store import STORE_METHODS, EvalStore, MemoryStore
+from tests.evals.store_contract import EmptyFirstPages
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -980,6 +981,23 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     assert await fresh[0].list_projects(ORG_A) == []
     records.close()
     fresh[1].close()
+
+
+async def test_an_import_finds_the_install_s_traces_past_a_search_page_with_none(tmp_path):
+    source, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
+    await populate(source, records, ORG_A, default_exists=False)
+    folder = tmp_path / "export"
+    await export_data(source, records, ORG_A, folder)
+    records.close()
+    # An install whose only data is one trace, behind a binding whose trace search answers a page
+    # with no traces and a next_cursor before the trace, as the store interface allows.
+    install, install_records = EmptyFirstPages(), SqlRecordStore(f"sqlite:///{tmp_path / 'install.db'}")
+    await install.create_project(ORG_A, Project(id="elsewhere", name="Elsewhere"))
+    await install.record_trace(ORG_A, Trace(id="tr-" + uuid.uuid4().hex, project_id="elsewhere", request_time=T0))
+    with pytest.raises(ExportError, match="project elsewhere has traces. Import into a fresh install"):
+        await import_data(install, install_records, ORG_A, folder)
+    assert [project.id for project in await install.list_projects(ORG_A)] == ["elsewhere"]
+    install_records.close()
 
 
 def test_the_commands_export_and_import_a_data_folder(tmp_path):
