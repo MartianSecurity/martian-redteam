@@ -59,6 +59,13 @@ treat `results.jsonl`.
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
+`martian evals import mlflow` copies an MLflow tracking store into the same folder. It opens the
+store so that it cannot write it (SQLite read-only, Postgres with read-only transactions) and never
+migrates it, and reads the trace files the store names on this machine only. A Postgres URL's
+password is not printed or stored: the report and each copied run's provenance keep the URL
+without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
+See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
+
 ## The local edition has no login
 
 `martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
