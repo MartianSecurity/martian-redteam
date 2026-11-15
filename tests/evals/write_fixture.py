@@ -108,7 +108,12 @@ def serve(
     between requests."""
     asyncio.run(publish(store, principal))
     worker = InProcessWorker(
-        store, records, targets=targets or {AGENT: agent}, judge=judge if with_judge else None, target_timeout_seconds=2
+        store,
+        records,
+        organisation_id=principal.organisation_id,
+        targets=targets or {AGENT: agent},
+        judge=judge if with_judge else None,
+        target_timeout_seconds=2,
     )
     holder: dict[str, Principal] = {"current": principal}
     options: dict[str, Any] = {} if entitlements is None else {"entitlements": entitlements}

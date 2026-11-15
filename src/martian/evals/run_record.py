@@ -35,7 +35,6 @@ from martian.evals.model import (
     CaseResult,
     CaseStatus,
     Counts,
-    Project,
     Run,
     RunState,
     Score,
@@ -70,10 +69,12 @@ class RunRecorder:
     first."""
 
     def __init__(self, home: Path, suite: Suite) -> None:
-        from martian.evals.local import open_stores
+        from martian.evals.local import LocalEditionError, open_stores
 
         try:
             self.store, self.records = open_stores(home)
+        except LocalEditionError as error:
+            raise ConfigError(str(error)) from None
         except Exception as error:  # noqa: BLE001 - a folder may fail to open in many ways; say which
             raise ConfigError(f"could not open the local data folder {home}: {type(error).__name__}") from None
         self.home = home
@@ -91,7 +92,6 @@ class RunRecorder:
         return _wait(self._start(planned=planned, total=total, limit=limit, reused=reused))
 
     async def _start(self, *, planned: int, total: int, limit: int | None, reused: list[GradedCase]) -> Run:
-        await self.store.create_project(SINGLE_USER, Project(id=DEFAULT_PROJECT, name="Default"))
         now = datetime.now(UTC)
         suite = self.suite
         run = Run(

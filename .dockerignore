@@ -1,10 +1,4 @@
 **
 !pyproject.toml
 !uv.lock
-!README.md
-!LICENSE
-!NOTICE
-!src/
-!src/**
-src/**/__pycache__/
-src/**/*.pyc
+!dist/*.whl

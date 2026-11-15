@@ -116,7 +116,9 @@ def test_migrations_run_both_ways_on_postgres_in_their_own_schema(schema):
                 .scalars()
                 .all()
             )
-        assert placed == [schema]
+        # Tests running alongside, in this run or another on the same database, have their own.
+        assert schema in placed
+        assert [name for name in placed if not name.startswith("martian_test_")] == []
     finally:
         engine.dispose()
 

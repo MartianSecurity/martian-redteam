@@ -47,6 +47,8 @@ push and keeps one comment with the result, also without a Martian account. See
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service; see
   [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
+  It also shows the traces an application records into it with
+  [MLflow tracing](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly
   ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
@@ -103,7 +105,7 @@ uv sync --locked --extra evals
 uv run --extra evals ruff format --check src tests examples
 uv run --extra evals ruff check src tests examples
 uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q
+uv run --extra evals pytest -q -n auto
 uv build
 ```
 
