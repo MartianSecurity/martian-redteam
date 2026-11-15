@@ -31,7 +31,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `scripts/sbom.py`, `scripts/licence-policy.json` | The release's CycloneDX bills of materials for the wheel and the image, and the licence check against the allowed list ([releasing](releasing.md#bills-of-materials-and-the-licence-check)) |
-| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, and `_policy.py` the patterns, checksums and refusal reading of the policy checks; the suite file runner checks options with all three |
+| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, `_policy.py` the patterns, checksums and refusal reading of the policy checks, and `_tool_calls.py` the reading of an agent's tool calls, turn by turn, from its reply or its trace, and their matching; the suite file runner checks options with all four. `_custom.py` holds the rules of a custom Python check, shared by `python_check`, the runner's `type: python` and the worker's installed scorers |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
 | `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
@@ -110,7 +110,16 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
-- `pytest-asyncio` mode `auto`.
+- **No test touches the developer's `~/.martian`.** An autouse, session-scoped fixture in
+  `tests/conftest.py` points `HOME` and `MARTIAN_EVALS_HOME` at a temporary folder for the whole
+  session, so the local edition's default data folder (`~/.martian/evals`) and MLflow's
+  `~/.config` resolve there, and every subprocess a test starts inherits both. A test that needs
+  another home sets its own (`test_no_outbound.py` starts its processes in a clean environment
+  with a new `HOME`). At the end of the session the fixture fails the run if a test reached the
+  default data folder (the temporary home gained a `.martian`). In CI (`CI` set) it also fails if
+  the real `~/.martian` or `~/.martian/evals` changed; it checks the real folders by `stat` only,
+  never reads or lists them, and never deletes anything. Outside CI that second check is skipped,
+  because `martian ui` or another checkout's tests may change the folder during the session.
 - The evals store contract (`tests/evals/store_contract.py`) runs on every store binding. The
   in-process `mlflow-skinny` binding runs it on SQLite always, and on Postgres when
   `MARTIAN_TEST_POSTGRES_URL` is set (for example

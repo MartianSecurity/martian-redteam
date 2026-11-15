@@ -6,16 +6,20 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 - A run reads the active cases of its published dataset (the default project's dataset version it
   was admitted with) up to its case limit, calls the target once per case with no retry, and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
+  with its exact-match score; a case with no usable prompt or expected text is skipped, and so is a
+  conversation case (``Case.turns``, or a ``Case.simulated_user`` whose turns a simulator writes),
+  which ``martian evals run`` runs turn by turn. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
   the setting to check, anything else with its type.
 - Before a run calls its target, on its first start and on every resume, the worker pins the
   target as it has it now; a pin that is not the run's (``provenance["target"]``) fails the run,
   naming the target, so one run never mixes two systems.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
-  scorers: code scorers here, judge scorers through the worker's judge, one request per model the
-  job's judges are pinned to. Each judge score records the model and version that produced it.
-  Its scores sit beside the run's own, and each scored value is also kept on the case's trace.
+  scorers: the built-in code scorers here, a custom Python scorer (kind ``code``) by the function
+  the worker's setup installs under its name (:data:`InstalledScorers`), and judge scorers through
+  the worker's judge, one request per model the job's judges are pinned to. Each judge score
+  records the model and version that produced it. Its scores sit beside the run's own, and each
+  scored value is also kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Each piece of work runs under limits (``RunLimits``): the run's own, ``provenance["limits"]``,
@@ -40,11 +44,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+from martian.evals import _custom
 from martian.evals.limits import Budget
 from martian.evals.model import (
     Case,
@@ -60,6 +65,7 @@ from martian.evals.model import (
     Span,
     StoreRef,
     Trace,
+    Value,
 )
 from martian.evals.records import RecordStore
 from martian.evals.runner import TargetCallError
@@ -81,6 +87,7 @@ MAX_SCORED_RESULTS = 1000
 EXACT_MATCH_SCORER = "exact_match"
 STOPPED = "Stopped before this target request"
 UNUSABLE = "item is missing a usable prompt or expected output"
+CONVERSATION = "item is a conversation, which martian evals run runs turn by turn; the worker sends one prompt per item"
 NO_OUTPUT = "No successful saved target output"
 NO_JUDGE = "Judge unavailable; no automatic model retry"
 JUDGE_MODEL_KEY = "martian.judge.model"
@@ -94,6 +101,12 @@ LIMITS_KEY = "limits"
 """``Run.provenance`` key of the limits a run, and its scoring jobs, run under."""
 STOPPED_KEY = "stopped"
 """``Run.provenance`` key of the limit a stopped run reached (``RunLimits.stop``)."""
+
+InstalledScorers = Mapping[str, Callable[..., Any]]
+"""The custom Python scorers a worker runs, by name: functions its setup imports in the work's own
+process. A scoring job's ``code`` scorer runs the one installed under its name; a record never
+names code or a file to import."""
+NOT_INSTALLED = "This worker has no custom scorer named {name}"
 
 
 def _now() -> datetime:
@@ -332,6 +345,8 @@ async def _run_case(
     call: TargetCall,
     timeout_seconds: float,
 ) -> tuple[CaseResult, Score | None]:
+    if case.turns or case.simulated_user is not None:
+        return _skipped(run, position, case, CONVERSATION), None
     prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
     if not prompt or not expected:
         return _skipped(run, position, case, UNUSABLE), None
@@ -424,9 +439,16 @@ async def _run_case(
 
 
 async def execute_scoring(
-    store: EvalStore, records: RecordStore, work: Work, *, judge: Judge | None, limits: RunLimits | None = None
+    store: EvalStore,
+    records: RecordStore,
+    work: Work,
+    *,
+    judge: Judge | None,
+    scorers: InstalledScorers | None = None,
+    limits: RunLimits | None = None,
 ) -> None:
-    """Score a finished run with a queued scoring job. Without a judge, judge scores are errors.
+    """Score a finished run with a queued scoring job. Without a judge, judge scores are errors;
+    a custom scorer the worker has not installed (``scorers``) is an error on each of its scores.
     The job runs under its run's limits, else ``limits``, the worker's."""
     principal, project = work.principal, work.project_id
     job = await _job(records, principal, project, work.run_id, work.job_id or "")
@@ -442,7 +464,7 @@ async def execute_scoring(
     except StoreError:
         return
     try:
-        await _score_results(store, records, principal, project, job, judge, limits)
+        await _score_results(store, records, principal, project, job, judge, scorers or {}, limits)
     except Exception:  # noqa: BLE001 - a job never stays running after its worker fails
         log.exception("Scoring job %s failed", job.id)
         current = await _job(records, principal, project, job.run_id, job.id)
@@ -547,6 +569,24 @@ async def all_results(records: RecordStore, principal: Principal, run: Run) -> l
             return results
 
 
+async def _custom_score(
+    installed: InstalledScorers, scorer: ScorerVersion, result: CaseResult
+) -> tuple[Value, str, str]:
+    """A custom scorer's value, reason and error for one saved output. It reads, by name, the
+    case's ``inputs``, the saved ``outputs`` and the case's ``expectations``, on a thread so that
+    the worker's loop goes on; what it raises or returns that it may not is the score's error."""
+    function = installed.get(scorer.name) if scorer.type in _custom.CODE_TYPES else None
+    if function is None:
+        return None, "", NOT_INSTALLED.format(name=scorer.name)
+    given = {"inputs": dict(result.inputs), "outputs": result.output, "expectations": dict(result.expectations)}
+    reads = _custom.arguments(function, _custom.WORKER_ARGUMENTS)
+    try:
+        value, reason = await asyncio.to_thread(_custom.call, function, {name: given[name] for name in reads})
+    except _custom.ScorerError as failure:
+        return None, "", str(failure)
+    return value, reason, ""
+
+
 async def _score_results(
     store: EvalStore,
     records: RecordStore,
@@ -554,6 +594,7 @@ async def _score_results(
     project: str,
     job: ScoringJob,
     judge: Judge | None,
+    installed: InstalledScorers,
     default_limits: RunLimits | None,
 ) -> None:
     run = await records.get_run(principal, project, job.run_id)
@@ -641,6 +682,8 @@ async def _score_results(
                 metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
             if not finished:
                 error = NO_OUTPUT
+            elif scorer.kind == "code":
+                value, rationale, error = await _custom_score(installed, scorer, result)
             elif scorer.kind != "llm_judge":
                 value, rationale = code_score(scorer.name, output, expected)
             elif isinstance(answer, str):

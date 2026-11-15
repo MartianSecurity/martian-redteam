@@ -53,9 +53,11 @@ run is recorded in the data folder of the
 to the target as keyword arguments), and optional `id`, `output`, `expectations` and `group`.
 `group` is a string that names a set of related cases, such as paraphrases of one attack or turns
 of one conversation, so the summary's intervals allow for them
-([pass rates and intervals](#pass-rates-and-confidence-intervals)). CSV takes the columns `input`,
-optional `id` and `output`; every other column becomes an expectation of that name, so a CSV case
-has no group. There is no row limit.
+([pass rates and intervals](#pass-rates-and-confidence-intervals)). A JSONL case with `turns` in
+place of `input` is a [conversation](#conversations) of several user turns, and one with
+`simulated_user` a conversation whose user a model plays ([simulated users](#simulated-users)). CSV takes the columns
+`input`, optional `id` and `output`; every other column becomes an expectation of that name, so a
+CSV case has no group and no turns. There is no row limit.
 
 **URL target.** When the agent is behind an HTTP endpoint, name the endpoint instead of a
 Python file:
@@ -80,9 +82,12 @@ target:
 | `timeout_seconds` | No | Per-request limit, 1 to 600; default 120. A function target takes it too (**Time limits and budgets** below) |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
-  `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
-  agents that keep a conversation per session. A value that is only a placeholder keeps its
-  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
+  `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID.
+  `{{session_id}}`, `{{history}}` and `{{messages}}` carry a [conversation](#conversations): its
+  id, its earlier turns, and those turns with this one's user message; in a case of one input they
+  are a new ID, an empty list and that one message. A value that is only a placeholder keeps its
+  type, so a number stays a number and `{{messages}}` a list. The body must use `{{input}}`,
+  `{{inputs.NAME}}` or `{{messages}}`.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -118,19 +123,23 @@ secret in the body.
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
 graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
-`inputs.context` and take no options; every other type is one of the twenty-four
-[deterministic checks](#deterministic-checks), each with its options and an example, five of them
-the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
-instructions and refusals. Criteria written in the suite file apply to every case that does not
-carry its own in `expectations`. Use at most one check of each judge type, and give repeated check
-types a `name`.
+`inputs.context` and take no options; `python` names a Python function of your own, in a file
+beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
+the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
+example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
+secrets, planted instructions and refusals, and four the
+[tool-call checks](#tool-calls-and-trajectories) of the tools an agent called, with what
+arguments, in which order and in how many steps. Criteria written in the suite file apply to every
+case that does not carry its own in `expectations`. Use at most one check of each judge type, and
+give repeated check types a `name`. A check's `scope`, `turn` (the default) or `conversation`, says
+whether it grades each turn of a [conversation](#conversations) or the conversation once.
 
 **Results.** The output folder receives:
 
 | File | Content |
 | --- | --- |
-| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -194,13 +203,16 @@ comment on the pull request with the result, still with no Martian account. See
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
-contents of its file. When any of these changes, the case is graded again, and the run prints how
+combine by ([repeated attempts](#repeated-attempts)), a conversation's turns and each check's
+scope ([conversations](#conversations)), a simulated user and the simulator's `model` and
+`inference_params` ([simulated users](#simulated-users)), and the SDK version. A function target
+and a [`python` check](#custom-python-checks) count by the contents of their files. When any of
+these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
 address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
-changes in modules the target file imports, or in the service behind a URL target: use `--fresh`
-after those.
+changes in modules the target or scorer files import, or in the service behind a URL target: use
+`--fresh` after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -302,15 +314,18 @@ and every judge again, so five attempts cost five times as much.
 - **Which rule a check uses.** Its own `combine`, when it names one. Otherwise `all` for a
   security check, and the suite's `combine` for any other. The suite's `combine` is `all` unless
   it names another, so a suite that names no rule needs every attempt to pass every check.
-- **Security checks** are `not_contains`, `not_matches` and the [policy checks](#policy-checks)
-  `no_prohibited_phrases`, `no_personal_data`, `no_secrets` and `resists_injection`: the checks
-  that fail a reply for holding something it must never hold, such as a secret, a key, personal
-  data, a prohibited phrase or an injected instruction's marker. One leak in five attempts fails
-  the case, even when the suite takes `majority` or `any`; a security check combines more loosely
+- **Security checks** are `not_contains`, `not_matches`, the [policy checks](#policy-checks)
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets` and `resists_injection`, and the
+  [tool-call check](#tool-calls-and-trajectories) `tool_not_called`: the checks that fail a reply
+  for holding something it must never hold, such as a secret, a key, personal data, a prohibited
+  phrase or an injected instruction's marker, or an agent for a call it must never make. One leak
+  or forbidden call in five attempts fails the case, even when the suite takes `majority` or `any`; a security check combines more loosely
   only when it names its own `combine`. `no_refusal` is not a security check: it fails a reply
   for refusing a benign request, which measures over-refusal rather than a leak, so it takes the
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
-  secret `combine: all` when the suite's rule is looser.
+  secret `combine: all` when the suite's rule is looser. A [`python` check](#custom-python-checks)
+  is one only when it says so, with `security: true`: the SDK cannot tell what a function guards,
+  and its author can.
 - **A case passes** when every check, combined, passes it, as with one attempt.
 - **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
   verdict, could have gone either way. A combined verdict stands when it is the same both ways;
@@ -397,6 +412,390 @@ run stops at and resumes from:
 - **The printed table** names the cases not run in its title, after the attempts of each case. The
   Reliability row is in the table, and under it come the flaky cases, the false-refusal line, the
   reasons attempts had no verdict, and last the limit the run reached and how to resume.
+
+## Conversations
+
+An agent that answers each question well can still forget, three turns in, the order number the
+customer gave at the start, and no single-turn case shows it. A conversation case sends several
+user turns in order, in one conversation, to a target that keeps it, and grades each turn's reply
+and the conversation as a whole:
+
+```json
+{"id": "cancel-later",
+ "turns": [{"input": "My order number is A-1002.", "checks": ["short"]},
+           {"input": "Is it in stock yet?", "expectations": {"reply": "waiting for stock"}},
+           {"input": "Then please cancel it.", "expectations": {"reply": ["A-1002", "cancelled"]}}],
+ "expectations": {"other_orders": ["A-1001"]}}
+```
+
+(one line in the data file), with a suite file such as:
+
+```yaml
+target:
+  file: agent.py
+  function: reply          # reply(message="...", history=[...]) for each turn
+checks:
+  - type: contains         # each turn's reply says what that turn expects
+    name: answers
+    expectation: reply
+  - type: length           # each turn that lists no checks, and each that lists it
+    name: short
+    max_length: 200
+  - type: not_contains     # once, over every reply of the conversation
+    name: no_other_orders
+    expectation: other_orders
+    scope: conversation
+```
+
+[`examples/evals/conversation`](../examples/evals/conversation/evals.yaml) is this suite, with an
+assistant that forgets what was said three turns ago. It needs no model key: one conversation
+passes, and the other fails on turn 3.
+
+**The data.** A JSONL case with `turns` is a conversation. Each turn has `input` (a string) or
+`inputs` (an object), and optional `expectations` and `checks` (the names of the turn checks that
+grade it). The case has no `input` or `output` of its own, and always runs against a target. Its
+own `expectations` are the conversation's, for the conversation checks; `id` and `group` are as
+for any case. A conversation has at most 100 turns, and a turn's inputs cannot be named
+`session_id` or `history`, which each turn is given.
+
+**How the target keeps the conversation.** The runner starts a new conversation, with a new
+`session_id`, for each conversation case, and for each attempt of one with
+[repeats](#repeated-attempts). It sends the turns in order, each one after the reply to the one
+before:
+
+| Target | Each turn is |
+| --- | --- |
+| A function | Called with the turn's inputs as keyword arguments, and whichever of `history` and `session_id` the function takes (both, when it takes `**kwargs`). `history` is the earlier turns as messages, `[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]`, empty on the first turn. A function that takes neither is refused before any turn |
+| A URL target | One `POST` with the body's placeholders filled in: `{{session_id}}` the conversation's id, the same in every turn; `{{history}}` the earlier turns as messages; `{{messages}}` the history and then this turn's user message, as a chat-completions request takes them. A body that uses none of the three is refused before any turn |
+
+A user message is the turn's input under `input_key`, or its inputs as JSON when that is not
+text; an assistant message is the reply as text. A target that keeps the conversation on its side
+needs only the session id. One that keeps nothing, such as a chat-completions endpoint, needs the
+history:
+
+```yaml
+target:
+  url: "${OPENAI_API_BASE}/chat/completions"
+  headers:
+    Authorization: "Bearer ${OPENAI_API_KEY}"
+  body:
+    model: your-model
+    messages: "{{messages}}"     # the whole list: the conversation so far and this turn
+  response_path: choices.0.message.content
+```
+
+In a case of one input these placeholders are a new ID, an empty list and that one message, so
+one body serves both kinds of case. A function target is called for a case of one input as before,
+with the case's inputs only, so a function that serves both gives `history` a default.
+
+**What each check grades.** A check's `scope` is `turn`, the default, or `conversation`:
+
+- A **turn check** grades each turn's reply against that turn's `expectations`, with the criteria
+  written in the suite file filled in as for any case. A turn that lists `checks` is graded by
+  those turn checks only, and by none when the list is empty; a turn with no list, by every turn
+  check. The check's verdict on the conversation passes when it passed every turn it grades, and
+  fails when it failed one; a turn without a verdict otherwise leaves it open. Its rationale says
+  how the turns went, such as `1 of 2 turns passed, failed on turn 3`.
+- A **conversation check** grades the conversation once: the target's replies, in order, joined
+  by a blank line, against the case's own `expectations`. It is a deterministic check or a
+  [`python` check](#custom-python-checks): an LLM judge grades one turn's reply against that
+  turn's input, `latency` and `cost` measure one call, and the
+  [tool-call checks](#tool-calls-and-trajectories) read the tool calls of one call, so they take
+  no `scope: conversation`.
+- **Tool-call checks** grade each turn: a turn's `tool_called`, `tool_not_called`,
+  `tool_trajectory` or `step_count` reads the tool calls of that turn's call only, from its trace
+  (a function target) or its reply (`source: reply`, which a URL target needs). A `tool_not_called`
+  that grades every turn therefore holds the whole conversation to it, failing on the turn that
+  made the call; a `tool_called` listed on one turn asks for the call in that turn. No check reads
+  one trajectory across turns.
+- **A `python` check** is called with what the scope gives it. A turn check gets the turn's
+  `inputs`, with its `session_id` and `history`, the turn's reply as `outputs`, the turn's
+  `expectations` and the trace of the turn's call. A conversation check gets `inputs` holding
+  `messages`, the conversation as `user` and `assistant` messages; the replies joined by a blank
+  line as `outputs`; and the case's own `expectations`. It has no call of its own, so a
+  conversation check whose function reads `trace` is refused as the run starts.
+- **A conversation passes** when every check, so combined, passes it. A turn that no check grades
+  passes when the target answered. A case of one input is graded by every check, whatever its
+  scope.
+
+Loading refuses a turn that names a check the suite does not have or a conversation check, a
+conversation that no check grades, and a conversation in a suite without a target.
+
+**False refusals.** A conversation counts once in [`false_refusals`](#false-refusals). A turn
+`no_refusal` check with an expectation key reads each turn's own flag, so a conversation is benign
+for it when a turn it grades is benign, and refused when the check failed the conversation.
+
+**When a turn fails.** A target call that fails, or a turn MLflow recorded no result for, ends the
+conversation: the later turns are not sent, no check has a verdict on the conversation, the case's
+`error` is why the failed call failed, and the run exits `2`. The next run sends the whole conversation
+again. A turn that a judge gave no verdict does not end the conversation.
+
+**Repeats and limits.** A conversation is one case. `--limit` counts it once, and each attempt is
+a whole conversation of its own, with its own session id, combined as any case's attempts are.
+Counts and pass rates are of cases. The turns are counted beside them, without an interval, since
+the turns of one conversation are related.
+
+**Run limits.** A run's [limits](#run-a-suite-file-locally) and a cancel in `martian ui` are
+checked before each turn's call, so a run can stop in the middle of a conversation. A conversation
+is then not run, as a case is whose attempts did not all run
+([limits and repeats](#limits-and-repeats)): the turns it sent are dropped, the case has no
+result, `summary.json` counts it in `not_run`, and running again sends every turn again. The
+judge tokens of the dropped turns still count towards `max_judge_tokens`. Each turn's call has
+the target's `timeout_seconds`; a turn that outlasts it is a failed call, which ends its
+conversation as above. A [simulated user](#simulated-users)'s model calls, the turns it writes and
+its goal verdict, are the simulator's, not a judge's: `max_judge_tokens` does not count them, and
+`max_seconds` stops its conversation at the next target call.
+
+**Resume.** A conversation's turns are part of what its verdict depends on, so changing a turn's
+input, expectations or checks, or a check's scope, grades it again.
+
+**Suite-file runs only.** The pytest gate evaluates one input per row, and the evals core's worker
+sends one prompt per case: it skips a conversation case, scripted or simulated, saying so. Its
+HTTP targets fill in `{{session_id}}`, `{{history}}` and `{{messages}}` as for a case of one input.
+LLM judges of a whole conversation are not built yet (MorningHQ/martian-notes#176).
+
+Every turn is recorded:
+
+| Where | What |
+| --- | --- |
+| `results.jsonl` | The case's `passed` and `checks` are the conversation's verdicts. `session_id` is its conversation's id, and `turns` lists every turn sent: its `number`, `inputs`, `passed`, `checks` (each check that grades it, with its verdict, rationale and error), `output` and `error`. The case's `output` is the conversation as messages, and it has no `inputs`. With repeats, each attempt has its own `session_id` and `turns`, and the case's are those of the attempt that shows its reply |
+| `summary.json` | `conversations`: the conversation cases (`cases`, `passed`, `failed`, `errors`) and their turns (`turns`: `total`, `passed`, `failed`, `errors`, over every attempt with repeats). Each check has its `scope`, and a turn check its turns' counts under `turns`. A check's own counts leave out the conversations it grades nothing in |
+| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Turns** row under **All checks**, a line saying how many cases are conversations and what their verdict means, and, for a failed conversation, the turns that failed |
+| The local Evals UI's data folder | A trace per turn, named `<run> <case> turn <n>` (`<run> <case> attempt <a> turn <n>` with repeats), tagged `martian.turn` and carrying that turn's verdicts and the conversation's session id, so **Sessions** shows each conversation as one session. The case result holds the session id and every turn; its trace is that of its first turn with the conversation's verdict, else of its first turn, and its latency the turns' added up. Its scores, the conversation's verdicts, are on no trace. The run's `provenance` holds `conversations`, how many of its cases are conversations. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) returns each conversation with its verdict on each check, its session id and its turns |
+| The Evals UI's run page | A conversation's row shows its last reply and how many of its turns passed. **Inspect** shows the conversation's verdict and each check's verdict on it, then each turn's user message, reply and check verdicts with their reasons, with **Open trace** on each turn and **Open session** for the conversation |
+
+A run without conversation cases writes and records exactly what it did before: no `session_id`,
+`turns`, `conversations` or `scope`.
+
+### Simulated users
+
+Scripted turns cannot follow where a conversation goes: when the assistant asks a question the
+script did not expect, the next scripted turn answers the wrong thing. A simulated user is played
+by a model instead. The case names what the user wants, who they are, the most messages they send
+and when they stop, and the suite's simulator writes each user message from the conversation so
+far:
+
+```json
+{"id": "cancel-after-chat",
+ "simulated_user": {"goal": "Cancel order A-1002 and be told you will be refunded.",
+                    "persona": "A chatty customer who gives the order number first and asks to cancel later.",
+                    "max_turns": 4,
+                    "stop_when": "The assistant confirms the cancellation, or the customer has asked twice."},
+ "expectations": {"other_orders": ["A-1001"]}}
+```
+
+(one line in the data file), with a suite file that names the simulator:
+
+```yaml
+target:
+  file: agent.py
+  function: reply
+simulator:
+  model: "openai:/YOUR_MODEL"     # the model that plays the users
+  inference_params:
+    temperature: 0.7
+checks:
+  - type: length
+    max_length: 300
+```
+
+[`examples/evals/simulated-users`](../examples/evals/simulated-users/evals.yaml) is this suite,
+with the assistant of the [conversation example](#conversations). Running it needs a model key:
+the simulator calls the model you name.
+
+**The case.** `simulated_user` takes `goal`, `persona`, `max_turns` (1 to 100) and `stop_when`, all
+required, in place of `input`, `inputs` and `turns`. The case's own `expectations` are the
+conversation's and each turn's: a simulated turn has none of its own. `id` and `group` are as for
+any case.
+
+**The simulator.** `simulator.model` is an MLflow model URI on the judges' provider path: the same
+[provider setup](#run-a-suite-file-locally), key from the environment, retry rules and failure
+messages, with its own `inference_params`, `headers`, `max_retries` and `rate_limit_wait_seconds`
+as the judge has them. A failure names the setting to check as `simulator.<name>`, such as
+`Simulated user failed [judge_provider_auth]. The endpoint refused the credentials. Check
+OPENAI_API_KEY and simulator.headers.` The simulator's reply is one flat JSON object,
+`{message, done, goal_reached, reason}`: some models, GLM 5 among them, break nested JSON, so
+nothing in it nests. Loading refuses a simulated user in a suite without a target or a simulator,
+and a check named `goal_reached`.
+
+**How a simulated conversation goes.**
+
+- The simulator writes the first message; it cannot end a conversation before it starts.
+- After each reply it writes the next message, or sets `done` when its stop condition is met.
+- When the user has sent `max_turns` messages, it is asked once more, only whether the goal was
+  reached. A conversation costs at most `max_turns + 1` simulator calls, besides the target's and
+  the judges'.
+- Each message is a turn, sent as a [conversation](#conversations)'s turns are, and graded by
+  every turn check against the case's expectations; the conversation checks then grade the
+  replies.
+
+**The goal verdict.** `goal_reached` is a conversation-level result beside the checks' verdicts:
+passed when the simulator says the user reached its goal, failed when it says it did not, with
+its reason as the rationale, such as `With its budget of 4 messages spent, the simulated user did
+not reach its goal: ...`. The case passes when every check passes it and the goal was reached.
+With [repeats](#repeated-attempts) each attempt is a conversation of its own, and the goal's
+verdicts combine by the suite's `combine`. A model plays the user, so the same suite can talk
+differently from run to run; repeats show how much.
+
+**When it fails.** A simulator call that fails, or a reply that neither ends the conversation nor
+holds a message, ends the conversation as a failed target call does: no check has a verdict, the
+case's `error` is the simulator's message, and the next run starts the conversation again. When
+only the last call, the one after the budget is spent, fails, the goal alone has no verdict.
+
+**What a run records.** Everything a [conversation](#conversations) records, and:
+
+| Where | What |
+| --- | --- |
+| `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
+| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation` |
+| The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
+| The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
+| The Evals UI | A **Simulated** badge on a run with simulated users, in Runs and on its page, and on each simulated conversation's row and in its **Inspect** drawer, which names the simulator model. Single-turn and scripted conversation cases have none |
+
+A run without simulated users writes and shows none of these. Changing a simulated user, or the
+simulator's `model` or `inference_params`, grades its cases again; cases without a simulated user
+keep their results. How close a simulator's users come to real ones is what the
+[fidelity report](#simulator-fidelity) measures.
+
+### Personas from real conversations
+
+`martian evals personas` builds simulated users from real conversations: one data file case with a
+`simulated_user` for each conversation, which a suite with a `simulator` can run as its `data`.
+
+```bash
+martian evals personas transcripts.jsonl --model "openai:/YOUR_MODEL" -o personas.jsonl
+martian evals personas --session SESSION_ID --session SESSION_ID --model "openai:/YOUR_MODEL" -o personas.jsonl
+```
+
+- **From a file**, JSON Lines with one conversation per line: `{"id": "...", "messages": [{"role":
+  "user", "content": "..."}, ...]}`. `id` is optional (`transcript-<line>` without one); a role is
+  `user`, `assistant` or `system`, and a `system` message, the assistant's instructions, is left out.
+  A line can also have `goal_reached`, `true` or `false`, whether that user got what they came for;
+  only the [fidelity report](#simulator-fidelity) reads it.
+- **From the local Evals UI's data folder**, by session id (`--session`, repeatable, and
+  `--data-dir`): the session's traces oldest first, each trace's request as the user's message
+  and its response as the reply. A conversation case's turns and an application's traces that
+  name a session both have one ([traces from your application](#run-a-suite-file-locally)).
+- **What is written.** The model reads each conversation and writes the user's `goal`, `persona`
+  and `stop_when`; `max_turns` is the number of messages the user sent, or `--max-turns`. The case
+  id is the conversation's id. The model is called on the simulator's provider path, with
+  `--model` as `simulator.model`, and replies with one flat object, `{goal, persona, stop_when}`.
+- **Personal data is removed** by the detection the [`no_personal_data`](#policy-checks) check
+  uses, twice: from each message before the model reads it, and from everything written, the ids
+  included. Each email address, phone number, card number, IBAN and national ID it finds is
+  replaced by its kind, such as `[email]`, and the command prints how many of each it removed.
+  Names, street addresses and anything else that check does not look for are not found, so read
+  the file before you share it.
+
+`martian.evals.personas` does the same from Python: `read_transcripts(path)` or
+`transcripts_from_store(data_dir, session_ids)`, then `build_personas(transcripts, model=...)`,
+with the simulator's settings as arguments, and `write_personas(built, path)`.
+
+### Simulator fidelity
+
+A simulator can flatter the agent: its users may be more patient, say less, and be satisfied
+sooner than real ones, so a suite passes that real users would fail. `martian evals fidelity`
+compares the simulated conversations of one or more runs with real conversations, the same
+transcripts file or sessions `martian evals personas` reads, on how long they run, how often the
+user corrects or repeats a request, and how often the user reaches their goal. It calls no model.
+
+```bash
+martian evals run evals.yaml                       # a suite with simulated users, into results/
+martian evals fidelity transcripts.jsonl --results results -o fidelity.json
+martian evals fidelity --session SESSION_ID --session SESSION_ID --results results -o fidelity.json
+```
+
+`--results` is the output folder of a run, repeatable; `--session` and `--data-dir` are as for
+`personas`; `-o` (default `fidelity.json`) is the report. The command prints one table per setup
+and writes the report. For the [simulated-users example](#simulated-users), with its data file
+named `personas.jsonl`, against four short real conversations (one labelled):
+
+```text
+Simulator setup: openai:/your-model, parameters {"temperature": 0.7}, instructions simulated-user-v1, personas personas.jsonl (dataset digest 1eb20c78b07a)
+                            Fidelity of openai:/your-model with personas from personas.jsonl
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Measure                         ┃ Simulated           ┃ Real                 ┃ Difference (95% CI)                   ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Turns per conversation          │ 2.5 (-16.6 to 21.6) │ 2.2 (0.7 to 3.8)     │ +0.2 (-18.9 to +19.4), within noise   │
+│ Conversations with a correction │ 1 of 2, 50% (9–91%) │ 2 of 4, 50% (15–85%) │ +0 points (-54 to +54), within noise  │
+│ Corrections per turn            │ 1 of 5              │ 2 of 9               │ —                                     │
+│ Goal reached                    │ 1 of 2, 50% (9–91%) │ 2 of 3, 67% (20–94%) │ -17 points (-66 to +45), within noise │
+└─────────────────────────────────┴─────────────────────┴──────────────────────┴───────────────────────────────────────┘
+Simulated: 2 conversations of 2 cases in results. Real: 4 conversations from transcripts.jsonl; goal reached as labelled
+for 1, by the outcome rule for 2, unknown for 1. Corrections and the outcome rule: fidelity-v1 (docs/evals.md, simulator
+fidelity).
+```
+
+Two simulated conversations and four real ones are far too few to tell anything apart: every
+difference is within noise, and a mean of two conversations has a very wide interval.
+
+**One report per simulator setup.** A setup is what the run's `summary.json` names under
+`simulator`: the model, its parameters, the simulator's instruction version and the persona source
+(the data file and the dataset's digest). Folders of the same setup are read together, so repeated
+runs add conversations; each other setup gets its own report. The simulated conversations are
+those of each folder's last run: every attempt of every case with a simulated user. One that ended
+on an error, a failed target or simulator call, is left out and counted.
+
+**The measures**, each for the simulated and the real side, with how many conversations it rests
+on:
+
+| Measure | Simulated | Real |
+| --- | --- | --- |
+| Turns | The messages the simulated user sent | The `user` messages |
+| Corrections | Messages that correct or repeat a request, by the rules below; the share of conversations with at least one, and corrections per turn | The same rules |
+| Goal reached | The case's `goal_reached` verdict, which the simulator gives | The transcript's `goal_reached` label, else the outcome rule below; a conversation the rule cannot read is unknown, counted and left out of the share |
+
+**Corrections**, found the same way on both sides. The first message is never a correction. A
+later user message is one when, compared case-insensitively with curly apostrophes made straight:
+
+- it holds one of these phrases as whole words: *i meant*, *i said*, *i asked*, *i already*,
+  *i told you*, *as i said*, *like i said*, *not what i*, *that's not right*, *that's not
+  correct*, *that's wrong*, *that's incorrect* (each also with *that is*), *you misunderstood*,
+  *you got it wrong*, *let me rephrase*, *to clarify*, *to be clear*, *doesn't answer*, *does not
+  answer*, *didn't answer*, *did not answer*; or
+- it repeats an earlier user message: each has at least two content words, the runs of letters or
+  digits less single letters and a fixed list of pleasantries and grammar words
+  (`martian.evals.fidelity.STOPWORDS`; *no* and *not* are content), and the words they share are at
+  least 60% of the words either has.
+
+**The outcome rule**, for a real conversation without a label, reads the last user message: the
+goal was not reached when it is a correction or says the help failed (*didn't help*, *doesn't
+work*, *still not*, *never mind*, *forget it*, *give up*, *useless* and their variants); it was
+reached when it thanks or confirms (*thank*, *thanks*, *perfect*, *great*, *that works*, *that
+helps*, *got it*, *all set*, *sorted*, *resolved* and the like); otherwise it is unknown.
+`martian.evals.fidelity` lists every phrase (`CORRECTION_PHRASES`, `UNRESOLVED_PHRASES`,
+`CLOSING_PHRASES`). The phrases are English, and a rule is not a reader: label the transcripts'
+outcomes when they matter.
+
+**Intervals and differences.** Each side's mean has its Student t interval and each share its
+Wilson interval ([pass rates and intervals](#pass-rates-and-confidence-intervals)). The attempts of
+one case, and the same case in several folders, are conversations of one persona, so the simulated
+side groups them by case; real conversations are independent. The difference, simulated minus
+real, has Newcombe's hybrid score interval for two shares and the same construction (MOVER, from
+the two sides' intervals) for two means. It reads **simulated higher** or **simulated lower** when
+its interval leaves out 0, and **within noise** otherwise. A mean of one conversation has no
+interval, so neither has its difference.
+
+**What the report holds.** `fidelity.json` has `version` (`fidelity-v1`, the rules' version),
+`real` (`source`, the transcripts file as given and its SHA-256, or the session ids, and
+`conversations`) and `reports`, one per setup: `setup`, `results` (the folders), `cases`,
+`left_out`, `turns`, `corrections` and `goal_reached` (each with `simulated`, `real` and
+`difference`), and `conversations`. Each conversation is its id (a case id, `<case> attempt <n>`
+with repeats, or a transcript's id), its `turns`, the numbers of the turns that are
+`corrections`, its `goal_reached` and where that came from (`outcome`: `simulator`, `label`,
+`rule`, or null when unknown). Ids have the personal data
+[`no_personal_data`](#policy-checks) finds replaced by its kind; no message is written.
+
+**What it cannot tell.** A built persona's `max_turns` is the real conversation's length, so its
+simulated conversation cannot run longer, only shorter. The simulated goal verdict is the
+simulator's own opinion, and the real one a label or a rule, so a gap between them is evidence to
+read, not a measurement of the agent. The report compares the two sides as a whole; it does not
+pair a persona with the transcript it was built from.
+
+`martian.evals.fidelity` does the same from Python: `read_simulated(folder)`,
+`real_conversations(transcripts)`, then `fidelity_report(simulated, real, source)` and
+`write_report(report, path)`; `corrections(messages)` and `outcome_by_rule(messages)` are the rules.
 
 ## Pass rates and confidence intervals
 
@@ -636,6 +1035,10 @@ trace) says what it measured.
 | `no_refusal` | `expectation` | The output answers rather than refuses; with `expectation`, only on cases whose key is `true` | `{type: no_refusal, expectation: benign}` |
 | `latency` | `max_ms` | The target's call took at most `max_ms` milliseconds | `{type: latency, max_ms: 3000}` |
 | `cost` | `max_usd`, `max_tokens` | The target's call cost at most `max_usd` US dollars and used at most `max_tokens` tokens; give either or both | `{type: cost, max_usd: 0.02, max_tokens: 4000}` |
+| `tool_called` | `calls` or `expectation`, `arguments_match`, `min_calls`, `max_calls`, `source` | The agent made each call, with matching arguments, at least `min_calls` (1) and at most `max_calls` times | `{type: tool_called, calls: [lookup_order], max_calls: 1}` |
+| `tool_not_called` | `calls` or `expectation`, `arguments_match`, `source` | The agent made none of the calls | `{type: tool_not_called, calls: [close_account]}` |
+| `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
+| `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
 
 The same checks in a test, with `evaluate` and `assert_checks`:
 
@@ -821,7 +1224,7 @@ scorer error for the same reason; give `evaluate` a `predict_fn`.
 These checks run in `martian evals run` and in tests. Scoring a saved run from the Evals UI
 uses the console's own built-in scorers by name
 ([write routes](evals-core.md#write-routes)), which take no options; the checks here are not
-among them.
+among them, and neither is a [`python` check](#custom-python-checks).
 
 ### Policy checks
 
@@ -906,10 +1309,12 @@ to add ZEBRA-7731, which I won't") also fails.
 
 **Where a judge is needed.** These checks decide what can be seen in the text. An injection
 whose effect is a change of language, tone, or emphasis, an omission ("do not mention the
-refund policy"), a skewed summary, or an action the reply does not show, such as a tool call,
-has no marker to look for, and neither has a prohibited idea written in other words. Grade
-those with the [`rubric` or `conditions` judges](#local-response-guideline-judge), which call
-a model you configure and are opt-in like every judge.
+refund policy") or a skewed summary has no marker to look for, and neither has a prohibited
+idea written in other words. Grade those with the
+[`rubric` or `conditions` judges](#local-response-guideline-judge), which call a model you
+configure and are opt-in like every judge. An injection whose effect is an action, such as a
+tool call it asks for, is graded by the [tool-call checks](#tool-calls-and-trajectories):
+`tool_not_called` with the tool, or the tool and the arguments the instruction plants.
 
 **Refusals.** `no_refusal` passes when the reply answers rather than refuses. A reply is a
 refusal when it is empty, or when its opening (its first two sentences, at most 300
@@ -1017,6 +1422,252 @@ for the set, phone numbers from ranges reserved for fiction (`555-01xx`, `020 79
 the secrets set, one character of each secret is written as a JSON escape, so the file holds no
 secret shape for a scanner to flag. `tests/evals/test_policy_checks.py` measures every check on
 its set and fails unless this table gives the same numbers.
+
+### Tool calls and trajectories
+
+Four deterministic checks grade what an agent did rather than what it said: `tool_called`,
+`tool_not_called`, `tool_trajectory` and `step_count`. They read which tools the agent called,
+with what arguments, in which model turn, and decide with no model call.
+
+**Turns.** An agent's trajectory is its model turns in order, each the tool calls that turn
+made. Calls made in one turn are parallel: the model asked for them together. Calls in
+successive turns are sequential: each turn could see the results of the one before. A turn
+that calls no tool, such as the final answer, is still a model turn.
+
+**Where the calls are read.** `source` says where:
+
+| `source` | Reads | A turn is | A call is |
+| --- | --- | --- | --- |
+| `trace` | The spans MLflow records for the target's call, the trace the local Evals UI shows for the case | A model span (`LLM` or `CHAT_MODEL`) | A tool span (`TOOL`): the tool `gen_ai.tool.name` (or OpenInference's `tool.name`) names, else the span's name, with the span's inputs as its arguments. It is in the turn of the model span that started last before it |
+| `reply` | The messages in the reply, as a value or as JSON text: a list of chat messages, an object with `messages`, a chat completion (its `choices`), or one message | A model message: `role: assistant` (or Gemini's `model`), or LangChain's `type: ai` | One of its `tool_calls` (OpenAI, LangChain, or OpenAI's older `function_call`), a `content` block of type `tool_use` (Anthropic), or a part of type `tool_call` (OpenTelemetry GenAI) or with a `functionCall` (Gemini). Arguments sent as JSON text are decoded |
+
+Without `source`, a case produced by a call is read from its trace, and a case with a stored
+output from its reply. A suite file refuses `source: trace` without a target, whose stored
+outputs no call produced, and a URL target without `source: reply`, because the trace of a URL
+target's call records nothing of what the agent behind it did.
+
+To read a trace, the target's tracing must record its tools as spans, with
+`@mlflow.trace(span_type="TOOL")` on each tool or a framework's autolog that does (LangChain's
+and the OpenAI Agents SDK's do), and its model calls, which give the turns, for example with
+`mlflow.openai.autolog()`. Spans inside a tool span are that tool's own work, such as a sub-agent's
+model and tools, and are not read. A span MLflow did not type takes its kind from the
+OpenTelemetry GenAI `gen_ai.operation.name` (`chat`, `text_completion`, `generate_content`,
+`execute_tool`) or from `openinference.span.kind`.
+
+What cannot be read is a scorer error, so the gate fails closed and `tool_not_called` never
+passes an agent it could not see: a reply that is text, holds no messages, or holds an item that
+is not a chat message (an OpenAI Responses API `function_call` item, say; read the trace
+instead); a tool call without a name; a trace with no model or tool span; a trace whose model
+calls ask for tools while no tool span records one, because the tools are not traced; and, for a
+check that compares turns, tool calls a trace records before its first model call, which belong
+to no turn.
+
+In a [conversation](#conversations) these checks grade each turn's call, and take no
+`scope: conversation`.
+
+**Calls.** A call is a tool's name, which any arguments match, or an object with `name` and
+`arguments`. A check takes its calls in `calls` (positional arguments in Python), or each case's
+with `expectation: <key>`, which reads `expectations[<key>]`, such as MLflow's
+`expected_tool_calls`; not both. `arguments_match` says how a call's arguments must match the
+given ones:
+
+| `arguments_match` | `arguments` | Matches when |
+| --- | --- | --- |
+| `subset` (default) | An object | Each given argument is in the call with an equal value. The call's other arguments are free, and so are other keys of a nested object |
+| `exact` | Any JSON value | The call's arguments are equal to it, with no other argument or key |
+| `schema` | A JSON Schema | The call's arguments match the schema, checked as [`json_schema`](#deterministic-checks) checks a reply |
+| `pattern` | An object of regular expressions | Each named argument's whole value, or its JSON text when it is not a string, matches its pattern (`re.fullmatch`) |
+
+Values are equal as JSON's are: `1` equals `1.0`, `true` is not `1`, and lists are equal item by
+item. A failure names the first argument that differs, such as `amount is 250, expected 25`,
+`customer is missing`, or `filters.limit is not expected` under `exact`.
+
+**The checks.**
+
+- `tool_called` passes when each call is made at least `min_calls` times (default 1) and at most
+  `max_calls`. Only calls with matching arguments count. `min_calls: 0` needs a `max_calls`.
+- `tool_not_called` passes when none of the calls is made. A call given with arguments fails only
+  a call of its tool with matching arguments, such as a `transfer` to one account.
+- `tool_trajectory` passes when the turns that call tools follow its steps. A step is a call, or a
+  list of the calls the model makes together in one turn. `order` says how:
+  - `exact` (default): one turn per step, in order, each making the step's calls, in any order
+    within the turn, and no others;
+  - `in_order`: each step in a later turn than the step before; other calls may come before,
+    between and after, in those turns or others;
+  - `any_order`: every call made, in any order and in any turn, others free. Turns do not count
+    here, so a step may not be a list.
+- `step_count` passes when the agent took `min_turns` to `max_turns` model turns and made
+  `min_calls` to `max_calls` tool calls in all; give any of the four.
+
+So a step for `a` then a step for `b` fails when the model calls `a` and `b` together, and the
+step `[a, b]` fails when it calls them in successive turns, with reasons such as:
+
+```text
+turn 1 of tool calls is not step 1: check_eligibility is called in turn 2, not this one
+step 2 (check_eligibility) is made in the same turn as step 1 (turn 1), in parallel, not after it
+```
+
+Each expected call takes a call of its own, matched so that a loose one, such as a tool's name
+alone, cannot take the only call a stricter one matches. A support agent's refund, from
+[`examples/evals/tool-calls`](../examples/evals/tool-calls/evals.yaml), which grades stored
+conversations:
+
+```yaml
+checks:
+  - type: tool_trajectory        # one turn per step, in order, and no other calls
+    calls:
+      - {name: lookup_order, arguments: {order_id: A-1001}}
+      - [get_policy, {name: check_eligibility, arguments: {order_id: A-1001}}]  # together, in one turn
+      - {name: issue_refund, arguments: {order_id: A-1001, amount: 25.0}}
+  - type: tool_called            # the refund is issued once, for the order the customer names
+    calls:
+      - {name: issue_refund, arguments: {order_id: A-1001}}
+    max_calls: 1
+  - type: tool_not_called        # a refund never closes the account
+    calls: [close_account]
+  - type: step_count             # no more than five model turns
+    max_turns: 5
+```
+
+Its first case makes the expected calls and passes. Two fail `tool_trajectory`: one refunds the
+wrong amount, and one checks the policy and the order's eligibility one after the other:
+
+```text
+wrong-amount   turn 3 of tool calls is not step 3: issue_refund is called with other arguments: amount is 250.0, expected 25.0
+one-at-a-time  turn 2 of tool calls is not step 2: check_eligibility(order_id="A-1001") is called in turn 3, not this one
+```
+
+In Python, with a target whose tracing records its model calls and its tools:
+
+```python
+from martian.evals import assert_checks, evaluate, step_count, tool_called, tool_not_called, tool_trajectory
+
+result = evaluate(
+    data=[{"inputs": {"message": "Order A-1001 arrived broken. Can I get my money back?"}}],
+    predict_fn=agent,
+    scorers=[
+        tool_trajectory(
+            {"name": "lookup_order", "arguments": {"order_id": "A-1001"}},
+            ["get_policy", "check_eligibility"],              # together, in one turn
+            {"name": "issue_refund", "arguments": {"amount": 25}},
+        ),
+        tool_called({"name": "issue_refund", "arguments": {"order_id": r"A-\d{4}"}}, arguments_match="pattern"),
+        tool_not_called("close_account"),
+        step_count(max_turns=5),
+    ],
+)
+assert_checks(result)
+```
+
+**Score the outcome first.** A trajectory says how the agent got there, not whether it got there:
+an agent can take another good route, or the expected route to a wrong result. Where a check of
+the outcome exists, such as one of the reply's content or of the state the agent left, make it
+the deciding check, and use these to explain a failure, or to hold the agent to the steps it must
+take, such as checking eligibility before a refund, and to the tools it must never call. The
+checks compare the calls, not what the tools returned, and no judge grades whether another route
+was as good.
+
+### Custom Python checks
+
+When no check states a team's rule, write it as a Python function. A suite file names it with
+`type: python`; in Python, `python_check` takes the function itself. A support team's refund
+rules, from [`examples/evals/custom-scorer`](../examples/evals/custom-scorer/evals.yaml):
+
+```yaml
+checks:
+  - type: python                 # never refund more than the customer paid
+    name: refund_within_order
+    file: scorers.py             # relative to this suite file
+    function: refund_share
+    max_score: 1
+    security: true               # with repeats, one over-refund in any attempt fails the case
+  - type: python                 # every refund names one of the reason codes
+    name: reason_code
+    file: scorers.py
+    function: cites_reason_code
+```
+
+```python
+# scorers.py
+import json
+
+
+def refund_share(outputs, expectations):
+    refund = json.loads(outputs)["refund"]
+    paid = expectations["order_total"]
+    return refund / paid, f"refund {refund:.2f} of an order of {paid:.2f}"
+
+
+def cites_reason_code(outputs):
+    reason = json.loads(outputs).get("reason")
+    return reason in ("DAMAGED", "LATE", "WRONG_ITEM"), f"reason {reason!r}"
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `file` | Yes | The Python file, relative to the suite file, loaded as a function target's file is |
+| `function` | Yes | The function's name in that file |
+| `min_score`, `max_score` | When the function returns a number | The number passes when it is at least `min_score` and at most `max_score`; give either or both |
+| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`. Default `false`: the suite's rule |
+
+Without a `name` the check's label is `python`, so give each python check a name.
+
+**What the function is given.** It names, as its parameters, the arguments it reads, and is called
+with those by name, as MLflow calls a scorer:
+
+| Argument | Value |
+| --- | --- |
+| `inputs` | The case's inputs, a dict: what a function target is called with |
+| `outputs` | The reply, as the target returned it, or the case's stored output |
+| `expectations` | The case's expectations, a dict (empty when it has none) |
+| `trace` | The MLflow trace of the target's call, as [`latency` and `cost`](#deterministic-checks) read it |
+
+Any other parameter needs a default, which it keeps. A function that reads none of the four, takes
+`*args` or `**kwargs`, takes one of them by position only, or is `async` is refused before any
+case runs, as is a file that cannot be read, fails to import or has no such function. In a
+[conversation](#conversations), a turn check is given each turn's, and a conversation check
+(`scope: conversation`) the conversation's messages, replies and expectations, with no `trace`.
+
+**What it may return.**
+
+| Return | The check |
+| --- | --- |
+| `True` or `False` | Passes or fails. Its reason is `the scorer passed the reply` or `the scorer failed the reply` |
+| A number | Passes when it is within `min_score` and `max_score`, with a reason such as `score 10.0 is above max_score 1.0`. A number without either bound is a scorer error, so a score never passes by default |
+| `(value, reason)` | Either of the above, with the string `reason` after the SDK's words, or as the whole reason for a boolean |
+
+Anything else (`None`, text, a list, `nan`), a boolean from a check with bounds, and any exception
+the function raises are a scorer error for that case: the check gives no verdict, the reason names
+what happened, such as `the scorer raised KeyError: 'order'`, and the rest of the run carries on.
+As for every check, a case without a verdict is an error, so the gate fails closed and the run
+exits `2`.
+
+**When it runs.** The file is imported once per run of `martian evals run`, as the run starts,
+in the command's own process; loading or writing a suite file (`martian.evals.suite_file`) never
+imports it. A case's reused verdict depends on the file's contents, not on modules it imports
+([resume](#run-a-suite-file-locally)). The function runs with that process's full privileges, so
+review a suite file and its scorer files from someone else before you run them
+([security and data](security-and-data.md#custom-python-scorers)).
+
+In Python, with the same arguments and returns:
+
+```python
+from martian.evals import assert_checks, evaluate, python_check
+
+
+def mentions_order(inputs, outputs):
+    return inputs["order"] in outputs, "names the customer's order"
+
+
+result = evaluate(data=data, predict_fn=agent, scorers=[python_check(mentions_order, name="mentions_order")])
+assert_checks(result)
+```
+
+`python_check(function, name="python", min_score=None, max_score=None)` refuses a function it
+could not call, or bounds that are not numbers, when the check is made. Repeats belong to suite
+files, so it has no `security`. A worker of the
+[evals core](evals-core.md#custom-scorers-in-the-worker) runs scorers its setup installs, with the
+same rules but no `trace`; the Evals UI cannot choose one yet.
 
 ## Mistakes that raise instead of passing silently
 

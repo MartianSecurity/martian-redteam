@@ -202,11 +202,12 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
 
-The core adds one read route of its own, which the server's contract does not have:
+The core adds two read routes of its own, which the server's contract does not have:
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
-| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
+| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
+| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -252,6 +253,15 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
   its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
   comparison pairs these combined statuses.
+- **Conversation cases.** A conversation case result is one item, with its conversation's status,
+  its first turn's prompt as `prompt` and the conversation as messages, in JSON, as `output`.
+  `EvalItemOut` has no place for turns, so they are served by the turns route above, which the
+  frozen contract does not type. The run's `provenance.conversations` on the run routes, how many
+  of its cases are conversations, says whether the turns route has any; a run without
+  conversation cases has no such key. The item's trace is the turn that shows the conversation's
+  verdict, and its scores, the conversation's verdicts, are on no trace. Each turn's trace has
+  the conversation's `session_id`, so the Sessions search groups a conversation's turns into one
+  session with no route of its own.
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -390,7 +400,9 @@ All paths are under `/v1/evals`. How the core carries them out:
   is already in progress" at a limit of 1, else "5 scoring jobs are already in progress, as many as
   this organisation may have at once". The count reads the jobs of each completed run, since the
   record store has no query across runs. A job's scores sit beside the run's own, and each scored
-  value is also kept on its case's trace.
+  value is also kept on its case's trace. A request cannot name a
+  [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
+  names, so any other is `422`, and `GET /scorers` does not offer one (MorningHQ/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. Only a role
@@ -475,7 +487,7 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None, limits=None)` runs each piece of
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -521,10 +533,12 @@ no registered agent, so an install with no martian-agents service runs functions
   because a function shares the run's process, its MLflow state and its setup's objects; a process
   could not call it.
 - **HTTP targets** follow a suite file's URL target, with the same code: the worker POSTs `body`
-  to `url` once per case, with no retry, no redirect and no proxy from the environment.
-  `{{input}}` in the body is the case's prompt (the text a registered agent is sent),
-  `{{inputs.NAME}}` an input and `{{uuid}}` a new UUID; the output is the response's text, or the
-  value at `response_path`. A response that is not 2xx is the case's error, naming the setting to
+  to `url` once per case, with no retry, no redirect and no proxy from the environment, the body
+  filled in by `martian.evals.runner.request_body`. `{{input}}` in the body is the case's prompt
+  (the text a registered agent is sent), `{{inputs.NAME}}` an input and `{{uuid}}` a new UUID,
+  and a case is a [conversation](evals.md#conversations) of one turn: `{{session_id}}` is a new
+  id, `{{history}}` empty and `{{messages}}` the prompt as one user message. The output is the
+  response's text, or the value at `response_path`. A response that is not 2xx is the case's error, naming the setting to
   check: `the target returned HTTP 401; check the credentials in target.headers`, `HTTP 404; check
   target.url`, `HTTP 400` or `422; check target.body`. So are an unreachable endpoint (`the target
   could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
@@ -534,6 +548,11 @@ no registered agent, so an install with no martian-agents service runs functions
   `targets['ID'].response_path`. Both workers refuse it each time a check or a run names the
   target, so a launch of it fails before any run is made, and one wrong target never stops the
   others.
+- **Conversation cases** (`Case.turns`, and `Case.simulated_user`, whose turns a simulator writes)
+  run only in suite-file runs, turn by turn. The worker
+  sends one prompt per case, so it skips a conversation case without calling the target, with
+  the reason `item is a conversation, which martian evals run runs turn by turn; the worker sends
+  one prompt per item`.
 - **Credentials.** `${NAME}` in an HTTP target's `url` or a header value is filled in by the
   worker's `Credentials`, a function `(principal, target_id, name) -> str | None` asked in the
   process that calls the target, each time it calls it. Neither the launch request nor a record
@@ -644,8 +663,9 @@ The new process:
 3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
    function, named by its import path so that the new process can import it, and returns
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
-   timeout, the HTTP targets' `credentials`, the registered agents' `executor` and the `limits` of
-   a run that has none of its own. `options` must be JSON;
+   timeout, the HTTP targets' `credentials`, the registered agents' `executor`, the custom
+   Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)) and the `limits` of a
+   run that has none of its own. `options` must be JSON;
 4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
    organisation, and exits.
 
@@ -967,6 +987,52 @@ the Agents judge against a loopback judge route (the request body, the checks on
 judge's allowed model recorded on its scores, a model Agents refuses, an endpoint, Agents'
 failures).
 
+### Custom scorers in the worker
+
+A worker runs a team's own Python scorers, the functions of a suite file's
+[`python` check](evals.md#custom-python-checks), when its setup installs them: whoever deploys the
+worker imports each function in the setup and names it in `WorkerServices.scorers`
+(`InProcessWorker(scorers={name: function})`). A scoring job's scorer of kind `code` and type
+`python` runs the function installed under its name, over each saved output; the record names the
+scorer, never code or a file.
+
+```python
+def worker_services(**options) -> WorkerServices:  # a module-level function, named by import path
+    from team_rules import refund_share  # imported here, in the work's own process
+
+    store, records = open_installation_stores(**options)  # the installation's own stores
+    return WorkerServices(store, records, scorers={"refund_within_order": refund_share})
+
+
+worker = ProcessWorker(worker_services, records, options={...})
+```
+
+- **What a scorer is given and returns.** The rules of a `python` check, without a trace: the
+  function reads, by name, the case's `inputs`, the saved `outputs` and the case's `expectations`,
+  and returns `True` or `False`, a number or `(value, reason)`. The score's `value` is what it
+  returned, so a number is a numeric score, as `response_length` is, which a suite's policy can
+  gate; its `rationale` is the reason, and its `source_id` `python:<name>`. A function that reads
+  `trace` or anything else it is not given is refused when the worker is built: `InProcessWorker`
+  raises, and under `ProcessWorker` the work's process ends before the work starts, so the work is
+  marked failed.
+- **No verdict, never a crash.** A scorer that raises, or returns anything else, gives that score
+  the error (`the scorer raised RuntimeError: ...`); a job's scorer the worker has not installed
+  gives each of its scores `This worker has no custom scorer named <name>`. The job carries on, and
+  those scores count as its errors: it ends `partial`, or `failed` when no score succeeded. A
+  scorer runs on a thread, so the worker's loop goes on while it does; it has no time limit.
+- **Never in the API process, and never in a judge.** With `ProcessWorker` the setup runs, and
+  imports the scorers, only in each piece of work's own process. The API process imports the
+  setup's module to check its import path, so the setup imports scorer modules inside the
+  function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
+  request or suite can name only those, so a job of custom scorers is recorded by the edition's
+  own code until the contract carries them (MorningHQ/martian-notes#334). A judge request carries
+  only judge scorers. The local edition installs none. What the worker isolates, and what it does
+  not, is in [security and data](security-and-data.md#custom-python-scorers).
+
+`tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
+values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
+through the core's routes, failing if the process that serves the API imports the scorer file.
+
 ## Judge models
 
 Each judge runs on a model of its own, or on the default judge model when it names none.
@@ -1034,19 +1100,20 @@ endpoint, and keeps the local edition's default in its data folder.
   [promptfoo results and configs](#promptfoo-results-and-configs).
 - `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
   check: [copied MLflow stores](#copied-mlflow-stores).
-- `martian evals export` writes everything an organisation holds as JSON Lines files with a
-  manifest, and `martian evals import martian` loads them into a fresh install:
+- `martian evals export` writes everything an organisation's store and record store hold as JSON
+  Lines files with a manifest, and `martian evals import martian` loads them into a fresh install:
   [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
-  and the core's own route for the attempts of repeated cases, with the run's reliability and its
-  flaky cases.
+  and the core's own routes for the attempts of repeated cases, with the run's reliability and its
+  flaky cases, and for the turns of conversation cases.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
   a one-organisation in-process worker, and a durable queue in the record store's database that
   either runs from ([the durable queue](#the-durable-queue)). Every target call has a time limit,
   and a run or scoring job stops at its time or judge token limit and resumes after what it
-  finished ([limits](#limits-stopping-and-resuming)).
+  finished ([limits](#limits-stopping-and-resuming)). The workers run the
+  [custom Python scorers](#custom-scorers-in-the-worker) their setup installs.
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
@@ -1700,7 +1767,7 @@ key for it if it needs one (`martian.evals.local_targets`). A target is one of:
 
 | Kind | Fields | What it calls |
 | --- | --- | --- |
-| `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{uuid}}`, and `response_path` finds the reply |
+| `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{messages}}`, and may use `{{uuid}}`, `{{session_id}}` and `{{history}}`, and `response_path` finds the reply |
 | `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content` |
 
 Every target has a `name`, unique among the targets. The key is sent in `key_header` (always
@@ -1960,9 +2027,9 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined |
-| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts, and tagged `martian.simulated` when a simulated user wrote it; the case result's trace is its first turn with the conversation's verdict, else its first |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
@@ -2002,6 +2069,12 @@ byte at a time while the run finishes; stops a run at its time limit and at its 
 against a loopback judge that reports its usage, and resumes each after the cases it finished;
 stops a repeated run in the middle of a case's attempts and resumes it with all of that case's
 attempts; and cancels a running command's run from the local edition's cancel route.
+`tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
+conversation verdicts, the turns route, each turn's trace and the session its turns share.
+`tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
+the simulator model, and for personas built from transcripts and from the data folder's sessions;
+`tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
+[fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
 
 ## Imported Inspect logs
 
@@ -2151,7 +2224,7 @@ a score threshold.
 
 | Listed, not converted | Why |
 | --- | --- |
-| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
 | `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
 | `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
@@ -2162,7 +2235,10 @@ a score threshold.
 | Other red team graders | Graded by a model with their own prompts |
 | `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
 | `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
-| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-valid-function-call`, `is-valid-openai-function-call`, `is-valid-openai-tools-call` | Validate the reply's tool calls against the schemas of the provider's own `tools` or `functions`. The closest check, `tool_called` with `arguments_match: schema`, checks the calls of a tool it names against a schema it gives; add it by hand to use it |
+| `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
+| `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
+| Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
 | `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
 | `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 
@@ -2297,7 +2373,8 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 
 ## Data export
 
-`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals export <folder>` exports everything the local edition's store and record store
+hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
@@ -2314,6 +2391,7 @@ an export holds, resuming, and what the receiving store assigns are in
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 

@@ -28,7 +28,11 @@ checks:
 ```
 
 `target` can also name an HTTP endpoint (`url`, `headers`, `body`, `response_path`), so an agent
-behind an API needs no Python file.
+behind an API needs no Python file. A case can be a conversation of several turns, sent in order
+to a target that keeps it and graded per turn and as a whole, and its user can be simulated: a
+model plays a goal and a persona, which `martian evals personas` can build from real
+conversations. Simulated results are labelled as such, and `martian evals fidelity` compares a
+simulator's conversations with real ones.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
 prints a summary table, can run each case several times, combine the attempts and report the
@@ -71,9 +75,11 @@ push and keeps one comment with the result, also without a Martian account. See
   ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
-  twenty-four deterministic checks on the reply's text, its JSON, its numbers and tables, its
-  personal data, secrets, planted-instruction markers and refusals, and the call's latency and
-  cost, pinned datasets, Backend-scored regression gates and recorded CI sessions.
+  twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
+  personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
+  their order, turn by turn, and the call's latency and cost, custom checks written as Python
+  functions (unsandboxed: they run with the caller's privileges), pinned datasets, Backend-scored
+  regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside
