@@ -69,8 +69,10 @@ push and keeps one comment with the result, also without a Martian account. See
   login, so never expose it publicly
   ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
-  deterministic checks (`contains`, `not_contains`, `matches`, `not_matches`, `is_json`),
-  pinned datasets, Backend-scored regression gates and recorded CI sessions.
+  grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  twenty-four deterministic checks on the reply's text, its JSON, its numbers and tables, its
+  personal data, secrets, planted-instruction markers and refusals, and the call's latency and
+  cost, pinned datasets, Backend-scored regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside

@@ -109,7 +109,7 @@ def _run_suite(
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
-    from martian.evals.runner import run_suite
+    from martian.evals.runner import false_refusal_line, run_suite
 
     console = Console()
     try:
@@ -132,6 +132,8 @@ def _run_suite(
         table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
     table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
     console.print(table)
+    if (refusals := summary.get("false_refusals")) is not None:
+        console.print(false_refusal_line(refusals), markup=False, highlight=False, soft_wrap=True)
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
     for label, reasons in summary.get("check_errors", {}).items():
