@@ -1378,11 +1378,18 @@ def write_cases(folder, count, **case):
 
 
 def calls_of(folder):
-    calls = folder / "calls"
+    calls = folder / "log" / "calls"
     return calls.read_text(encoding="utf-8").split() if calls.exists() else []
 
 
-# Each call is noted in `calls`; `question 0` takes SECONDS to answer.
+def write_counted_agent(folder, agent):
+    """Write ``agent`` beside the suite, and the folder its calls are noted in: a function target
+    cannot create files in the suite's own folder, which holds the suite file and its data."""
+    (folder / "agent.py").write_text(agent, encoding="utf-8")
+    (folder / "log").mkdir(exist_ok=True)
+
+
+# Each call is noted in `log/calls`; `question 0` takes SECONDS to answer.
 COUNTED_AGENT = """
 import pathlib
 import time
@@ -1391,44 +1398,44 @@ SECONDS = {seconds}
 
 
 def target(message):
-    with (pathlib.Path(__file__).parent / "calls").open("a", encoding="utf-8") as calls:
+    with (pathlib.Path(__file__).parent / "log" / "calls").open("a", encoding="utf-8") as calls:
         calls.write(message.replace(" ", "-") + "\\n")
     if message == "question 0":
         time.sleep(SECONDS)
     return "I cannot share it."
 """
 
-# Each call is noted in `calls`; `question 0` answers only once the test writes `release`, or after
-# two minutes, and then writes `returned`.
+# Each call is noted in `log/calls`; `question 0` answers only once the test writes `log/release`,
+# or after two minutes, and then writes `log/returned`.
 GATED_AGENT = """
 import pathlib
 import time
 
-HERE = pathlib.Path(__file__).parent
+LOG = pathlib.Path(__file__).parent / "log"
 
 
 def target(message):
-    with (HERE / "calls").open("a", encoding="utf-8") as calls:
+    with (LOG / "calls").open("a", encoding="utf-8") as calls:
         calls.write(message.replace(" ", "-") + "\\n")
     if message == "question 0":
         deadline = time.monotonic() + 120
-        while not (HERE / "release").exists() and time.monotonic() < deadline:
+        while not (LOG / "release").exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        (HERE / "returned").touch()
+        (LOG / "returned").touch()
     return "I cannot share it."
 """
 
 
 def test_a_hung_function_target_is_a_timed_out_case_and_the_run_finishes(tmp_path):
     write_cases(tmp_path, 2)
-    (tmp_path / "agent.py").write_text(GATED_AGENT, encoding="utf-8")
+    write_counted_agent(tmp_path, GATED_AGENT)
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\n  timeout_seconds: 1\n")
     try:
         summary = run_suite(suite)
         # The run finished while the hung call had still not returned: it did not wait for it.
-        assert not (tmp_path / "returned").exists()
+        assert not (tmp_path / "log" / "returned").exists()
     finally:
-        (tmp_path / "release").touch()
+        (tmp_path / "log" / "release").touch()
     # The hung call ends at its limit as the case's error; the other case and the run finish.
     assert (summary["cases"], summary["passed"], summary["errors"], summary["not_run"]) == (2, 1, 1, 0)
     assert summary["target_errors"] == {runner.TIMED_OUT: 1}
@@ -1446,7 +1453,7 @@ def test_a_run_stops_at_its_time_limit_keeps_its_finished_cases_and_resumes(tmp_
     real = time.monotonic
     monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * bool(calls_of(tmp_path)))
     write_cases(tmp_path, 3)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    write_counted_agent(tmp_path, COUNTED_AGENT.format(seconds=0))
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
     result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
     # The case in flight finished, and the run stopped before the next one.
@@ -1529,7 +1536,7 @@ def test_a_repeated_run_stopped_in_the_middle_of_a_cases_attempts_runs_them_all_
     real = time.monotonic
     monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * (len(calls_of(tmp_path)) >= 4))
     write_cases(tmp_path, 3)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    write_counted_agent(tmp_path, COUNTED_AGENT.format(seconds=0))
     extra = "  - type: no_secrets\ntarget:\n  file: agent.py\nrepeats: 3\nbatch: 1\nconcurrency: 1\n"
     suite = write_suite(tmp_path, extra=extra)
     result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
@@ -1583,7 +1590,7 @@ def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished
     monkeypatch.setattr(RunRecorder, "watch_cancel", watching)
     write_cases(tmp_path, 4)
     # The first case is in flight until the run has read that it was cancelled.
-    (tmp_path / "agent.py").write_text(GATED_AGENT, encoding="utf-8")
+    write_counted_agent(tmp_path, GATED_AGENT)
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
     ended: dict = {}
     running = threading.Thread(target=lambda: ended.setdefault("summary", run_suite(suite)))
@@ -1599,7 +1606,7 @@ def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished
         assert (asked.status_code, asked.json()["state"]) == (202, "running")
         assert noticed[0].wait(60)
     finally:
-        (tmp_path / "release").touch()
+        (tmp_path / "log" / "release").touch()
     running.join(60)
     summary = ended["summary"]
     assert summary["cancelled"] is True and summary["not_run"] >= 1

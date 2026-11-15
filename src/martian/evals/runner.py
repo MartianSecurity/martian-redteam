@@ -4,9 +4,11 @@
 
 The suite names a data file (JSONL or CSV), the checks to apply, and optionally the target under
 test: a Python function, or an HTTP endpoint. Nothing here contacts the Martian platform: a
-function target runs in this process, a URL target is called from it, LLM judges call the model
-you configure, and MLflow's evaluation harness uses a local store in the output folder unless you
-point it at your own server. The run, its case results, scores and traces are also recorded in the
+function target runs in a process of its own, given each case's inputs only, which cannot reach
+the expectations, checks, scorers or results (:mod:`martian.evals.isolation`); a URL target is
+called from this process with a body filled from the inputs; LLM judges call the model you
+configure, and MLflow's evaluation harness uses a local store in the output folder unless you point
+it at your own server. The run, its case results, scores and traces are also recorded in the
 local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
 a finished case is skipped while nothing that produced its verdict has changed. A suite can run each
 case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`).
@@ -17,18 +19,19 @@ so far (:mod:`martian.evals.simulation`). Use ``martian ci`` when a result must 
 platform.
 
 Every target call has a time limit, ``target.timeout_seconds``: a URL target's client stops the
-call, and a function runs on a thread of its own, which the run stops waiting for at the limit. A
-run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``, which counts the tokens of
-its LLM judges and its simulated users): once it reaches one, it calls no more targets, records
-the cases it finished, and ends ``stopped``; running it again resumes after them. A case is the
-unit a run stops at and resumes from: with repeats, a case whose
+call, and a function target's process runs each call on a thread of its own, which the run stops
+waiting for at the limit. A run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``,
+which counts the tokens of its LLM judges and its simulated users): once it reaches one, it calls
+no more targets, records the cases it finished, and ends ``stopped``; running it again resumes
+after them. A case is the unit a run stops at and resumes from: with repeats, a case whose
 attempts did not all run has no result, and so has a conversation whose turns did not all run;
-running again runs all of its attempts and turns. Cancelling the run in ``martian ui`` stops it the
-same way, as ``cancelled``.
+running again runs all of its attempts and turns. Cancelling the run in ``martian ui`` stops it
+the same way, as ``cancelled``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import csv
 import functools
@@ -151,6 +154,12 @@ POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
 TOOL_CHECKS = _tool_calls.TOOL_CHECKS
 # A team's own rule: a Python function the suite file names (martian.evals._custom).
 CODE_CHECKS = _custom.CODE_TYPES
+# A check a worker installs by name (martian.evals.worker.hooks); this runner installs none.
+INSTALLED_CHECKS = _custom.INSTALLED_TYPES
+NOT_INSTALLED_HERE = (
+    "check {label}: an installed check runs in a worker that installs a check under that name, "
+    "and this command installs none"
+)
 SECURITY_CHECKS = ("not_contains", "not_matches", *REFUSAL_PASSING, "tool_not_called")
 """Check types that fail a reply for holding something it must never hold, such as a leaked secret,
 personal data, a prohibited phrase or an injected instruction's marker, or an agent for a tool call
@@ -170,6 +179,8 @@ class _Model(BaseModel):
 # {{session_id}}, {{history}} and {{messages}} with the conversation (martian.evals.conversations).
 _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _PLACEHOLDER_NAME = re.compile(r"input|uuid|session_id|history|messages|inputs\.[A-Za-z_][A-Za-z0-9_]*")
+# Placeholders that name what grades the target rather than what it is given.
+_GRADER_PLACEHOLDER = re.compile(r"expect|output", re.IGNORECASE)
 # In a URL target's url and header values: ${NAME} is read from the environment.
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -183,6 +194,23 @@ def _placeholders(value: Any) -> list[str]:
     if isinstance(value, list):
         return [name for item in value for name in _placeholders(item)]
     return []
+
+
+def check_body(body: Any, setting: str) -> None:
+    """Refuse a body template whose placeholders name anything but the case's inputs: a name that
+    starts like ``expectations``, ``expected`` or ``outputs`` because a target is never sent the
+    answers it is graded against, any other unknown name because nothing would fill it in. Raises
+    ``ValueError`` naming ``setting``, before any case is sent."""
+    names = _placeholders(body)
+    allowed = "{{input}}, {{inputs.NAME}}, {{uuid}}, {{session_id}}, {{history}} or {{messages}}"
+    unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
+    if graded := [name for name in unknown if _GRADER_PLACEHOLDER.match(name)]:
+        raise ValueError(
+            f"{setting} placeholder(s) {', '.join(graded)} name the case's expectations or outputs, which are never "
+            f"sent to the target; use {allowed}"
+        )
+    if unknown:
+        raise ValueError(f"unknown {setting} placeholder(s) {', '.join(unknown)}; use {allowed}")
 
 
 DEFAULT_TARGET_TIMEOUT_SECONDS = 120
@@ -246,11 +274,8 @@ class TargetRef(_Model):
         _response_steps(self.response_path, "target.response_path")
         if not self.body:
             raise ValueError("a url target needs a body, with {{input}} where the case's input goes")
+        check_body(self.body, "body")
         names = _placeholders(self.body)
-        unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
-        if unknown:
-            allowed = "{{input}}, {{inputs.NAME}}, {{uuid}}, {{session_id}}, {{history}} or {{messages}}"
-            raise ValueError(f"unknown body placeholder(s) {', '.join(unknown)}; use {allowed}")
         if not any(name not in ("uuid", SESSION_ID, HISTORY) for name in names):
             raise ValueError(
                 "a url target's body must use {{input}}, {{inputs.NAME}} or {{messages}}, or every case sends the same"
@@ -315,6 +340,7 @@ class CheckSpec(_Model):
         "tool_trajectory",
         "step_count",
         "python",
+        "installed",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own; a
@@ -375,6 +401,8 @@ class CheckSpec(_Model):
     min_score: float | None = Field(default=None, allow_inf_nan=False)
     max_score: float | None = Field(default=None, allow_inf_nan=False)
     security: bool = False
+    # An installed check: the options the worker's check is given, as written. Its name is `name`.
+    options: dict[str, Any] | None = None
     # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
     combine: CombineRule | None = None
     # What it grades in a conversation case: each turn's reply, or the whole conversation once.
@@ -443,6 +471,8 @@ class CheckSpec(_Model):
             if not self.function.isidentifier():
                 raise ValueError("function must be the name of a function in the file")
             _custom.bounds(self.min_score, self.max_score)
+        if self.type in INSTALLED_CHECKS and not self.name:
+            raise ValueError("an installed check needs a name: the name a worker installs the check under")
         return self
 
     def tool_options(self) -> _tool_calls.ToolOptions:
@@ -1001,9 +1031,12 @@ class _Calls:
 
 def _conversation_parameters(function: Callable[..., Any], name: str) -> tuple[str, ...]:
     """Which of ``history`` and ``session_id`` a function target takes, so each turn of a
-    conversation gives it those. One that takes neither cannot keep a conversation."""
+    conversation gives it those. One that takes neither cannot keep a conversation. A function
+    target in a process of its own (:class:`_ProcessTarget`) is never imported here: its process
+    reads the function's parameters."""
     try:
-        parameters = inspect.signature(function).parameters.values()
+        signature = function.signature() if isinstance(function, _ProcessTarget) else inspect.signature(function)
+        parameters = signature.parameters.values()
     except (TypeError, ValueError):
         raise ConfigError(f"could not read the parameters of the target function {name!r}") from None
     if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
@@ -1068,8 +1101,94 @@ def _conversation_target(
     return mlflow.trace(turn, name=getattr(target, "__name__", "target")), reasons
 
 
-def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
-    """The target's call, which never takes much longer than ``timeout_seconds``, whatever it is."""
+class _ProcessTarget:
+    """A function target as MLflow's evaluation harness calls it, in a process of its own
+    (:class:`martian.evals.isolation.TargetProcess`), started at once. Each call opens the case's
+    span here, named after the function, with the case's inputs, sends the inputs, the only part of
+    the case the target is given, and adds the spans the target recorded under it. A call that
+    outlasts ``timeout_seconds`` is the case's error (``TIMED_OUT``) and the run goes on. The
+    target is never imported in this process, which holds the run's expectations and scorers."""
+
+    def __init__(self, reference: TargetRef, base: Path, private: list[Path]) -> None:
+        from martian.evals.isolation import TargetProcess
+
+        self.__name__ = self.__qualname__ = reference.function
+        self.__mlflow_traced__ = True  # it opens the case's span itself
+        self._timeout = reference.timeout_seconds
+        self._process = TargetProcess(
+            _relative(reference.file or "", base), reference.function, private=private, trace=True
+        )
+
+    def ready(self) -> str | None:
+        """Wait for the target's process; None when the private paths are hidden from it, or why not."""
+        return self._process.ready()
+
+    def signature(self) -> inspect.Signature:
+        """The target function's keyword parameters, which its process read once it imported it."""
+        return self._process.signature()
+
+    def __call__(self, **inputs: Any) -> Any:
+        from martian.evals._mlflow import add_spans, start_span
+        from martian.evals.isolation import TargetRaised
+
+        with start_span(self.__name__) as span:
+            span.set_inputs(inputs)
+            try:
+                value, trace = self._process.call(inputs, self._timeout)
+            except TargetRaised as raised:
+                if raised.trace is not None:
+                    add_spans(raised.trace, span)
+                raise
+            if trace is not None:
+                add_spans(trace, span)
+            span.set_outputs(value)
+            return value
+
+    def close(self) -> None:
+        self._process.close()
+
+
+def _private_paths(suite: Suite, suite_file: Path, base: Path, output: Path, home: Path) -> list[Path]:
+    """What a function target must not reach, because it grades the target or holds what grading
+    found: the suite file, which holds the checks and their criteria; the data file, which holds the
+    expectations; each python check's file and the compiled copies beside it; the output folder,
+    with the results and MLflow's local store; MLflow's store when the suite names a local SQLite
+    or file one; and the local Evals UI's data folder. A target whose own file is among them cannot
+    be run, and is a ``ConfigError`` naming the setting that holds it."""
+    named: list[tuple[str, Path]] = [
+        ("the suite file", suite_file),
+        ("data", _relative(suite.data, base)),
+        ("the output folder", output),
+        ("the local Evals UI's data folder", home),
+    ]
+    for check in suite.checks:
+        if check.type in CODE_CHECKS:
+            scorer = _relative(check.file or "", base)
+            named += [(f"check {check.label}", scorer), (f"check {check.label}", scorer.parent / "__pycache__")]
+    uri = suite.mlflow.tracking_uri or ""
+    if uri.startswith("sqlite:///"):
+        named.append(("mlflow.tracking_uri", Path(uri.removeprefix("sqlite:///"))))
+    elif uri.startswith("file://"):
+        named.append(("mlflow.tracking_uri", Path(urlsplit(uri).path)))
+    elif uri and "://" not in uri:  # a folder, which MLflow reads as a file store
+        named.append(("mlflow.tracking_uri", Path(uri)))
+    assert suite.target is not None and suite.target.file is not None
+    target = os.path.realpath(_relative(suite.target.file, base))
+    for setting, path in named:
+        found = os.path.realpath(path)
+        if target == found or target.startswith(found.rstrip(os.sep) + os.sep):
+            raise ConfigError(
+                f"target.file is inside {setting}, which the target may not read; keep the target's file elsewhere"
+            )
+    return [path for _, path in named]
+
+
+def _load_target(
+    reference: TargetRef, base: Path, input_key: str = "message", private: list[Path] | None = None
+) -> Callable[..., Any]:
+    """The target's call, which never takes much longer than ``timeout_seconds``, whatever it is. A
+    function target is a :class:`_ProcessTarget`, in a process of its own that cannot reach
+    ``private``; the caller waits for it with ``ready()`` and ends it with ``close()``."""
     if reference.url is not None:
         call = _http_target(reference, input_key)
         limit = reference.timeout_seconds + CLIENT_SLACK_SECONDS
@@ -1077,9 +1196,7 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
         # A conversation's turn has the same time limit as a case's call.
         timed.converse = _function_target(call.converse, limit)  # type: ignore[attr-defined]
         return timed
-    file = _relative(reference.file or "", base)
-    function = _custom.load_function(file, reference.function, what="target", module="martian_evals_target")
-    return _function_target(function, reference.timeout_seconds)
+    return _ProcessTarget(reference, base, private or [])
 
 
 def _python_check(check: CheckSpec, base: Path, modules: dict[Path, Any]) -> Any:
@@ -1156,9 +1273,12 @@ def _build_scorers(suite: Suite, base: Path) -> list[Any]:
 
 def _build_check(check: CheckSpec) -> Any:
     """The deterministic check a suite file's entry names. ``CheckSpec.complete`` has made sure the
-    options each type needs are there."""
+    options each type needs are there. An installed check is refused: only a worker that installs
+    one can run it."""
     from martian.evals import checks as deterministic
 
+    if check.type in INSTALLED_CHECKS:
+        raise ConfigError(NOT_INSTALLED_HERE.format(label=check.label))
     name = check.label
     text: dict[str, Any] = {"expectation": check.expectation, "name": name, "case_sensitive": check.case_sensitive}
     match check.type:
@@ -1787,24 +1907,40 @@ def run_suite(
         raise ConfigError(
             "max_judge_tokens counts the tokens of LLM judge checks and simulated users, and the run has neither"
         )
-    target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
-    scorers = _build_scorers(suite, base)
+    folder = Path(output) if output is not None else base / suite.output
+    home_folder = data_folder(home)
+    target: Callable[..., Any] | None = None
+    if suite.target is not None:
+        private = _private_paths(suite, Path(path).resolve(), base, folder, home_folder) if suite.target.file else None
+        target = _load_target(suite.target, base, suite.input_key, private)
+    process = target if isinstance(target, _ProcessTarget) else None
+    say = progress or (lambda message: None)
+    talking = any(_conversation(case) for case in cases)
+    accepted: tuple[str, ...] = ()
+    try:
+        scorers = _build_scorers(suite, base)
+        hidden = process.ready() if process is not None else None
+        if talking:
+            assert suite.target is not None and target is not None  # the suite file loader refuses otherwise
+            accepted = _conversation_inputs(suite.target, target)
+        # A simulated conversation's goal verdict is a conversation-level result beside its checks',
+        # combined over attempts by the suite's rule. Only conversations have one.
+        simulator = _build_simulator(suite) if any("simulated_user" in case for case in cases) else None
+    except BaseException:
+        if process is not None:
+            process.close()
+        raise
+    isolation = None if process is None else {"files_hidden": hidden is None, "reason": hidden}
+    if hidden is not None:
+        say(f"{hidden}: the target can read the suite file, its data and its results")
     labels = [check.label for check in suite.checks]
     panelled = {check.label for check in suite.checks if check.panel is not None}
     scorer_of = dict(zip(labels, scorers, strict=True))
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
     turn_labels = [label for label in labels if scopes[label] == "turn"]
     whole_labels = [label for label in labels if scopes[label] == "conversation"]
-    talking = any(_conversation(case) for case in cases)
     turn_target: Callable[..., Any] | None = None
     turn_reasons: dict[str, str] = {}
-    accepted: tuple[str, ...] = ()
-    if talking:
-        assert suite.target is not None and target is not None  # the suite file loader refuses otherwise
-        accepted = _conversation_inputs(suite.target, target)
-    # A simulated conversation's goal verdict is a conversation-level result beside its checks',
-    # combined over attempts by the suite's rule. Only conversations have one.
-    simulator = _build_simulator(suite) if any("simulated_user" in case for case in cases) else None
     graded_labels = [*labels, GOAL] if simulator is not None else labels
     talk_rules = dict(rules)
     if simulator is not None:
@@ -1813,9 +1949,11 @@ def run_suite(
         talk_rules[GOAL] = suite.combine
     workers = concurrency or suite.concurrency
 
-    folder = Path(output) if output is not None else base / suite.output
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
-    with RunRecorder(data_folder(home), model, limits=limits) as recorder:
+    with (
+        contextlib.closing(process) if process else contextlib.nullcontext(),
+        RunRecorder(home_folder, model, limits=limits) as recorder,
+    ):
         results = Results(folder, resume=resume)
         suite_print = _suite_fingerprint(suite, base)
         prints = {case["id"]: _case_fingerprint(suite_print, case, suite) for case in cases}
@@ -1825,7 +1963,6 @@ def run_suite(
         done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
         invalidated = len(finished) - len(done)
         todo = [case for case in cases if case["id"] not in done]
-        say = progress or (lambda message: None)
         each = f" of {suite.repeats} attempts each" if repeated else ""
         message = f"{len(cases)} cases{each}, {len(cases) - len(todo)} already done"
         if talking:
@@ -2330,6 +2467,7 @@ def run_suite(
             **({} if simulator is None else {"simulator": budget.used["simulator"]}),
         }
         summary["output"] = str(folder)
+        summary["target_isolation"] = isolation
         if not_run and cancelled.is_set():
             summary["cancelled"] = True
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

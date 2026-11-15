@@ -2,7 +2,7 @@
 
 Python imports this module as ``sitecustomize`` when it starts, before any of the program's own
 code, in a process whose ``PYTHONPATH`` names this folder, and so in every Python process that
-process starts with its environment. With ``MARTIAN_TEST_OUTBOUND_DIR`` naming a folder, it:
+process starts with its environment. With ``EVALS_TEST_OUTBOUND_DIR`` naming a folder, it:
 
 - writes ``started-<pid>.json`` there, the process's command line, so a test can tell which
   processes ran with the guard;
@@ -30,7 +30,9 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-FOLDER_ENV = "MARTIAN_TEST_OUTBOUND_DIR"
+FOLDER_ENV = "EVALS_TEST_OUTBOUND_DIR"
+"""Not a ``MARTIAN_*`` name: a function target's process does not inherit those
+(``martian.evals.isolation``), and it runs under the guard too."""
 ATTEMPTS = "attempts.log"
 TELEMETRY_STARTED = "MLflow's telemetry client started"
 

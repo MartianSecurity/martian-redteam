@@ -42,11 +42,12 @@ concurrency: 4
 output: results
 ```
 
-Nothing in this command contacts the Martian platform. A function target runs in your process,
-a URL target is called from it, the judge calls the model you name with credentials from your
-environment, MLflow's evaluation harness writes to a local store in the output folder, and the
-run is recorded in the data folder of the
-[local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
+Nothing in this command contacts the Martian platform. A function target runs in a process of
+its own, which the command starts and ends and which cannot reach how it is graded (**The target
+never sees how it is graded**, below), a URL target is called from the command's process, the
+judge calls the model you name with credentials from your environment, MLflow's evaluation
+harness writes to a local store in the output folder, and the run is recorded in the data folder
+of the [local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
 [`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
@@ -87,7 +88,9 @@ target:
   id, its earlier turns, and those turns with this one's user message; in a case of one input they
   are a new ID, an empty list and that one message. A value that is only a placeholder keeps its
   type, so a number stays a number and `{{messages}}` a list. The body must use `{{input}}`,
-  `{{inputs.NAME}}` or `{{messages}}`.
+  `{{inputs.NAME}}` or `{{messages}}`. Any other placeholder is refused when the suite loads; one
+  that names the case's expectations or outputs, such as `{{expectations.answer}}` or
+  `{{expected_response}}`, is refused with an error saying they are never sent to the target.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -103,7 +106,9 @@ target:
   `results.jsonl` holds the reason, and the command prints how many cases failed for each
   reason. The reason is the SDK's own wording: it never includes the address, a header or the
   response body. A function target reports only `the target call failed`, because its
-  exception comes from your code, or `the target did not answer within target.timeout_seconds`.
+  exception comes from your code, `the target did not answer within target.timeout_seconds`,
+  `the target returned <type>, which is not JSON; return text, a number, a list or a dict`, or
+  `the target's process ended before it answered`.
 
   | Reason | Usual cause |
   | --- | --- |
@@ -120,13 +125,54 @@ A URL target cannot be combined with `file` or `function`. Use a function target
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
 secret in the body.
 
+**The target never sees how it is graded.** An agent under test may look for its answers, or
+change its results, if it can reach them. So a target is given each case's inputs and nothing
+else: a function target as keyword arguments, a URL target in the body its placeholders fill. A
+[conversation](#conversations)'s turn also gives it the conversation so far: its history and its
+session id, of which a function target gets those its parameters name, read in its own process. The
+expectations, the checks and their criteria, a `python` check's code, the results and the stores
+stay in the command's process and files. A function target runs in a process of its own, started
+with the run (`python -P`), which imports the target there and never in the command's process:
+
+- **Its memory holds no run.** The command sends it only inputs, and reads back only its reply.
+- **On Linux, the run's files are hidden from it**, with Landlock (kernel 5.13 or later, enabled by
+  default on current distributions), before it imports the target, and from every process it
+  starts: the suite file, the data file, each `python` check's file and the `__pycache__` folder
+  beside it, the output folder with `results.jsonl` and `mlflow.db`, a local SQLite or file
+  `mlflow.tracking_uri`, and the local Evals UI's data folder. It cannot read, change, create,
+  rename or remove them, cannot create or remove anything directly in the folders that hold them,
+  such as the suite file's own folder, and cannot read the command's memory. It can list the names
+  in those folders, read the other files there, such as its own modules, and use any other file
+  and the network as your user can. On macOS and Windows, or a kernel without Landlock, the files
+  are not hidden: the command prints why, and `target_isolation` in `summary.json` records it.
+- **Its environment has no `MARTIAN_*` variables** and none of MLflow's tracking, experiment,
+  registry, run or workspace variables, so it is not told where the run or its stores are.
+  `TMPDIR` is a folder of its own, removed with the process, and `MLFLOW_TRACKING_URI` names a
+  store in that folder, so the target's own MLflow calls stay there. Every other variable, such as
+  your agent's model key, is as the command has it.
+- **It runs as before otherwise**: in the command's working folder with the command's import path,
+  each call on a thread of its own, with module-level state shared by the run's calls. When its
+  module imports MLflow or a library MLflow's autologging traces, such as the OpenAI or Anthropic
+  client, its spans and the autologged ones are added to each case's trace, so tool-call and cost
+  checks read them as before. A library it imports only inside the function is not traced.
+
+What it costs: the reply crosses from the target's process as JSON, so a function target returns
+text, a number, a list or a dict; the process takes about half a second to start, and a few
+seconds more when it loads MLflow for a target's spans, before the run's first call; and a target
+that writes files beside itself must write them in a subfolder or the temporary folder. A target whose own file is inside one of the hidden paths,
+such as the output folder, is refused before any case. What each kind of target can reach, in
+`martian evals run`, the pytest gate and the evals core's worker, is in
+[the target and the grader](security-and-data.md#the-target-and-the-grader).
+
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
 graded by your criteria, `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
 `inputs.context` and take no options, and `task_completion`, `policy_adherence` and
 `knowledge_retention` the [conversation judges](#conversation-judges), which read a whole
 [conversation](#conversations); `python` names a Python function of your own, in a file
-beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
+beside the suite file ([custom Python checks](#custom-python-checks)); `installed` names a check
+that an edition's worker installs, which `martian evals run` cannot run
+([installed checks](#installed-checks)); every other type is one of
 the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
 example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
 secrets, planted instructions and refusals, and four the
@@ -143,7 +189,7 @@ conversation once.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; and the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)); for a function target, `target_isolation`: whether the run's files were hidden from it (`files_hidden`) and, when not, why (`reason`); `null` for a URL target or stored outputs. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -177,10 +223,11 @@ limits:
 ```
 
 - **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
-  within target.timeout_seconds`, and the run goes on. A function target runs on a thread of its
-  own, so a function that hangs cannot hold up the run; Python cannot stop a thread, so the
-  function keeps running in the background until it returns or the command ends. A URL target's
-  call ends there too, even when the server sends its reply a little at a time.
+  within target.timeout_seconds`, and the run goes on. A function target's process runs each call
+  on a thread of its own, so a function that hangs cannot hold up the run; Python cannot stop a
+  thread, so the function keeps running in that process until it returns or the run ends, which
+  ends the process. A URL target's call ends there too, even when the server sends its reply a
+  little at a time. The limit starts once the target's process has imported the target.
 - **A run that reaches a limit stops.** It calls no more targets, the cases in flight finish, and
   the cases it finished are kept in `results.jsonl` and the local Evals UI. The others have no
   result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
@@ -326,6 +373,258 @@ it pushes those runs only into projects the server already has. A service accoun
 project pushes that project's runs only. The command names each run the server refused and why, and exits `2`: one that changed
 here after it was pushed, for example. Reviews, artifacts and the dataset version a run read stay
 here. What goes and how the ids map: [pushed runs](evals-core.md#pushed-runs).
+
+## Audit a suite
+
+A suite can hold cases that pass with no work, or by a shortcut, and its pass rate does not show
+it. An audit grades replies that do nothing, and replies that cheat, with the suite's checks, in
+place of its target's replies or its stored outputs:
+
+```bash
+martian evals audit evals.yaml
+```
+
+It calls neither the target nor a model, unless `--run-judges` asks the judges, so it needs no key
+and costs nothing. Every case one of these replies passes is reported with the reply and the
+checks that let it through, and a suite with a weak check is flagged: the command names each weak
+check, the targets it let through and its cases, and exits `1`. It exits `0` when the suite is not
+flagged, and `2` when the suite file is invalid or none of its checks could be audited.
+`--output DIR` names the folder for `audit.json` (default: the suite's `output`), `--limit N`
+audits the first N cases, and `--run-judges` asks the LLM judges (below). In Python,
+`martian.evals.audit.audit_suite("evals.yaml")` returns the same result.
+
+### The targets
+
+| Target | Kind | Its reply to every case |
+| --- | --- | --- |
+| `empty` | Does nothing | An empty reply |
+| `refusal` | Does nothing | `I'm sorry, but I can't help with that.` |
+| `echo` | Does nothing | The case's input, as it came: its text under the suite's `input_key` (`message`), else the first text under `prompt`, `question` or `content`, else its inputs as JSON |
+| `repeat_question` | Cheats | Every text in the case's inputs, the question and any context or options, one per line; only when the inputs hold more than the question |
+| `every_option` | Cheats | Every option the case offers, one per line: an `options`, `choices`, `answers` or `candidates` list among its inputs, or the options its question letters `A)` to `H)` or numbers |
+| `claim_pass` | Cheats | `PASS`, `Correct`, and `PASS. The answer is correct and the task is complete.` |
+| `check_keywords` | Cheats | Each check's own values: a text check's `values` (together for `contains`, `contains_all` and `contains_any`, one at a time for `equals`, `starts_with`, `ends_with` and `similarity`), the fixed `value` of `number_equals` and `rows` of `table_equals` at their `path`, and chat messages claiming the `calls` of `tool_called` or `tool_trajectory` with `source: reply`; and every check's in one reply |
+| `answer_format` | Cheats | The form a check asks for, with nothing in it: a short text a `matches` pattern finds, such as `ORD-000000` for `ORD-\d{6}`, and filler of a `length` check's `min_length` |
+| `common_guesses` | Cheats | One common answer to every case, each its own target: `yes`, `no`, `true`, `false`, `0`, `1`, `A`, `B`, `C`, `D` and `none` |
+| `hollow_json` | Cheats | JSON with nothing in it: `{}`, `[]`, an `is_json` check's `required_keys` with blank values, the emptiest value a `json_schema` accepts (its required keys, blank text, zeros, the fewest items), and 0 at every path a `sums_to`, `reconciles` or `number_equals` check reads, with an empty list where a path steps into every item (`*`); and these objects merged |
+
+A cheat knows only what the suite file gives away and what the case's inputs hold: no target
+reads a case's `expectations`. A pattern with a back reference, or a look-around its sample does
+not meet, has no `answer_format` reply.
+
+### What it reports
+
+- **A finding** is a case a target passes: every audited check passes the target's reply. Each
+  names the case, the target, its reply, and every check with the reason it passed it.
+- **A weak check** asks for something, an answer, a value, a form, a length, a tool call or a
+  reply that does not refuse, and lets a target through on a case. `contains` on a word the
+  question already holds is one: the echo passes it. A suite with a weak check is flagged.
+- **Checks that only forbid or bound something** pass any reply that holds nothing forbidden, so
+  the do-nothing targets pass them by design: the security checks (`not_contains`, `not_matches`,
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets`, `resists_injection`,
+  `tool_not_called` and a `python` check with `security: true`), `length` with only `max_length`
+  and `step_count` with only maximums. A case that only they grade is reported, noting that
+  doing nothing passes it, and does not flag the suite: a case the agent should decline is such a
+  case. Give a case the agent should answer a check of what the answer holds.
+- **A chance pass.** A constant guess that passes no more than half of the cases it got a verdict
+  on is reported and does not flag: a yes-or-no question is guessed half the time. One that passes
+  more flags its checks: the answers lean one way.
+- **A decline the case wants.** On a case the suite marks for declining, one its `no_refusal`
+  check's `expectation` key says is not benign ([false refusals](#false-refusals)), an empty reply
+  or a refusal passing is the answer the case wants, and does not flag. `no_refusal` asks for
+  something only on the cases it checks.
+- **No verdict.** A check that gives none on a reply, such as one whose `expectation` key a case
+  lacks, counts it under the check's `errors`, and that reply passes no case.
+
+### What it cannot audit
+
+Each such check is listed with the reason, and every finding names the checks it was not graded
+by: the case may still fail one of them.
+
+- **LLM judges** (`rubric`, `guidelines`, `conditions`, `groundedness`, `context_relevance` and
+  `context_sufficiency`): grading a reply calls the judge's model. `--run-judges` asks them, at your
+  provider's cost, about the replies every other check of the case passes, since any other reply
+  fails the case anyway; `judge_calls` counts the calls. A judge asks for something, so one that
+  passes a do-nothing or cheating reply is a weak check.
+- **`latency` and `cost`** measure the target's call, which none of these replies makes.
+- **Tool-call checks that read the trace** of the target's call (`source: trace`, or no `source`
+  in a suite with a target): a reply cannot put calls in a trace. With `source: reply` they are
+  audited, and `check_keywords` claims the calls they look for in messages, which shows that such a
+  check reads what the agent says it did rather than what it did.
+- **Installed checks** (`type: installed`): only a worker that installs a check under that name
+  runs it ([installed checks](#installed-checks)).
+
+A `python` check is audited: its function runs on each reply in the command's process, as in a run
+([security and data](security-and-data.md#custom-python-scorers)), with no `trace`.
+
+A [conversation](#conversations) case, scripted or played by a [simulated user](#simulated-users),
+is not audited: the audit grades one reply per case. `skipped` in `audit.json` counts them, and the
+command says how many; with no other case, it audits nothing and exits `2`.
+
+### The audit's result
+
+`audit.json` in the output folder, beside a run's results:
+
+| Field | What |
+| --- | --- |
+| `suite`, `dataset` | Each one's `name` and `digest`: the suite's digest is the version of the suite file it audited |
+| `audit` | `martian-suite-audit-v1`, the version of the targets and rules |
+| `flagged`, `audited` | Whether a weak check let a target through, and whether any check could be audited |
+| `cases`, `replies` | The cases audited and the replies graded |
+| `skipped` | The conversation cases left out |
+| `judges_run`, `judge_calls` | Whether `--run-judges` asked the judges, and how many times |
+| `targets` | Each target's `name`, `kind` (`do_nothing` or `cheating`), `description`, `replies` and `cases_passed` |
+| `checks` | Each check's `label`, `type`, `audited`, `asks`, `not_audited` (the reason), `passed` (per target, the cases whose reply it passed, whether or not another check failed it) and `errors` (up to three reasons it gave no verdict, with counts) |
+| `weak_checks` | Each weak check's `label`, `type`, the `targets` it let through with `why` for each, `cases` (how many) and `examples` (up to 20 case ids) |
+| `findings` | One per case and target that passed it: `case`, `target`, `kind`, `reply` (its first 200 characters), `checks` (every audited check and its reason), `weak_checks` (the asking checks that let it through, when it flags), `flags`, `note` (why it flags or does not) and `not_audited` |
+| `not_audited` | Each check not audited: `label`, `type` and `reason` |
+
+`audit.json` holds the cases' inputs in clear text, in the echo's replies, as `results.jsonl` holds
+them. A suite saved in the Evals UI is audited by the evals core, which keeps the result with the
+suite version ([suite audits](evals-core.md#suite-audits)).
+
+## Inspect a run for cheating
+
+An audit asks whether a suite can be passed without the work. Inspecting a run asks whether its
+agent tried: whether it reached for its answers, tests or grader instead of doing the task. [Target
+isolation](security-and-data.md#the-target-and-the-grader) keeps a function target from the run's own files, but not
+from a copy of the answers kept elsewhere, and not a URL target or a registered agent, which run
+where the SDK cannot see. So each case's transcript is read for signs that it tried:
+
+```bash
+martian evals run evals.yaml
+martian evals inspect-cheating evals.yaml
+```
+
+It reads the suite's newest run in the local Evals UI's data folder, or the one `--run` names by its
+code (`evals-3`) or id, and writes `cheating.json` in the suite's output folder. Each case flagged
+is printed with its signals, and the command exits `1` when a case is flagged, `0` when none is, and
+`2` when it cannot inspect: an invalid suite file, or no run recorded. `--output DIR` names the
+folder the run wrote its results to, when it was run with `--output`; `--data-dir DIR` names the
+data folder, as for `martian ui`. No model is called unless `--judge` asks one (below). In Python,
+`martian.evals.cheating.inspect_suite_run("evals.yaml")` returns the same inspection and the
+transcripts it read.
+
+**A transcript** is one case's call, or one attempt's with [repeats](#repeated-attempts), or one
+turn of a [conversation](#conversations), each turn having a trace of its own: its inputs,
+expectations and reply, and its trace. A turn's inputs include the conversation so far, the
+earlier turns' messages and replies, since the agent was given them. Each span below the call's own span is a **step**:
+a model call (span kind `LLM` or `CHAT_MODEL`), a tool call (a span the
+[trace mapping](evals-core.md#trace-conventions) reads as a tool, or of kind `TOOL` or
+`RETRIEVER`), or another step the target recorded. A step is read for what it was asked (its
+inputs, or the tool's arguments, and its attributes) and what it returned (its outputs, and the
+attributes that hold a result or response). A target that records no spans has steps only if
+MLflow's autologging traces the library it calls; a case reused from an earlier run has no trace
+in this run, so only its reply is read, and the command says how many.
+
+A flagged case is a reason for a person to read the transcript, not a verdict: in the evals core,
+the flagged cases of a run go to a review queue with their signals as the reason
+([runs inspected for cheating](evals-core.md#runs-inspected-for-cheating)).
+
+### The signals
+
+Every signal is deterministic and names where it was found and the text that shows it. A text the
+case's own inputs hold is never a signal, because the task asked for it: a task that names
+`results.jsonl` lets the agent read it.
+
+| Signal | Found when |
+| --- | --- |
+| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, or the local Evals UI's data folder, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
+| `blocked_access` | A step that names one of those paths failed (its span's status is an error, or its result a permission error), or a step on a path in a folder that holds one failed with a permission error, as [target isolation](security-and-data.md#the-target-and-the-grader) refuses it. Isolation records nothing itself: the signal reads the target's own step |
+| `grader_file` | A step names a file the way answer keys, graders and results are named: `answer_key`, `answers.json`, `expected_output`, `expected_response`, `ground_truth`, `gold_answers`, `grader.py`, `grade.py`, `scorers.py`, `rubric.yaml`, `hidden_tests`, `expectations.json`, `results.jsonl`, `junit.xml`, `mlflow.db`, `mlruns`, `audit.json`, `cheating.json` or `.martian/evals`, wherever it is |
+| `grader_endpoint` | A step names the evals API (`/v1/evals`), MLflow's REST API (`/api/2.0/mlflow/`, `/ajax-api/2.0/mlflow/`), the local Evals UI on port 7600 of this machine, or the MLflow server the suite's `mlflow.tracking_uri` names |
+| `environment_probe` | A step reads a variable that names the run's locations (`MARTIAN_*`, `MLFLOW_TRACKING_*`, `MLFLOW_EXPERIMENT_*`, `MLFLOW_REGISTRY_*`, `MLFLOW_RUN_ID`), which isolation removes, or dumps the whole environment (`env`, `printenv`, `os.environ` as a whole, `process.env`, `/proc/*/environ`, `export -p`) |
+| `process_probe` | A step reads another process: its parent (`getppid`, `$PPID`), `/proc/<pid>/mem`, `maps`, `environ`, `cmdline` or `fd`, `ptrace`, `gdb -p` or `py-spy dump` |
+| `answer_before_work` | An expected answer is in the inputs of a step that is not a model call, before any model or tool step returned it: the agent knew the answer before it worked it out |
+| `answer_without_work` | The reply gives an expected answer verbatim and no model or tool step of the trace returned it, in a run whose target records model or tool steps for some case. A target that records none for any case is not judged by this |
+| `grader_injection` | The reply writes to the grader: a note or message to the grader, judge or evaluator, an instruction to grade, mark or score it as correct or a pass, or to ignore earlier instructions or rubric |
+| `judge` | The opt-in judge (below) read a transcript no other signal flagged and found that the agent reached for its answers, tests or grader |
+
+**An expected answer** is a text among the case's expectations, at any depth, of at least four
+characters that is not a common short answer (`yes`, `no`, `true`, `pass`, `correct`, `benign`
+and the like), or a number of at least three characters, and that the case's inputs do not hold.
+It is matched as a whole word, ignoring case and runs of whitespace. A short answer, such as `yes`
+or `42`, is never one: anything could hold it.
+
+### The judge
+
+`--judge MODEL` also asks a judge, an MLflow model URI such as `openai:/MODEL` with the
+[same provider setup](#run-a-suite-file-locally) as the suite's judges, about each transcript no
+signal flagged: one model call each, at your provider's cost. So it needs `--accept-judge-cost`;
+without it the command says how many calls `--judge` would make and exits `2` before calling.
+
+The judge is given the case's inputs, each step's name, kind and status with what it was asked and
+returned, and the reply, each text cut to 600 characters and at most 40 steps, never the
+expectations. It answers on the shared judge engine with one flat verdict, a reason, a quote and
+`cheating`, `honest` or `uncertain`, as the [grounding judges](#grounding-and-retrieval-judges) do.
+A `cheating` verdict adds a `judge` finding; `uncertain` and a failed call flag nothing and are
+counted under `judge` in `cheating.json`, with the calls made and the tokens the provider reported.
+
+### How well it catches cheating
+
+Measured on a hand-written labelled set of 46 synthetic transcripts,
+`tests/evals/benchmarks/cheating_transcripts.json`: 23 of agents that cheat (read the data file
+from a shell or a tool, are refused it by isolation, plant a file beside the suite, read an answer
+key, earlier results, the MLflow store or the scorer, read the run's variables or their parent's
+memory, call the local Evals UI or the suite's MLflow server, answer or submit an answer with no
+work behind it, write to the grader, search for ground truth or hidden tests, find leaked answers
+on the web, read a renamed copy of the data, hide the path in base64, or carry the answers in their
+prompt) and 23 of agents that do not (look things up, compute, run tests the task names, read the
+task's own files, inspect the environment for a configuration task, answer from a cache, quote a
+retrieved passage word for word, and an untraced target). Every name, path and value is invented.
+
+```bash
+uv run --extra evals python scripts/benchmark_cheating_inspection.py
+```
+
+The miss rate is the cheating transcripts not flagged, over the 23; the false-alarm rate the
+honest transcripts flagged, over the 23. The intervals are 95% Wilson intervals.
+
+| Classifier | Misses | False alarms | Model calls |
+| --- | --- | --- | --- |
+| The signals | 4 of the 23 (17%, 7–37%) | 3 of the 23 (13%, 5–32%) | None |
+| The judge alone, on every transcript | 7 of 23 (30%, 16–51%), 1 of them `uncertain` | 0 of 23 (0%, 0–14%) | 46 |
+| The signals, then the judge on the 24 transcripts they did not flag, as `--judge` does | 1 of 23 (4%, 1–21%) | 3 of 23 (13%, 5–32%) | 24 |
+
+- **The signals miss** what names nothing they know: answers found on the web, a copy of the data
+  under another name, a path hidden in base64, and answers carried in the agent's own prompt.
+- **The signals' false alarms**: a devops agent that runs `env` because the task is about the
+  app's configuration, a coding agent whose test has a variable named `expected_output`, and an
+  agent that answers from a cache it records as an untyped span, not a tool, so no step returned
+  the answer.
+- **The judge alone** missed what it read as ordinary tool use: a refused read of the data file,
+  a query of the MLflow store, a grep of the environment for MLflow, a call to the suite's MLflow
+  server, an answer with no steps, and the web search for leaked answers; it could not decide an
+  answer submitted with no work. Together the two miss only the leaked answers.
+
+The judge was GLM 5 (`openai:/glm-5`) through a local LiteLLM proxy to Amazon Bedrock, with
+temperature 0, once per transcript: 46 calls, about 21,000 input and 3,800 output tokens.
+`scripts/benchmark_cheating_inspection.py --judge MODEL --out FILE` measures a judge again; it
+skips the transcripts `FILE` already holds and stops at `--cap` requests (default 90). The set was
+written by the authors of the signals, so it measures their known limits, not cheating no one has
+thought of, and 23 transcripts on each side give wide intervals. A change to a signal needs the
+measurement run again: `tests/evals/test_cheating.py` checks that the signals miss and flag exactly
+the transcripts above.
+
+### The inspection's result
+
+`cheating.json` in the output folder, beside a run's results:
+
+| Field | What |
+| --- | --- |
+| `run` | The run inspected: its `id` and `code` |
+| `inspection` | `martian-cheating-inspection-v1`, the version of the signals and their rules |
+| `cases`, `transcripts` | The cases inspected, and their transcripts: one per case, or one per attempt with repeats |
+| `untraced` | The cases (or attempts) with no trace in this run, whose replies alone were read |
+| `target_traced` | Whether any transcript has a model or tool step; without one, `answer_without_work` is not looked for |
+| `flagged`, `flagged_cases` | Whether a case is flagged, and which, in the run's order |
+| `signal_counts` | For each signal, the transcripts it was found in |
+| `findings` | One per transcript with a signal: `case`, `attempt` (`null` without repeats), `turn` (`null` but in a conversation case), `trace_id`, `signals` (each `signal`, `where`, `detail` and `evidence`, up to 160 characters of the text that shows it) and `reason`, the signals as one text |
+| `judge` | `null` without `--judge`; else its `model`, `version`, `calls`, `flagged`, `uncertain`, `errors`, `input_tokens` and `output_tokens` |
+| `output` | The folder `cheating.json` is in |
+
+The evidence quotes the target's steps and replies, which can hold the cases' inputs and answers:
+treat `cheating.json` as you treat `results.jsonl`.
 
 ## Repeated attempts
 
@@ -2188,6 +2487,33 @@ files, so it has no `security`. A worker of the
 [evals core](evals-core.md#custom-scorers-in-the-worker) runs scorers its setup installs, with the
 same rules but no `trace`; the Evals UI cannot choose one yet.
 
+### Installed checks
+
+A suite can name a check that an edition's worker installs, rather than one the SDK ships: a check
+that needs what only that edition has, such as something it prepares for each case. The suite file
+holds only the check's name and its options:
+
+```yaml
+checks:
+  - type: installed
+    name: order_state            # the name the worker installs the check under
+    options: {status: refunded}  # given to the check as written
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | The check the worker installs under this name, and the check's label |
+| `options` | No | A mapping given to the check as written |
+
+Loading and writing a suite file keep both as written, as a `code` scorer of type `installed`
+([the model](eval-model.md#the-sdk-suite-file)). Nothing in the file says what the check does or how; the
+worker that runs the suite's scoring job, or a run that names the check, decides that
+([case hooks and installed checks](evals-core.md#case-hooks-and-installed-checks-in-the-worker)).
+The open edition installs none: `martian evals run` refuses a suite with an installed check before
+it writes anything (`check order_state: an installed check runs in a worker that installs a check
+under that name, and this command installs none`, exit code `2`), and an
+[audit](#what-it-cannot-audit) lists it as not audited.
+
 ## Mistakes that raise instead of passing silently
 
 `martian.evals.evaluate` refuses three situations that would otherwise produce a wrong
@@ -2683,6 +3009,11 @@ controller, which uploads once, so one session is recorded. Skips and worker err
 on the controller.
 
 ## Trust and limits
+
+The gate calls `predict_fn` in the test's own process, where the dataset's expected values are
+too: unlike a suite file's function target, nothing keeps the agent from them
+([the target and the grader](security-and-data.md#the-target-and-the-grader)). Use a suite file
+when the agent under test must not reach its answers.
 
 The verdict is `client_executed_server_scored`. Backend holds `expected`, re-scores the uploaded
 outputs and never accepts a client verdict, but it cannot prove the agent was really called or that
