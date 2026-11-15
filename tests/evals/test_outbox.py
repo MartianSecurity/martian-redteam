@@ -153,6 +153,31 @@ def test_a_write_the_store_refuses_for_good_ends_failed(flaky):
     assert asyncio.run(served.records.due_deliveries(ADMIN, now=LATER)) == []
 
 
+def test_a_score_kept_on_its_trace_is_the_one_saved_beside_a_persons_of_the_same_name(flaky):
+    # MartianSecurity/martian-notes#345: a judge's score and a person's answer of the same name.
+    served, store = flaky
+    run = served.completed_run()
+    item = next(i for i in run["items"] if i["evals_trace_id"])
+    person = Score(
+        run_id=run["id"],
+        case_id=item["dataset_item_id"],
+        trace_id=item["evals_trace_id"],
+        scorer="politeness",
+        source="human",
+        value=False,
+        created_at=datetime.now(UTC),
+    )
+    judged = person.model_copy(
+        update={"source": "llm_judge", "source_id": "fake-judge@1", "value": True, "created_at": datetime.now(UTC)}
+    )
+    asyncio.run(save_score(store, served.records, ADMIN, DEFAULT_PROJECT, person))
+    kept, delivery = asyncio.run(save_score(store, served.records, ADMIN, DEFAULT_PROJECT, judged))
+    assert delivery is not None and delivery.state == "delivered"
+    assert (kept.source, kept.value) == ("llm_judge", True) and kept.store.assessment_id is not None
+    on_trace = asyncio.run(store.list_scores(ADMIN, DEFAULT_PROJECT, item["evals_trace_id"]))
+    assert kept.store.assessment_id in {s.store.assessment_id for s in on_trace if s.source == "llm_judge"}
+
+
 def test_retries_wait_longer_each_time_up_to_fifteen_minutes():
     assert [pause(n).total_seconds() for n in (1, 2, 3, 4)] == [5, 10, 20, 40]
     assert pause(20) == timedelta(minutes=15)

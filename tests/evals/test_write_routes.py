@@ -1,10 +1,12 @@
 """The core's write routes launch, score and review runs, and edit datasets, suites, judges, queues,
 projects and views, through the store, the record store and the worker alone. The first test runs
-on MemoryStore and on the in-process MLflow binding; the rest on MemoryStore."""
+on MemoryStore and on the in-process MLflow binding; the rest on MemoryStore, with the record store
+on SQLite, and one also on Postgres when MARTIAN_TEST_POSTGRES_URL is set."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -14,6 +16,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
 from martian.evals.manifests import CHANGED, PAUSED, manifest_for
 from martian.evals.model import Case
@@ -475,6 +478,79 @@ def test_a_review_queue_hands_results_to_a_reviewer_and_tracks_their_answers(mem
     )
     memory.call("POST", "/v1/evals/review-queues", 403, json={**body, "request_id": request_id()})
     memory.call("POST", f"/v1/evals/{run['id']}/items/{chosen[1]}/reviews", 403, json={**answer, "value": 4})
+
+
+POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run on Postgres"),
+        ),
+    ]
+)
+def both_databases(request, tmp_path):
+    """The record store on SQLite, and on Postgres in a schema of its own."""
+    if request.param == "sqlite":
+        store = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+        yield store
+        store.close()
+        return
+    schema = f"martian_test_{uuid.uuid4().hex[:10]}"
+    store = SqlRecordStore(str(POSTGRES_URL), schema=schema)
+    try:
+        yield store
+    finally:
+        store.close()
+        engine = create_engine(str(POSTGRES_URL))
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
+
+
+def test_a_review_answer_named_like_a_check_leaves_the_checks_score_in_place(both_databases: SqlRecordStore):
+    # MartianSecurity/martian-notes#345: a queue question named like the run's exact-match check.
+    client, served = serve(MemoryStore(), both_databases, entitlements=lambda _p: ENTERPRISE, principal=ADMIN)
+    with client:
+        run = served.completed_run()
+        item = items_by_case(run)["faq-1"]
+        question = {"name": "exact_match", "kind": "boolean", "instruction": "Is it the expected answer?"}
+        body = {"request_id": request_id(), "run_id": run["id"], "name": "Second look", "item_ids": [item["id"]]}
+        queue = served.call("POST", "/v1/evals/review-queues", 201, json={**body, "question": question})
+        (pending,) = served.call("GET", "/v1/evals/reviews", 200, params={"queue_id": queue["id"]})["items"]
+        review = {
+            "request_id": request_id(),
+            "state": "complete",
+            "queue_id": queue["id"],
+            "previous_id": pending["id"],
+        }
+        path = f"/v1/evals/{run['id']}/items/{item['id']}/reviews"
+        answer = served.call("POST", path, 201, json={**review, "value": False, "comment": "Not quite."})
+
+        # The check's verdict stays in the record store, beside the person's answer.
+        kept = asyncio.run(both_databases.list_scores(ADMIN, DEFAULT_PROJECT, run["id"], case_id="faq-1"))
+        assert [(s.scorer, s.source, s.value) for s in kept] == [
+            ("exact_match", "code", True),
+            ("exact_match", "human", False),
+        ]
+        # The run's results show both, each its own assessment, and the review names the person's.
+        for params in ({"item_id": item["id"]}, {}):
+            work = served.call("GET", f"/v1/evals/{run['id']}/workbench", 200, params=params)
+            named = {
+                a["source"]: a for a in work["assessments"] if a["item_id"] == item["id"] and a["name"] == "exact_match"
+            }
+            assert {source: a["value"] for source, a in named.items()} == {"CODE": True, "HUMAN": False}
+            assert answer["assessment_id"] == named["HUMAN"]["id"] != named["CODE"]["id"]
+        # So does the case's trace in the store.
+        trace = served.call("GET", f"/v1/evals/{run['id']}/items/{item['id']}/trace", 200)
+        assert sorted(
+            (a["source"]["source_type"], a["feedback"]["value"])
+            for a in trace["annotations"]
+            if a["assessment_name"] == "exact_match"
+        ) == [("CODE", True), ("HUMAN", False)]
 
 
 def test_the_question_library_keeps_one_definition_per_name(memory: Served):
