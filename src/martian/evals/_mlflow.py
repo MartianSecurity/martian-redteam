@@ -27,6 +27,7 @@ from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
 from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
+from mlflow.store.tracking.dbmodels.models import SqlRun
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
@@ -62,8 +63,10 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.tracking.fluent", "_active_experiment_id"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
+    ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
+    ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
     ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
     ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
@@ -74,6 +77,10 @@ TYPE_ONLY = frozenset({("mlflow.genai.evaluation.utils", "EvaluationDatasetTypes
 
 MLFLOW_PYTEST_PLUGIN = "mlflow.pytest.plugin"
 """MLflow's pytest plugin module, which the eval gate loads by name."""
+
+RUN_ARTIFACT_URI_LENGTH: int = SqlRun.artifact_uri.type.length
+"""The length of MLflow's ``runs.artifact_uri`` column, which keeps a run's artifact location:
+200 characters. Postgres enforces it; SQLite does not."""
 
 
 def active_experiment_id() -> str | None:
@@ -97,11 +104,22 @@ class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
     MLflow turns workspaces on with the process-wide ``MLFLOW_ENABLE_WORKSPACES`` variable, which
     would also change every other MLflow use in the process, such as a local suite run. Every
     query of this store still requires a workspace in the request context.
+
+    An experiment it creates keeps its artifacts in the artifact root itself, not in MLflow's
+    ``workspaces/<workspace>/<experiment id>`` under it, so a run's artifact location is the root
+    and ``/<run id>/artifacts``. For an organisation, whose workspace name is 44 characters,
+    MLflow's layout would add 58 or more to a location that must fit in
+    :data:`RUN_ARTIFACT_URI_LENGTH`. Run ids are unique in the database, so no two runs share a
+    folder. An experiment an earlier release created keeps the location MLflow stored for it.
     """
 
     @staticmethod
     def _workspaces_enabled() -> bool:
         return True
+
+    def _get_artifact_location(self, experiment_id: object, workspace: str | None = None) -> str:
+        root: str = self.artifact_root_uri  # the root as MLflow resolved it
+        return root
 
 
 def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, page_token: str | None) -> Any:
@@ -122,6 +140,7 @@ __all__ = [
     "MLFLOW_GATEWAY_CALLER_HEADER",
     "MLFLOW_PYTEST_PLUGIN",
     "PRIVATE_DEPENDENCIES",
+    "RUN_ARTIFACT_URI_LENGTH",
     "TYPE_ONLY",
     "WORKSPACE_HEADER_NAME",
     "AssessmentMetadataKey",

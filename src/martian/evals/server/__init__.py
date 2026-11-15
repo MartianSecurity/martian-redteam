@@ -13,6 +13,10 @@ things the core never imports:
 - ``worker``: a :class:`~martian.evals.worker.Worker` that runs what the write routes start, such
   as :class:`~martian.evals.worker.InProcessWorker`. Without one, a route that starts a run or a
   scoring job answers ``503``.
+- ``judge_settings``: :class:`~martian.evals.judge_settings.JudgeSettings`, where each
+  organisation's default judge model is kept, such as the local edition's
+  :class:`~martian.evals.judge_settings.FileJudgeSettings`. Without it there is no default, and
+  setting one answers ``503``.
 
 Routes read them through :func:`current_principal`, :func:`current_entitlements`,
 :func:`current_store`, :func:`current_records` and ``current_worker``. A route that serves a paid
@@ -30,6 +34,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
 from martian.evals.server import datasets, drafts, launch, projects, reviews, runs, scoring, suites, traces, views
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
@@ -38,6 +43,7 @@ from martian.evals.server.dependencies import (
     EntitlementsProvider,
     PrincipalProvider,
     current_entitlements,
+    current_judge_settings,
     current_principal,
     current_records,
     current_store,
@@ -101,6 +107,7 @@ def create_app(
     principal: PrincipalProvider,
     entitlements: EntitlementsProvider = lambda _principal: COMMUNITY,
     worker: Worker | None = None,
+    judge_settings: JudgeSettings | None = None,
     **fastapi_options: Any,
 ) -> FastAPI:
     """The evals core as an application. ``principal`` is a FastAPI dependency, so it can read the
@@ -112,11 +119,14 @@ def create_app(
         raise TypeError("records must implement martian.evals.records.RecordStore")
     if worker is not None and not isinstance(worker, Worker):
         raise TypeError("worker must implement martian.evals.worker.Worker")
+    if judge_settings is not None and not isinstance(judge_settings, JudgeSettings):
+        raise TypeError("judge_settings must implement martian.evals.judge_settings.JudgeSettings")
     app = FastAPI(title="Martian Evals", **fastapi_options)
     app.state.martian_evals_store = store
     app.state.martian_evals_records = records
     app.state.martian_evals_entitlements = entitlements
     app.state.martian_evals_worker = worker
+    app.state.martian_evals_judge_settings = judge_settings
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
     for part in (
@@ -161,6 +171,7 @@ __all__ = [
     "capabilities_for",
     "create_app",
     "current_entitlements",
+    "current_judge_settings",
     "current_principal",
     "current_records",
     "current_store",

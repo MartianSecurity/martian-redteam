@@ -43,6 +43,7 @@ SUITE_FILE_FIELDS = {
     "judge.inference_params": "ScorerVersion.parameters of each llm_judge scorer",
     "judge.max_retries": "RunSettings.judge_max_retries",
     "judge.rate_limit_wait_seconds": "RunSettings.judge_rate_limit_wait_seconds",
+    "judge.headers": "RunSettings.judge_headers, values as written",
     "checks": "Suite.scorers, in order",
     "checks.type": "ScorerVersion.type; kind llm_judge for rubric, guidelines and conditions, check otherwise",
     "checks.name": "ScorerVersion.name (the check's label)",
@@ -217,7 +218,7 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
     target, judge, mlflow = file_suite.target, file_suite.judge, file_suite.mlflow
     if target is not None and "timeout_seconds" in target.model_fields_set:
         values["target_timeout_seconds"] = target.timeout_seconds
-    for name in ("max_retries", "rate_limit_wait_seconds"):
+    for name in ("max_retries", "rate_limit_wait_seconds", "headers"):
         if judge is not None and name in judge.model_fields_set:
             values[f"judge_{name}"] = getattr(judge, name)
     for name in ("tracking_uri", "experiment"):
@@ -333,21 +334,24 @@ def _target_file(target: Target | None, settings: RunSettings) -> dict[str, Any]
 
 def _judge_file(scorers: list[ScorerVersion], settings: RunSettings) -> dict[str, Any] | None:
     judges = [scorer for scorer in scorers if scorer.kind == "llm_judge"]
-    retries = {
+    transport = {
         "max_retries": settings.judge_max_retries,
         "rate_limit_wait_seconds": settings.judge_rate_limit_wait_seconds,
+        "headers": settings.judge_headers,
     }
-    retries = {name: value for name, value in retries.items() if value is not None}
+    transport = {name: value for name, value in transport.items() if value is not None}
     if not judges:
-        if retries:
-            raise ConfigError("settings.judge_max_retries and judge_rate_limit_wait_seconds need an llm_judge scorer")
+        if transport:
+            raise ConfigError(
+                "settings.judge_max_retries, judge_rate_limit_wait_seconds and judge_headers need an llm_judge scorer"
+            )
         return None
     if len({(scorer.model, digest(scorer.parameters)) for scorer in judges}) > 1:
         raise ConfigError("a suite file has one judge: every llm_judge scorer needs the same model and parameters")
     written: dict[str, Any] = {"model": judges[0].model}
     if judges[0].parameters:
         written["inference_params"] = dict(judges[0].parameters)
-    return written | retries
+    return written | transport
 
 
 def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:

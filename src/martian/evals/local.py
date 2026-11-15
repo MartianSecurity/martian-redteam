@@ -11,6 +11,8 @@ unless the caller names another:
 - ``targets.json`` and ``target-keys.json``: the targets the user defines in the UI, in place of
   the hosted console's Agents registry, and their keys, in a file only the user can read
   (:mod:`martian.evals.local_targets`).
+- ``settings.json``: the local settings, :class:`~martian.evals.judge_settings.FileJudgeSettings`:
+  the default judge model, which an organisation sets on the server. Written when it is first set.
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
@@ -48,6 +50,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
 from martian.evals import local_runs, local_targets
+from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
@@ -82,6 +85,9 @@ ACCESS_TOKEN = "local"
 """What the session call issues. Nothing checks it: the local edition has one user and no sign-in."""
 
 SESSION_ID = "local"
+
+SETTINGS_FILE = "settings.json"
+"""The data folder's local settings: the default judge model."""
 
 
 class LocalEditionError(Exception):
@@ -186,7 +192,13 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS)
     store, records = open_stores(home)
     targets = local_targets.LocalTargets(home)
     worker = local_runs.LocalWorker(home, records, targets)
-    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=worker)
+    app = create_app(
+        store=store,
+        records=records,
+        principal=lambda: SINGLE_USER,
+        worker=worker,
+        judge_settings=FileJudgeSettings(home / SETTINGS_FILE),
+    )
     app.state.martian_local_targets = targets
     app.include_router(session_router)
     app.include_router(local_targets.router)
