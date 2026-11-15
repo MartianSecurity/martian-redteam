@@ -362,7 +362,7 @@ What builds on it:
 | MorningHQ/martian-notes#140 | One process per evaluation run, executing each `Work` |
 | MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
 | MorningHQ/martian-notes#133 | The SDK judge as the worker's judge |
-| MorningHQ/martian-notes#116 | Run and run again from the local UI |
+| MorningHQ/martian-notes#116 | Run and run again from the local UI, with the [local targets](#local-targets) |
 
 ## What exists
 
@@ -371,8 +371,9 @@ What builds on it:
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
-- `martian ui`, the local edition: the core and the Evals UI from one process, with no login. See
-  [the local edition](#the-local-edition-martian-ui).
+- `martian ui`, the local edition: the core and the Evals UI from one process, with no login, and
+  the targets its user defines in place of an Agents registry. See
+  [the local edition](#the-local-edition-martian-ui) and [local targets](#local-targets).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
@@ -564,7 +565,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   [above](#bootstrap-response).
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start
-  (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
+  (`open_stores` in `martian.evals.local`). The targets the user defines are in `targets.json`
+  and their keys in `target-keys.json` ([local targets](#local-targets)). `martian evals run` writes its runs into the same
   folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
   page reads again, since the UI gets no live event from another process.
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
@@ -602,6 +604,61 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
 when no `--ui-dir` is given, and the container settings below with their warning.
+
+### Local targets
+
+The hosted console starts a run against an agent from its Agents registry. The local edition has no
+registry: its user defines targets in the UI's **Run eval** dialog instead, each with the user's own
+key for it if it needs one (`martian.evals.local_targets`). A target is one of:
+
+| Kind | Fields | What it calls |
+| --- | --- | --- |
+| `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{uuid}}`, and `response_path` finds the reply |
+| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content` |
+
+Every target has a `name`, unique among the targets. The key is sent in `key_header` (always
+`Authorization` for a model): as `Bearer <key>` in `Authorization`, as it is in any other header.
+An address cannot hold credentials or `${...}`, so the key never goes in a URL.
+
+The routes are the local edition's, outside the frozen `/v1/evals` contract:
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/local/targets` | `{"items": [...]}`: every target, oldest first, with `id`, `created_at` and `has_key` |
+| `POST /v1/local/targets` | Define a target, with an optional `key`; `201` with the target. A name in use is `409` |
+| `DELETE /v1/local/targets/{target_id}` | Remove a target and its key; `204`, or `404` |
+
+```json
+{"name": "Support agent", "kind": "http", "url": "https://agent.example/api/chat",
+ "body": {"message": "{{input}}"}, "response_path": "reply", "key": "..."}
+```
+
+Where the keys are and are not:
+
+- `targets.json` in the data folder holds the definitions and never a key. `target-keys.json` beside
+  it holds each target's key by the target's id. Every write creates a new file with mode `0600` and
+  renames it over the old one, so only the user who runs `martian ui` can read it; on Windows the
+  file has the permissions of the data folder. The OS keychain is not used: a headless Linux machine
+  or the container image often has none.
+- No answer carries a key: a target has `has_key`, and a request the routes cannot read is answered
+  `422` with its problems as one line of text, without the values FastAPI's own answer would repeat.
+  Nothing logs a key, and `martian.db` and `mlflow.db` never hold one.
+- In the shared model a local target is an `http` `Target` whose key header names
+  `${MARTIAN_TARGET_KEY}` (`LocalTargets.model_target`), so a run that records it keeps the
+  reference, never the key. `LocalTargets.key(id)` is the one way to read a key, for the worker that
+  calls the target.
+
+A launch from the local UI names the chosen target by its id in the launch request's `agent_id`,
+the frozen contract's one target field. Running it is MorningHQ/martian-notes#116: until then the
+local edition has no worker, so a launch is answered `503`. That issue's worker resolves the id
+with `LocalTargets.get` in `Worker.check_target`, records `LocalTargets.model_target` as the run's
+target and fills in the key from `LocalTargets.key` when it calls it. Editing a target is not
+built; remove it and define it again.
+
+`tests/evals/test_local_targets.py` defines, lists and removes targets of both kinds, refuses
+targets that would not work, maps each kind onto the shared model, checks the key file's mode, and
+runs every target route on the server `martian ui` runs to check that the key is in no answer, no
+log record at any level, nothing printed and no file in the data folder but the key file.
 
 ### The local edition in a container
 
@@ -705,6 +762,7 @@ cannot be opened.
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
-`test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py` and the store and record tests run the core without the backend. The `Evals core`
+`test_local_targets.py`, `test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`,
+`test_write_contract.py`, `test_worker.py` and the store and record tests run the core without the
+backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

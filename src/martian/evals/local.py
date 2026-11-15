@@ -8,12 +8,16 @@ unless the caller names another:
 - ``artifacts/``: that store's run artifacts.
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
   runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
+- ``targets.json`` and ``target-keys.json``: the targets the user defines in the UI, in place of
+  the hosted console's Agents registry, and their keys, in a file only the user can read
+  (:mod:`martian.evals.local_targets`).
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it.
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
-``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
+The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
+``POST /v1/auth/refresh``, which answers with the fixed principal, and the local targets under
+``/v1/local/targets``. Every other path is a file of
 the built Evals UI, by default the one the wheel ships in ``martian/ui``. The server listens on
 127.0.0.1 and refuses a request whose ``Host`` header names another host, so a web page cannot
 reach it through a name that resolves to this machine. The container image (``Dockerfile``) sets
@@ -36,6 +40,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from martian.evals import local_targets
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app, current_principal
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
@@ -152,13 +157,15 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
 
 def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
-    user, the session call, and the built UI in ``ui``, a folder holding ``index.html``. It answers
-    a request only when its ``Host`` header names one of ``hosts``."""
+    user, the session call, the local targets in ``home``, and the built UI in ``ui``, a folder
+    holding ``index.html``. It answers a request only when its ``Host`` header names one of ``hosts``."""
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
     app = create_app(store=store, records=records, principal=lambda: SINGLE_USER)
+    app.state.martian_local_targets = local_targets.LocalTargets(home)
     app.include_router(session_router)
+    app.include_router(local_targets.router)
     app.mount("/", StaticFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
     return app
