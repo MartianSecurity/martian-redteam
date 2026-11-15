@@ -161,7 +161,7 @@ need no new references.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 5,
+  "version": 6,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -173,10 +173,11 @@ need no new references.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `5`): a new
+`null` for the single local user. `version` is the format's version (`VERSION`, here `6`): a new
 file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
 Version 2 added the six monitoring files, version 3 added `manifests.jsonl`, version 4 added
-`calibrations.jsonl` and `rechecks.jsonl`, and version 5 added `prompts.jsonl` and
+`calibrations.jsonl` and `rechecks.jsonl`, version 5 put a score's source in its key, so
+`scores.jsonl` can hold two lines for one scorer, and version 6 added `prompts.jsonl` and
 `prompt_versions.jsonl`. An export of an earlier version is refused: import it with the SDK that
 wrote it, and export again with this one.
 

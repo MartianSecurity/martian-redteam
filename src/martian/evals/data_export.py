@@ -98,11 +98,12 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 5
+VERSION = 6
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
 alerts. Version 3 added the dataset publications (``manifests.jsonl``), version 4 the judge
-calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), and version 5 the
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), version 5 a
+score's source in its key, so ``scores.jsonl`` can hold two lines for one scorer, and version 6 the
 organisation's prompts and their versions (``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
 
 MANIFEST = "manifest.json"
