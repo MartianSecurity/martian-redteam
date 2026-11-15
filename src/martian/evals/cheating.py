@@ -240,9 +240,10 @@ def protected_for_suite(suite_file: str | Path, *, output: str | Path | None = N
 
 @dataclass(frozen=True)
 class Transcript:
-    """One case's call, or one attempt of a case its suite repeats: its inputs, expectations and
-    reply, and the spans of its trace, or None when it has no trace in the run (a case whose verdict
-    was reused from an earlier run)."""
+    """One case's call, or one attempt of a case its suite repeats, or one turn of a conversation
+    case (``turn``), whose inputs hold the conversation so far: its inputs, expectations and reply,
+    and the spans of its trace, or None when it has no trace in the run (a case whose verdict was
+    reused from an earlier run)."""
 
     case_id: str
     inputs: Mapping[str, Any]
@@ -251,6 +252,7 @@ class Transcript:
     spans: tuple[Span, ...] | None
     attempt: int | None = None
     trace_id: str | None = None
+    turn: int | None = None
 
 
 @dataclass(frozen=True)
@@ -524,7 +526,8 @@ def inspect_transcripts(transcripts: Sequence[Transcript], protected: Protected)
     """The inspection of a run's transcripts: each transcript's signals, and which cases they flag.
 
     ``findings`` holds one entry per transcript with a signal: its ``case``, ``attempt`` (None
-    without repeats), ``trace_id``, ``signals`` and ``reason``. ``flagged_cases`` lists the cases
+    without repeats), ``turn`` (None but in a conversation case), ``trace_id``, ``signals`` and
+    ``reason``. ``flagged_cases`` lists the cases
     with one, in the order of the transcripts."""
     target_traced = any(has_work(transcript) for transcript in transcripts)
     counts = dict.fromkeys(SIGNALS, 0)
@@ -551,13 +554,16 @@ def inspect_transcripts(transcripts: Sequence[Transcript], protected: Protected)
 
 
 def _label(transcript: Transcript) -> str:
-    return transcript.case_id if transcript.attempt is None else f"{transcript.case_id} attempt {transcript.attempt}"
+    attempt = "" if transcript.attempt is None else f" attempt {transcript.attempt}"
+    turn = "" if transcript.turn is None else f" turn {transcript.turn}"
+    return transcript.case_id + attempt + turn
 
 
 def _finding(transcript: Transcript, signals: Sequence[Signal]) -> dict[str, Any]:
     return {
         "case": transcript.case_id,
         "attempt": transcript.attempt,
+        "turn": transcript.turn,
         "trace_id": transcript.trace_id,
         "signals": [signal.as_dict() for signal in signals],
         "reason": reason(signals),
@@ -692,8 +698,8 @@ def judge_transcript(
 
 def unflagged(report: Mapping[str, Any], transcripts: Sequence[Transcript]) -> list[Transcript]:
     """The transcripts no signal flagged: the ones the judge reads."""
-    found = {(finding["case"], finding["attempt"]) for finding in report["findings"]}
-    return [transcript for transcript in transcripts if (transcript.case_id, transcript.attempt) not in found]
+    found = {(finding["case"], finding["attempt"], finding.get("turn")) for finding in report["findings"]}
+    return [t for t in transcripts if (t.case_id, t.attempt, t.turn) not in found]
 
 
 def judge_transcripts(

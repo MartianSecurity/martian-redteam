@@ -7,7 +7,8 @@ run telemetry and review queues from the store. A run is found by its id in the 
 then in each of the store's projects. The run routes match only a UUID in place of ``{run_id}``,
 so a route an edition adds under ``/v1/evals`` is not taken for a run. ``GET /{run_id}/attempts``
 is the core's own addition, which the server's contract does not have: the attempts of each case
-of a run whose suite repeats its cases, the run's reliability and its flaky cases.
+of a run whose suite repeats its cases, the run's reliability and its flaky cases. So is
+``GET /{run_id}/turns``: each conversation case's verdict per check, its session and its turns.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -22,7 +23,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from martian.evals.model import CaseResult, Project, ReviewQueue, Run, ScoringJob, Trace
+from martian.evals.model import CaseResult, Project, ReviewQueue, Run, Score, ScoringJob, Trace
 from martian.evals.records import RecordStore
 from martian.evals.server.capabilities import highest_role
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep
@@ -33,6 +34,7 @@ from martian.evals.server.projection import (
     Assessment,
     ReviewRow,
     attempts_out,
+    conversation_out,
     item_out,
     job_config,
     mlflow_assessment,
@@ -289,6 +291,21 @@ async def attempts(
         "reliability": reliability_out(results) if repeats is not None else None,
         "items": [item for item in items if item["flaky"]] if flaky else items,
     }
+
+
+@router.get("/{run_id:uuid}/turns", response_model=None)
+async def turns(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> dict[str, Any]:
+    # The core's own route, not the contract's: each conversation case of the run, with its
+    # verdict on each check, the session its turns' traces share and every turn it sent with that
+    # turn's verdicts (MorningHQ/martian-notes#191). A run without conversation cases answers no
+    # items. The run routes' responses are typed in the frozen contract, whose `EvalItemOut` has no
+    # place for turns.
+    run = await find_run(store, records, principal, run_id)
+    results = [result for result in await run_results(records, principal, run) if result.turns]
+    scores: dict[str | None, list[Score]] = {}
+    for score in await records.list_scores(principal, run.project_id, run.id) if results else []:
+        scores.setdefault(score.case_id, []).append(score)
+    return {"run_id": run.id, "items": [conversation_out(result, scores.get(result.case_id, [])) for result in results]}
 
 
 @router.get("/{run_id:uuid}/workbench", response_model=None)

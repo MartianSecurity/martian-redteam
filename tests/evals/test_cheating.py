@@ -150,6 +150,43 @@ def test_a_planted_cheating_run_is_flagged_and_an_honest_run_is_not(tmp_path):
     assert "Not flagged" in output
 
 
+CONVERSING_AGENT = (
+    CHEATING_AGENT.replace("def answer(message):", "def plain(message):")
+    + """
+
+def answer(message, history):
+    # The second turn reads the answer key; the first only greets.
+    if not history:
+        return "Hello, I can help with an order code."
+    return plain(message)
+"""
+)
+
+
+def test_each_turn_of_a_conversation_is_inspected_and_given_only_the_history_it_takes(tmp_path):
+    # The target runs in its own process, which reads answer's parameters: it takes history and no
+    # session_id, and is given only history on each turn.
+    folder = tmp_path / "talk"
+    write_suite(folder, cheat_on=("kettle",))
+    (folder / "agent.py").write_text(CONVERSING_AGENT.format(cheat_on=("kettle",)), encoding="utf-8")
+    talk = {
+        "id": "kettle",
+        "turns": [
+            {"input": "Hi there.", "expectations": {"answer": "help"}},
+            {"input": "What is the order code for the blue kettle?", "expectations": {"answer": "KET-4821"}},
+        ],
+    }
+    (folder / "cases.jsonl").write_text(json.dumps(talk) + "\n", encoding="utf-8")
+    summary = run_suite(folder / "evals.yaml")
+    assert (summary["passed"], summary["errors"]) == (1, 0)
+    code, report, output = inspect(folder / "evals.yaml")
+    assert code == 1, output
+    assert report["transcripts"] == 2 and report["flagged_cases"] == ["kettle"]
+    (finding,) = report["findings"]
+    assert finding["turn"] == 2 and "answer_key" in finding["reason"]
+    assert "kettle turn 2:" in output
+
+
 def test_the_command_names_the_run_and_refuses_what_it_cannot_inspect(tmp_path, evals_home):
     suite = write_suite(tmp_path / "suite", cheat_on=("kettle",))
     refused = CliRunner().invoke(app, ["evals", "inspect-cheating", str(suite)])
