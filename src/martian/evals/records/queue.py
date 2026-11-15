@@ -2,17 +2,21 @@
 has finished.
 
 ``SqlWorkQueue`` keeps one row per piece of work in ``martian_work_queue`` (migration ``0003``),
-on SQLite or Postgres, beside the records it names. A worker takes the oldest row that is
-``queued``, or ``claimed`` by a lease that ran out, with :meth:`SqlWorkQueue.claim`. A claim holds
-the row for ``lease_seconds``; the worker renews it while the work runs (:meth:`renew`) and
-removes the row when the work has ended (:meth:`done`). A claim is a new random token each time,
-and every change to a claimed row names it, so a worker whose lease ran out and was taken by
-another changes nothing any more.
+on SQLite or Postgres, beside the records it names. A worker takes a row that is ``queued``, or
+``claimed`` by a lease that ran out, with :meth:`SqlWorkQueue.claim`: the oldest row of the
+organisation with the fewest rows running, so one organisation's many queued pieces never hold
+back another's (MorningHQ/martian-notes#145). A row is running while a claim whose lease has not
+run out holds it. A claim holds the row for ``lease_seconds``; the worker renews it while the work
+runs (:meth:`renew`) and removes the row when the work has ended (:meth:`done`). A claim is a new
+random token each time, and every change to a claimed row names it, so a worker whose lease ran
+out and was taken by another changes nothing any more.
 
 Two workers never hold one row at once: the claim moves a row only while it is still claimable,
 in one statement, and on Postgres it also locks the row it read and skips rows another claim has
-locked (``FOR UPDATE SKIP LOCKED``). A row whose worker died is claimable again once its lease
-runs out, and each claim counts an attempt. Lease times are this process's clock in UTC, so the
+locked (``FOR UPDATE SKIP LOCKED``). Two claims at the same moment each count the rows running
+before either moved one, so both may go to the same organisation; the next claim counts both. A
+row whose worker died is claimable again once its lease runs out, and each claim counts an
+attempt. Lease times are this process's clock in UTC, so the
 hosts of the workers that share one queue need clocks within a small part of the lease of each
 other.
 
@@ -158,14 +162,28 @@ class SqlWorkQueue:
         return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
 
     async def claim(self, lease_seconds: float) -> Claim | None:
-        """Take the oldest piece of work that is queued, or whose claim's lease ran out, and hold it
-        for ``lease_seconds``; None when there is none, or when another worker took it first."""
+        """Take a piece of work that is queued, or whose claim's lease ran out, and hold it for
+        ``lease_seconds``: the oldest of the organisation with the fewest pieces running, so that
+        organisations share the workers. None when there is none, or when another worker took it
+        first."""
 
         def claim(connection: Connection) -> Claim | None:
             now = _now()
             claimable = or_(
                 work_queue.c.state == QUEUED,
                 and_(work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at < now),
+            )
+            other = work_queue.alias("running")
+            running = (
+                select(func.count())
+                .select_from(other)
+                .where(
+                    other.c.space == work_queue.c.space,
+                    other.c.state == CLAIMED,
+                    other.c.lease_expires_at >= now,
+                )
+                .correlate(work_queue)
+                .scalar_subquery()
             )
             query = (
                 select(
@@ -177,11 +195,11 @@ class SqlWorkQueue:
                     work_queue.c.work,
                 )
                 .where(claimable)
-                .order_by(work_queue.c.created_at, work_queue.c.id)
+                .order_by(running, work_queue.c.created_at, work_queue.c.id)
                 .limit(1)
             )
             if self._postgres:
-                query = query.with_for_update(skip_locked=True)
+                query = query.with_for_update(skip_locked=True, of=work_queue)
             row = connection.execute(query).first()
             if row is None:
                 return None

@@ -1,8 +1,10 @@
 """The local edition: the evals core and the Evals UI, served by one process on this machine.
 
 ``martian ui`` starts it. It has one fixed user (:data:`~martian.evals.server.SINGLE_USER`), no
-sign-in and the Community edition. It keeps everything in one data folder, ``~/.martian/evals``
-unless the caller names another:
+sign-in and the Community edition, with as many runs, and as many scoring jobs, in progress at
+once as its ``concurrency`` (:func:`local_entitlements`; 1 unless ``martian ui --concurrency`` or
+:data:`CONCURRENCY_ENV` names more), which is also how many its worker runs at once. It keeps
+everything in one data folder, ``~/.martian/evals`` unless the caller names another:
 
 - ``mlflow.db``: the core's store, :class:`~martian.evals.store.mlflow_local.MlflowStore` on SQLite;
 - ``artifacts/``: that store's run artifacts.
@@ -59,7 +61,15 @@ from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
+from martian.evals.server import (
+    COMMUNITY,
+    DEFAULT_PROJECT,
+    SINGLE_USER,
+    Entitlements,
+    Principal,
+    create_app,
+    current_principal,
+)
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
 from martian.evals.store import StoreError
 from martian.evals.store.mlflow_local import MlflowStore
@@ -94,6 +104,18 @@ SESSION_ID = "local"
 
 SETTINGS_FILE = "settings.json"
 """The data folder's local settings: the default judge model."""
+
+CONCURRENCY_ENV = "MARTIAN_EVALS_CONCURRENCY"
+"""``martian ui --concurrency``: how many runs, and how many scoring jobs, may be in progress at
+once, and how many pieces of work the worker runs at once. Unset, 1, the Community edition's."""
+
+
+def local_entitlements(concurrency: int = 1) -> Entitlements:
+    """The local edition's entitlements: Community, with ``concurrency`` as its limits on runs and
+    on scoring jobs in progress at once. The user's own machine runs the work, so the user sets
+    them."""
+    limits = {"concurrent_runs": concurrency, "concurrent_scoring_jobs": concurrency}
+    return Entitlements(edition=COMMUNITY.edition, features=COMMUNITY.features, limits=limits)
 
 
 class LocalEditionError(Exception):
@@ -188,24 +210,27 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
     return LocalToken(access_token=ACCESS_TOKEN, session=session)
 
 
-def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS) -> FastAPI:
+def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS, *, concurrency: int = 1) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
     user, with a worker that serves the folder's queue beside the app and runs each run in a
     process of its own, the session call, the local targets in ``home`` and the local runs, and
     the built UI in ``ui``, a folder holding ``index.html``. It answers a request only when its
-    ``Host`` header names one of ``hosts``. Queued or running runs of ``home`` that are not in its
-    queue at all are finished as interrupted first."""
+    ``Host`` header names one of ``hosts``. ``concurrency`` runs, and as many scoring jobs, may be
+    in progress at once, and its worker runs that many pieces at once. Queued or running runs of
+    ``home`` that are not in its queue at all are finished as interrupted first."""
+    entitlements = local_entitlements(concurrency)
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
     asyncio.run(local_runs.finish_interrupted(home, store, records))
     targets = local_targets.LocalTargets(home)
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
-    worker = local_runs.LocalWorker(home, records, targets, judge_settings)
+    worker = local_runs.LocalWorker(home, records, targets, judge_settings, concurrency=concurrency)
     app = create_app(
         store=store,
         records=records,
         principal=lambda: SINGLE_USER,
+        entitlements=lambda _principal: entitlements,
         worker=worker,
         judge_settings=judge_settings,
     )

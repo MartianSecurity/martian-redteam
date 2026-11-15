@@ -4,9 +4,16 @@ worker process that takes it from there (MorningHQ/martian-notes#139).
 :class:`QueueWorker` is a :class:`~martian.evals.worker.Worker` like the others, so the routes do
 not change. ``submit`` puts the work in the queue (:class:`~martian.evals.records.queue.SqlWorkQueue`,
 in the record store's database: SQLite locally, Postgres on a server) and returns. A worker then
-takes it with :meth:`QueueWorker.serve`, one piece at a time, and runs it with its *runner*, a
-:class:`~martian.evals.worker.Runner`: an :class:`~martian.evals.worker.InProcessWorker`, or a
-:class:`~martian.evals.worker.ProcessWorker`, which gives each piece a process of its own.
+takes it with :meth:`QueueWorker.serve`, up to ``concurrency`` pieces at once, and runs each with
+its *runner*, a :class:`~martian.evals.worker.Runner`: an :class:`~martian.evals.worker.InProcessWorker`,
+or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a process of its own.
+
+- **Several at once, shared fairly.** A worker with free places takes the next piece at once, and
+  each claim takes the oldest piece of the organisation with the fewest pieces running, across
+  every worker of the queue (MorningHQ/martian-notes#145). So one organisation that queues many
+  runs holds back another's only until a place frees, never until its own queue is empty. How
+  many of an organisation's runs and scoring jobs may be in progress at all is the edition's
+  limit, checked when the work is admitted (:mod:`martian.evals.server.admission`).
 
 - **Where the worker runs.** With ``in_process=True`` the worker serves beside the app, in the API
   process, which starts it when it starts serving and stops it when it stops
@@ -65,6 +72,8 @@ log = logging.getLogger("martian.evals.worker")
 LEASE_SECONDS = 30.0
 POLL_SECONDS = 1.0
 MAX_ATTEMPTS = 3
+CONCURRENCY = 1
+"""How many pieces of work a worker runs at once unless it is given another number."""
 STOPPED_TOO_OFTEN = "The worker stopped before this work finished, too many times; it is not taken again"
 
 
@@ -79,8 +88,9 @@ class QueueWorker:
     ``records`` is the record store the work's records are in, which the worker reads and moves on
     when it takes over work whose worker stopped. ``in_process`` serves the queue in this process
     while the app does. ``lease_seconds`` is how long a claim holds work without being renewed,
-    ``poll_seconds`` how often an idle worker looks for work another process queued, and
-    ``max_attempts`` how many workers may take one piece of work before it is failed."""
+    ``poll_seconds`` how often an idle worker looks for work another process queued,
+    ``max_attempts`` how many workers may take one piece of work before it is failed, and
+    ``concurrency`` how many pieces this worker runs at once, of any organisations."""
 
     def __init__(
         self,
@@ -92,9 +102,10 @@ class QueueWorker:
         lease_seconds: float = LEASE_SECONDS,
         poll_seconds: float = POLL_SECONDS,
         max_attempts: int = MAX_ATTEMPTS,
+        concurrency: int = CONCURRENCY,
     ) -> None:
-        if lease_seconds <= 0 or poll_seconds <= 0 or max_attempts < 1:
-            raise ValueError("lease_seconds and poll_seconds are positive and max_attempts at least 1")
+        if lease_seconds <= 0 or poll_seconds <= 0 or max_attempts < 1 or concurrency < 1:
+            raise ValueError("lease_seconds and poll_seconds are positive, and max_attempts and concurrency at least 1")
         self._queue = queue
         self._runner = runner
         self._records = records
@@ -102,12 +113,18 @@ class QueueWorker:
         self._lease = lease_seconds
         self._poll = poll_seconds
         self._max_attempts = max_attempts
+        self._concurrency = concurrency
         self._wake = asyncio.Event()
         self._serving: asyncio.Task[None] | None = None
 
     @property
     def judges(self) -> bool:
         return self._runner.judges
+
+    @property
+    def concurrency(self) -> int:
+        """How many pieces of work this worker runs at once."""
+        return self._concurrency
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         return await self._runner.check_target(principal, target)
@@ -144,19 +161,34 @@ class QueueWorker:
             await asyncio.gather(serving, return_exceptions=True)
 
     async def serve(self) -> None:
-        """Take work from the queue and run it, one piece at a time, until cancelled. Cancelled, it
-        stops the work in hand and gives it back to the queue."""
-        while True:
-            claim = await self._next()
-            if claim is None:
-                self._wake.clear()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._wake.wait(), self._poll)
-                continue
-            try:
-                await self._handle(claim)
-            except Exception:  # noqa: BLE001 - the database is away; the claim runs out and is taken again
-                log.exception("The worker could not end its turn on %s", claim.id)
+        """Take work from the queue and run it, up to ``concurrency`` pieces at once, until
+        cancelled. Cancelled, it stops the work in hand and gives each piece back to the queue."""
+        turns: set[asyncio.Task[None]] = set()
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                if len(turns) >= self._concurrency:
+                    await asyncio.wait(turns, return_when=asyncio.FIRST_COMPLETED)
+                    continue
+                claim = await self._next()
+                if claim is None:
+                    self._wake.clear()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._wake.wait(), self._poll)
+                    continue
+                turn = loop.create_task(self._turn(claim), name=f"martian-queue-work-{claim.id}")
+                turns.add(turn)
+                turn.add_done_callback(turns.discard)
+        finally:
+            for turn in turns:
+                turn.cancel()
+            await asyncio.gather(*turns, return_exceptions=True)
+
+    async def _turn(self, claim: Claim) -> None:
+        try:
+            await self._handle(claim)
+        except Exception:  # noqa: BLE001 - the database is away; the claim runs out and is taken again
+            log.exception("The worker could not end its turn on %s", claim.id)
 
     async def drain(self) -> None:
         """Wait until the queue holds no work, of any organisation: for the local edition and for
@@ -232,4 +264,12 @@ class QueueWorker:
                 return False
 
 
-__all__ = ["LEASE_SECONDS", "MAX_ATTEMPTS", "POLL_SECONDS", "STOPPED_TOO_OFTEN", "QueueWorker", "entry_id"]
+__all__ = [
+    "CONCURRENCY",
+    "LEASE_SECONDS",
+    "MAX_ATTEMPTS",
+    "POLL_SECONDS",
+    "STOPPED_TOO_OFTEN",
+    "QueueWorker",
+    "entry_id",
+]
