@@ -70,6 +70,11 @@ MEMBER = organisation_principal("member-1", "org-1", frozenset({"member"}))
 VIEWER = organisation_principal("viewer-1", "org-1", frozenset({"viewer"}))
 T0 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 """A Sunday."""
+REFUSED = Target(
+    kind="http", url="http://127.0.0.1:9/chat", body={"message": "{{input}}"}, response_path="choices.².text"
+)
+"""An HTTP target the worker has but refuses to pin: its ``response_path`` indexes a list with digits other than 0-9."""
+REFUSAL = f"targets['{AGENT}'].response_path indexes lists with the digits 0-9 only; step 2 uses other digits"
 
 
 class Answers:
@@ -300,6 +305,26 @@ async def test_a_run_that_cannot_be_admitted_is_skipped_with_the_reason(
     assert (await records.list_runs(SINGLE_USER, DEFAULT_PROJECT)).items == []
 
 
+async def test_a_turn_whose_target_the_worker_refuses_skips_its_slot_with_the_refusal(
+    records: SqlRecordStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MemoryStore()
+    services = ScheduleServices(store, lambda _p: ONE_RUN)
+    work = await make_schedule(store, records, since=T0 - timedelta(seconds=30))
+    refusing = InProcessWorker(store, records, targets={AGENT: REFUSED}, judge=judge)
+    at(monkeypatch, T0 + timedelta(seconds=1))
+    await execute_schedule(services, records, refusing, work)
+    [skipped] = await history(records)
+    assert (skipped.state, skipped.run_id, skipped.reason) == ("skipped", None, REFUSAL)
+    assert (await records.list_runs(SINGLE_USER, DEFAULT_PROJECT)).items == []
+    # The slot is skipped, not the schedule: the next one looks at the target again.
+    fixed = InProcessWorker(store, records, targets={AGENT: Answers()}, judge=judge)
+    at(monkeypatch, T0 + timedelta(minutes=1, seconds=1))
+    await execute_schedule(services, records, fixed, work)
+    await fixed.drain()
+    assert [(entry.state, entry.reason) for entry in await history(records)] == [("skipped", REFUSAL), ("admitted", "")]
+
+
 async def test_a_turn_that_stopped_after_admitting_its_run_never_admits_a_second(
     records: SqlRecordStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,7 +503,7 @@ class Core:
         self,
         url: str,
         in_schema: str,
-        target: Answers,
+        target: Answers | Target,
         *,
         entitlements: Callable[[Principal], Entitlements] = lambda _p: ONE_RUN,
         serving: bool = True,
@@ -565,7 +590,7 @@ class Core:
 def core_on(database: tuple[str, str]) -> Iterator[Callable[..., Core]]:
     made: list[Core] = []
 
-    def make(target: Answers, **options: Any) -> Core:
+    def make(target: Answers | Target, **options: Any) -> Core:
         made.append(Core(*database, target, **options))
         return made[-1]
 
@@ -651,6 +676,16 @@ def test_a_schedule_refuses_what_it_cannot_run(core_on: Callable[..., Core]) -> 
                 503,
                 "This installation's worker does not run schedules",
             )
+
+
+def test_a_schedule_of_a_target_the_worker_refuses_is_422_naming_the_target_and_is_not_kept(
+    core_on: Callable[..., Core],
+) -> None:
+    core = core_on(REFUSED)
+    with core.client:
+        refused = core.create(422, suite_version_id=core.suite())
+        assert refused["detail"] == REFUSAL
+        assert core.call("GET", "/v1/evals/schedules", 200) == {"items": []}
 
 
 def test_a_threshold_names_a_schedule_s_gate_results_through_its_routes(core_on: Callable[..., Core]) -> None:

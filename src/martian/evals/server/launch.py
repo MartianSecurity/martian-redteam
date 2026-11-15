@@ -19,6 +19,11 @@ read, and submits it to the worker. The worker calls the target later; the reque
 which the run grades each case with (:mod:`martian.evals.worker.hooks`); the contract's launch
 names none.
 
+Every route and turn that pins a target asks :func:`pin_target`: the launch, the local edition's
+launch and run again, a schedule's creation and each turn of a schedule. A target the worker has
+but refuses is ``422``, naming it (a schedule's turn records that as the slot's skip reason), and
+never a ``500``.
+
 A run, or a scoring job, that stopped at one of its limits (``stopped``) is resumed by
 :func:`resume_run` or :func:`resume_scoring`: queued again, optionally under new limits, so that
 the worker goes on after the cases it finished (``execute_run``'s checkpoints). The contract's
@@ -124,6 +129,18 @@ def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
     )
 
 
+async def pin_target(worker: Worker, principal: Principal, target: Target) -> dict[str, Any]:
+    """What pins a run of ``target``, as ``worker`` has it now (``Worker.check_target``), before
+    anything is recorded. An id the worker does not know is ``404``. A target it has but refuses
+    (:class:`~martian.evals.worker.targets.TargetRefused`) is ``422`` with the refusal, which names
+    the target and never repeats a value of it; a schedule's turn records it as the slot's skip
+    reason."""
+    try:
+        return await worker.check_target(principal, target)
+    except TargetRefused as error:
+        raise HTTPException(422, str(error)) from None
+
+
 async def admit_run(
     store: EvalStore,
     records: RecordStore,
@@ -223,10 +240,7 @@ async def request_run(
         return run_out(existing, name_of(await agent_names(names, principal, [existing]), existing))
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    try:
-        pin = await worker.check_target(principal, target)
-    except TargetRefused as error:
-        raise HTTPException(422, str(error)) from None
+    pin = await pin_target(worker, principal, target)
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
@@ -411,6 +425,7 @@ __all__ = [
     "ACTIVE",
     "admit_run",
     "limits_provenance",
+    "pin_target",
     "resume_run",
     "resume_scoring",
     "router",
