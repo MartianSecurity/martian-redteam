@@ -774,6 +774,84 @@ def import_martian(
     typer.echo(f"Open them in the local Evals UI: {ui}")
 
 
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+@evals_app.command("push")
+def push_evals(
+    runs: Annotated[
+        list[str] | None,
+        typer.Argument(
+            show_default=False, help="Runs to push, by id or code (EV-1001, evals-3). Default: every finished run."
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Push finished runs from the local Evals UI's data folder to a Martian server: each run with
+    its case results, scores, scoring jobs and traces. Signs in with an organisation API key:
+    MARTIAN_API_URL and MARTIAN_API_TOKEN.
+
+    martian evals push              run it again to continue an interrupted push; nothing is pushed twice
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Pushing the local Evals UI's runs needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.config import ConfigError
+    from martian.evals.client import Backend, BackendError
+    from martian.evals.data_export import ExportError
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.push import PushError, push_local
+    from martian.evals.store import StoreError
+
+    home = data_folder(data_dir)
+    try:
+        config = MartianConfig.from_env()
+    except ConfigError as error:
+        typer.echo(f"Push failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    server = Backend(
+        config.api_url,
+        config.token.get_secret_value(),
+        timeout=config.request_timeout_seconds,
+        trust_env=config.trust_env,
+    )
+    try:
+        summary = push_local(home, server, runs or ())
+    except (PushError, ExportError, LocalEditionError) as error:
+        typer.echo(f"Push failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except (BackendError, StoreError) as error:
+        reason = error.detail if isinstance(error, StoreError) else str(error)
+        typer.echo(f"Push stopped: {reason}. Run the same command again to continue it.", err=True)
+        raise typer.Exit(code=2) from None
+    except KeyboardInterrupt:
+        typer.echo("Push interrupted. Run the same command again to continue it.", err=True)
+        raise typer.Exit(code=130) from None
+    finally:
+        server.close()
+    organisation = summary.organisation_name or summary.organisation_id or "the single local user"
+    new = sum(run.created for run in summary.pushed)
+    typer.echo(
+        f"Pushed {_plural(len(summary.pushed), 'run')} to {config.api_url} ({organisation}): {new} new, "
+        f"{len(summary.pushed) - new} there already."
+    )
+    for run in summary.pushed:
+        typer.echo(f"  {run.code}: {run.sent} of {_plural(run.cases, 'case')} sent, {_plural(run.traces, 'trace')}")
+    if summary.unfinished:
+        typer.echo(
+            f"Not pushed, still queued or running: {', '.join(summary.unfinished)}. Push again once they finish.",
+            err=True,
+        )
+    for refused in summary.refused:
+        status = f"HTTP {refused.status}" if refused.status else "not sent"
+        typer.echo(f"Refused: {refused.code} ({status}): {refused.reason}.", err=True)
+    if summary.refused:
+        raise typer.Exit(code=2)
+
+
 @evals_app.command("personas")
 def build_personas(
     transcripts: Annotated[

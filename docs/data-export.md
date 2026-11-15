@@ -177,6 +177,12 @@ would import such a pair as one score; it refuses version 5 instead. An export o
 version, version 4 too, is refused: import it with the SDK that wrote it, and export again with
 this one.
 
+`martian evals push` sends runs to a server as lines of this format, under its name and version,
+written by the same code (`run_records` and `export_line`): a run's lines of `runs.jsonl`,
+`case_results.jsonl`, `scores.jsonl` and `scoring_jobs.jsonl`, its project's `projects.jsonl` line
+and its traces' `traces.jsonl` lines. So a change to one of those lines is a new version for the
+push too, and a server reads pushes of its own version only ([pushed runs](evals-core.md#pushed-runs)).
+
 ## Exporting and resuming
 
 An export runs in steps, in a fixed order: for each project, its definitions (the project, its
