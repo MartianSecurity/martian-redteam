@@ -1,5 +1,5 @@
 """HTTP targets called from the worker, and registered agents through martian-agents
-(MorningHQ/martian-notes#137).
+(MartianSecurity/martian-notes#137).
 
 A run of an HTTP target needs no martian-agents service: the worker POSTs each case to the
 target itself, once, with no retry, and fills in the target's credential from its own
@@ -10,7 +10,7 @@ fake martian-agents; nothing calls a model.
 
 A run calls only the target it was admitted with: before it calls its target, on its first start
 and on every resume, a worker that now has another target under the run's id fails the run
-without calling it (MorningHQ/martian-notes#344).
+without calling it (MartianSecurity/martian-notes#344).
 """
 
 from __future__ import annotations
@@ -356,7 +356,7 @@ def test_a_run_completes_in_its_own_process_on_an_install_with_no_martian_agents
 def test_a_run_reads_and_checks_only_the_target_it_names(tmp_path, endpoint, queued):
     """Another target the worker has, under some other id, that it would refuse is never read: not
     when the launch checks its own target, before the run is recorded, and not when the run's
-    process starts (MorningHQ/martian-notes#337)."""
+    process starts (MartianSecurity/martian-notes#337)."""
     refused = Target(kind="function", file="agent.py", function="target")
 
     def worker_for(records: SqlRecordStore) -> Any:

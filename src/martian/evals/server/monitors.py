@@ -1,5 +1,5 @@
 """Monitors: judges and deterministic checks attached to a project's live traces
-(MorningHQ/martian-notes#196). The core's own routes; the server's frozen contract has none.
+(MartianSecurity/martian-notes#196). The core's own routes; the server's frozen contract has none.
 
 A monitor names its scorers as a scoring request does (the console's scorers by name, registered
 judges by name and version), a sampling rate from 0 to 1, a filter of the trace search's, and a

@@ -1,7 +1,7 @@
 """The work itself: running a queued run against its target, and scoring a finished run.
 
 A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_workbench.py``
-(MorningHQ/MartianBackend) onto the store and the record store:
+(MartianSecurity/MartianBackend) onto the store and the record store:
 
 - A run reads the active cases of its published dataset (the default project's dataset version it
   was admitted with) up to its case limit, calls the target once per case with no retry, giving it

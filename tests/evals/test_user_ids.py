@@ -1,5 +1,5 @@
 """Every route names a person by the id the bootstrap gives, and the routes that take a user accept
-it (MorningHQ/martian-notes#335). The local user is ``local``, which the contract's user fields, UUIDs,
+it (MartianSecurity/martian-notes#335). The local user is ``local``, which the contract's user fields, UUIDs,
 refuse; the API names it by a UUID derived from it. A user whose id is a UUID is named by it."""
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """Monitors: judges and checks that score a sample of a project's live traces
-(MorningHQ/martian-notes#196).
+(MartianSecurity/martian-notes#196).
 
 A monitor is created through its routes, which need the ``monitoring`` entitlement, and scored by
 the durable queue's worker in passes over the project's new traces, read by time only. New traces
