@@ -5,9 +5,11 @@ The store's ``TraceQuery`` filters on project, session, user, text, state and ti
 time. The contract's search also filters on minimum latency and a boolean assessment, and orders
 by latency; the core applies those to what the store returns:
 
-- With a latency or assessment filter, a page is filled from the store's pages in turn, at most
-  1,000 traces read per request; the cursor names the store's page and how many of its matches
-  were already returned.
+- A page is filled from at most 10 of the store's pages in turn, of 100 traces with a latency or
+  assessment filter, so at most 1,000 of the store's traces per request; the cursor names the
+  store's page and how many of its matches were already returned. A store that filters in its own
+  process may return a page short or empty with a cursor, so a page of this search may hold fewer
+  traces than its limit, or none, and still have a ``next_cursor``.
 - Ordering by latency reads every trace the store's filters match, up to 1,000, and refuses more.
 - A session search is the store's ``search_sessions``. With a latency or assessment filter or a
   latency order, the core reads the first 1,000 traces the store's filters match, filters and

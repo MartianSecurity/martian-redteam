@@ -314,14 +314,21 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   preview, the detail's `info.trace_metadata` says so: `martian.request_preview_truncated` or
   `martian.response_preview_truncated` is `"true"`. The frozen contract has no field for it, so it
   is trace metadata.
-- **Trace search and sessions.** The store filters on project, session, user, text, state and
-  time and orders by time. The core applies the contract's minimum latency and assessment filters
-  to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
-  most 1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another,
-  it is `409`. A session search is the store's `search_sessions`; with a latency or assessment
-  filter or a latency order, the core reads the first 1,000 traces the store's filters match,
-  applies the rest and groups them the same way. A session search with a cursor is `422`, as on
-  the server.
+- **Trace search and sessions.** The store filters on project, session, user, text, state and time
+  and orders by time. The core fills a page from at most 10 of the store's pages, applying the
+  contract's minimum latency and assessment filters to them (pages of 100, so at most 1,000 of the
+  store's traces per request), and orders by latency over at most 1,000 matching traces (more is
+  `422`). A store that filters in its own process, as `MlflowStore` filters free text, reads up to
+  1,000 traces for each of its pages, so a page of the trace search may hold fewer traces than its
+  `limit`, or none, and still have a `next_cursor`: only a `next_cursor` of `null` ends a search,
+  so a client reads on to fill a page (the Evals UI's bound is in `docs/evals-workbench.md` in
+  MartianSecurity/MartianFrontend). A cursor belongs to its query: reused with another, it is
+  `409`. A session search is the store's `search_sessions`; with a latency or assessment filter or
+  a latency order, the core reads the first 1,000 traces the store's filters match, applies the
+  rest and groups them the same way. A session search that stopped before it read `limit` matching
+  traces, such as one with free text on `MlflowStore` or one whose latency or assessment filter
+  kept fewer of those 1,000, has `has_more` and a `traces_examined` below its `limit`. A session
+  search with a cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
