@@ -2314,10 +2314,39 @@ every route, so the traces go into the principal's organisation, which no other 
   either: OTLP's content types need a CORS preflight, which the server never answers, and a body
   of any other type is refused with `415` before it is read.
 
+**An edition's own route.** An edition that signs exporters in differently from its other routes,
+or must keep one organisation's trace ids apart from another's, serves `POST /v1/traces` on a
+route of its own and calls the endpoint's work, `otlp.export`:
+
+```python
+from martian.evals.server import otlp
+
+router = APIRouter(route_class=otlp.OtlpRoute)  # refusals, its own included, as google.rpc.Status
+
+
+@router.post(otlp.TRACES_PATH, response_model=None)
+async def export_traces(request: Request, exporter: Principal = Depends(sign_in_exporter)) -> Response:
+    return await otlp.export(request, exporter, store, trace_ids=my_trace_ids, max_body_bytes=4 * 1024 * 1024)
+```
+
+- `export(request, principal, store, *, trace_ids=mlflow_trace_id, max_body_bytes=None)` does
+  everything the core's route does once the principal and store are known, the role check first.
+- `trace_ids` (`TraceIds`) makes each trace's store id from the principal, the store's key of the
+  project and the OpenTelemetry trace id (16 bytes). The core's route uses `mlflow_trace_id`,
+  `tr-` and the id in hex. An edition's mapping must give an id its store takes, and the same id
+  for the same arguments, so that spans of one trace sent in several requests, or sent again,
+  still make one trace.
+- `max_body_bytes` is the largest body, as sent and decompressed; without it, `MAX_BODY_BYTES`.
+- The application must hold the trace write lock `create_app` sets
+  (`app.state.martian_evals_trace_writes`, an `asyncio.Lock`).
+
+Martian Cloud does this ([the Martian server](#the-martian-server)).
+
 **How spans become traces.**
 
 - Spans are grouped by trace id. A trace's id is `tr-` and the OpenTelemetry trace id in hex,
-  MLflow's form, which the Traces routes take; its spans keep their span ids.
+  MLflow's form, which the Traces routes take, unless an edition's own route maps it
+  ([above](#opentelemetry-traces)); its spans keep their span ids.
 - The root span, the one without a parent, gives the trace its name, start, latency and state:
   `ERROR` when the root's status is an error, `OK` otherwise. Everything else (span kinds, model,
   tokens, session, user, request and response) is the trace conventions mapping, which the
@@ -2349,7 +2378,7 @@ every route, so the traces go into the principal's organisation, which no other 
 | `403` | The principal's role does not write |
 | `404` | `x-martian-project-id` names no project |
 | `409` | The project is archived |
-| `413` | The body is larger than 16 MiB (`MAX_BODY_BYTES`), as sent or decompressed |
+| `413` | The body is larger than 16 MiB (`MAX_BODY_BYTES`), or an edition's own route's limit, as sent or decompressed |
 | `415` | Another `Content-Type` or `Content-Encoding` |
 
 A refusal's body is the `google.rpc.Status` OTLP asks for, in the request's encoding, carrying
@@ -2360,7 +2389,8 @@ only its `message`: `{"message": "Requires member role"}` in JSON.
 loopback port, each span in a request of its own, and reads the traces back through the Traces
 and Sessions routes in each attribute style. It also exports to a core whose sign-in takes
 bearer tokens, with and without one, and checks spans of one trace in several requests on both
-stores, partial success, the project header and each refusal. On the in-process binding it sends
+stores, partial success, the project header and each refusal, and an edition's own route calling
+`export` with a mapping of trace ids per organisation and a smaller body limit. On the in-process binding it sends
 a trace whose root span's request and response are longer than a preview in three batches and
 checks after each that MLflow holds one root span of the binding's with them whole, that a search
 shows the flagged previews, and that an application span carrying the root span's marker
@@ -3484,9 +3514,14 @@ scoring job, with the agent's target lease; not the durable queue yet), `current
 each organisation's default judge model, and `current_agent_names` its agent registry. It
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
 names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
-contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`). So a route reads
-what an edition supplies only through these dependencies, never from `create_app`'s
-`app.state` (the OTLP route's write lock is the exception, and the server does not mount it).
+contract (`GET /v1/evals/{run_id}/attempts` and `/turns`). It serves OpenTelemetry's
+`POST /v1/traces` on a route of its own that calls `otlp.export` ([an edition's own
+route](#opentelemetry-traces)): exporters sign in with an organisation's API key or a service
+account's key, never a console session, and each trace's id is derived from the organisation, the
+project and the OpenTelemetry trace id, so no organisation can name another's traces
+(`app/evals_otlp.py` there). So a route reads what an edition supplies only through these
+dependencies, never from `create_app`'s `app.state`; the OTLP route's write lock is the
+exception, which the server sets on its application too.
 `tests/evals/test_write_routes.py` serves the scorers route on an application of its own that
 way.
 

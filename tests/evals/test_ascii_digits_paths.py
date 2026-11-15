@@ -45,12 +45,11 @@ def request(length: str, body: bytes = b"{}") -> Request:
 
 # A header is read as Latin-1, so the digits that can arrive in one are ¹, ² and ³.
 @pytest.mark.parametrize("length", ["²", "¹", "³"])
-def test_a_content_length_of_other_digits_is_not_a_declared_size(monkeypatch, length):
+def test_a_content_length_of_other_digits_is_not_a_declared_size(length):
     # Not a size: the body is counted as it arrives, as for a missing or non-numeric Content-Length.
-    monkeypatch.setattr(otlp, "MAX_BODY_BYTES", 64)
-    assert asyncio.run(otlp._body(request(length))) == b"{}"
+    assert asyncio.run(otlp._body(request(length), 64)) == b"{}"
     with pytest.raises(otlp.HTTPException) as refused:
-        asyncio.run(otlp._body(request(length, b" " * 65)))
+        asyncio.run(otlp._body(request(length, b" " * 65), 64))
     assert refused.value.status_code == 413
 
 
