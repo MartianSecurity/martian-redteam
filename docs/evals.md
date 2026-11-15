@@ -588,6 +588,9 @@ curl -X POST "$EVALS_CORE/v1/evals/monitors" -H 'Content-Type: application/json'
 - A new trace is scored within about 31 seconds of its request time, plus its judge's time. A
   trace recorded more than 20 seconds after its request time is not scored. Each trace is scored
   at most once by a monitor.
+- `GET .../monitors/{id}/trends` gives each scorer's pass rate or mean per hour over the last day,
+  or in the windows you ask for, each with its 95% interval: what the Evals UI's Monitoring page
+  draws ([score trends](evals-core.md#score-trends)).
 - `POST .../monitors/{id}/pause`, `.../resume` and `DELETE .../monitors/{id}` stop and restart it.
 
 The local edition (`martian ui`) is Community, so it runs no monitors. How the worker scores,

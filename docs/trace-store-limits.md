@@ -209,7 +209,9 @@ For monitoring production traffic (MorningHQ/martian-notes#196) on this store as
   measured range: a page of 50 of the newest 1,000 takes 11 to 39 ms, reading 1,000 traces about
   what the Sessions page takes, and reading one trace with its spans 11 to 80 ms. A
   [monitor](evals-core.md#monitors) reads so, at most 1,000 traces a pass, and reads only the
-  traces it samples whole.
+  traces it samples whole. Its thresholds and its [score trends](evals-core.md#score-trends) read
+  no traces: they read the monitor's own record of the traces it scored, by time, at most 5,000
+  rows.
 - **Requests and responses of any length**, at a write time and size per trace that this report
   has measured only up to 7,900 characters.
 - **Plan for retention**: at 50 traces a second the store grows by about 4.3 million traces and

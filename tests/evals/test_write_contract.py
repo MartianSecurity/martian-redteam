@@ -76,6 +76,8 @@ OWN_NAMES |= {
     ("post", "/v1/evals/monitors/{monitor_id}/resume"),
     ("delete", "/v1/evals/monitors/{monitor_id}"),
 }
+# And its monitors' score trends (MorningHQ/martian-notes#199).
+OWN_NAMES |= {("get", "/v1/evals/monitors/{monitor_id}/trends")}
 # And its threshold routes (MorningHQ/martian-notes#198).
 OWN_NAMES |= {
     ("get", "/v1/evals/thresholds"),
