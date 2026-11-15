@@ -385,10 +385,11 @@ class SqlRecordStore:
                     "case_id": score.case_id,
                     "scorer": score.scorer,
                     "scoring_job_id": score.scoring_job_id or "",
+                    "source": score.source,
                     "created_at": saved.created_at,
                     "record": _json(saved),
                 },
-                ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id"],
+                ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id", "source"],
             )
             touched.add(score.run_id)
         return touched
@@ -410,7 +411,9 @@ class SqlRecordStore:
             )
             if case_id is not None:
                 query = query.where(score_rows.c.case_id == case_id)
-            query = query.order_by(score_rows.c.case_id, score_rows.c.scorer, score_rows.c.scoring_job_id)
+            query = query.order_by(
+                score_rows.c.case_id, score_rows.c.scorer, score_rows.c.scoring_job_id, score_rows.c.source
+            )
             found: Sequence[Any] = connection.execute(query).scalars().all()
             return [Score.model_validate(r) for r in found]
 

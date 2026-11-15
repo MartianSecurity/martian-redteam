@@ -228,6 +228,33 @@ class RecordContract:
             records.create_scoring_job(ORG_A, "p1", ScoringJob(id="j2", run_id="r9", scorers=[JUDGE], state="queued")),
         )
 
+    async def test_a_persons_score_sits_beside_a_check_score_of_the_same_name(self, records: RecordStore) -> None:
+        # A review question named like a check of the run (MartianSecurity/martian-notes#345).
+        await records.create_run(ORG_A, run("r1"))
+        judged = Score(run_id="r1", case_id="c1", scorer="politeness", source="llm_judge", value=True, passed=True)
+        checked = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+        await records.put_scores(ORG_A, "p1", [judged, checked])
+        answers = [
+            Score(run_id="r1", case_id="c1", scorer=name, source="human", source_id="user-a", value=False, passed=False)
+            for name in ("politeness", "exact_match")
+        ]
+        await records.put_scores(ORG_A, "p1", answers)
+        found = await records.list_scores(ORG_A, "p1", "r1", case_id="c1")
+        assert [(s.scorer, s.source, s.value) for s in found] == [
+            ("exact_match", "code", True),
+            ("exact_match", "human", False),
+            ("politeness", "human", False),
+            ("politeness", "llm_judge", True),
+        ]
+        # A newer answer replaces the person's score alone, and the judge's score the judge's.
+        await records.put_scores(ORG_A, "p1", [answers[0].model_copy(update={"value": True, "passed": True})])
+        await records.put_scores(ORG_A, "p1", [judged.model_copy(update={"rationale": "Kind."})])
+        found = await records.list_scores(ORG_A, "p1", "r1", case_id="c1")
+        assert [(s.source, s.value, s.rationale) for s in found if s.scorer == "politeness"] == [
+            ("human", True, ""),
+            ("llm_judge", True, "Kind."),
+        ]
+
     async def test_review_chains_never_fork(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
         first = await records.add_review(

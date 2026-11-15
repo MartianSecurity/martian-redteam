@@ -567,8 +567,9 @@ class RecordStore(Protocol):
         ...
 
     async def put_scores(self, principal: Principal, project_id: str, scores: list[Score]) -> None:
-        """Store scores of a run's cases. A score is replaced only by one from the same scorer and
-        scoring job; a scoring job's scores never replace the run's own."""
+        """Store scores of a run's cases. A score is replaced only by one from the same scorer,
+        scoring job and source: a scoring job's scores never replace the run's own, and a person's
+        answer never replaces a check's or a judge's score of the same name."""
         ...
 
     async def list_scores(

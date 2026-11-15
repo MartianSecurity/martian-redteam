@@ -321,6 +321,20 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         }
     )
     await records.add_review(principal, project, answered)
+    # A person's answer named like the run's judge: a score of its own, beside the judge's.
+    named_like_the_judge = Score(
+        run_id=run_id,
+        case_id="c0",
+        scorer="politeness",
+        source="human",
+        source_id=principal.user_id,
+        value=False,
+        passed=False,
+        rationale="Too curt.",
+        metadata={"martian.review_criterion": "politeness"},
+        created_at=T0 + timedelta(hours=4),
+    )
+    await records.put_scores(principal, project, [named_like_the_judge])
     # Through the outbox, as the review routes set it: a delivery the export leaves out.
     delivered = await save_queue_item(store, records, principal, project, queue.id, traced[0], "completed")
     assert delivered.state == "delivered"
@@ -784,6 +798,15 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
+    # The person's answer named like the run's judge comes back beside the judge's own score.
+    for folder in ("first", "again"):
+        named = sorted(
+            (line["score"]["source"], line["score"]["value"])
+            for line in lines_of(tmp_path / folder, "scores.jsonl")
+            if (line["score"]["case_id"], line["score"]["scorer"], line["score"]["scoring_job_id"])
+            == ("c0", "politeness", None)
+        )
+        assert named == [("human", False), ("llm_judge", True)], folder
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
     # The published version is still pinned by its manifest: a run reads it only as published.

@@ -5,14 +5,16 @@ both databases and create exactly the tables the store uses."""
 import inspect
 import os
 import uuid
+from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import JSON, Column, DateTime, MetaData, String, Table, create_engine, insert, select, text
 
+from martian.evals.model import Score
 from martian.evals.records import RECORD_METHODS, RecordStore
 from martian.evals.records.sql import SqlRecordStore, downgrade, engine_for, upgrade
-from martian.evals.records.tables import TABLES, metadata
-from tests.evals.record_contract import ORG_A, RecordContract, run
+from martian.evals.records.tables import TABLES, metadata, scores
+from tests.evals.record_contract import ORG_A, T0, RecordContract, run
 from tests.evals.record_contract import test_a_listener_that_falls_behind_is_told_to_read_again as _listener_test
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
@@ -119,6 +121,92 @@ def test_migrations_run_both_ways_on_postgres_in_their_own_schema(schema):
         # Tests running alongside, in this run or another on the same database, have their own.
         assert schema in placed
         assert [name for name in placed if not name.startswith("martian_test_")] == []
+    finally:
+        engine.dispose()
+
+
+# The scores table as migration 0009 left it: a score keyed by run, case, scorer and scoring job.
+SCORES_AT_0009 = Table(
+    "martian_scores",
+    MetaData(),
+    *(Column(name, String(200)) for name in ("space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id")),
+    Column("created_at", DateTime(timezone=True)),
+    Column("record", JSON),
+)
+SPACES = ("org-a", "~local")
+
+
+def _in_space(connection, space: str) -> None:
+    # On Postgres row-level security shows a transaction only its space's rows, the owner's too.
+    if connection.dialect.name == "postgresql":
+        connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
+
+
+def _score_row(space: str, case_id: str, source: str) -> dict[str, Any]:
+    score = Score(run_id="r1", case_id=case_id, scorer="politeness", source=source, value=source != "human")
+    return {
+        "space": space,
+        "project_id": "p1",
+        "run_id": "r1",
+        "case_id": case_id,
+        "scorer": "politeness",
+        "scoring_job_id": "",
+        "created_at": T0,
+        "record": score.model_dump(mode="json"),
+    }
+
+
+def _sources(engine, space: str, table: Table) -> list[tuple[str, str]]:
+    """Each score of the space as (case, source), the source read from the score's record and, once
+    the table has one, checked against its column."""
+    with engine.begin() as connection:
+        _in_space(connection, space)
+        rows = connection.execute(select(table).where(table.c.space == space)).mappings().all()
+    for row in rows:
+        assert row.get("source", row["record"]["source"]) == row["record"]["source"]
+    return sorted((row["case_id"], row["record"]["source"]) for row in rows)
+
+
+def _sources_join_the_score_key(engine) -> None:
+    """Migration 0010 fills each score's source from its record in every space, so a check's score
+    and a person's of the same name are two rows; going back keeps the check's (the review still
+    holds the person's answer)."""
+    upgrade(engine, "0009")
+    with engine.begin() as connection:
+        for space in SPACES:
+            _in_space(connection, space)
+            # A review's answer that replaced the judge's score on c1, and a judge's score on c2.
+            connection.execute(
+                insert(SCORES_AT_0009), [_score_row(space, "c1", "human"), _score_row(space, "c2", "llm_judge")]
+            )
+    upgrade(engine)
+    _migrations_match_the_tables(engine)
+    for space in SPACES:
+        assert _sources(engine, space, scores) == [("c1", "human"), ("c2", "llm_judge")]
+    with engine.begin() as connection:
+        _in_space(connection, "org-a")
+        connection.execute(insert(scores), [{**_score_row("org-a", "c1", "llm_judge"), "source": "llm_judge"}])
+    assert _sources(engine, "org-a", scores) == [("c1", "human"), ("c1", "llm_judge"), ("c2", "llm_judge")]
+    downgrade(engine, "0009")
+    assert _sources(engine, "org-a", SCORES_AT_0009) == [("c1", "llm_judge"), ("c2", "llm_judge")]
+    assert _sources(engine, "~local", SCORES_AT_0009) == [("c1", "human"), ("c2", "llm_judge")]
+    upgrade(engine)
+    _migrations_match_the_tables(engine)
+
+
+def test_a_score_keeps_its_source_through_the_migrations_on_sqlite(tmp_path):
+    engine = engine_for(f"sqlite:///{tmp_path / 'martian.db'}")
+    try:
+        _sources_join_the_score_key(engine)
+    finally:
+        engine.dispose()
+
+
+@needs_postgres
+def test_a_score_keeps_its_source_through_the_migrations_on_postgres_as_the_tables_owner(schema, owner_url):
+    engine = engine_for(owner_url, schema=schema)
+    try:
+        _sources_join_the_score_key(engine)
     finally:
         engine.dispose()
 
