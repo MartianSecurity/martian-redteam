@@ -188,9 +188,9 @@ The core adds read routes of its own, which the server's contract does not have:
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
-| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models`, `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and complete reviews. Store: the registered judges, and the newest 1,000 traces |
-| `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `status` (`checked` or `unchecked`), `reason` (`null`, `none` when it has no calibration, or `model_changed` when it runs on another model than its calibration was measured on) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
-| `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `labelled`, `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved), `actor_id` and `created_at`. `project_id` names its project | Records |
+| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models` (a [panel](evals.md#a-panel-of-judges)'s members for a panel's verdicts), `panel` (whether its verdicts are a panel's), `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and complete reviews. Store: the registered judges, and the newest 1,000 traces |
+| `GET /v1/evals/judge-calibrations` | Each judge version's [calibration](evals.md#calibration): `project_id`, `minimum` (30) and `items`, one for every registered judge version of the project and each built-in model judge (`correctness`, `safety` and `policy` at `v1`), by name and then version, each with `judge`, `version`, `model` and `endpoint` (the model it runs on now: its own, or the default judge model when it names none), `panel` (the members a judge graded by a [panel](evals.md#a-panel-of-judges) runs on, each `model` and `endpoint`, in place of a model; empty for any other judge), `status` (`checked` or `unchecked`), `reason` (`null`, `none` when it has no calibration, or `model_changed` when it runs on another model, or panel, than its calibration was measured on) and `calibration`, its newest or `null`. `name` narrows it to one judge; a project that does not exist is `404` | Records: the calibrations. Store: the registered judges. The edition's default judge model |
+| `GET /v1/evals/judge-calibrations/{calibration_id}` | One calibration, as a judge score's `martian.calibration_id` names it: `id`, `project_id`, `judge`, `version`, `model`, `endpoint`, `panel`, `labelled`, `traces_examined`, `traces_truncated`, `report` (the version's item of the agreement report when it was saved), `actor_id` and `created_at`. `project_id` names its project | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -250,7 +250,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
 - **Judge calibrations.** A judge version is `checked` while its newest calibration was measured
   on the model it runs on now, as a scoring job admitted now would pin it; the routes are the
   core's own for the same reason as the agreement report. `POST /judge-calibrations` saves one
-  ([write routes](#write-routes)).
+  ([write routes](#write-routes)). A judge graded by a panel is calibrated as one judge, on its
+  members ([calibration](evals.md#calibration)).
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -331,7 +332,7 @@ contract:
 | `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
-| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on | `suites` |
+| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on; `GET` lists a judge graded by a panel with `panel` in its `definition` | `suites` |
 | `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
 | `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
@@ -340,10 +341,11 @@ contract:
 | `GET`, `POST /views`, `PUT`, `DELETE /views/{view_id}` | Saved trace views | `views` |
 | `/dataset-drafts...`, `/dataset-operations...` | Dataset drafts: create (empty or from a published dataset), rename, remove, browse, add, edit, merge (JSON, JSONL, CSV), delete and import records, validate, publish; the record of each publication | `drafts` |
 
-The core adds one write route of its own, which the server's contract does not have:
+The core adds two write routes of its own, which the server's contract does not have:
 
 | Route | What it does | Module |
 | --- | --- | --- |
+| `POST /judge-panels` | Register a new version of a judge graded by a [panel of judges](evals.md#a-panel-of-judges): the body of `POST /judges` with `panel`, 2 to 9 different members, each a `model` (required) and an optional `endpoint`, and no `model` or `endpoint` of its own. A panel decides pass or fail, so its `kind` is `boolean`; a duplicate member, another kind, or a judge model of its own is `422`. Versions, idempotency and `manageJudges` are as for `POST /judges`, and the answer (`201`) is the version as `GET /judges` lists it, with `panel` in its `definition`. The contract's `JudgeVersionRequest` has no field for a panel, and the core does not change it | `suites` |
 | `POST /judge-calibrations` | Save a judge version's current item of the agreement report as its [calibration](evals.md#calibration), with the model it runs on now. The body is `request_id`, `project_id` (optional), `name` and `version` (`"2"`, or `"v1"` for a built-in model judge); the answer (`201`) is the calibration as `GET /judge-calibrations/{calibration_id}` gives it. A judge version the project has not registered and that is no built-in model judge is `404`; a report that is not measured, below 30 labelled items or of a free-text judge, is `422`. It needs `manageJudges`, and an archived project takes none (`409`) | `calibration` |
 
 All paths are under `/v1/evals`. How the core carries them out:
@@ -641,6 +643,16 @@ provider's or Agents' own error text. Any other exception is logged, and its sco
 unavailable; no automatic model retry". A scorer the judge leaves out of `JudgeResult.verdicts`
 with a reason in `JudgeResult.errors` gets that reason.
 
+**A judge graded by a panel.** A registered judge with a `panel` ([`POST /judge-panels`](#write-routes))
+is in the `JudgeRequest` of each of its members' models, beside the other judges of the job on
+that model, so each member grades it on its own through the same `Judge`, in one call per model
+and case as before. Its score is decided by the strict majority of the members that gave a
+verdict, from more than half of them ([a panel of judges](evals.md#a-panel-of-judges)): a member
+whose request failed, or that gave no pass/fail verdict, does not vote, and no majority is the
+score's error (`Judge panel has no majority [judge_panel_no_majority]: ...`), never a pass. The
+SDK judge grades panels; the Agents judge refuses every request pinned to a model, so on it each
+member errors and a panel never decides.
+
 `tests/evals/test_worker_judges.py` scores a run through the routes with the SDK judge against a
 loopback OpenAI-compatible endpoint (the rubrics, the context, one call per case, the reported
 version, a numeric judge's error, a wrong key, an unreachable endpoint, no model at all), and with
@@ -655,11 +667,14 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   such as `openai:/gpt-4o-mini`), and `endpoint`, the base address of the OpenAI-compatible
   endpoint that serves it (`http://localhost:4000/v1`). Both are optional and part of the version,
   so a new model is a new version, and `GET /judges` returns them in each version's `definition`.
-  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`.
+  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`. A judge graded by a
+  panel (`POST /judge-panels`) names its members instead, each a model and an optional endpoint,
+  kept as `ScorerVersion.panel`; its `model` and `endpoint` are `null`.
 - **The default judge model.** `GET /judge-model` answers `{"model", "endpoint", "selectable"}`
   for the principal's organisation; `PUT /judge-model` sets it (`manageJudges`), and `{}` clears
   it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
-  included. With none set, the worker's judge uses its own model. `selectable` says whether the
+  included; a panel's members always name theirs, so the default never applies to a panel. With
+  none set, the worker's judge uses its own model. `selectable` says whether the
   installation runs a judge on the model it names: always `true` here, where the worker's judge is
   `sdk_judge`; the Martian server answers `false`, because its judges run in Agents on the
   operator's model (`docs/evals-workbench.md` in MorningHQ/MartianBackend), as they do with
@@ -682,7 +697,11 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   it was pinned to. It also names, as `martian.calibration_id`, the judge version's
   [calibration](evals.md#calibration) that applied: its newest when the job started, if it was
   measured on the model the job runs the judge on, else `none`. The same values are on the case's
-  trace.
+  trace. A panel's score has `source_id` `panel:` and a digest of its members, and its metadata
+  holds the decision and each member's model, endpoint, reported model version, verdict and
+  reason (`martian.panel.*`, [what is recorded](evals.md#a-panel-of-judges)) in place of
+  `martian.judge.model`, `model_version` and `endpoint`, with `martian.judge.version` when the
+  members' answers report one, and the calibration of the panel as a whole.
 - **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
   its own environment, and a per-organisation key store is MorningHQ/martian-notes#135. An
   endpoint is a plain `http` or `https` address, so one with a user name, password, query or
@@ -694,6 +713,10 @@ Each judge runs on a model of its own, or on the default judge model when it nam
 `tests/evals/test_judge_models.py` scores one run with two registered judges on two models and a
 built-in judge on the default, keeps a job's model when the default changes, refuses a key in an
 endpoint, and keeps the local edition's default in its data folder.
+`tests/evals/test_judge_panel.py` covers the panel's rule, a panel in Python and in a suite file
+against a loopback endpoint, and a registered panel the worker grades with a fake judge: one
+member's error still decides, no majority is an error, every vote is on the score, and a panel is
+reported and calibrated as one judge.
 
 ## What exists
 
@@ -713,7 +736,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own routes for the attempts of repeated cases, with the run's reliability and its
   flaky cases, for each judge version's agreement with people's labels, and for each judge
-  version's calibration, which the core's own write route saves.
+  version's calibration, which a core's own write route saves. Another registers a judge graded
+  by a [panel of judges](evals.md#a-panel-of-judges), which the worker grades on each member.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
@@ -946,7 +970,8 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   not part of the shared model: `save_calibration` records one, or returns the stored one with
   the same id; `get_calibration` reads one and `list_calibrations` lists a project's, or one
   judge's, newest first. A calibration is never changed, so a score that names one can always
-  read it. Migration `0003` adds its table. It is kept here, not with the registered judge in
+  read it. A panel judge's calibration keeps its members in `panel`, inside the stored record, so
+  no migration adds a column for it. Migration `0003` adds its table. It is kept here, not with the registered judge in
   MLflow: a registered judge version is immutable there, so a calibration on it would need a new
   version, and every earlier calibration must stay readable by the scores that name it.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed.
@@ -1347,7 +1372,7 @@ default project:
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
 | `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`, or for a panel check `panel:` and a digest of its members, with every member's vote in its `metadata` (from the check's `metadata` in `results.jsonl`). With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined |
 | `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,

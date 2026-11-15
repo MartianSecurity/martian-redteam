@@ -220,7 +220,8 @@ def test_the_report_as_the_core_serves_it():
     )
     served = report[0].as_dict()
     assert set(served) == {
-        "judge", "version", "kind", "models", "judged", "labelled", "incomparable", "minimum", "status", "agreed",
+        "judge", "version", "kind", "models", "panel", "judged", "labelled", "incomparable", "minimum", "status",
+        "agreed",
         "agreement", "agreement_confidence_95", "kappa", "confusion", "false_pass_rate", "false_pass_confidence_95",
         "false_fail_rate", "false_fail_confidence_95", "categories", "mean_difference",
         "mean_difference_confidence_95", "mean_absolute_difference", "concordance",

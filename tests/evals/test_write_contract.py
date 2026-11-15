@@ -73,6 +73,9 @@ OWN_NAMES |= {
     ("post", "/v1/evals/judge-calibrations"),
     ("get", "/v1/evals/judge-calibrations/{calibration_id}"),
 }
+# Registering a judge graded by a panel of judge models (MorningHQ/martian-notes#187), which the
+# contract's POST /judges has no field for.
+OWN_NAMES |= {("post", "/v1/evals/judge-panels")}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),
