@@ -460,6 +460,22 @@ def test_a_trace_annotation_is_written_once_per_request(memory: Served):
     assert {a["assessment_name"] for a in detail["info"]["assessments"]} >= {"on_topic", "ideal"}
 
 
+def test_an_expectation_reads_as_an_expectation_and_is_no_verdict(memory: Served):
+    run = memory.completed_run()
+    trace_id = items_by_case(run)["faq-1"]["evals_trace_id"]
+    for kind, name, value in (("feedback", "on_topic", True), ("expectation", "ideal", "Use the link.")):
+        body = {"request_id": request_id(), "kind": kind, "name": name, "value": value}
+        memory.call("POST", f"/v1/evals/traces/{trace_id}/annotations", 201, json=body)
+    info = memory.call("GET", f"/v1/evals/traces/{trace_id}", 200)["info"]
+    found = {a["assessment_name"]: a for a in info["assessments"]}
+    assert (found["ideal"]["expectation"], "feedback" in found["ideal"]) == ({"value": "Use the link."}, False)
+    assert (found["on_topic"]["feedback"], "expectation" in found["on_topic"]) == ({"value": True}, False)
+    # The Traces page lists verdicts: feedback, never an expectation.
+    (row,) = [r for r in memory.call("POST", "/v1/evals/traces/search", 200, json={})["items"] if r["id"] == trace_id]
+    assert "on_topic" in {a["name"] for a in row["assessments"]}
+    assert "ideal" not in {a["name"] for a in row["assessments"]}
+
+
 # --- projects, views and datasets ---------------------------------------------------------------
 
 

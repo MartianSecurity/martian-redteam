@@ -158,5 +158,6 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 
 The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
 suite file is their written form ([above](#the-sdk-suite-file)). The evals core serves them
-(MorningHQ/martian-notes#98), and the server imports them when it mounts that core
-(MorningHQ/martian-notes#102).
+(MorningHQ/martian-notes#98). The Martian server imports them: its store binding reads its
+MLflow projects and traces as these objects for the core routes it mounts
+([the Martian server](evals-core.md#the-martian-server)).

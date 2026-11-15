@@ -9,7 +9,7 @@ builds it with `create_app` and supplies these:
 
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
-| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST (planned) |
+| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST: `ServerStore` for the routes it mounts ([the Martian server](#the-martian-server)) |
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
@@ -83,9 +83,8 @@ sign-in has been checked:
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
 own routes this way: the review queue routes, the question library and answering a queue's item
 need `review_queues`, and `GET /v1/evals/monitoring` needs `monitoring`
-([write routes](#write-routes)). The Martian server gates its own routes the same way until it
-mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
-MorningHQ/MartianBackend, and the two change together.
+([write routes](#write-routes)). The Martian server imports this map (`app/entitlements.py` in
+MorningHQ/MartianBackend) and gates the routes it still serves itself the same way.
 
 ## Capabilities
 
@@ -222,6 +221,11 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
   spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
   spans are not one tree is refused with `409`.
+- **Expectations** are not verdicts. A score whose metadata has `martian.annotation: expectation`
+  (a person's expectation on a trace, or an MLflow expectation a store binding read) is an
+  `expectation` assessment in a `TraceInfo` and in a result's `annotations`, and every other score
+  a `feedback` assessment. Trace search lists feedback only, and its assessment filter reads
+  feedback only, as the server's search did (`projection.is_expectation`).
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
   time and orders by time. The core applies the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
@@ -1033,9 +1037,21 @@ cannot be opened.
 | Piece | Issue |
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
-| The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | A durable worker | MorningHQ/martian-notes#139 |
-| Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| The rest of the core in the Martian server: runs, scoring, reviews, suites, judges, datasets and drafts, on its records and worker ([the Martian server](#the-martian-server)) | MorningHQ/martian-notes#102 |
+
+## The Martian server
+
+MorningHQ/MartianBackend depends on this package and mounts part of the core
+(`app/evals_core.py` there). It binds `current_principal` to its session lookup
+(`organisation_principal` with the member's role, names and platform-admin flag),
+`current_entitlements` to the organisation's plan and `current_store` to a `ServerStore` per
+request: the read half of `EvalStore` on its MLflow REST binding, with the organisation's
+evaluation experiment as the default project. It serves the core's `GET /v1/evals/projects` and
+trace reads (`POST /traces/search`, `POST /sessions/search`, `GET /traces/{trace_id}` and its
+`/payload`), and builds `GET /v1/evals/bootstrap` with `build_bootstrap`. Every other route is
+still the server's own until the record store, the worker and the judge are bound there
+(MorningHQ/martian-notes#102).
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
