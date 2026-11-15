@@ -80,6 +80,25 @@ class DatasetManifest(BaseModel):
     published_at: datetime | None = None
 
 
+class Delivery(BaseModel):
+    """A store write the record store keeps until it reaches the store (``martian.evals.outbox``):
+    a score on its case's trace, or a review queue item's status. ``attempts`` and
+    ``next_attempt_at`` pace the retries; ``failed`` is a write the store refused for good."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    project_id: Identifier
+    kind: Literal["score", "queue_item"]
+    payload: dict[str, Any]
+    state: Literal["pending", "delivered", "failed"] = "pending"
+    attempts: int = Field(default=0, ge=0)
+    next_attempt_at: datetime | None = None
+    error: str = ""
+    created_at: datetime | None = None
+    delivered_at: datetime | None = None
+
+
 @runtime_checkable
 class RecordStore(Protocol):
     events: EventBus
@@ -257,6 +276,23 @@ class RecordStore(Protocol):
         """Every publication of the project, newest first."""
         ...
 
+    # The outbox: store writes kept until they are delivered.
+    async def put_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        """Keep a delivery to make. One with the same id is replaced and pending again, so the newest
+        write of the same thing is the one delivered."""
+        ...
+
+    async def settle_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        """Record the outcome of an attempt: the delivery as it is now."""
+        ...
+
+    async def get_delivery(self, principal: Principal, project_id: str, delivery_id: str) -> Delivery | None: ...
+
+    async def due_deliveries(self, principal: Principal, *, now: datetime, limit: int = 100) -> list[Delivery]:
+        """Pending deliveries of every project of the principal's space whose next attempt is due,
+        oldest first."""
+        ...
+
 
 RECORD_METHODS = frozenset(
     name for name in vars(RecordStore) if not name.startswith("_") and callable(getattr(RecordStore, name))
@@ -265,6 +301,7 @@ RECORD_METHODS = frozenset(
 __all__ = [
     "RECORD_METHODS",
     "DatasetManifest",
+    "Delivery",
     "Event",
     "EventBus",
     "EventsLost",

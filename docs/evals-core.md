@@ -310,11 +310,22 @@ All paths are under `/v1/evals`. How the core carries them out:
   `POST /review-queues/{id}/sync` sets every item again. The store keeps one definition per
   question name, so the library has version 1 of each question: a second version is `409`, and a
   queue question with the name of a different library question is the store's `409`.
-- **Store writes happen in the request.** A review's score, an annotation, a queue and a published
-  dataset are written to the store before the response. The store is the core's own, not a
-  telemetry export, so the server's background tasks that copied them to MLflow have no
-  counterpart, and `POST /{run_id}/assessments/{id}/sync` only writes a score the store does not
-  hold yet.
+- **A person's answer never waits on the store** (`martian.evals.outbox`). A review's score is
+  saved in the record store first, and a review queue item's status with it; their writes to the
+  store are deliveries kept in the record store's outbox (`Delivery`, record store migration
+  `0004`). Each is attempted in the request; when the store cannot take it (MLflow is down), the
+  request still succeeds and `deliver_due` retries it, 5 seconds after the first failure, doubling
+  to at most 15 minutes, until it is delivered or the store refuses it for good (`invalid`:
+  `failed`). Every attempt reads back first, so a write that reached the store is never made twice:
+  a delivered score carries its delivery's id in its metadata (`martian.delivery`), and a queue
+  item is set only when its status differs; the newest status of an item replaces a pending one.
+  `run_deliveries` runs the retries in a loop for the principals an edition serves: the local
+  edition runs it for its one user, the server for its organisations.
+  `POST /{run_id}/assessments/{id}/sync` delivers a score the store does not hold yet and answers
+  `pending` while its delivery waits. An annotation, a queue, a question, a judge and a published
+  dataset are still written to the store in the request. The outbox is one table and a loop; the
+  durable job queue (MorningHQ/martian-notes#139) can later run `deliver_due` as one of its kinds of
+  work.
 - **Dataset drafts** live in the record store's default project. A record (`id`, `input`,
   `expected_output`, `status`, `metadata`) is a case: an object `input` is its `inputs`, a text one
   `inputs.message`, anything else `inputs.input`, with the tag `martian.input_form` saying which;

@@ -36,13 +36,14 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
-from martian.evals.records import DatasetManifest, SavedView
+from martian.evals.records import DatasetManifest, Delivery, SavedView
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
     dataset_draft_cases,
     dataset_drafts,
     dataset_manifests,
+    deliveries,
     reviews,
     runs,
     saved_views,
@@ -988,5 +989,82 @@ class SqlRecordStore:
                 .all()
             )
             return [DatasetManifest.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- the outbox --------------------------------------------------------------------------
+
+    def _put_delivery(self, connection: Connection, space: str, project_id: str, delivery: Delivery) -> None:
+        values = {
+            "space": space,
+            "project_id": project_id,
+            "id": delivery.id,
+            "kind": delivery.kind,
+            "state": delivery.state,
+            "next_attempt_at": delivery.next_attempt_at,
+            "created_at": delivery.created_at,
+            "record": _json(delivery),
+        }
+        self._upsert(connection, deliveries, values, ["space", "project_id", "id"])
+
+    async def put_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        if delivery.project_id != project_id:
+            raise StoreError("invalid", "the delivery belongs to another project")
+        now = _now()
+        saved = delivery.model_copy(
+            update={
+                "state": "pending",
+                "attempts": 0,
+                "error": "",
+                "next_attempt_at": now,
+                "created_at": delivery.created_at or now,
+                "delivered_at": None,
+            }
+        )
+
+        def work(connection: Connection, space: str) -> Delivery:
+            self._put_delivery(connection, space, project_id, saved)
+            return saved
+
+        return await self._run(principal, work)
+
+    async def settle_delivery(self, principal: Principal, project_id: str, delivery: Delivery) -> Delivery:
+        if delivery.next_attempt_at is None or delivery.created_at is None:
+            raise StoreError("invalid", "a settled delivery has its times")
+
+        def work(connection: Connection, space: str) -> Delivery:
+            if self._one(connection, deliveries, space, project_id, id=delivery.id) is None:
+                raise StoreError("not_found", "delivery not found")
+            self._put_delivery(connection, space, project_id, delivery)
+            return delivery
+
+        return await self._run(principal, work)
+
+    async def get_delivery(self, principal: Principal, project_id: str, delivery_id: str) -> Delivery | None:
+        def work(connection: Connection, space: str) -> Delivery | None:
+            stored = self._one(connection, deliveries, space, project_id, id=delivery_id)
+            return Delivery.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def due_deliveries(self, principal: Principal, *, now: datetime, limit: int = 100) -> list[Delivery]:
+        _bounds(0, limit)
+
+        def work(connection: Connection, space: str) -> list[Delivery]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(deliveries.c.record)
+                    .where(
+                        deliveries.c.space == space,
+                        deliveries.c.state == "pending",
+                        deliveries.c.next_attempt_at <= now,
+                    )
+                    .order_by(deliveries.c.created_at, deliveries.c.id)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return [Delivery.model_validate(r) for r in rows]
 
         return await self._run(principal, work)

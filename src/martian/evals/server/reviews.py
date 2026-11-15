@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from martian.evals.model import CaseResult, Review, ReviewQueue, Run, Score
 from martian.evals.model import ReviewQuestion as Question
+from martian.evals.outbox import save_queue_item, save_score
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
     EntitlementsDep,
@@ -119,8 +120,8 @@ async def sync_queue_item(
     reviews = await records.list_reviews(principal, run.project_id, run.id, case_id=result.case_id)
     answered = {r.criterion for r in reviews if r.queue_id == queue.id and r.state == "complete"}
     done = {q.name for q in queue.questions} <= answered
-    await store.set_queue_item(
-        principal, run.project_id, queue.id, result.store.trace_id, "completed" if done else "pending"
+    await save_queue_item(
+        store, records, principal, run.project_id, queue.id, result.store.trace_id, "completed" if done else "pending"
     )
 
 
@@ -235,10 +236,8 @@ async def review(
     if saved.run_id != run.id or saved.case_id != result.case_id:
         raise HTTPException(409, "request_id belongs to a different review")
     if score is not None:
-        if score.trace_id:
-            logged = await store.log_score(principal, run.project_id, score.trace_id, score)
-            score = score.model_copy(update={"store": logged.store})
-        await records.put_scores(principal, run.project_id, [score])
+        # Saved first; its write to the trace waits in the outbox when the store cannot take it.
+        await save_score(store, records, principal, run.project_id, score)
     if queue is not None:
         await sync_queue_item(store, records, principal, run, queue, result)
     return ReviewRow.of(saved).public()
