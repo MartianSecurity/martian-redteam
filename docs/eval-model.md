@@ -80,7 +80,7 @@ and its data give them again on the next load.
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds` |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; the other types are `kind: check` with their options (`values`, `expectation`, `any_of`, `case_sensitive`, `pattern`, `required_keys`) in `parameters` |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
 | `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
 | `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
@@ -99,7 +99,13 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
   with no LLM judge check;
 - a field of a JSONL case that the runner does not read, or both `input` and `inputs` (or
   `output` and `outputs`) in one case;
-- anything `martian evals run` refuses, such as an unknown field.
+- anything `martian evals run` refuses, such as an unknown field, a `json_schema` keyword the
+  check cannot apply, a `latency` or `cost` check with no target to measure, or a numeric or
+  table option the check cannot read, such as a `value` that is not a number, a `rel_tolerance`
+  of 1 or more, a path with an empty step, or `rows` with two rows of one key, or a policy check
+  option it cannot use, such as an unknown `kinds` entry, a phrase with no letter or digit, or a
+  marker shorter than four letters or digits
+  ([deterministic checks](evals.md#deterministic-checks)).
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
 grades stored outputs, which is a `stored` target), an `agent` target, `policies` (in a file, a
@@ -137,7 +143,9 @@ counts and `target_errors` are counted from scores and case results; `pass_rate`
 `confidence_95` and `groups` are computed from those verdicts and the cases' `martian.group` tags
 ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)); with repeats,
 `repeats` is the run's `provenance.repeats`, and `attempts` and `reliability` are counted from
-the case results' attempts; `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
+the case results' attempts; `false_refusals`, for a suite with a policy check, is counted from
+the cases' `no_refusal` verdicts, with repeats their attempts combined
+([false refusals](evals.md#false-refusals)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
 

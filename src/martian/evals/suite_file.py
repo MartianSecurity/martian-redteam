@@ -45,7 +45,7 @@ SUITE_FILE_FIELDS = {
     "judge.rate_limit_wait_seconds": "RunSettings.judge_rate_limit_wait_seconds",
     "judge.headers": "RunSettings.judge_headers, values as written",
     "checks": "Suite.scorers, in order",
-    "checks.type": "ScorerVersion.type; kind llm_judge for rubric, guidelines and conditions, check otherwise",
+    "checks.type": "ScorerVersion.type; kind llm_judge for the LLM judges (runner.JUDGES), check otherwise",
     "checks.name": "ScorerVersion.name (the check's label)",
     "checks.rubric": "ScorerVersion.criteria.rubric",
     "checks.guidelines": "ScorerVersion.criteria.guidelines",
@@ -54,8 +54,28 @@ SUITE_FILE_FIELDS = {
     "checks.expectation": "ScorerVersion.parameters.expectation",
     "checks.any_of": "ScorerVersion.parameters.any_of",
     "checks.case_sensitive": "ScorerVersion.parameters.case_sensitive",
+    "checks.min_similarity": "ScorerVersion.parameters.min_similarity",
     "checks.pattern": "ScorerVersion.parameters.pattern",
     "checks.required_keys": "ScorerVersion.parameters.required_keys",
+    "checks.schema": "ScorerVersion.parameters.schema",
+    "checks.min_length": "ScorerVersion.parameters.min_length",
+    "checks.max_length": "ScorerVersion.parameters.max_length",
+    "checks.max_ms": "ScorerVersion.parameters.max_ms",
+    "checks.max_usd": "ScorerVersion.parameters.max_usd",
+    "checks.max_tokens": "ScorerVersion.parameters.max_tokens",
+    "checks.value": "ScorerVersion.parameters.value, as written",
+    "checks.path": "ScorerVersion.parameters.path",
+    "checks.abs_tolerance": "ScorerVersion.parameters.abs_tolerance, as written",
+    "checks.rel_tolerance": "ScorerVersion.parameters.rel_tolerance, as written",
+    "checks.parts": "ScorerVersion.parameters.parts",
+    "checks.add": "ScorerVersion.parameters.add",
+    "checks.subtract": "ScorerVersion.parameters.subtract",
+    "checks.total": "ScorerVersion.parameters.total",
+    "checks.key": "ScorerVersion.parameters.key",
+    "checks.columns": "ScorerVersion.parameters.columns",
+    "checks.rows": "ScorerVersion.parameters.rows",
+    "checks.kinds": "ScorerVersion.parameters.kinds",
+    "checks.allow": "ScorerVersion.parameters.allow",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
@@ -71,16 +91,42 @@ SUITE_FILE_FIELDS = {
 # The fields every check type takes: its type, its label and the rule its attempts combine by.
 COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
 
-# The check fields each check type uses besides COMMON_CHECK_FIELDS. Loading refuses the others.
+# The check fields each check type uses besides COMMON_CHECK_FIELDS, as the file names them.
+# Loading refuses the others.
+_TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
+_TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
     "conditions": frozenset({"conditions"}),
-    "contains": frozenset({"values", "expectation", "any_of", "case_sensitive"}),
-    "not_contains": frozenset({"values", "expectation", "case_sensitive"}),
+    # The grounding judges read each case's inputs.context and take no options.
+    "groundedness": frozenset(),
+    "context_relevance": frozenset(),
+    "context_sufficiency": frozenset(),
+    "contains": _TEXT_OPTIONS | {"any_of"},
+    "not_contains": _TEXT_OPTIONS,
+    "contains_any": _TEXT_OPTIONS,
+    "contains_all": _TEXT_OPTIONS,
+    "equals": _TEXT_OPTIONS,
+    "starts_with": _TEXT_OPTIONS,
+    "ends_with": _TEXT_OPTIONS,
+    "similarity": _TEXT_OPTIONS | {"min_similarity"},
     "matches": frozenset({"pattern"}),
     "not_matches": frozenset({"pattern"}),
     "is_json": frozenset({"required_keys"}),
+    "json_schema": frozenset({"schema"}),
+    "length": frozenset({"min_length", "max_length"}),
+    "latency": frozenset({"max_ms"}),
+    "cost": frozenset({"max_usd", "max_tokens"}),
+    "number_equals": _TOLERANCE_OPTIONS | {"value", "expectation", "path", "pattern"},
+    "sums_to": _TOLERANCE_OPTIONS | {"parts", "total"},
+    "reconciles": _TOLERANCE_OPTIONS | {"add", "subtract", "total"},
+    "table_equals": _TOLERANCE_OPTIONS | {"rows", "expectation", "key", "columns", "path", "case_sensitive"},
+    "no_prohibited_phrases": frozenset({"values", "expectation"}),
+    "no_personal_data": frozenset({"kinds", "allow"}),
+    "no_secrets": frozenset({"kinds", "allow"}),
+    "resists_injection": frozenset({"values", "expectation"}),
+    "no_refusal": frozenset({"expectation"}),
 }
 
 # The fields of a JSONL case that the runner reads.
@@ -175,7 +221,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
     """Everything a suite file says, as the model's suite fields."""
     if file_suite.judge is not None and not any(check.type in runner.JUDGES for check in file_suite.checks):
         raise ConfigError(
-            "judge: no check is an LLM judge (rubric, guidelines or conditions), so nothing uses it; remove it"
+            f"judge: no check is an LLM judge ({', '.join(runner.JUDGES)}), so nothing uses it; remove it"
         )
     try:
         return {
@@ -208,13 +254,20 @@ def _target(reference: runner.TargetRef | None) -> Target:
     )
 
 
-def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | None) -> ScorerVersion:
+def _options(check: runner.CheckSpec) -> dict[str, Any]:
+    """The options a check entry gives, under the names the file uses for them."""
+    fields = type(check).model_fields
     given = check.model_fields_set - COMMON_CHECK_FIELDS
-    if unused := sorted(given - CHECK_OPTIONS[check.type]):
+    return {fields[key].alias or key: getattr(check, key) for key in given}
+
+
+def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | None) -> ScorerVersion:
+    options = _options(check)
+    if unused := sorted(set(options) - CHECK_OPTIONS[check.type]):
         raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
         assert judge is not None  # the runner refuses a judge check without a judge
-        criterion = getattr(check, check.type)
+        criterion = getattr(check, check.type) if check.type in runner.CRITERIA_JUDGES else None
         return ScorerVersion(
             name=check.label,
             kind="llm_judge",
@@ -224,7 +277,7 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
             criteria={} if criterion is None else {check.type: criterion},
         )
     return ScorerVersion(
-        name=check.label, kind="check", type=check.type, parameters={key: getattr(check, key) for key in sorted(given)}
+        name=check.label, kind="check", type=check.type, parameters={key: options[key] for key in sorted(options)}
     )
 
 
@@ -387,6 +440,8 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
     if scorer.kind == "llm_judge":
         if scorer.type not in runner.JUDGES:
             raise ConfigError(f"{where}: a suite file's LLM judges are {', '.join(runner.JUDGES)}")
+        if scorer.type in runner.GROUNDING_JUDGES and scorer.criteria:
+            raise ConfigError(f"{where}: {scorer.type} judges have no criteria")
         if set(scorer.criteria) - {scorer.type}:
             raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {scorer.type} only")
         options = dict(scorer.criteria)
