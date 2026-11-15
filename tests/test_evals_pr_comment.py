@@ -69,15 +69,62 @@ def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_pat
     assert "wrote no results (exit code 2)" in body and "old" not in body
 
 
+def test_a_repeated_run_says_how_often_each_case_ran_each_checks_rule_and_its_reliability(tmp_path):
+    counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
+    summary = {
+        "cases": 2,
+        **counts,
+        "groups": None,
+        "repeats": {
+            "attempts": 5,
+            "combine": "any",
+            "checks": {
+                "no_leak": {"combine": "all", "from": "security"},
+                "polite": {"combine": "any", "from": "suite"},
+            },
+        },
+        "checks": {"no_leak": counts, "polite": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+        "reliability": {**counts, "pass_rate": 0.0, "confidence_95": [0.0, 0.66], "flaky": ["key", "hint"]},
+    }
+    body = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE)
+    assert (
+        "Each case ran 5 times, and the counts are of cases: each check's attempts combine by its rule, "
+        "`all` for `no_leak`; `any` for `polite`."
+    ) in body
+    # The share of cases that passed every attempt, under the pass rate, and the flaky cases.
+    rows = body.splitlines()
+    assert rows[rows.index("| **All checks** | 0 | 2 | 0 | 0% (0–66%) |") + 1] == (
+        "| **Reliability** (every attempt) | 0 | 2 | 0 | 0% (0–66%) |"
+    )
+    assert (
+        "Reliability counts the cases that passed every attempt. Flaky cases, whose verdict changed "
+        "between attempts: `key`, `hint`."
+    ) in body
+    calm = {**summary, "reliability": {**summary["reliability"], "flaky": []}}
+    assert "No flaky cases: no case's verdict changed between attempts." in comment.render(
+        comment.Outcome(1, calm), suite=SUITE, key=SUITE
+    )
+    plain = comment.render(
+        comment.Outcome(1, {**summary, "repeats": None, "reliability": None}), suite=SUITE, key=SUITE
+    )
+    assert "Each case ran" not in plain and "Reliability" not in plain and "Flaky" not in plain
+
+
 def test_a_policy_suite_says_how_many_benign_cases_were_refused_under_the_headline():
     from martian.evals.runner import false_refusal_line
 
     checks = {
-        "no_secrets": {"passed": 4, "failed": 0, "errors": 0},
-        "no_refusal": {"passed": 3, "failed": 1, "errors": 0},
+        "no_secrets": {"passed": 4, "failed": 0, "errors": 0, "pass_rate": 1.0, "confidence_95": [0.51, 1.0]},
+        "no_refusal": {"passed": 3, "failed": 1, "errors": 0, "pass_rate": 0.75, "confidence_95": [0.3, 0.95]},
     }
     measured = {"checks": ["no_refusal"], "benign": 3, "refused": 1, "errors": 0, "rate": 0.3333}
-    summary = {"cases": 4, "passed": 3, "failed": 1, "errors": 0, "checks": checks, "false_refusals": measured}
+    summary = {
+        "cases": 4,
+        **checks["no_refusal"],
+        "groups": None,
+        "checks": checks,
+        "false_refusals": measured,
+    }
     lines = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE).splitlines()
     assert lines[3:7] == [
         f"Suite {comment.code(SUITE, 120, cell=False)}: 4 cases, 3 passed, 1 failed, 0 errors.",
@@ -92,6 +139,33 @@ def test_a_policy_suite_says_how_many_benign_cases_were_refused_under_the_headli
     # A suite with no policy check has no false_refusals, and its comment no line for them.
     without = {key: item for key, item in summary.items() if key != "false_refusals"}
     assert "False refusals" not in comment.render(comment.Outcome(1, without), suite=SUITE, key=SUITE)
+
+
+def test_a_repeated_policy_suite_shows_its_false_refusals_and_its_reliability():
+    counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
+    summary = {
+        "cases": 2,
+        **counts,
+        "groups": None,
+        "repeats": {
+            "attempts": 5,
+            "combine": "any",
+            "checks": {
+                "no_secrets": {"combine": "all", "from": "security"},
+                "no_refusal": {"combine": "any", "from": "suite"},
+            },
+        },
+        "checks": {"no_secrets": counts, "no_refusal": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+        "false_refusals": {"checks": ["no_refusal"], "benign": 2, "refused": 0, "errors": 0, "rate": 0.0},
+        "reliability": {**counts, "flaky": []},
+    }
+    lines = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE).splitlines()
+    # The false-refusal line under the headline, and the reliability row under the pass rate.
+    assert lines[5:7] == ["False refusals: 0 of 2 benign cases refused (0.0%).", ""]
+    assert lines[lines.index("| **All checks** | 0 | 2 | 0 | 0% (0–66%) |") + 1] == (
+        "| **Reliability** (every attempt) | 0 | 2 | 0 | 0% (0–66%) |"
+    )
+    assert "`all` for `no_secrets`; `any` for `no_refusal`." in "\n".join(lines)
 
 
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():

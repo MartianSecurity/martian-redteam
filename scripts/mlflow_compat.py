@@ -28,7 +28,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # Every test module that runs MLflow itself: the store binding, the judge transport and the judges
-# built on it, the private-import guard, and the pytest kit and suite runner end to end.
+# built on it, the private-import guard, the pytest kit and suite runner end to end, and the
+# setting that turns MLflow's telemetry off.
 SUITE = (
     "tests/evals/test_mlflow_compat.py",
     "tests/evals/test_mlflow_private.py",
@@ -40,6 +41,7 @@ SUITE = (
     "tests/evals/test_grounding_judges.py",
     "tests/evals/test_plugin.py",
     "tests/evals/test_runner.py",
+    "tests/evals/test_no_outbound.py",
 )
 
 
