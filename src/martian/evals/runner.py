@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals import _numeric
 from martian.evals._json_schema import check_schema
 
 JUDGES = ("rubric", "guidelines", "conditions")
@@ -55,6 +56,10 @@ CHECKS = (
     "length",
     "latency",
     "cost",
+    "number_equals",
+    "sums_to",
+    "reconciles",
+    "table_equals",
 )
 # Checks that look for given text, from `values` or from each case's `expectation` key.
 TEXT_CHECKS = (
@@ -69,6 +74,8 @@ TEXT_CHECKS = (
 )
 # Checks that measure the target's call rather than its reply.
 CALL_CHECKS = ("latency", "cost")
+# Checks that read the reply's numbers and tables as exact decimals, within a tolerance.
+NUMERIC_CHECKS = ("number_equals", "sums_to", "reconciles", "table_equals")
 
 
 class _Model(BaseModel):
@@ -176,6 +183,10 @@ class CheckSpec(_Model):
         "length",
         "latency",
         "cost",
+        "number_equals",
+        "sums_to",
+        "reconciles",
+        "table_equals",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
@@ -197,6 +208,19 @@ class CheckSpec(_Model):
     max_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_tokens: int | None = Field(default=None, ge=1)
+    # Numeric and table checks. A figure stays as written, a number or text such as "1,234.56",
+    # so the file says the same when written again; CheckSpec.complete checks that it is one.
+    value: Any = None
+    path: str | None = None
+    abs_tolerance: Any = 0
+    rel_tolerance: Any = 0
+    parts: list[str] = Field(default_factory=list)
+    add: list[str] = Field(default_factory=list)
+    subtract: list[str] = Field(default_factory=list)
+    total: str | None = None
+    key: str | list[str] | None = None
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
@@ -219,7 +243,37 @@ class CheckSpec(_Model):
             raise ValueError("a latency check needs max_ms")
         if self.type == "cost" and self.max_usd is None and self.max_tokens is None:
             raise ValueError("a cost check needs max_usd, max_tokens or both")
+        if self.type in NUMERIC_CHECKS:
+            self._numeric_options()
         return self
+
+    def _numeric_options(self) -> Any:
+        """The options of a numeric or table check, read as the check reads them, so a bad one
+        is refused when the suite loads."""
+        tolerance = {"abs_tolerance": self.abs_tolerance, "rel_tolerance": self.rel_tolerance}
+        if self.type == "number_equals":
+            return _numeric.number_options(
+                value=self.value, expectation=self.expectation, path=self.path, pattern=self.pattern, **tolerance
+            )
+        if self.type == "table_equals":
+            return _numeric.table_options(
+                rows=self.rows,
+                expectation=self.expectation,
+                key=self.key,
+                columns=self.columns,
+                path=self.path,
+                case_sensitive=self.case_sensitive,
+                **tolerance,
+            )
+        sums = self.type == "sums_to"
+        return _numeric.balance_options(
+            check=self.type,
+            add_option="parts" if sums else "add",
+            add=self.parts if sums else self.add,
+            subtract=() if sums else self.subtract,
+            total=self.total,
+            **tolerance,
+        )
 
     @property
     def label(self) -> str:
@@ -545,6 +599,29 @@ def _build_check(check: CheckSpec) -> Any:
             return deterministic.latency(max_ms=check.max_ms, name=name)
         case "cost":
             return deterministic.cost(max_usd=check.max_usd, max_tokens=check.max_tokens, name=name)
+    numbers: dict[str, Any] = {"abs_tolerance": check.abs_tolerance, "rel_tolerance": check.rel_tolerance, "name": name}
+    match check.type:
+        case "number_equals":
+            return deterministic.number_equals(
+                check.value, expectation=check.expectation, path=check.path, pattern=check.pattern, **numbers
+            )
+        case "sums_to":
+            assert check.total is not None
+            return deterministic.sums_to(parts=check.parts, total=check.total, **numbers)
+        case "reconciles":
+            assert check.total is not None
+            return deterministic.reconciles(add=check.add, subtract=check.subtract, total=check.total, **numbers)
+        case "table_equals":
+            assert check.key is not None
+            return deterministic.table_equals(
+                check.rows,
+                key=check.key,
+                expectation=check.expectation,
+                columns=check.columns,
+                path=check.path,
+                case_sensitive=check.case_sensitive,
+                **numbers,
+            )
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 

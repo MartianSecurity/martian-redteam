@@ -80,7 +80,7 @@ and its data give them again on the next load.
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds` |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`). `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
 | `judge.max_retries`, `judge.rate_limit_wait_seconds` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds` |
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
@@ -98,7 +98,9 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
 - a field of a JSONL case that the runner does not read, or both `input` and `inputs` (or
   `output` and `outputs`) in one case;
 - anything `martian evals run` refuses, such as an unknown field, a `json_schema` keyword the
-  check cannot apply, or a `latency` or `cost` check with no target to measure
+  check cannot apply, a `latency` or `cost` check with no target to measure, or a numeric or
+  table option the check cannot read, such as a `value` that is not a number, a `rel_tolerance`
+  of 1 or more, a path with an empty step, or `rows` with two rows of one key
   ([deterministic checks](evals.md#deterministic-checks)).
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
