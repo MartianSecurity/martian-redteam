@@ -144,6 +144,16 @@ def _check_url(url: str) -> None:
         raise ValueError("target.url must not contain credentials; send them in target.headers")
 
 
+def _response_steps(path: str | None, setting: str) -> list[str]:
+    """The steps of a ``response_path``. A step of digits indexes a list, so its digits must be
+    0-9: one with other digits, such as ``²``, is a ``ValueError`` that names ``setting``."""
+    steps = [part for part in (path or "").split(".") if part]
+    for position, step in enumerate(steps, 1):
+        if step.isdigit() and not step.isascii():
+            raise ValueError(f"{setting} indexes lists with the digits 0-9 only; step {position} uses other digits")
+    return steps
+
+
 class TargetRef(_Model):
     """The thing under test: a Python function in a file, or an HTTP endpoint that takes a JSON POST."""
 
@@ -169,6 +179,7 @@ class TargetRef(_Model):
             raise ValueError("function only applies to a file target")
         if not _ENV_REFERENCE.search(self.url or ""):  # otherwise checked once the variables are read
             _check_url(self.url or "")
+        _response_steps(self.response_path, "target.response_path")
         if not self.body:
             raise ValueError("a url target needs a body, with {{input}} where the case's input goes")
         names = _placeholders(self.body)
@@ -561,7 +572,7 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
     for step in steps:
         if isinstance(reply, dict) and step in reply:
             reply = reply[step]
-        elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
+        elif isinstance(reply, list) and step.isascii() and step.isdigit() and int(step) < len(reply):
             reply = reply[int(step)]
         else:
             raise TargetCallError("the target's response has no value at response_path")
@@ -584,7 +595,7 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     except ValueError as error:
         raise ConfigError(str(error)) from None
     headers = {name: _from_environment(value, f"target.headers.{name}") for name, value in reference.headers.items()}
-    steps = [part for part in (reference.response_path or "").split(".") if part]
+    steps = _response_steps(reference.response_path, "target.response_path")
 
     def send(inputs: dict[str, Any]) -> Any:
         body = _fill(reference.body, _case_values(inputs, input_key))

@@ -468,7 +468,11 @@ no registered agent, so an install with no martian-agents service runs functions
   target.url`, `HTTP 400` or `422; check target.body`. So are an unreachable endpoint (`the target
   could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
   These errors never repeat the address, a header or the response. A call that outlasts the
-  worker's `target_timeout_seconds` is `item timed out`.
+  worker's `target_timeout_seconds` is `item timed out`. A `response_path` step of digits other
+  than 0-9, such as `²`, is refused as in a suite file, with a `ValueError` naming
+  `targets['ID'].response_path`. Both workers refuse it each time a check or a run names the
+  target, so a launch of it fails before any run is made, and one wrong target never stops the
+  others.
 - **Credentials.** `${NAME}` in an HTTP target's `url` or a header value is filled in by the
   worker's `Credentials`, a function `(principal, target_id, name) -> str | None` asked in the
   process that calls the target, each time it calls it. Neither the launch request nor a record
@@ -600,10 +604,20 @@ scoring job's id as `campaign_id`. `connection(principal)` returns an `AgentsCon
 approved HTTP target, the `authorization_ref`, and the headers that authenticate the worker
 (`X-API-Key`, or a bearer token). The reply is checked as the server checks it: exactly the
 requested scores, each of its judge's type, a model name, and revision `martian-eval-judge-v1`
-(`v2` with registered judges). Agents judges on the model its operator configured and reports it
-as `bedrock/<model>` with no version, so a request pinned to a model or an endpoint is refused
-before any call ("The Agents judge runs on its operator's model; this judge is pinned to ...").
-An installation on the Agents judge leaves the default judge model unset. It uses the route's
+(`v2` with registered judges).
+
+A request pinned to a model sends it as `model`, named as Agents names models: the judge's
+`bedrock:/zai.glm-5` is `bedrock/zai.glm-5`. Agents grades on it only when its operator lists it
+in `EVALS_JUDGE_MODELS` (the default `MODEL` is always allowed), and otherwise refuses it before
+any model call; each score of the request then says "Agents does not allow the judge model
+bedrock:/...; its operator lists the models it allows in EVALS_JUDGE_MODELS". A request with no
+model sends none, and Agents grades on its operator's `MODEL`. Agents reports the model that
+graded, with no version, and the score records it as an MLflow model URI (`bedrock:/zai.glm-5`),
+so a judge's own model, the default judge model and Agents' model are recorded alike, and a reply
+from another model than the request names is an error on its scores ([judge
+models](#judge-models)). A request pinned to an endpoint is refused before any call ("The Agents
+judge calls its models itself, not at an endpoint; ..."). An installation on the Agents judge
+sets judge models and the default judge model only to models Agents allows. It uses the route's
 static authorization; the per-case target lease the Martian server sends
 (`X-Martian-Target-Lease` with an `action_id`) is not part of it, and a server that needs it
 supplies its own `Judge` when it mounts the core (MorningHQ/martian-notes#102). It is separate
@@ -622,8 +636,9 @@ with a reason in `JudgeResult.errors` gets that reason.
 `tests/evals/test_worker_judges.py` scores a run through the routes with the SDK judge against a
 loopback OpenAI-compatible endpoint (the rubrics, the context, one call per case, the reported
 version, a numeric judge's error, a wrong key, an unreachable endpoint, no model at all), and with
-the Agents judge against a loopback judge route (the request body, the checks on the reply, a
-pinned model, Agents' failures).
+the Agents judge against a loopback judge route (the request body, the checks on the reply, each
+judge's allowed model recorded on its scores, a model Agents refuses, an endpoint, Agents'
+failures).
 
 ## Judge models
 
@@ -638,10 +653,10 @@ Each judge runs on a model of its own, or on the default judge model when it nam
   for the principal's organisation; `PUT /judge-model` sets it (`manageJudges`), and `{}` clears
   it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
   included. With none set, the worker's judge uses its own model. `selectable` says whether the
-  installation runs a judge on the model it names: always `true` here, where the worker's judge is
-  `sdk_judge`; the Martian server answers `false`, because its judges run in Agents on the
-  operator's model (`docs/evals-workbench.md` in MorningHQ/MartianBackend), as they do with
-  `agents_judge` ([the worker's judge](#the-workers-judge)). Where the default lives is the
+  installation runs a judge on the model it names: always `true` from the core's own routes. The
+  Martian server answers `false` (`docs/evals-workbench.md` in MorningHQ/MartianBackend); its
+  judges run in Agents, which grades on a judge's model only when Agents' operator allows it, as
+  with `agents_judge` ([the worker's judge](#the-workers-judge)). Where the default lives is the
   edition's `JudgeSettings`:
   `FileJudgeSettings` keeps the local edition's in `settings.json` in its data folder, since the
   local edition has no organisation; `MemoryJudgeSettings` keeps each organisation's in memory, for
