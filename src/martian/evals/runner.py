@@ -11,8 +11,10 @@ local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped
 a finished case is skipped while nothing that produced its verdict has changed. A suite can run each
 case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`).
 A case can be a conversation of several user turns, sent in order to a target that keeps the
-conversation and graded per turn and as a whole (:mod:`martian.evals.conversations`). Use
-``martian ci`` when a result must be recorded on the platform.
+conversation and graded per turn and as a whole (:mod:`martian.evals.conversations`), and its
+user can be simulated: a model plays a goal and a persona, writing each turn from the conversation
+so far (:mod:`martian.evals.simulation`). Use ``martian ci`` when a result must be recorded on the
+platform.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
@@ -58,8 +61,9 @@ from martian.evals.conversations import (
     user,
     user_text,
 )
-from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, Turn
+from martian.evals.model import MAX_ATTEMPTS, MAX_TURNS, CheckScope, CombineRule, SimulatedUser, Turn
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability, representative
+from martian.evals.simulation import GOAL, SIMULATOR_VERSION, SimulatedUsers, Step, goal_verdict
 from martian.evals.stats import proportion_interval
 
 GROUP_TAG = "martian.group"
@@ -385,6 +389,9 @@ class Suite(_Model):
     # not a security check (martian.evals.repeats).
     repeats: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
     combine: CombineRule = "all"
+    # The model that plays the data's simulated users (martian.evals.simulation), with the judge's
+    # settings.
+    simulator: JudgeConfig | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -450,7 +457,9 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     ``id``, ``outputs``/``output``, ``expectations`` and ``group`` (a string naming the group of
     related cases it belongs to, which the summary's intervals allow for). A conversation case has
     ``turns`` instead of ``inputs``: a list of turns, each with ``inputs`` or ``input`` and optional
-    ``expectations`` and ``checks`` (the names of the turn checks that grade it).
+    ``expectations`` and ``checks`` (the names of the turn checks that grade it). A simulated
+    conversation case has ``simulated_user`` instead: an object with ``goal``, ``persona``,
+    ``max_turns`` and ``stop_when``.
     CSV: columns ``input``, optional ``id`` and ``output``; every other non-empty column becomes
     an expectation of that name.
     """
@@ -483,11 +492,12 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     seen: set[str] = set()
     for position, record in enumerate(records, 1):
         identifier = str(record.get("id") or position)
+        simulated = _simulated_user(record, identifier) if "simulated_user" in record else None
         turns = _turns(record, identifier, input_key) if "turns" in record else None
         inputs = record.get("inputs")
         if inputs is None and isinstance(record.get("input"), str):
             inputs = {input_key: record["input"]}
-        if turns is not None:
+        if turns is not None or simulated is not None:
             inputs = {}
         elif not isinstance(inputs, dict) or not inputs:
             raise ConfigError(f"case {position} needs `inputs` (an object) or `input` (a string)")
@@ -500,6 +510,8 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
         case: dict[str, Any] = {"id": identifier, "inputs": inputs, "expectations": dict(expectations)}
         if turns is not None:
             case["turns"] = turns
+        if simulated is not None:
+            case["simulated_user"] = simulated
         if "group" in record:
             if not isinstance(record["group"], str) or not record["group"].strip():
                 raise ConfigError(f"case {identifier}: `group` must be a non-empty string")
@@ -551,6 +563,36 @@ def _turns(record: dict[str, Any], identifier: str, input_key: str) -> list[dict
             found["checks"] = list(checks)
         turns.append(found)
     return turns
+
+
+SIMULATED_USER_FIELDS = ("goal", "persona", "max_turns", "stop_when")
+"""The fields of a case's ``simulated_user``, every one required."""
+
+
+def _simulated_user(record: dict[str, Any], identifier: str) -> dict[str, Any]:
+    """A simulated conversation case's user: its goal, persona, turn budget and stop condition."""
+    where = f"case {identifier}: simulated_user"
+    given = record["simulated_user"]
+    if not isinstance(given, dict):
+        raise ConfigError(f"{where} must be an object with {', '.join(SIMULATED_USER_FIELDS)}")
+    if unknown := sorted(set(given) - set(SIMULATED_USER_FIELDS)):
+        raise ConfigError(
+            f"{where} has no field {', '.join(unknown)}; its fields are {', '.join(SIMULATED_USER_FIELDS)}"
+        )
+    for given_too in ("turns", "input", "inputs"):
+        if given_too in record:
+            raise ConfigError(
+                f"case {identifier}: a simulated user writes the conversation's turns; remove {given_too}"
+            )
+    if {"output", "outputs"} & set(record):
+        raise ConfigError(f"case {identifier}: a conversation runs against a target, so it has no stored output")
+    for name in ("goal", "persona", "stop_when"):
+        if not isinstance(given.get(name), str) or not given[name].strip():
+            raise ConfigError(f"{where}.{name} must be a nonempty string")
+    budget = given.get("max_turns")
+    if type(budget) is not int or not 1 <= budget <= MAX_TURNS:
+        raise ConfigError(f"{where}.max_turns must be a whole number of turns from 1 to {MAX_TURNS}")
+    return {name: given[name] for name in SIMULATED_USER_FIELDS}
 
 
 def _expand(text: str, setting: str, value_of: Callable[[str], str | None], source: str) -> str:
@@ -991,9 +1033,12 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
     return _digest(definition)
 
 
-def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any]) -> str:
+def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any], suite: Suite | None = None) -> str:
     """What a case's verdict depends on besides the suite: its inputs, expectations and stored
-    output, and a conversation's turns."""
+    output, and a conversation's turns. A simulated conversation's depends on its simulated user
+    and the suite's simulator too: the simulator's model and inference parameters and, with
+    repeats, the suite's rule its goal's attempts combine by. A case without a simulated user
+    keeps its fingerprint when a simulator is added."""
     found = {
         "suite": suite_fingerprint,
         "inputs": case["inputs"],
@@ -1002,6 +1047,15 @@ def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any]) -> str:
     }
     if "turns" in case:
         found["turns"] = case["turns"]
+    if "simulated_user" in case:
+        assert suite is not None and suite.simulator is not None  # the suite file loader refuses otherwise
+        found["simulated_user"] = case["simulated_user"]
+        found["simulator"] = {
+            "model": suite.simulator.model,
+            "inference_params": suite.simulator.inference_params,
+            "version": SIMULATOR_VERSION,
+            "combine": suite.combine if suite.repeats > 1 else None,
+        }
     return _digest(found)
 
 
@@ -1130,6 +1184,7 @@ def _summary(
     repeats: dict[str, Any] | None = None,
     false_refusals: dict[str, Any] | None = None,
     scopes: dict[str, CheckScope] | None = None,
+    simulator: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The run's counts and pass rates. A record is one case: with repeats its verdicts are its
     attempts combined, so the pass rates and their intervals count cases, never attempts. With
@@ -1144,7 +1199,10 @@ def _summary(
     scope, given when the run has conversation cases) adds ``conversations``: the conversation
     cases' counts and their turns' counts, over attempts with repeats, each check's ``scope``, and
     a turn check's own ``turns`` counts. A check's counts leave out the conversations it grades
-    nothing in, and a check that gave a turn no verdict is counted under that turn's reason."""
+    nothing in, and a check that gave a turn no verdict is counted under that turn's reason.
+    ``simulator`` (the simulator's model and version, given when the run has simulated users) adds
+    ``simulator``: that model, its version and how many cases' users it played; the goal verdict
+    (:data:`martian.evals.simulation.GOAL`) is then among ``labels``, a conversation check."""
     repeated = repeats is not None
     units = [attempt for r in records for attempt in r["attempts"]] if repeated else records
     turns = [turn for unit in units for turn in unit.get("turns", [])]
@@ -1203,6 +1261,8 @@ def _summary(
             **_counts(talks),
             "turns": {"total": len(turns), **_counts([turn["passed"] for turn in turns])},
         }
+    if simulator is not None:
+        summary["simulator"] = {**simulator, "cases": sum(r.get("simulated") is True for r in records)}
     return summary | {
         "checks": per_check,
         **({} if false_refusals is None else {"false_refusals": false_refusals}),
@@ -1268,6 +1328,28 @@ def _no_reason() -> str | None:
     return None
 
 
+def _build_simulator(suite: Suite) -> SimulatedUsers:
+    """The suite's simulator, its headers read from the environment as the judge's are."""
+    assert suite.simulator is not None  # the suite file loader refuses a simulated user without one
+    config = suite.simulator
+    headers = {name: _from_environment(value, f"simulator.headers.{name}") for name, value in config.headers.items()}
+    try:
+        return SimulatedUsers(
+            model=config.model,
+            inference_params=dict(config.inference_params),
+            max_retries=config.max_retries,
+            rate_limit_wait_seconds=config.rate_limit_wait_seconds,
+            headers=headers,
+        )
+    except ValueError as error:
+        raise ConfigError(f"simulator: {error}") from None
+
+
+def _conversation(case: dict[str, Any]) -> bool:
+    """Whether a case is a conversation: scripted turns, or a simulated user."""
+    return "turns" in case or "simulated_user" in case
+
+
 def _turn_row(turn: Turn) -> dict[str, Any]:
     """A conversation turn as the runner reads it: its inputs, expectations and listed checks."""
     row: dict[str, Any] = {"inputs": dict(turn.inputs), "expectations": dict(turn.expectations)}
@@ -1301,7 +1383,10 @@ def run_suite(
     A conversation case is one case: ``limit`` counts it once, and each of its attempts is a whole
     conversation of its own. Its turns are sent in order, every conversation of a batch at turn
     one before any at turn two, and each turn is graded by the turn checks it names; the
-    conversation checks then grade the replies (:mod:`martian.evals.conversations`).
+    conversation checks then grade the replies (:mod:`martian.evals.conversations`). A simulated
+    conversation's turns are written by the suite's simulator as it goes, each graded by every turn
+    check against the case's expectations, and its goal verdict sits beside the conversation
+    checks' (:mod:`martian.evals.simulation`); its record is marked ``simulated``.
     """
     from martian.evals.local import data_folder
     from martian.evals.model import suite_digest
@@ -1327,6 +1412,7 @@ def run_suite(
             "expectations": dict(case.expectations),
             **({} if case.outputs is None else {"outputs": case.outputs}),
             **({"turns": [_turn_row(turn) for turn in case.turns]} if case.turns else {}),
+            **({"simulated_user": case.simulated_user.model_dump()} if case.simulated_user else {}),
         }
         for case in model_cases
     ]
@@ -1346,19 +1432,29 @@ def run_suite(
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
     turn_labels = [label for label in labels if scopes[label] == "turn"]
     whole_labels = [label for label in labels if scopes[label] == "conversation"]
-    talking = any("turns" in case for case in cases)
+    talking = any(_conversation(case) for case in cases)
     turn_target: Callable[..., Any] | None = None
     turn_reasons: dict[str, str] = {}
     if talking:
         assert suite.target is not None and target is not None  # the suite file loader refuses otherwise
         turn_target, turn_reasons = _conversation_target(suite.target, target)
+    # A simulated conversation's goal verdict is a conversation-level result beside its checks',
+    # combined over attempts by the suite's rule. Only conversations have one.
+    simulator = _build_simulator(suite) if any("simulated_user" in case for case in cases) else None
+    graded_labels = [*labels, GOAL] if simulator is not None else labels
+    talk_rules = dict(rules)
+    if simulator is not None:
+        scopes[GOAL] = "conversation"
+        repeat_plan["checks"][GOAL] = {"combine": suite.combine, "from": "suite"}
+        talk_rules[GOAL] = suite.combine
+    workers = concurrency or suite.concurrency
 
     folder = Path(output) if output is not None else base / suite.output
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
     with RunRecorder(data_folder(home), model) as recorder:
         results = Results(folder, resume=resume)
         suite_print = _suite_fingerprint(suite, base)
-        prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
+        prints = {case["id"]: _case_fingerprint(suite_print, case, suite) for case in cases}
         positions = {case["id"]: position for position, case in enumerate(cases)}
         # An earlier verdict is reused only when it was produced by exactly this suite and case.
         finished = {i: r for i, r in results.records().items() if r["passed"] is not None and i in prints}
@@ -1369,8 +1465,11 @@ def run_suite(
         each = f" of {suite.repeats} attempts each" if repeated else ""
         message = f"{len(cases)} cases{each}, {len(cases) - len(todo)} already done"
         if talking:
-            talk_count = sum("turns" in case for case in cases)
+            talk_count = sum(_conversation(case) for case in cases)
             message += f"; {talk_count} {'is a conversation' if talk_count == 1 else 'are conversations'}"
+        if simulator is not None:
+            played = sum("simulated_user" in case for case in cases)
+            message += f", {played} with a simulated user played by {simulator.model}"
         if invalidated:
             plural = "result" if invalidated == 1 else "results"
             message += f", {invalidated} earlier {plural} discarded because the suite, the data or the target changed"
@@ -1400,7 +1499,12 @@ def run_suite(
                     tuple(trace if isinstance(trace, str) else None for trace in attempt)
                     for attempt in turn_traces or []
                 ),
-                turn_expectations=tuple(turn["expectations"] for turn in case.get("turns", [])),
+                # A simulated turn's expectations are its case's.
+                turn_expectations=tuple(turn["expectations"] for turn in case["turns"])
+                if "turns" in case
+                else (dict(case["expectations"]),) * case["simulated_user"]["max_turns"]
+                if "simulated_user" in case
+                else (),
             )
 
         def outcome(frame: Any, position: int, checked: list[str], why: Callable[[], str | None]) -> dict[str, Any]:
@@ -1453,11 +1557,15 @@ def run_suite(
         def converse(talks: list[dict[str, Any]]) -> dict[tuple[str, int], tuple[dict[str, Any], list[Any]]]:
             """Every attempt of each conversation case: its record and its turns' traces, by case id
             and attempt number. Turn ``n`` of every conversation runs, in one evaluation per set of
-            turn checks, before any turn ``n + 1``; a conversation whose turn did not complete stops."""
+            turn checks, before any turn ``n + 1``; a conversation whose turn did not complete stops.
+            A simulated user writes its turn ``n`` first, every one at once, and stops when it says
+            so or when its budget is spent; then it says whether it reached its goal."""
             assert turn_target is not None
             by_id = {case["id"]: case for case in talks}
             # Each attempt's conversation: its session id, the messages so far, the turns sent with
-            # their traces, and the number of the turn that did not complete, if one did not.
+            # their traces, and the number of the turn that did not complete, if one did not. A
+            # simulated conversation also has the turn its user wrote next, the simulator's reply
+            # that ended it, and why a turn or the goal verdict could not be had.
             states: dict[tuple[str, int], dict[str, Any]] = {
                 (case["id"], number): {
                     "session_id": str(uuid.uuid4()),
@@ -1465,27 +1573,82 @@ def run_suite(
                     "turns": [],
                     "traces": [],
                     "broken": None,
+                    "next": None,
+                    "ended": None,
+                    "error": None,
+                    "goal_error": None,
                 }
                 for case in talks
                 for number in numbers
             }
-            for index in range(max(len(case["turns"]) for case in talks)):
+
+            def budget(case: dict[str, Any]) -> int:
+                """The most turns a conversation sends: its turns, or its simulated user's budget."""
+                return case["simulated_user"]["max_turns"] if "simulated_user" in case else len(case["turns"])
+
+            def live(key: tuple[str, int]) -> bool:
+                """Whether a conversation goes on: no turn failed, and its simulated user has not ended it."""
+                state = states[key]
+                return state["broken"] is None and state["ended"] is None
+
+            def simulated(final: bool) -> list[tuple[tuple[str, int], Step | str]]:
+                """Each simulated conversation still talking that has sent fewer turns than its budget
+                (or, ``final``, all of them), and its user's reply or why there is none."""
+                assert simulator is not None
+                asked = [
+                    key
+                    for key in states
+                    if "simulated_user" in by_id[key[0]]
+                    and live(key)
+                    and (final or len(states[key]["turns"]) < budget(by_id[key[0]]))
+                ]
+
+                def ask(key: tuple[str, int]) -> Step | str:
+                    user = SimulatedUser(**by_id[key[0]]["simulated_user"])
+                    try:
+                        return simulator.step(user, states[key]["history"], final=final)
+                    except ValueError as error:  # the SDK's own message, naming the setting to check
+                        return str(error)
+
+                if not asked:
+                    return []
+                with ThreadPoolExecutor(max_workers=min(workers, len(asked))) as pool:
+                    return list(zip(asked, pool.map(ask, asked), strict=True))
+
+            def turn_at(key: tuple[str, int], index: int) -> dict[str, Any]:
+                case = by_id[key[0]]
+                found: dict[str, Any] = states[key]["next"] if "simulated_user" in case else case["turns"][index]
+                return found
+
+            for index in range(max(budget(case) for case in talks)):
+                for key, step in simulated(final=False) if simulator is not None else []:
+                    state = states[key]
+                    if isinstance(step, str):
+                        state["broken"], state["error"] = index + 1, step
+                    elif step.done:
+                        state["ended"] = step
+                    else:
+                        case = by_id[key[0]]
+                        state["next"] = {
+                            "inputs": {suite.input_key: step.message},
+                            "expectations": case["expectations"],
+                        }
                 groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
                 for case in talks:
-                    if index >= len(case["turns"]):
+                    if index >= budget(case):
                         continue
-                    turn = case["turns"][index]
-                    checked = tuple(turn_checks(turn.get("checks"), turn_labels))
                     for number in numbers:
-                        state = states[(case["id"], number)]
-                        if state["broken"] is not None:
+                        key = (case["id"], number)
+                        if not live(key):
                             continue
+                        turn = turn_at(key, index)
+                        checked = tuple(turn_checks(turn.get("checks"), turn_labels))
                         groups.setdefault(checked, []).append(
                             {
                                 "inputs": {
                                     **turn["inputs"],
-                                    SESSION_ID: state["session_id"],
-                                    HISTORY: list(state["history"]),
+                                    SESSION_ID: states[key]["session_id"],
+                                    HISTORY: list(states[key]["history"]),
                                 },
                                 "expectations": _with_suite_criteria(turn, suite),
                                 "tags": {"martian_case_id": case["id"], "martian_attempt": str(number)},
@@ -1499,7 +1662,7 @@ def run_suite(
                     for position in range(len(frame)):
                         tags = frame["tags"].iloc[position] or {}
                         key = (str(tags.get("martian_case_id")), int(tags.get("martian_attempt", 1)))
-                        state, turn = states[key], by_id[key[0]]["turns"][index]
+                        state, turn = states[key], turn_at(key, index)
                         why = partial(turn_reasons.pop, state["session_id"], None)
                         found = outcome(frame, position, list(checked), why)
                         state["turns"].append({"number": index + 1, "inputs": turn["inputs"], **found})
@@ -1514,7 +1677,7 @@ def run_suite(
                         key = (row["tags"]["martian_case_id"], int(row["tags"]["martian_attempt"]))
                         if key in answered:
                             continue
-                        state, turn = states[key], by_id[key[0]]["turns"][index]
+                        state, turn = states[key], turn_at(key, index)
                         missing = {"passed": None, "rationale": None, "error": "no result was recorded for this turn"}
                         state["turns"].append(
                             {
@@ -1528,6 +1691,13 @@ def run_suite(
                         )
                         state["traces"].append(None)
                         state["broken"] = index + 1
+            # A simulated user whose budget is spent says whether it reached its goal. Without that
+            # verdict the goal has none, and the conversation's checks keep theirs.
+            for key, step in simulated(final=True) if simulator is not None else []:
+                if isinstance(step, str):
+                    states[key]["goal_error"] = step
+                else:
+                    states[key]["ended"] = step
             # The conversation checks grade each finished conversation's replies at once.
             wholes: dict[tuple[str, int], dict[str, Any]] = {}
             data = [
@@ -1549,15 +1719,25 @@ def run_suite(
             out: dict[tuple[str, int], tuple[dict[str, Any], list[Any]]] = {}
             for key, state in states.items():
                 case = by_id[key[0]]
-                graded_by = graded_turns([turn.get("checks") for turn in case["turns"]], turn_labels)
+                conversation = {label: wholes.get(key, {}).get(label) for label in whole_labels}
+                if "simulated_user" in case:
+                    # Every turn check grades every simulated turn; a conversation that broke before
+                    # any turn is graded by none, as its first turn did not complete.
+                    graded_by = graded_turns([None] * max(1, len(state["turns"])), turn_labels)
+                    conversation[GOAL] = goal_verdict(
+                        state["ended"], sent=len(state["turns"]), budget=budget(case), error=state["goal_error"]
+                    )
+                else:
+                    graded_by = graded_turns([turn.get("checks") for turn in case["turns"]], turn_labels)
                 record = conversation_record(
                     state["turns"],
-                    labels=labels,
+                    labels=graded_labels if "simulated_user" in case else labels,
                     graded=graded_by,
-                    conversation={label: wholes.get(key, {}).get(label) for label in whole_labels},
+                    conversation=conversation,
                     session_id=state["session_id"],
                     messages=state["history"],
                     broken=state["broken"],
+                    error=state["error"],
                 )
                 out[key] = (record, state["traces"])
             return out
@@ -1568,7 +1748,9 @@ def run_suite(
             limit=limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
             repeats=repeat_plan if repeated else None,
-            conversations=sum("turns" in case for case in cases),
+            # Scripted and simulated alike: the Evals UI reads the turns route of a run with any.
+            conversations=sum(_conversation(case) for case in cases),
+            simulator=None if simulator is None else simulator.definition,
         )
         # Leave MLflow as it was found: another evaluation in this process must not inherit this
         # run's store, experiment or worker settings.
@@ -1584,7 +1766,7 @@ def run_suite(
             mlflow.set_experiment(suite.mlflow.experiment or Path(path).stem)
             for start in range(0, len(todo), suite.batch):
                 batch = todo[start : start + suite.batch]
-                singles = [case for case in batch if "turns" not in case]
+                singles = [case for case in batch if not _conversation(case)]
                 rows: dict[tuple[str, int], tuple[dict[str, Any], Any]] = {}
                 if singles:
                     data = []
@@ -1616,11 +1798,11 @@ def run_suite(
                             outcome(frame, position, labels, why),
                             trace,
                         )
-                talks = [case for case in batch if "turns" in case]
+                talks = [case for case in batch if _conversation(case)]
                 talked = converse(talks) if talks else {}
                 recorded: list[GradedCase] = []
                 for case in batch:
-                    if "turns" in case:
+                    if _conversation(case):
                         conversations = [talked[(case["id"], number)] for number in numbers]
                         attempts = [
                             {"number": number, **found}
@@ -1629,7 +1811,7 @@ def run_suite(
                         result = conversations[0][0]
                         if repeated:
                             # A check that grades nothing in this case has no verdict to combine.
-                            used = {label: rule for label, rule in rules.items() if label in attempts[0]["checks"]}
+                            used = {label: rule for label, rule in talk_rules.items() if label in attempts[0]["checks"]}
                             result = combine_attempts(attempts, used)
                             chosen = attempts[representative([a["passed"] for a in attempts], result["passed"])]
                             result |= {"session_id": chosen["session_id"], "turns": chosen["turns"]}
@@ -1643,6 +1825,8 @@ def run_suite(
                             "error": result["error"],
                             "fingerprint": prints[case["id"]],
                         }
+                        if "simulated_user" in case:
+                            record["simulated"] = True
                         if repeated:
                             record["attempts"] = attempts
                         results.append(record)
@@ -1686,13 +1870,14 @@ def run_suite(
         )
         summary = _summary(
             ordered,
-            labels,
+            graded_labels,
             time.monotonic() - started,
             invalidated,
             groups,
             repeat_plan if repeated else None,
             refusals,
             scopes if talking else None,
+            None if simulator is None else {"model": simulator.model, "version": SIMULATOR_VERSION},
         )
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

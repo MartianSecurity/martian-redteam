@@ -29,7 +29,9 @@ checks:
 
 `target` can also name an HTTP endpoint (`url`, `headers`, `body`, `response_path`), so an agent
 behind an API needs no Python file. A case can be a conversation of several turns, sent in order
-to a target that keeps it and graded per turn and as a whole.
+to a target that keeps it and graded per turn and as a whole, and its user can be simulated: a
+model plays a goal and a persona, which `martian evals personas` can build from real
+conversations.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
 prints a summary table, can run each case several times, combine the attempts and report the
