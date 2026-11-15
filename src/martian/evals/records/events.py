@@ -29,6 +29,8 @@ EventKind = Literal[
     "monitor",
     "threshold",
     "schedule",
+    "calibration",
+    "recheck",
 ]
 
 
