@@ -105,7 +105,15 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
-- `pytest-asyncio` mode `auto`.
+- **No test touches the developer's `~/.martian`.** An autouse, session-scoped fixture in
+  `tests/conftest.py` points `HOME` and `MARTIAN_EVALS_HOME` at a temporary folder for the whole
+  session, so the local edition's default data folder (`~/.martian/evals`) and MLflow's
+  `~/.config` resolve there, and every subprocess a test starts inherits both. A test that needs
+  another home sets its own (`test_no_outbound.py` starts its processes in a clean environment
+  with a new `HOME`). At the end of the session the fixture fails the run if a test reached the
+  default data folder (the temporary home gained a `.martian`) or if the real `~/.martian` or
+  `~/.martian/evals` changed; it checks the real folders by `stat` only, never reads or lists
+  them, and never deletes anything.
 - The evals store contract (`tests/evals/store_contract.py`) runs on every store binding. The
   in-process `mlflow-skinny` binding runs it on SQLite always, and on Postgres when
   `MARTIAN_TEST_POSTGRES_URL` is set (for example
