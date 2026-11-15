@@ -69,6 +69,31 @@ def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_pat
     assert "wrote no results (exit code 2)" in body and "old" not in body
 
 
+def test_a_policy_suite_says_how_many_benign_cases_were_refused_under_the_headline():
+    from martian.evals.runner import false_refusal_line
+
+    checks = {
+        "no_secrets": {"passed": 4, "failed": 0, "errors": 0},
+        "no_refusal": {"passed": 3, "failed": 1, "errors": 0},
+    }
+    measured = {"checks": ["no_refusal"], "benign": 3, "refused": 1, "errors": 0, "rate": 0.3333}
+    summary = {"cases": 4, "passed": 3, "failed": 1, "errors": 0, "checks": checks, "false_refusals": measured}
+    lines = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE).splitlines()
+    assert lines[3:7] == [
+        f"Suite {comment.code(SUITE, 120, cell=False)}: 4 cases, 3 passed, 1 failed, 0 errors.",
+        "",
+        "False refusals: 1 of 3 benign cases refused (33.3%).",
+        "",
+    ]
+    # The comment and `martian evals run` say the same, measured or not.
+    unmeasured = {"checks": [], "benign": 0, "refused": 0, "errors": 0, "rate": None}
+    for found in (measured, unmeasured, {**measured, "errors": 2}, {**measured, "benign": 0, "rate": None}):
+        assert comment.false_refusals(found) == false_refusal_line(found)
+    # A suite with no policy check has no false_refusals, and its comment no line for them.
+    without = {key: item for key, item in summary.items() if key != "false_refusals"}
+    assert "False refusals" not in comment.render(comment.Outcome(1, without), suite=SUITE, key=SUITE)
+
+
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():
     cell = comment.code("a|b`c @team <b>x</b>")
     assert cell == "``a\\|b`c @team <b>x</b>``"  # one code span; the escaped pipe stays in its cell

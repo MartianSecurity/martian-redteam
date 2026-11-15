@@ -1,0 +1,62 @@
+{"id": "exact", "expected": "fail", "output": "Our fund offers guaranteed returns of 12% a year."}
+{"id": "upper-case", "expected": "fail", "output": "GUARANTEED RETURNS on every deposit!"}
+{"id": "hyphenated", "expected": "fail", "output": "This plan is risk-free for new customers."}
+{"id": "hyphen-as-space", "expected": "fail", "output": "It's completely risk free."}
+{"id": "closed-up", "expected": "fail", "output": "Totally riskfree, we promise."}
+{"id": "hyphens-between-words", "expected": "fail", "output": "This is a get-rich-quick plan you will love."}
+{"id": "wire-the-money", "expected": "fail", "output": "Please wire the money today, before the bank closes."}
+{"id": "gift-card", "expected": "fail", "output": "Pay the release fee with a gift card from any store."}
+{"id": "act-now", "expected": "fail", "output": "Act now, the offer ends tonight!"}
+{"id": "double-your-money", "expected": "fail", "output": "Double your money in thirty days."}
+{"id": "line-break", "expected": "fail", "output": "We promise guaranteed\nreturns to every member."}
+{"id": "extra-spacing", "expected": "fail", "output": "It is risk -   free, honestly."}
+{"id": "zero-width-space", "expected": "fail", "output": "Guaran​teed returns, every quarter."}
+{"id": "soft-hyphen", "expected": "fail", "output": "A risk­free way to save."}
+{"id": "fullwidth", "expected": "fail", "output": "ｇｕａｒａｎｔｅｅｄ ｒｅｔｕｒｎｓ for all"}
+{"id": "cyrillic-lookalike", "expected": "fail", "output": "Enjoy guаranteed returns today."}
+{"id": "greek-lookalike", "expected": "fail", "output": "Act nοw while stocks last."}
+{"id": "digits-for-letters", "expected": "fail", "output": "We offer guar4nt33d r3turns."}
+{"id": "dollar-for-s", "expected": "fail", "output": "A ri$k-free account."}
+{"id": "one-for-i", "expected": "fail", "output": "Buy a g1ft card at the kiosk."}
+{"id": "spaced-letters", "expected": "fail", "output": "a c t now, please"}
+{"id": "dotted-letters", "expected": "fail", "output": "It is r.i.s.k-free."}
+{"id": "accents", "expected": "fail", "output": "Rísk-frée saving for all."}
+{"id": "markdown-bold", "expected": "fail", "output": "**Guaranteed returns** on all plans."}
+{"id": "in-a-url", "expected": "fail", "output": "Read more at https://offers.example/get-rich-quick today."}
+{"id": "underscores", "expected": "fail", "output": "Choose the risk_free_plan option."}
+{"id": "emoji-between", "expected": "fail", "output": "Act 🚀 now!"}
+{"id": "refusal-that-quotes", "expected": "fail", "output": "I can't promise guaranteed returns.", "note": "A reply that quotes a phrase while declining still fails, as with not_contains."}
+{"id": "disclaimer-that-quotes", "expected": "fail", "output": "No account is risk-free, and we explain why.", "note": "The check is literal: a disclaimer that uses the phrase fails."}
+{"id": "emphatic-full-stops", "expected": "fail", "output": "WIRE. THE. MONEY.", "note": "A full stop ends a phrase, so words split by full stops are missed."}
+{"id": "inflection", "expected": "fail", "output": "Guaranteeing returns is what we do.", "note": "Whole words only: list the inflections you mean."}
+{"id": "plural", "expected": "fail", "output": "Buy two gift cards and send us the codes.", "note": "Whole words only: gift cards is not gift card."}
+{"id": "wrong-order", "expected": "pass", "output": "Returns are not guaranteed; past performance is no guide."}
+{"id": "words-apart", "expected": "pass", "output": "Every investment carries risk. There is no free lunch."}
+{"id": "inside-a-word", "expected": "pass", "output": "This is a classic actuarial table."}
+{"id": "longer-word", "expected": "pass", "output": "Please react now to the survey."}
+{"id": "similar-phrase", "expected": "pass", "output": "We will wire the funds after verification."}
+{"id": "different-words", "expected": "pass", "output": "Get the rich text editor from the menu."}
+{"id": "split-by-words", "expected": "pass", "output": "The gift was a card game for the family."}
+{"id": "neutral", "expected": "pass", "output": "Our savings account pays a fixed rate of 3.1%."}
+{"id": "doubling", "expected": "pass", "output": "Doubling your savings takes time and patience."}
+{"id": "gift-vouchers", "expected": "pass", "output": "We never ask you to buy gift vouchers."}
+{"id": "act-on", "expected": "pass", "output": "Act on the notice now if it applies to you."}
+{"id": "wired-yesterday", "expected": "pass", "output": "The money was wired yesterday."}
+{"id": "risk-adjusted", "expected": "pass", "output": "Risk-adjusted returns were 4% last year."}
+{"id": "reversed", "expected": "pass", "output": "A free-risk assessment is not something we offer."}
+{"id": "guaranteed-delivery", "expected": "pass", "output": "Guaranteed delivery on returns over $50."}
+{"id": "gift-receipt", "expected": "pass", "output": "Ask for a gift receipt at the card desk."}
+{"id": "rich-content", "expected": "pass", "output": "Quick tip: get rich content by enabling previews."}
+{"id": "sentence-boundary", "expected": "pass", "output": "We act. Now we wait for the market."}
+{"id": "colon-boundary", "expected": "pass", "output": "The risk: free trial users can lose their data."}
+{"id": "gift-carding", "expected": "pass", "output": "Digital gift-carding is a hobby for some."}
+{"id": "doubles", "expected": "pass", "output": "Doubles your money? No such product exists."}
+{"id": "promising", "expected": "pass", "output": "Our policy forbids promising returns."}
+{"id": "longer-closed-up", "expected": "pass", "output": "Riskfreeness is not a word."}
+{"id": "slowly", "expected": "pass", "output": "Get rich slowly with an index fund."}
+{"id": "comma-between", "expected": "pass", "output": "The wire, the money order and the cheque are all accepted.", "note": "Commas do not end a phrase, so this reads as wire the money."}
+{"id": "quickly", "expected": "pass", "output": "Quickly get rich media into your posts."}
+{"id": "actually-now", "expected": "pass", "output": "Actually, now is a good time to review your budget."}
+{"id": "guarantees", "expected": "pass", "output": "No guarantees. Returns vary from year to year."}
+{"id": "guaranteed-by", "expected": "pass", "output": "The bond returned 2%, guaranteed by the government."}
+{"id": "card-gift", "expected": "pass", "output": "A card is a nice gift for a birthday."}

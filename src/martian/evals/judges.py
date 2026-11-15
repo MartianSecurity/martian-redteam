@@ -519,26 +519,19 @@ def response_rubric(
     )
 
 
-def _response_judge(
+def _judge_options(
     *,
     model: str,
     name: str,
     input_key: str,
     context_key: str | None,
     inference_params: dict[str, Any] | None,
-    include_judge_prompt: bool,
-    mode: Literal["guidelines", "conditions", "rubrics"],
-    verify: bool,
     max_retries: int,
     rate_limit_wait_seconds: float,
     headers: Mapping[str, str] | None,
-    endpoint: str | None = None,
-) -> Scorer:
-    """The three judges' shared implementation. ``endpoint`` is the base address of the
-    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to."""
-    if type(verify) is not bool:
-        raise ValueError("verify must be a boolean")
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Check the options every judge built on this engine takes, when the judge is created.
+    Returns the inference parameters and the extra headers to send."""
     if type(max_retries) is not int or not 0 <= max_retries <= 10:
         raise ValueError("max_retries must be an integer between 0 and 10")
     if (
@@ -573,6 +566,39 @@ def _response_judge(
             raise ValueError(f"Judge inference parameter is out of range: {key}")
         if key == "top_p" and not 0 < value <= 1:
             raise ValueError("top_p must be in (0, 1]")
+    return params, extra_headers
+
+
+def _response_judge(
+    *,
+    model: str,
+    name: str,
+    input_key: str,
+    context_key: str | None,
+    inference_params: dict[str, Any] | None,
+    include_judge_prompt: bool,
+    mode: Literal["guidelines", "conditions", "rubrics"],
+    verify: bool,
+    max_retries: int,
+    rate_limit_wait_seconds: float,
+    headers: Mapping[str, str] | None,
+    endpoint: str | None = None,
+) -> Scorer:
+    """The three judges' shared implementation. ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to."""
+    if type(verify) is not bool:
+        raise ValueError("verify must be a boolean")
+    params, extra_headers = _judge_options(
+        model=model,
+        name=name,
+        input_key=input_key,
+        context_key=context_key,
+        inference_params=inference_params,
+        max_retries=max_retries,
+        rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
+    )
 
     @scorer(name=name)
     def assess(inputs: Any, outputs: Any, expectations: dict[str, Any]) -> Feedback:
