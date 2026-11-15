@@ -1,11 +1,14 @@
 """The full data export: everything an organisation holds, exported, imported into a fresh install
 and exported again with nothing lost, on the in-memory store and on the local edition's MLflow
-store; an interrupted export resumed to the same files; and what an import refuses."""
+store; every table of the record store and every kind of object of the two store interfaces either
+exported or left out with a reason; an interrupted export resumed to the same files; and what an
+import refuses."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import typing
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,12 +16,18 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
+from sqlalchemy import create_engine, func, select
 from typer.testing import CliRunner
 
 from martian.cli import app
 from martian.evals import data_export
 from martian.evals.data_export import (
+    EXPORTED_KINDS,
+    EXPORTED_TABLES,
     FILES,
+    LEFT_OUT_KINDS,
+    LEFT_OUT_TABLES,
     MANIFEST,
     PROGRESS,
     ExportError,
@@ -51,10 +60,11 @@ from martian.evals.model import (
     Trace,
     suite_digest,
 )
-from martian.evals.records import RecordStore, SavedView
+from martian.evals.records import RECORD_METHODS, RecordStore, SavedView
 from martian.evals.records.sql import SqlRecordStore
+from martian.evals.records.tables import metadata
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
-from martian.evals.store import EvalStore, MemoryStore
+from martian.evals.store import STORE_METHODS, EvalStore, MemoryStore
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -413,6 +423,73 @@ def assert_round_trip(first: Path, again: Path, references: dict[str, dict[str, 
     assert normalised(first, references) == normalised(again)
 
 
+def table_rows(database: Path, space: str) -> dict[str, int]:
+    """How many rows of one organisation (or the single local user) each table of the record
+    store's database holds."""
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            return {
+                table.name: connection.execute(
+                    select(func.count()).select_from(table).where(table.c.space == space)
+                ).scalar_one()
+                for table in metadata.sorted_tables
+            }
+    finally:
+        engine.dispose()
+
+
+def assert_tables_round_trip(source: Path, target: Path, space: str) -> None:
+    """Every table the export carries holds rows in the source, and as many in the fresh install."""
+    before, after = table_rows(source, space), table_rows(target, space)
+    assert {name: before[name] > 0 for name in EXPORTED_TABLES} == dict.fromkeys(EXPORTED_TABLES, True)
+    assert {name: after[name] for name in EXPORTED_TABLES} == {name: before[name] for name in EXPORTED_TABLES}
+
+
+def models_in(hint: Any) -> set[str]:
+    """The names of the model classes a type hint names, with unions, lists and generic models
+    such as ``Page[Run]`` opened up."""
+    found: set[str] = set()
+    if isinstance(hint, type) and issubclass(hint, BaseModel):
+        generic = hint.__pydantic_generic_metadata__
+        found.add((generic["origin"] or hint).__name__)
+        for arg in generic["args"]:
+            found |= models_in(arg)
+    for arg in typing.get_args(hint):
+        found |= models_in(arg)
+    return found
+
+
+def interface_kinds(interface: type, methods: frozenset[str]) -> set[str]:
+    """Every model class a store interface's methods take or return."""
+    found: set[str] = set()
+    for name in methods:
+        for hint in typing.get_type_hints(getattr(interface, name), localns={"Principal": Principal}).values():
+            found |= models_in(hint)
+    return found
+
+
+def test_every_table_and_kind_of_object_is_exported_or_left_out_with_a_reason():
+    # A table or a kind of object added to the record store or the store fails here until the
+    # export writes it (a new file, so a new format version) or names it as left out, and why.
+    tables = {table.name for table in metadata.sorted_tables}
+    unlisted = tables - set(EXPORTED_TABLES) - set(LEFT_OUT_TABLES)
+    assert not unlisted, f"the export neither writes nor leaves out the record store's tables {sorted(unlisted)}"
+    assert set(EXPORTED_TABLES) | set(LEFT_OUT_TABLES) == tables, "the export names tables the record store lacks"
+    assert not set(EXPORTED_TABLES) & set(LEFT_OUT_TABLES)
+
+    kinds = interface_kinds(EvalStore, STORE_METHODS) | interface_kinds(RecordStore, RECORD_METHODS)
+    unlisted = kinds - set(EXPORTED_KINDS) - set(LEFT_OUT_KINDS)
+    assert not unlisted, f"the export neither writes nor leaves out the stores' kinds of object {sorted(unlisted)}"
+    assert set(EXPORTED_KINDS) | set(LEFT_OUT_KINDS) == kinds, "the export names kinds the stores lack"
+    assert not set(EXPORTED_KINDS) & set(LEFT_OUT_KINDS)
+
+    # What it writes, it writes in a file of the format; what it leaves out has a reason.
+    written = set(EXPORTED_TABLES.values()) | {name for names in EXPORTED_KINDS.values() for name in names}
+    assert written <= set(FILES)
+    assert all(reason.strip() for reason in [*LEFT_OUT_TABLES.values(), *LEFT_OUT_KINDS.values()])
+
+
 async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     source, source_records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
     await populate(source, source_records, ORG_A, default_exists=False)
@@ -427,6 +504,7 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     again = await export_data(target, target_records, ORG_A, tmp_path / "again")
 
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
+    assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
     # The receiving store's dataset ids are new, and the references to them follow.
@@ -473,6 +551,7 @@ def test_the_local_edition_comes_back_whole_in_a_fresh_data_folder(tmp_path):
     export_local(fresh, tmp_path / "again")
 
     assert_round_trip(tmp_path / "first", tmp_path / "again", imported.references)
+    assert_tables_round_trip(home / "martian.db", fresh / "martian.db", "~local")
     # MLflow assigns its own experiment, run and assessment ids; every reference follows them.
     assert all(imported.references[kind] for kind in ("experiment_id", "run_id", "dataset_id", "assessment_id"))
     # The Evals UI shows the imported runs, their results, scores and reviews as it showed them.

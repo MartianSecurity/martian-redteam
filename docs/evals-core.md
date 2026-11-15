@@ -1034,8 +1034,8 @@ endpoint, and keeps the local edition's default in its data folder.
   [promptfoo results and configs](#promptfoo-results-and-configs).
 - `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
   check: [copied MLflow stores](#copied-mlflow-stores).
-- `martian evals export` writes everything an organisation holds as JSON Lines files with a
-  manifest, and `martian evals import martian` loads them into a fresh install:
+- `martian evals export` writes everything an organisation's store and record store hold as JSON
+  Lines files with a manifest, and `martian evals import martian` loads them into a fresh install:
   [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own route for the attempts of repeated cases, with the run's reliability and its
@@ -2298,7 +2298,8 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 
 ## Data export
 
-`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals export <folder>` exports everything the local edition's store and record store
+hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
