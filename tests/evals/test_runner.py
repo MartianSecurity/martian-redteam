@@ -1398,20 +1398,42 @@ def target(message):
     return "I cannot share it."
 """
 
+# Each call is noted in `calls`; `question 0` answers only once the test writes `release`, or after
+# two minutes, and then writes `returned`.
+GATED_AGENT = """
+import pathlib
+import time
+
+HERE = pathlib.Path(__file__).parent
+
+
+def target(message):
+    with (HERE / "calls").open("a", encoding="utf-8") as calls:
+        calls.write(message.replace(" ", "-") + "\\n")
+    if message == "question 0":
+        deadline = time.monotonic() + 120
+        while not (HERE / "release").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (HERE / "returned").touch()
+    return "I cannot share it."
+"""
+
 
 def test_a_hung_function_target_is_a_timed_out_case_and_the_run_finishes(tmp_path):
     write_cases(tmp_path, 2)
-    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=20), encoding="utf-8")
+    (tmp_path / "agent.py").write_text(GATED_AGENT, encoding="utf-8")
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\n  timeout_seconds: 1\n")
-    started = time.monotonic()
-    summary = run_suite(suite)
-    elapsed = time.monotonic() - started
+    try:
+        summary = run_suite(suite)
+        # The run finished while the hung call had still not returned: it did not wait for it.
+        assert not (tmp_path / "returned").exists()
+    finally:
+        (tmp_path / "release").touch()
     # The hung call ends at its limit as the case's error; the other case and the run finish.
     assert (summary["cases"], summary["passed"], summary["errors"], summary["not_run"]) == (2, 1, 1, 0)
     assert summary["target_errors"] == {runner.TIMED_OUT: 1}
     records = {r["id"]: r for r in map(json.loads, (tmp_path / "results/results.jsonl").read_text().splitlines())}
     assert (records["c0"]["passed"], records["c0"]["error"]) == (None, runner.TIMED_OUT)
-    assert elapsed < 15, elapsed
     (run,) = local_ui(tmp_path).get("/v1/evals").json()
     assert (run["state"], run["errored"]) == ("completed", 1)
 
@@ -1544,24 +1566,40 @@ def test_a_repeated_run_stopped_in_the_middle_of_a_cases_attempts_runs_them_all_
     assert again["attempts"]["total"] == 9
 
 
-def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished_cases(tmp_path):
+def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished_cases(tmp_path, monkeypatch):
     import threading
 
+    from martian.evals.run_record import RunRecorder
+
+    # The run reads its record for a cancel request every second, on a thread of its own: the event
+    # that thread sets once it has read one.
+    noticed: list[threading.Event] = []
+    watch = RunRecorder.watch_cancel
+
+    def watching(self: RunRecorder) -> threading.Event:
+        noticed.append(watch(self))
+        return noticed[-1]
+
+    monkeypatch.setattr(RunRecorder, "watch_cancel", watching)
     write_cases(tmp_path, 4)
-    agent = COUNTED_AGENT.format(seconds=0).replace("return ", "time.sleep(1)\n    return ")
-    (tmp_path / "agent.py").write_text(agent, encoding="utf-8")
+    # The first case is in flight until the run has read that it was cancelled.
+    (tmp_path / "agent.py").write_text(GATED_AGENT, encoding="utf-8")
     suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
     ended: dict = {}
     running = threading.Thread(target=lambda: ended.setdefault("summary", run_suite(suite)))
     running.start()
-    deadline = time.monotonic() + 60
-    while not calls_of(tmp_path) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    client = local_ui(tmp_path)
-    (run,) = client.get("/v1/evals").json()
-    # The process recording the run holds it, so cancelling asks that process to stop.
-    asked = client.post(f"/v1/evals/{run['id']}/cancel")
-    assert (asked.status_code, asked.json()["state"]) == (202, "running")
+    try:
+        deadline = time.monotonic() + 60
+        while not calls_of(tmp_path) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        client = local_ui(tmp_path)
+        (run,) = client.get("/v1/evals").json()
+        # The process recording the run holds it, so cancelling asks that process to stop.
+        asked = client.post(f"/v1/evals/{run['id']}/cancel")
+        assert (asked.status_code, asked.json()["state"]) == (202, "running")
+        assert noticed[0].wait(60)
+    finally:
+        (tmp_path / "release").touch()
     running.join(60)
     summary = ended["summary"]
     assert summary["cancelled"] is True and summary["not_run"] >= 1
@@ -1578,26 +1616,34 @@ def test_a_url_target_that_sends_its_reply_a_little_at_a_time_is_timed_out(tmp_p
 
     # The client's timeout bounds each read, and a byte arrives every half second, so only the
     # call's total limit ends it.
-    listener = socket.create_server(("127.0.0.1", 0))
+    # It drips until the test ends, or for two minutes, and never sends the whole body.
+    listener, stop, dripped = socket.create_server(("127.0.0.1", 0)), threading.Event(), threading.Event()
 
     def drip() -> None:
         connection, _ = listener.accept()
         with connection:
             connection.recv(65536)
-            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n")
-            for _ in range(100):
-                time.sleep(0.5)
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\n\r\n")
+            for _ in range(240):
+                if stop.wait(0.5):
+                    break
                 try:
                     connection.sendall(b"x")
                 except OSError:
-                    return
+                    break
+        dripped.set()
 
     threading.Thread(target=drip, daemon=True).start()
     monkeypatch.setenv("AGENT_KEY", "k")
     write_inputs(tmp_path, ["hi"])
     url = f"http://127.0.0.1:{listener.getsockname()[1]}/chat"
-    started = time.monotonic()
-    summary = run_suite(write_suite(tmp_path, extra=url_target(url, response_path="", extra="  timeout_seconds: 1\n")))
+    try:
+        summary = run_suite(
+            write_suite(tmp_path, extra=url_target(url, response_path="", extra="  timeout_seconds: 1\n"))
+        )
+        # The reply was still arriving when the run ended: the call's total limit ended it.
+        assert not dripped.is_set()
+    finally:
+        stop.set()
+        listener.close()
     assert summary["target_errors"] == {runner.TIMED_OUT: 1}
-    assert time.monotonic() - started < 15
-    listener.close()
