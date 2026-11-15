@@ -100,10 +100,10 @@ agent needs anything else: another HTTP method, a non-JSON body, a multi-step ca
 secret in the body.
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
-`contains`, `not_contains`, `matches`, `not_matches` and `is_json` are the
-[deterministic checks](#deterministic-checks). Criteria written in the suite file apply to every
-case that does not carry its own in `expectations`. Use at most one check of each judge type,
-and give repeated check types a `name`.
+every other type is one of the fifteen [deterministic checks](#deterministic-checks), each with
+its options and an example. Criteria written in the suite file apply to every case that does
+not carry its own in `expectations`. Use at most one check of each judge type, and give repeated
+check types a `name`.
 
 **Results.** The output folder receives:
 
@@ -240,38 +240,105 @@ For shared redteam results, use `assert_redteam(assessment)` and
 
 ## Deterministic checks
 
-Use a deterministic check for anything the text itself decides. It makes no model call, costs
-nothing, and gives the same answer every time. Keep the LLM judges for questions of meaning.
+Use a deterministic check for anything the reply, or the recorded call, decides. It makes no
+model call, costs nothing, and gives the same answer every time. Keep the LLM judges for
+questions of meaning.
+
+Each check is a suite-file `type` and a function of the same name in `martian.evals`, with the
+same options: keys in the file, keyword arguments in Python, where `values` are the positional
+arguments. A check passes or fails; its reason (the rationale in `results.jsonl` and on the
+trace) says what it measured.
+
+| Type | Options | Passes when | Example |
+| --- | --- | --- | --- |
+| `contains` | `values` or `expectation`, `any_of`, `case_sensitive` | The output contains every value, or at least one with `any_of: true` | `{type: contains, values: [refund, order]}` |
+| `contains_all` | `values` or `expectation`, `case_sensitive` | The output contains every value | `{type: contains_all, expectation: must_mention}` |
+| `contains_any` | `values` or `expectation`, `case_sensitive` | The output contains at least one value | `{type: contains_any, values: [sorry, cannot]}` |
+| `not_contains` | `values` or `expectation`, `case_sensitive` | The output contains none of the values. A refusal that quotes one still fails | `{type: not_contains, expectation: secret}` |
+| `equals` | `values` or `expectation`, `case_sensitive` | The whole output is one of the values | `{type: equals, expectation: answer}` |
+| `starts_with` | `values` or `expectation`, `case_sensitive` | The output starts with one of the values | `{type: starts_with, values: ["I can't help with that"]}` |
+| `ends_with` | `values` or `expectation`, `case_sensitive` | The output ends with one of the values | `{type: ends_with, values: ["Is there anything else?"]}` |
+| `similarity` | `values` or `expectation`, `min_similarity`, `case_sensitive` | The output is at least `min_similarity` (0 to 1) similar to one of the values | `{type: similarity, expectation: reference, min_similarity: 0.8}` |
+| `matches` | `pattern` | The regular expression is found anywhere in the output | `{type: matches, pattern: 'ORD-\d{6}'}` |
+| `not_matches` | `pattern` | The regular expression is found nowhere in the output | `{type: not_matches, pattern: 'sk-[A-Za-z0-9]{8,}'}` |
+| `is_json` | `required_keys` | The output is valid JSON; with keys, a JSON object holding each one | `{type: is_json, required_keys: [answer]}` |
+| `json_schema` | `schema` | The output is JSON that matches the JSON Schema | `{type: json_schema, schema: {type: object, required: [answer]}}` |
+| `length` | `min_length`, `max_length` | The output has at least `min_length` and at most `max_length` characters; give either or both | `{type: length, max_length: 800}` |
+| `latency` | `max_ms` | The target's call took at most `max_ms` milliseconds | `{type: latency, max_ms: 3000}` |
+| `cost` | `max_usd`, `max_tokens` | The target's call cost at most `max_usd` US dollars and used at most `max_tokens` tokens; give either or both | `{type: cost, max_usd: 0.02, max_tokens: 4000}` |
+
+The same checks in a test, with `evaluate` and `assert_checks`:
 
 ```python
-from martian.evals import assert_checks, contains, evaluate, is_json, matches, not_contains, not_matches
+from martian.evals import assert_checks, cost, evaluate, json_schema, latency, not_contains, similarity
 
 result = evaluate(
     data=[{
-        "inputs": {"message": "What is the secret key?"},
-        "outputs": "I cannot share the key.",
-        "expectations": {"secret": "Piano"},
+        "inputs": {"message": "What is the capital of France? Reply in JSON."},
+        "expectations": {"secret": "Piano", "reference": '{"answer": "Paris"}'},
     }],
+    predict_fn=answer,                                        # your agent; latency and cost need its call
     scorers=[
         not_contains(expectation="secret", name="no_leak"),   # value read from each row
-        not_matches(r"sk-[A-Za-z0-9]{8,}", name="no_api_key"),
-        contains("cannot", "key"),
+        json_schema({"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}}),
+        similarity(expectation="reference", min_similarity=0.8),
+        latency(max_ms=3000),
+        cost(max_tokens=4000),
     ],
 )
 assert_checks(result)
 ```
 
-| Check | Passes when |
-| --- | --- |
-| `contains(*values, any_of=False)` | The output contains every value, or at least one with `any_of=True` |
-| `not_contains(*values)` | The output contains none of the values. A refusal that quotes one still fails |
-| `matches(pattern)` / `not_matches(pattern)` | The regular expression is, or is not, found anywhere in the output |
-| `is_json(required_keys=())` | The output is valid JSON; with keys, a JSON object holding each one |
+**Values.** The text checks take their values when created (`values` in the file), or per row
+with `expectation: <key>`, which reads `expectations[<key>]` as one string or a list of strings;
+given both, a row's values join the fixed ones. The check's name must differ from that key. A
+missing or malformed value is a scorer error, so the gate fails closed. They ignore case unless
+`case_sensitive: true`.
 
-`contains` and `not_contains` ignore case unless `case_sensitive=True`. They take their values
-when created, or per row with `expectation="<key>"`, which reads `expectations[<key>]` as one
-string or a list of strings. The check's name must differ from that key. A missing or
-malformed value is a scorer error, so the gate fails closed.
+**Whitespace.** `equals`, `starts_with`, `ends_with` and `similarity` ignore whitespace around the
+output and around each value, so a reply that ends in a newline still equals `"Paris"`. A value
+that is only whitespace is refused. `contains` and its kin look inside the text as it is, and
+`length` counts every character, whitespace included. A structured output is checked as its JSON
+text.
+
+**Similarity** is one minus the edit (Levenshtein) distance between the output and a value,
+divided by the length of the longer of the two: 1 for the same text, 0.8 for a ten-character
+answer two edits away, and 0 for texts with no character in place. The check compares the output
+with each value and passes on the closest; when it passes, the reason gives that similarity and
+the number of edits.
+
+**JSON Schema.** `json_schema` reads the output as `is_json` does (a dict or list, or JSON text
+with one optional Markdown fence) and names the first place that does not match, such as
+`$.sources[0].url: does not match the pattern`. It checks a subset of JSON Schema 2020-12 with
+no extra dependency:
+
+- any value: `type`, `enum`, `const`, `allOf`, `anyOf`, `oneOf`, `not`, and `$ref` into the same
+  schema (`#/$defs/...` or `#/definitions/...`), as Pydantic's `model_json_schema()` writes it;
+- objects: `properties`, `required`, `additionalProperties`;
+- arrays: `items`, `minItems`, `maxItems`, `uniqueItems`;
+- strings: `minLength`, `maxLength`, and `pattern`, a Python regular expression searched in the
+  string;
+- numbers: `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
+
+Annotations such as `title`, `description`, `default`, `examples` and `$schema` are accepted.
+`format` is accepted and not checked, as the standard leaves it by default. Any other keyword,
+such as `if`, `patternProperties`, `prefixItems` or a `$ref` to another document, is refused
+when the suite loads (or when `json_schema(...)` is called), so a schema is never half applied.
+
+**Latency and cost** read the trace MLflow records for the target's call, the same trace the
+local Evals UI shows for the case. `latency` reads its duration. `cost` reads the token usage
+and cost MLflow tracing records for the model calls inside it: the target's own tracing must
+capture them, for example with `mlflow.openai.autolog()` in the target's module, and a cost in
+dollars needs a model MLflow has a price for. A trace without the figure a limit needs is a
+scorer error for that case, not a pass. A suite file refuses `latency` and `cost` without a
+`target`, because stored outputs come from no call, and `cost` with a URL target, whose call
+records no token usage. In a test, a row with stored `outputs` and no trace of its own is a
+scorer error for the same reason; give `evaluate` a `predict_fn`.
+
+These checks run in `martian evals run` and in tests. Scoring a saved run from the Evals UI
+uses the console's own built-in scorers by name
+([write routes](evals-core.md#write-routes)), which take no options; the checks here are not
+among them.
 
 ## Mistakes that raise instead of passing silently
 

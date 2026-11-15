@@ -6,7 +6,23 @@ import os
 # An explicit application setting continues to take precedence.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
-from martian.evals.checks import contains, is_json, matches, not_contains, not_matches
+from martian.evals.checks import (
+    contains,
+    contains_all,
+    contains_any,
+    cost,
+    ends_with,
+    equals,
+    is_json,
+    json_schema,
+    latency,
+    length,
+    matches,
+    not_contains,
+    not_matches,
+    similarity,
+    starts_with,
+)
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
 from martian.evals.dataset import EvalDataset, load_dataset
@@ -30,9 +46,17 @@ __all__ = [
     "assert_gate",
     "assert_redteam",
     "contains",
+    "contains_all",
+    "contains_any",
+    "cost",
+    "ends_with",
+    "equals",
     "exact_match",
     "evaluate",
     "is_json",
+    "json_schema",
+    "latency",
+    "length",
     "load_dataset",
     "matches",
     "not_contains",
@@ -40,4 +64,6 @@ __all__ = [
     "response_guidelines",
     "response_conditions",
     "response_rubric",
+    "similarity",
+    "starts_with",
 ]

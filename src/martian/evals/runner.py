@@ -36,9 +36,39 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals._json_schema import check_schema
 
 JUDGES = ("rubric", "guidelines", "conditions")
-CHECKS = ("contains", "not_contains", "matches", "not_matches", "is_json")
+CHECKS = (
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+    "matches",
+    "not_matches",
+    "is_json",
+    "json_schema",
+    "length",
+    "latency",
+    "cost",
+)
+# Checks that look for given text, from `values` or from each case's `expectation` key.
+TEXT_CHECKS = (
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+)
+# Checks that measure the target's call rather than its reply.
+CALL_CHECKS = ("latency", "cost")
 
 
 class _Model(BaseModel):
@@ -127,7 +157,26 @@ class JudgeConfig(_Model):
 
 
 class CheckSpec(_Model):
-    type: Literal["rubric", "guidelines", "conditions", "contains", "not_contains", "matches", "not_matches", "is_json"]
+    type: Literal[
+        "rubric",
+        "guidelines",
+        "conditions",
+        "contains",
+        "not_contains",
+        "contains_any",
+        "contains_all",
+        "equals",
+        "starts_with",
+        "ends_with",
+        "similarity",
+        "matches",
+        "not_matches",
+        "is_json",
+        "json_schema",
+        "length",
+        "latency",
+        "cost",
+    ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
     rubric: str | None = None
@@ -138,15 +187,38 @@ class CheckSpec(_Model):
     expectation: str | None = None
     any_of: bool = False
     case_sensitive: bool = False
+    min_similarity: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     pattern: str | None = None
     required_keys: list[str] = Field(default_factory=list)
+    # `schema` in the file; a field of that name would hide BaseModel.schema.
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    min_length: int | None = Field(default=None, ge=0)
+    max_length: int | None = Field(default=None, ge=0)
+    max_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_tokens: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
         if self.type in ("matches", "not_matches") and not self.pattern:
             raise ValueError(f"a {self.type} check needs a pattern")
-        if self.type in ("contains", "not_contains") and not self.values and not self.expectation:
+        if self.type in TEXT_CHECKS and not self.values and not self.expectation:
             raise ValueError(f"a {self.type} check needs values or an expectation key")
+        if self.type == "similarity" and self.min_similarity is None:
+            raise ValueError("a similarity check needs min_similarity, from 0 to 1")
+        if self.type == "json_schema":
+            if self.json_schema is None:
+                raise ValueError("a json_schema check needs a schema")
+            check_schema(self.json_schema)
+        if self.type == "length":
+            if self.min_length is None and self.max_length is None:
+                raise ValueError("a length check needs min_length, max_length or both")
+            if self.min_length is not None and self.max_length is not None and self.min_length > self.max_length:
+                raise ValueError("min_length is more than max_length")
+        if self.type == "latency" and self.max_ms is None:
+            raise ValueError("a latency check needs max_ms")
+        if self.type == "cost" and self.max_usd is None and self.max_tokens is None:
+            raise ValueError("a cost check needs max_usd, max_tokens or both")
         return self
 
     @property
@@ -182,6 +254,18 @@ class Suite(_Model):
             raise ValueError("use at most one check of each judge type (rubric, guidelines, conditions)")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
+        calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
+        if calls and self.target is None:
+            raise ValueError(
+                f"{', '.join(calls)} measures the target's call, and a suite without a target grades stored "
+                "outputs, which no call produced; name a target or remove the check"
+            )
+        costs = [check.label for check in self.checks if check.type == "cost"]
+        if costs and self.target is not None and self.target.url is not None:
+            raise ValueError(
+                f"{', '.join(costs)} reads the token usage and cost the target's MLflow tracing records, and a "
+                "URL target's call records neither; use a function target or remove the check"
+            )
         return self
 
 
@@ -394,7 +478,6 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
-    from martian.evals import checks as deterministic
     from martian.evals import judges
 
     built = []
@@ -416,29 +499,53 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
                 )
             )
-        elif check.type == "contains":
-            built.append(
-                deterministic.contains(
-                    *check.values,
-                    expectation=check.expectation,
-                    name=check.label,
-                    any_of=check.any_of,
-                    case_sensitive=check.case_sensitive,
-                )
-            )
-        elif check.type == "not_contains":
-            built.append(
-                deterministic.not_contains(
-                    *check.values, expectation=check.expectation, name=check.label, case_sensitive=check.case_sensitive
-                )
-            )
-        elif check.type == "matches":
-            built.append(deterministic.matches(check.pattern or "", name=check.label))
-        elif check.type == "not_matches":
-            built.append(deterministic.not_matches(check.pattern or "", name=check.label))
         else:
-            built.append(deterministic.is_json(required_keys=check.required_keys, name=check.label))
+            built.append(_build_check(check))
     return built
+
+
+def _build_check(check: CheckSpec) -> Any:
+    """The deterministic check a suite file's entry names. ``CheckSpec.complete`` has made sure the
+    options each type needs are there."""
+    from martian.evals import checks as deterministic
+
+    name = check.label
+    text: dict[str, Any] = {"expectation": check.expectation, "name": name, "case_sensitive": check.case_sensitive}
+    match check.type:
+        case "contains":
+            return deterministic.contains(*check.values, any_of=check.any_of, **text)
+        case "not_contains":
+            return deterministic.not_contains(*check.values, **text)
+        case "contains_any":
+            return deterministic.contains_any(*check.values, **text)
+        case "contains_all":
+            return deterministic.contains_all(*check.values, **text)
+        case "equals":
+            return deterministic.equals(*check.values, **text)
+        case "starts_with":
+            return deterministic.starts_with(*check.values, **text)
+        case "ends_with":
+            return deterministic.ends_with(*check.values, **text)
+        case "similarity":
+            assert check.min_similarity is not None
+            return deterministic.similarity(*check.values, min_similarity=check.min_similarity, **text)
+        case "matches":
+            return deterministic.matches(check.pattern or "", name=name)
+        case "not_matches":
+            return deterministic.not_matches(check.pattern or "", name=name)
+        case "is_json":
+            return deterministic.is_json(required_keys=check.required_keys, name=name)
+        case "json_schema":
+            assert check.json_schema is not None
+            return deterministic.json_schema(check.json_schema, name=name)
+        case "length":
+            return deterministic.length(min_length=check.min_length, max_length=check.max_length, name=name)
+        case "latency":
+            assert check.max_ms is not None
+            return deterministic.latency(max_ms=check.max_ms, name=name)
+        case "cost":
+            return deterministic.cost(max_usd=check.max_usd, max_tokens=check.max_tokens, name=name)
+    raise AssertionError(f"{check.type} is not a deterministic check")
 
 
 def _with_suite_criteria(case: dict[str, Any], suite: Suite) -> dict[str, Any]:
