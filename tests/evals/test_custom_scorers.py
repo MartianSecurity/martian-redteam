@@ -1,4 +1,4 @@
-"""Custom Python scorers (MorningHQ/martian-notes#177): a suite file names a function as a check,
+"""Custom Python scorers (MartianSecurity/martian-notes#177): a suite file names a function as a check,
 the Python API takes a callable, and a worker runs the scorers its setup installs. A scorer that
 raises is a scorer error for that case, never a crash. On a server the code runs only in the
 work's own process: the process that serves the API never imports a scorer file. Nothing here
@@ -425,7 +425,7 @@ def test_a_server_runs_custom_scorers_only_in_the_works_own_process(tmp_path):
         client.portal.call(worker.drain)
         # Every route of the scoring dialog, suites and judges answers without the scorer code:
         # the scorers on offer are the built-in ones, and the frozen contract's scoring request and
-        # suite name only those (a custom one by name is MorningHQ/martian-notes#334).
+        # suite name only those (a custom one by name is MartianSecurity/martian-notes#334).
         assert [s["name"] for s in client.get("/v1/evals/scorers").json()] == list(BUILTIN_SCORERS)
         named = {"request_id": request_id(), "scorers": ["names_organisation"]}
         assert client.post(f"/v1/evals/{run_id}/scores", json=named).status_code == 422

@@ -1,5 +1,5 @@
 """HTTP targets called from the worker, and registered agents through martian-agents
-(MorningHQ/martian-notes#137).
+(MartianSecurity/martian-notes#137).
 
 A run of an HTTP target needs no martian-agents service: the worker POSTs each case to the
 target itself, once, with no retry, and fills in the target's credential from its own
@@ -10,7 +10,7 @@ fake martian-agents; nothing calls a model.
 
 A run calls only the target it was admitted with: before it calls its target, on its first start
 and on every resume, a worker that now has another target under the run's id fails the run
-without calling it (MorningHQ/martian-notes#344).
+without calling it (MartianSecurity/martian-notes#344).
 """
 
 from __future__ import annotations
@@ -282,7 +282,7 @@ def test_registered_agents_run_through_martian_agents_and_never_over_direct_http
         run = finished(core, REGISTERED_AGENT)
         assert (run["state"], run["passed"], run["failed"]) == ("completed", 1, 1)
         # The record store keeps the executor's pin; the run routes show only the pin's kind, agent
-        # id, name and digest (READER_PROVENANCE, MorningHQ/martian-notes#352).
+        # id, name and digest (READER_PROVENANCE, MartianSecurity/martian-notes#352).
         assert "target_id" not in run["provenance"]["target"]
         kept = core.client.portal.call(core.records.get_run, SINGLE_USER, DEFAULT_PROJECT, run["id"])
         assert kept is not None and kept.provenance["target"]["target_id"] == f"agent-{REGISTERED_AGENT}"
@@ -378,7 +378,7 @@ def test_a_run_completes_in_its_own_process_on_an_install_with_no_martian_agents
 def test_a_run_reads_and_checks_only_the_target_it_names(tmp_path, endpoint, queued):
     """Another target the worker has, under some other id, that it would refuse is never read: not
     when the launch checks its own target, before the run is recorded, and not when the run's
-    process starts (MorningHQ/martian-notes#337)."""
+    process starts (MartianSecurity/martian-notes#337)."""
     refused = Target(kind="function", file="agent.py", function="target")
 
     def worker_for(records: SqlRecordStore) -> Any:

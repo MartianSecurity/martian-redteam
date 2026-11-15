@@ -237,7 +237,7 @@ def test_roles_come_from_the_capability_table(memory: Served):
 
 def test_the_scorers_read_the_worker_an_edition_binds_on_its_own_application():
     # The server mounts the core's routers on its own application and binds the core's
-    # dependencies there, without create_app's state (MorningHQ/MartianBackend app/evals_core.py).
+    # dependencies there, without create_app's state (MartianSecurity/MartianBackend app/evals_core.py).
     app = FastAPI()
     app.include_router(scoring.router)
     app.dependency_overrides[current_principal] = lambda: SINGLE_USER

@@ -1,5 +1,5 @@
 """Published datasets: a port of the dataset routes of the server's ``app/api/evals.py`` and its
-MLflow adapter (MorningHQ/MartianBackend) onto the store.
+MLflow adapter (MartianSecurity/MartianBackend) onto the store.
 
 Published datasets belong to the organisation, not to one project: they are the dataset versions
 of the default project. A name lists its newest version; ``version`` is that version's content

@@ -1,6 +1,6 @@
 """Scoring a finished run, and Monitoring: a port of the scoring routes of the server's
 ``app/api/evals_workbench.py`` and ``GET /monitoring`` and ``scoring_config`` of
-``app/api/evals_quality.py`` (MorningHQ/MartianBackend).
+``app/api/evals_quality.py`` (MartianSecurity/MartianBackend).
 
 A scoring request admits a ``queued`` scoring job and submits it to the worker, which runs the code
 scorers and, through its judge, the model judges. The request calls no model.

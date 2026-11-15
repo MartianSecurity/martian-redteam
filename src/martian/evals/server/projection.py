@@ -312,6 +312,10 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     # A run's limits and the one it stopped at (martian.evals.limits).
     "limits": ("max_seconds", "max_judge_tokens"),
     "stopped": ("limit", "value", "used", "message"),
+    # The model a run's target reported (martian.evals.worker.execute), and the schedule and slot a
+    # run was admitted for (martian.evals.worker.schedule).
+    "model": ("name", "cases"),
+    "schedule": ("id", "name", "slot", "trigger", "model_change"),
     # Where an imported run came from (martian.evals.inspect_import, promptfoo_import, mlflow_import).
     "inspect": (
         "log",

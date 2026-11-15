@@ -10,7 +10,8 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
 - One file per kind of object, each line one object in the shared model's JSON with the project
   it belongs to, and ``manifest.json``, written last, with the format's name and version and each
   file's line count, size and SHA-256. Run artifacts are files named by their SHA-256.
-- An export runs in steps: a project's definitions, a dataset version, a run, a page of traces.
+- An export runs in steps: a project's definitions, a dataset version, a run, its monitoring (its
+  monitors, schedules and thresholds with their history), a page of traces.
   After each step the files are flushed and ``export-progress.json`` records how long each file
   is. An interrupted export is resumed by exporting into the same folder again: the files are cut
   back to the last finished step and the export carries on from there.
@@ -18,7 +19,8 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   data. It writes every object through the interfaces, in an order that creates what an object
   refers to before the object. The receiving store assigns its own identifiers for what it
   stores (``StoreRef``, dataset version ids, assessment ids), and the import points every
-  reference at them.
+  reference at them. Monitors and schedules come back paused, and a threshold's webhook comes
+  back without its secret, which an export never holds.
 - :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
   kind of object of the two interfaces that an export carries, and the files it is in;
   :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
@@ -32,7 +34,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +49,7 @@ from martian.evals.model import (
     CaseResult,
     DatasetDraft,
     DatasetVersion,
+    Page,
     Project,
     QueueItem,
     Review,
@@ -61,7 +64,19 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
 )
-from martian.evals.records import DatasetManifest, SavedView
+from martian.evals.records import (
+    Alert,
+    DatasetManifest,
+    Monitor,
+    MonitoredTrace,
+    MonitorProgress,
+    SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleProgress,
+    Threshold,
+    ThresholdStatus,
+)
 
 if TYPE_CHECKING:
     from martian.evals.records import RecordStore
@@ -73,8 +88,10 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 2
-"""The format's version, in ``manifest.json``. An import reads this version only."""
+VERSION = 3
+"""The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
+the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
+alerts. Version 3 added the dataset publications (``manifests.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -100,6 +117,12 @@ FILES = (
     "queues.jsonl",
     "artifacts.jsonl",
     "traces.jsonl",
+    "monitors.jsonl",
+    "monitored_traces.jsonl",
+    "schedules.jsonl",
+    "scheduled_runs.jsonl",
+    "thresholds.jsonl",
+    "alerts.jsonl",
 )
 """Every file of an export, in the order an import reads them."""
 
@@ -114,15 +137,22 @@ EXPORTED_TABLES = {
     "martian_dataset_draft_cases": "draft_cases.jsonl",
     "martian_saved_views": "views.jsonl",
     "martian_dataset_manifests": "manifests.jsonl",
+    "martian_monitors": "monitors.jsonl",
+    "martian_monitored_traces": "monitored_traces.jsonl",
+    "martian_schedules": "schedules.jsonl",
+    "martian_schedule_runs": "scheduled_runs.jsonl",
+    "martian_thresholds": "thresholds.jsonl",
+    "martian_threshold_alerts": "alerts.jsonl",
 }
 """Each table of the record store (``martian.evals.records.tables``) that an export carries, and
 the file its rows are in."""
 
 LEFT_OUT_TABLES = {
     "martian_work_queue": (
-        "the worker's queue of runs and scoring jobs no worker has finished: transient. A run "
-        "exported queued or running is finished as interrupted when the local edition opens the "
-        "data folder it was imported into"
+        "the worker's queue of runs and scoring jobs no worker has finished, and of monitors' and "
+        "schedules' next turns: transient. A run exported queued or running is finished as "
+        "interrupted when the local edition opens the data folder it was imported into; a monitor "
+        "or a schedule is imported paused, and resuming it puts its turn back in the queue"
     ),
     "martian_deliveries": (
         "the outbox, store writes on their way from the record store to the store: transient. A "
@@ -145,16 +175,26 @@ EXPORTED_KINDS = {
     "DatasetManifest": ("manifests.jsonl",),
     "Run": ("runs.jsonl",),
     "CaseResult": ("case_results.jsonl",),
-    "Score": ("scores.jsonl", "traces.jsonl"),
+    "Score": ("scores.jsonl", "traces.jsonl", "monitored_traces.jsonl"),
     "ScoringJob": ("scoring_jobs.jsonl",),
     "Review": ("reviews.jsonl",),
     "ReviewQueue": ("queues.jsonl",),
     "QueueItem": ("queues.jsonl",),
     "Trace": ("traces.jsonl",),
+    "Monitor": ("monitors.jsonl",),
+    "MonitorProgress": ("monitors.jsonl",),
+    "MonitoredTrace": ("monitored_traces.jsonl",),
+    "Schedule": ("schedules.jsonl",),
+    "ScheduleProgress": ("schedules.jsonl",),
+    "ScheduledRun": ("scheduled_runs.jsonl",),
+    "Threshold": ("thresholds.jsonl",),
+    "ThresholdStatus": ("thresholds.jsonl",),
+    "Alert": ("alerts.jsonl",),
 }
 """Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
 return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
-not objects: ``artifacts.jsonl`` and ``artifacts/``."""
+not objects: ``artifacts.jsonl`` and ``artifacts/``. A threshold's webhook secret is not an object
+either: the record store keeps it apart and the export never reads it (``threshold_secret``)."""
 
 LEFT_OUT_KINDS = {
     "StoreStatus": "the store's readiness, not data",
@@ -171,7 +211,8 @@ TRACE_PAGE = 500
 """Traces read per export step: a page of the store's trace search."""
 
 PAGE = 1000
-"""Cases or case results read per call."""
+"""Cases or case results read per call, and the traces a monitor took, a schedule's slots or a
+threshold's alerts."""
 
 WRITE_BATCH = 500
 """Case results or scores written per call on import."""
@@ -199,11 +240,15 @@ class ExportSummary:
 class ImportSummary:
     """A finished import: the export's manifest, and for each ``StoreRef`` field (``dataset_id``
     also for dataset version ids) the identifiers of the source store and the receiving store's
-    for the same objects."""
+    for the same objects. ``paused`` are the monitors and schedules imported paused, by id, that
+    were active in the export, and ``needs_secret`` the thresholds whose webhook needs its secret
+    given again (``POST /v1/evals/thresholds/{id}/secret``) before its alerts are signed."""
 
     folder: Path
     manifest: dict[str, Any]
     references: dict[str, dict[str, str]]
+    paused: tuple[str, ...]
+    needs_secret: tuple[str, ...]
 
     def lines(self, name: str) -> int:
         return int(self.manifest["files"][name]["lines"])
@@ -331,6 +376,8 @@ def _steps(plan: dict[str, Any]) -> list[tuple[str, str, str]]:
         steps.append(("project", project["id"], ""))
         steps += [("dataset", project["id"], dataset_id) for dataset_id in project["datasets"]]
         steps += [("run", project["id"], run_id) for run_id in project["runs"]]
+        # Before the traces: every trace a monitor took is then among the traces exported.
+        steps.append(("monitoring", project["id"], ""))
         steps.append(("traces", project["id"], ""))
     return steps
 
@@ -375,6 +422,8 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
                 await _project(store, records, principal, files, project_id)
             elif kind == "dataset":
                 await _dataset(store, principal, files, project_id, item)
+            elif kind == "monitoring":
+                await _monitoring(records, principal, files, project_id, runs[project_id])
             else:
                 await _run(store, records, principal, files, project_id, item)
             files.commit()
@@ -494,6 +543,52 @@ async def _run(
                 raise ExportError(f"artifact {name} of run {run_id} is no longer in the store")
             sha = files.artifact(data)
             files.write("artifacts.jsonl", _line(project_id, run_id=run_id, name=name, sha256=sha, size=len(data)))
+
+
+async def _listed[T](read: Callable[..., Awaitable[Page[T]]], *args: Any) -> AsyncIterator[T]:
+    """Every item of a record store listing, page by page: ``read(*args, limit=, cursor=)``."""
+    cursor: str | None = None
+    while True:
+        page = await read(*args, limit=PAGE, cursor=cursor)
+        for item in page.items:
+            yield item
+        if (cursor := page.next_cursor) is None:
+            return
+
+
+async def _monitoring(
+    records: RecordStore, principal: Principal, files: _Files, project_id: str, runs: set[str]
+) -> None:
+    """The project's monitors with their progress and every trace each took, its schedules with
+    their progress and every slot, and the thresholds on either with their status and every alert.
+    Never a threshold's webhook secret: this does not read it. A slot whose run started after the
+    export did stops it, as a trace of such a run does: the export would not hold that run."""
+    for monitor in await records.list_monitors(principal, project_id):
+        progress = await records.monitor_progress(principal, project_id, monitor.id)
+        if progress is None:
+            raise ExportError(f"monitor {monitor.id} of project {project_id} is no longer in the record store")
+        files.write("monitors.jsonl", _line(project_id, monitor=monitor, progress=progress))
+        async for taken in _listed(records.list_monitored_traces, principal, project_id, monitor.id):
+            files.write("monitored_traces.jsonl", _line(project_id, trace=taken))
+    for schedule in await records.list_schedules(principal, project_id):
+        schedule_progress = await records.schedule_progress(principal, project_id, schedule.id)
+        if schedule_progress is None:
+            raise ExportError(f"schedule {schedule.id} of project {project_id} is no longer in the record store")
+        files.write("schedules.jsonl", _line(project_id, schedule=schedule, progress=schedule_progress))
+        async for entry in _listed(records.list_scheduled_runs, principal, project_id, schedule.id):
+            if entry.run_id is not None and entry.run_id not in runs:
+                raise ExportError(
+                    f"schedule {schedule.id} started run {entry.run_id}, which started after this export did. "
+                    "Pause the project's schedules and export again into a new folder"
+                )
+            files.write("scheduled_runs.jsonl", _line(project_id, scheduled_run=entry))
+    for threshold in await records.list_thresholds(principal, project_id):
+        status = await records.threshold_status(principal, project_id, threshold.id)
+        if status is None:
+            raise ExportError(f"threshold {threshold.id} of project {project_id} is no longer in the record store")
+        files.write("thresholds.jsonl", _line(project_id, threshold=threshold, status=status))
+        async for alert in _listed(records.list_alerts, principal, project_id, threshold.id):
+            files.write("alerts.jsonl", _line(project_id, alert=alert))
 
 
 async def _traces(
@@ -675,6 +770,12 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("dataset publications")
         if await records.list_views(principal, project_id):
             found.append("saved views")
+        if await records.list_monitors(principal, project_id):
+            found.append("monitors")
+        if await records.list_schedules(principal, project_id):
+            found.append("schedules")
+        if await records.list_thresholds(principal, project_id):
+            found.append("thresholds")
         if project_id in present:
             if await store.list_datasets(principal, project_id):
                 found.append("datasets")
@@ -792,10 +893,15 @@ async def _import(
     await _import_drafts(records, principal, folder, refs)
     for project_id, view in _objects(folder, "views.jsonl", "view", SavedView):
         await records.save_view(principal, project_id, view)
+    paused = await _import_monitors(records, principal, folder, refs)
+    paused += await _import_schedules(records, principal, folder, refs)
+    needs_secret = await _import_thresholds(records, principal, folder)
     for project in projects:
         if project.archived_at is not None:
             await store.archive_project(principal, project.id)
-    return ImportSummary(folder=folder, manifest=manifest, references=refs.maps)
+    return ImportSummary(
+        folder=folder, manifest=manifest, references=refs.maps, paused=paused, needs_secret=needs_secret
+    )
 
 
 async def _import_datasets(store: EvalStore, principal: Principal, folder: Path, refs: _References) -> None:
@@ -894,6 +1000,81 @@ async def _import_drafts(records: RecordStore, principal: Principal, folder: Pat
             )
     if not cases.done():
         raise ExportError("draft_cases.jsonl holds cases of a draft drafts.jsonl does not list")
+
+
+async def _import_monitors(
+    records: RecordStore, principal: Principal, folder: Path, refs: _References
+) -> tuple[str, ...]:
+    """Each monitor, paused, with its progress, then every trace each took, its scores pointing at
+    the receiving store's. The ids of those that were active."""
+    active = []
+    for number, line in _read(folder, "monitors.jsonl"):
+        project_id = line["project_id"]
+        monitor = _model(Monitor, line.get("monitor"), "monitors.jsonl", number)
+        progress = _model(MonitorProgress, line.get("progress"), "monitors.jsonl", number)
+        # Paused: an import scores nothing. Resuming it scores the traces recorded from then on.
+        await records.create_monitor(principal, project_id, monitor.model_copy(update={"state": "paused"}))
+        await records.set_monitor_progress(principal, project_id, monitor.id, progress)
+        if monitor.state == "active":
+            active.append(monitor.id)
+    for project_id, taken in _objects(folder, "monitored_traces.jsonl", "trace", MonitoredTrace):
+        scores = [score.model_copy(update={"store": refs.ref(score.store)}) for score in taken.scores]
+        await records.finish_monitored_trace(principal, project_id, taken.model_copy(update={"scores": scores}))
+    return tuple(active)
+
+
+async def _import_schedules(
+    records: RecordStore, principal: Principal, folder: Path, refs: _References
+) -> tuple[str, ...]:
+    """Each schedule, paused and pinned to the receiving store's dataset version, with its
+    progress, then every slot it ran or skipped. The ids of those that were active."""
+    active = []
+    for number, line in _read(folder, "schedules.jsonl"):
+        project_id = line["project_id"]
+        schedule = _model(Schedule, line.get("schedule"), "schedules.jsonl", number)
+        progress = _model(ScheduleProgress, line.get("progress"), "schedules.jsonl", number)
+        # Paused: an import runs nothing. Resuming it runs the slots from then on.
+        dataset_id = refs.get("dataset_id", schedule.dataset_id)
+        await records.create_schedule(
+            principal, project_id, schedule.model_copy(update={"state": "paused", "dataset_id": dataset_id})
+        )
+        await records.set_schedule_progress(principal, project_id, schedule.id, progress)
+        if schedule.state == "active":
+            active.append(schedule.id)
+    for project_id, entry in _objects(folder, "scheduled_runs.jsonl", "scheduled_run", ScheduledRun):
+        await records.add_scheduled_run(principal, project_id, entry)
+    return tuple(active)
+
+
+async def _import_thresholds(records: RecordStore, principal: Principal, folder: Path) -> tuple[str, ...]:
+    """Each threshold with its status and its alerts as the export holds them, delivered or not.
+    A webhook comes back without its secret, which the export does not hold. The ids of the
+    thresholds with a webhook, whose secret is to be given again."""
+
+    def alerts() -> Iterator[tuple[tuple[str, str], Alert]]:
+        for number, line in _read(folder, "alerts.jsonl"):
+            alert = _model(Alert, line.get("alert"), "alerts.jsonl", number)
+            yield (line["project_id"], alert.threshold_id), alert
+
+    grouped = _Groups(alerts())
+    needs_secret = []
+    for number, line in _read(folder, "thresholds.jsonl"):
+        project_id = line["project_id"]
+        threshold = _model(Threshold, line.get("threshold"), "thresholds.jsonl", number)
+        status = _model(ThresholdStatus, line.get("status"), "thresholds.jsonl", number)
+        await records.create_threshold(principal, project_id, threshold, webhook_secret=None)
+        found = grouped.take((project_id, threshold.id))
+        if not await records.set_threshold_status(
+            principal, project_id, threshold.id, status, expected_sequence=0, alerts=found
+        ):
+            raise ExportError(f"threshold {threshold.id} of project {project_id} did not import whole")
+        for alert in found:  # each as its last delivery attempt left it
+            await records.finish_alert(principal, project_id, alert)
+        if threshold.webhook is not None:
+            needs_secret.append(threshold.id)
+    if not grouped.done():
+        raise ExportError("alerts.jsonl holds alerts of a threshold thresholds.jsonl does not list")
+    return tuple(needs_secret)
 
 
 # --- the local edition -------------------------------------------------------------------------------

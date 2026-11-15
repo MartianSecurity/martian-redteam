@@ -253,6 +253,8 @@ class MemoryStore:
                 continue
             if query.user_id is not None and trace.user_id != query.user_id:
                 continue
+            if query.model is not None and trace.model != query.model:
+                continue
             if query.trace_ids and trace.id not in query.trace_ids:
                 continue
             if query.states and trace.state not in query.states:

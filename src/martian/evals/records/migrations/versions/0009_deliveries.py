@@ -1,7 +1,7 @@
 """The outbox: store writes kept until they are delivered (martian.evals.outbox).
 
-Revision ID: 0006
-Revises: 0005
+Revision ID: 0009
+Revises: 0008
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0006"
-down_revision = "0005"
+revision = "0009"
+down_revision = "0008"
 branch_labels = None
 depends_on = None
 

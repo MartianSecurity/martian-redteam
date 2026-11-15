@@ -41,6 +41,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import DataError, IntegrityError
 
+from martian.evals._digits import ascii_digits
 from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
 from martian.evals.model import (
     Case,
@@ -54,7 +55,21 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
-from martian.evals.records import DatasetManifest, Delivery, SavedView
+from martian.evals.records import (
+    THRESHOLD_WINDOW_BOUND,
+    Alert,
+    DatasetManifest,
+    Delivery,
+    Monitor,
+    MonitoredTrace,
+    MonitorProgress,
+    SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleProgress,
+    Threshold,
+    ThresholdStatus,
+)
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
@@ -62,11 +77,17 @@ from martian.evals.records.tables import (
     dataset_drafts,
     dataset_manifests,
     deliveries,
+    monitored_traces,
+    monitors,
     reviews,
     runs,
     saved_views,
+    schedule_runs,
+    schedules,
     scoring_jobs,
     suites,
+    threshold_alerts,
+    thresholds,
 )
 from martian.evals.records.tables import scores as score_rows
 from martian.evals.store import StoreError, cursor_offset
@@ -1150,3 +1171,821 @@ class SqlRecordStore:
             return [Delivery.model_validate(r) for r in rows]
 
         return await self._run(principal, work)
+
+    # --- monitors ------------------------------------------------------------------------------
+
+    async def create_monitor(self, principal: Principal, project_id: str, monitor: Monitor) -> Monitor:
+        if monitor.project_id != project_id:
+            raise StoreError("invalid", "the monitor belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[Monitor, bool]:
+            if stored := self._one(connection, monitors, space, project_id, id=monitor.id):
+                return Monitor.model_validate(stored), False
+            now = _now()
+            saved = monitor.model_copy(
+                update={
+                    "revision": 1,
+                    "created_at": monitor.created_at or now,
+                    "updated_at": now,
+                    "active_since": monitor.active_since or monitor.created_at or now,
+                    "created_by": monitor.created_by or principal.user_id,
+                }
+            )
+            connection.execute(
+                insert(monitors).values(
+                    space=space,
+                    project_id=project_id,
+                    id=monitor.id,
+                    state=saved.state,
+                    revision=1,
+                    record=_json(saved),
+                    progress=_json(MonitorProgress()),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "monitor", project_id, monitor.id)
+        return saved
+
+    async def get_monitor(self, principal: Principal, project_id: str, monitor_id: str) -> Monitor | None:
+        def work(connection: Connection, space: str) -> Monitor | None:
+            stored = self._one(connection, monitors, space, project_id, id=monitor_id)
+            return Monitor.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_monitors(self, principal: Principal, project_id: str) -> list[Monitor]:
+        def work(connection: Connection, space: str) -> list[Monitor]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(monitors.c.record).where(monitors.c.space == space, monitors.c.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+            return sorted((Monitor.model_validate(r) for r in rows), key=lambda m: (m.name, m.id))
+
+        return await self._run(principal, work)
+
+    async def update_monitor(
+        self, principal: Principal, project_id: str, monitor: Monitor, *, expected_revision: int
+    ) -> Monitor:
+        def work(connection: Connection, space: str) -> Monitor:
+            stored = self._one(connection, monitors, space, project_id, id=monitor.id)
+            if stored is None:
+                raise StoreError("not_found", "monitor not found")
+            earlier = Monitor.model_validate(stored)
+            saved = monitor.model_copy(
+                update={
+                    "revision": expected_revision + 1,
+                    "created_at": earlier.created_at,
+                    "created_by": earlier.created_by,
+                    "updated_at": _now(),
+                }
+            )
+            changed = connection.execute(
+                update(monitors)
+                .where(
+                    monitors.c.space == space,
+                    monitors.c.project_id == project_id,
+                    monitors.c.id == monitor.id,
+                    monitors.c.revision == expected_revision,
+                )
+                .values(state=saved.state, revision=saved.revision, record=_json(saved))
+            ).rowcount
+            if changed == 0:
+                raise StoreError("conflict", "the monitor was changed by someone else; reload it")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "monitor", project_id, monitor.id)
+        return saved
+
+    async def delete_monitor(self, principal: Principal, project_id: str, monitor_id: str) -> None:
+        def work(connection: Connection, space: str) -> list[str]:
+            if self._one(connection, monitors, space, project_id, id=monitor_id) is None:
+                raise StoreError("not_found", "monitor not found")
+            gone = self._delete_thresholds_on(connection, space, project_id, "monitor", monitor_id)
+            for table, key in ((monitored_traces, monitored_traces.c.monitor_id), (monitors, monitors.c.id)):
+                connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == monitor_id)
+                )
+            return gone
+
+        for threshold_id in await self._run(principal, work):
+            self._emit(principal, "threshold", project_id, threshold_id)
+        self._emit(principal, "monitor", project_id, monitor_id)
+
+    async def monitor_progress(self, principal: Principal, project_id: str, monitor_id: str) -> MonitorProgress | None:
+        def work(connection: Connection, space: str) -> MonitorProgress | None:
+            stored = connection.execute(
+                select(monitors.c.progress).where(
+                    monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id
+                )
+            ).scalar_one_or_none()
+            return MonitorProgress.model_validate(stored) if stored is not None else None
+
+        return await self._run(principal, work)
+
+    async def set_monitor_progress(
+        self, principal: Principal, project_id: str, monitor_id: str, progress: MonitorProgress
+    ) -> None:
+        def work(connection: Connection, space: str) -> int:
+            return connection.execute(
+                update(monitors)
+                .where(monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id)
+                .values(progress=_json(progress))
+            ).rowcount
+
+        if await self._run(principal, work):
+            self._emit(principal, "monitor", project_id, monitor_id)
+
+    async def claim_monitored_trace(
+        self, principal: Principal, project_id: str, monitor_id: str, trace_id: str, *, pass_id: str
+    ) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            state = connection.execute(
+                select(monitors.c.state).where(
+                    monitors.c.space == space, monitors.c.project_id == project_id, monitors.c.id == monitor_id
+                )
+            ).scalar_one_or_none()
+            if state != "active":
+                return False
+            key = (
+                monitored_traces.c.space == space,
+                monitored_traces.c.project_id == project_id,
+                monitored_traces.c.monitor_id == monitor_id,
+                monitored_traces.c.trace_id == trace_id,
+            )
+            found = connection.execute(select(monitored_traces.c.state, monitored_traces.c.pass_id).where(*key)).first()
+            if found is None:
+                taken = MonitoredTrace(
+                    monitor_id=monitor_id, trace_id=trace_id, state="scoring", pass_id=pass_id, created_at=_now()
+                )
+                try:
+                    with connection.begin_nested():
+                        connection.execute(
+                            insert(monitored_traces).values(
+                                space=space,
+                                project_id=project_id,
+                                monitor_id=monitor_id,
+                                trace_id=trace_id,
+                                state="scoring",
+                                pass_id=pass_id,
+                                created_at=taken.created_at,
+                                record=_json(taken),
+                            )
+                        )
+                except IntegrityError:
+                    return False  # another pass took it at the same moment
+                return True
+            if found.state != "scoring":
+                return False
+            if found.pass_id == pass_id:
+                return True
+            # An earlier pass took it and stopped before storing its scores: this pass takes it over.
+            return bool(
+                connection.execute(
+                    update(monitored_traces)
+                    .where(*key, monitored_traces.c.state == "scoring", monitored_traces.c.pass_id == found.pass_id)
+                    .values(pass_id=pass_id)
+                ).rowcount
+            )
+
+        return await self._run(principal, work)
+
+    async def finish_monitored_trace(self, principal: Principal, project_id: str, trace: MonitoredTrace) -> None:
+        def work(connection: Connection, space: str) -> None:
+            stored = connection.execute(
+                select(monitored_traces.c.record).where(
+                    monitored_traces.c.space == space,
+                    monitored_traces.c.project_id == project_id,
+                    monitored_traces.c.monitor_id == trace.monitor_id,
+                    monitored_traces.c.trace_id == trace.trace_id,
+                )
+            ).scalar_one_or_none()
+            taken = MonitoredTrace.model_validate(stored).created_at if stored else None
+            created = taken or trace.created_at or _now()
+            saved = trace.model_copy(update={"created_at": created})
+            self._upsert(
+                connection,
+                monitored_traces,
+                {
+                    "space": space,
+                    "project_id": project_id,
+                    "monitor_id": trace.monitor_id,
+                    "trace_id": trace.trace_id,
+                    "state": trace.state,
+                    "pass_id": trace.pass_id,
+                    "created_at": created,
+                    "record": _json(saved),
+                },
+                ["space", "project_id", "monitor_id", "trace_id"],
+            )
+
+        await self._run(principal, work)
+
+    async def list_monitored_traces(
+        self, principal: Principal, project_id: str, monitor_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[MonitoredTrace]:
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
+        _bounds(offset, limit)
+
+        def work(connection: Connection, space: str) -> Page[MonitoredTrace]:
+            where = [
+                monitored_traces.c.space == space,
+                monitored_traces.c.project_id == project_id,
+                monitored_traces.c.monitor_id == monitor_id,
+            ]
+            total = connection.execute(select(func.count()).select_from(monitored_traces).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(monitored_traces.c.record)
+                    .where(*where)
+                    .order_by(monitored_traces.c.created_at.desc(), monitored_traces.c.trace_id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([MonitoredTrace.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    async def scored_monitored_traces(
+        self, principal: Principal, project_id: str, monitor_id: str, *, since: datetime, until: datetime, limit: int
+    ) -> list[MonitoredTrace]:
+        if not 1 <= limit <= THRESHOLD_WINDOW_BOUND:
+            raise StoreError("invalid", f"limit must be between 1 and {THRESHOLD_WINDOW_BOUND}")
+
+        def work(connection: Connection, space: str) -> list[MonitoredTrace]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(monitored_traces.c.record)
+                    .where(
+                        monitored_traces.c.space == space,
+                        monitored_traces.c.project_id == project_id,
+                        monitored_traces.c.monitor_id == monitor_id,
+                        monitored_traces.c.state == "scored",
+                        monitored_traces.c.created_at >= since.astimezone(UTC),
+                        monitored_traces.c.created_at < until.astimezone(UTC),
+                    )
+                    .order_by(monitored_traces.c.created_at.desc(), monitored_traces.c.trace_id.desc())
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return [MonitoredTrace.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    # --- thresholds and their alerts -------------------------------------------------------------
+
+    async def create_threshold(
+        self, principal: Principal, project_id: str, threshold: Threshold, *, webhook_secret: str | None
+    ) -> Threshold:
+        if threshold.project_id != project_id:
+            raise StoreError("invalid", "the threshold belongs to another project")
+        if threshold.webhook is None and webhook_secret is not None:
+            raise StoreError("invalid", "a threshold without a webhook has no secret")
+
+        def work(connection: Connection, space: str) -> tuple[Threshold, bool]:
+            if stored := self._one(connection, thresholds, space, project_id, id=threshold.id):
+                return Threshold.model_validate(stored), False
+            saved = threshold.model_copy(
+                update={
+                    "created_at": threshold.created_at or _now(),
+                    "created_by": threshold.created_by or principal.user_id,
+                }
+            )
+            connection.execute(
+                insert(thresholds).values(
+                    space=space,
+                    project_id=project_id,
+                    id=threshold.id,
+                    source_kind=threshold.source.kind,
+                    source_id=threshold.source.source_id,
+                    sequence=0,
+                    record=_json(saved),
+                    status=_json(ThresholdStatus()),
+                    secret=webhook_secret,
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "threshold", project_id, threshold.id)
+        return saved
+
+    async def get_threshold(self, principal: Principal, project_id: str, threshold_id: str) -> Threshold | None:
+        def work(connection: Connection, space: str) -> Threshold | None:
+            stored = self._one(connection, thresholds, space, project_id, id=threshold_id)
+            return Threshold.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_thresholds(
+        self, principal: Principal, project_id: str, *, source_kind: str | None = None, source_id: str | None = None
+    ) -> list[Threshold]:
+        if (source_kind is None) != (source_id is None):
+            raise StoreError("invalid", "name a source by its kind and its id together")
+
+        def work(connection: Connection, space: str) -> list[Threshold]:
+            query = select(thresholds.c.record).where(
+                thresholds.c.space == space, thresholds.c.project_id == project_id
+            )
+            if source_kind is not None:
+                query = query.where(thresholds.c.source_kind == source_kind, thresholds.c.source_id == source_id)
+            rows: Sequence[Any] = connection.execute(query).scalars().all()
+            return sorted((Threshold.model_validate(r) for r in rows), key=lambda t: (t.name, t.id))
+
+        return await self._run(principal, work)
+
+    async def delete_threshold(self, principal: Principal, project_id: str, threshold_id: str) -> None:
+        def work(connection: Connection, space: str) -> None:
+            if self._one(connection, thresholds, space, project_id, id=threshold_id) is None:
+                raise StoreError("not_found", "threshold not found")
+            connection.execute(
+                delete(threshold_alerts).where(
+                    threshold_alerts.c.space == space,
+                    threshold_alerts.c.project_id == project_id,
+                    threshold_alerts.c.threshold_id == threshold_id,
+                )
+            )
+            connection.execute(
+                delete(thresholds).where(
+                    thresholds.c.space == space, thresholds.c.project_id == project_id, thresholds.c.id == threshold_id
+                )
+            )
+
+        await self._run(principal, work)
+        self._emit(principal, "threshold", project_id, threshold_id)
+
+    async def threshold_status(
+        self, principal: Principal, project_id: str, threshold_id: str
+    ) -> ThresholdStatus | None:
+        def work(connection: Connection, space: str) -> ThresholdStatus | None:
+            stored = connection.execute(
+                select(thresholds.c.status).where(
+                    thresholds.c.space == space, thresholds.c.project_id == project_id, thresholds.c.id == threshold_id
+                )
+            ).scalar_one_or_none()
+            return ThresholdStatus.model_validate(stored) if stored is not None else None
+
+        return await self._run(principal, work)
+
+    async def set_threshold_status(
+        self,
+        principal: Principal,
+        project_id: str,
+        threshold_id: str,
+        status: ThresholdStatus,
+        *,
+        expected_sequence: int,
+        alerts: Sequence[Alert] = (),
+    ) -> bool:
+        if any(alert.threshold_id != threshold_id for alert in alerts):
+            raise StoreError("invalid", "an alert belongs to another threshold")
+
+        def work(connection: Connection, space: str) -> bool:
+            changed = connection.execute(
+                update(thresholds)
+                .where(
+                    thresholds.c.space == space,
+                    thresholds.c.project_id == project_id,
+                    thresholds.c.id == threshold_id,
+                    thresholds.c.sequence == expected_sequence,
+                )
+                .values(sequence=status.sequence, status=_json(status))
+            ).rowcount
+            if not changed:
+                return False
+            now = _now()
+            for alert in alerts:
+                if self._one(connection, threshold_alerts, space, project_id, id=alert.id) is not None:
+                    continue
+                saved = alert.model_copy(
+                    update={"created_at": alert.created_at or now, "next_attempt_at": alert.next_attempt_at or now}
+                )
+                connection.execute(
+                    insert(threshold_alerts).values(
+                        space=space,
+                        project_id=project_id,
+                        id=alert.id,
+                        threshold_id=threshold_id,
+                        state=saved.state,
+                        next_attempt_at=saved.next_attempt_at if saved.state == "pending" else None,
+                        created_at=saved.created_at,
+                        record=_json(saved),
+                    )
+                )
+            return True
+
+        written = await self._run(principal, work)
+        if written and status.sequence != expected_sequence:
+            self._emit(principal, "threshold", project_id, threshold_id)
+        return written
+
+    async def threshold_secret(self, principal: Principal, project_id: str, threshold_id: str) -> str | None:
+        def work(connection: Connection, space: str) -> str | None:
+            found: str | None = connection.execute(
+                select(thresholds.c.secret).where(
+                    thresholds.c.space == space, thresholds.c.project_id == project_id, thresholds.c.id == threshold_id
+                )
+            ).scalar_one_or_none()
+            return found
+
+        return await self._run(principal, work)
+
+    async def threshold_signed(self, principal: Principal, project_id: str, threshold_id: str) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            return (
+                connection.execute(
+                    select(thresholds.c.id).where(
+                        thresholds.c.space == space,
+                        thresholds.c.project_id == project_id,
+                        thresholds.c.id == threshold_id,
+                        thresholds.c.secret.is_not(None),
+                    )
+                ).first()
+                is not None
+            )
+
+        return await self._run(principal, work)
+
+    async def set_threshold_secret(self, principal: Principal, project_id: str, threshold_id: str, secret: str) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            stored = self._one(connection, thresholds, space, project_id, id=threshold_id)
+            if stored is None or Threshold.model_validate(stored).webhook is None:
+                return False
+            return bool(
+                connection.execute(
+                    update(thresholds)
+                    .where(
+                        thresholds.c.space == space,
+                        thresholds.c.project_id == project_id,
+                        thresholds.c.id == threshold_id,
+                        thresholds.c.secret.is_(None),
+                    )
+                    .values(secret=secret)
+                ).rowcount
+            )
+
+        written = await self._run(principal, work)
+        if written:
+            self._emit(principal, "threshold", project_id, threshold_id)
+        return written
+
+    async def take_due_alerts(
+        self,
+        principal: Principal,
+        project_id: str,
+        threshold_ids: Sequence[str],
+        *,
+        now: datetime,
+        hold_until: datetime,
+        limit: int = 20,
+    ) -> list[Alert]:
+        _bounds(0, limit, 100)
+        ids = list(threshold_ids)
+        if not ids:
+            return []
+
+        def work(connection: Connection, space: str) -> list[Alert]:
+            due = (
+                threshold_alerts.c.space == space,
+                threshold_alerts.c.project_id == project_id,
+                threshold_alerts.c.state == "pending",
+                threshold_alerts.c.next_attempt_at <= now.astimezone(UTC),
+            )
+            rows: Sequence[Any] = connection.execute(
+                select(threshold_alerts.c.id, threshold_alerts.c.record)
+                .where(*due, threshold_alerts.c.threshold_id.in_(ids))
+                .order_by(threshold_alerts.c.created_at, threshold_alerts.c.id)
+                .limit(limit)
+            ).all()
+            taken = []
+            for alert_id, record in rows:
+                held = Alert.model_validate(record).model_copy(update={"next_attempt_at": hold_until})
+                # Still due: no other delivery took it since it was read.
+                if connection.execute(
+                    update(threshold_alerts)
+                    .where(*due, threshold_alerts.c.id == alert_id)
+                    .values(next_attempt_at=hold_until.astimezone(UTC), record=_json(held))
+                ).rowcount:
+                    taken.append(held)
+            return taken
+
+        return await self._run(principal, work)
+
+    async def finish_alert(self, principal: Principal, project_id: str, alert: Alert) -> None:
+        def work(connection: Connection, space: str) -> None:
+            connection.execute(
+                update(threshold_alerts)
+                .where(
+                    threshold_alerts.c.space == space,
+                    threshold_alerts.c.project_id == project_id,
+                    threshold_alerts.c.id == alert.id,
+                )
+                .values(
+                    state=alert.state,
+                    next_attempt_at=alert.next_attempt_at if alert.state == "pending" else None,
+                    record=_json(alert),
+                )
+            )
+
+        await self._run(principal, work)
+
+    async def list_alerts(
+        self, principal: Principal, project_id: str, threshold_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[Alert]:
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
+        _bounds(offset, limit)
+
+        def work(connection: Connection, space: str) -> Page[Alert]:
+            where = [
+                threshold_alerts.c.space == space,
+                threshold_alerts.c.project_id == project_id,
+                threshold_alerts.c.threshold_id == threshold_id,
+            ]
+            total = connection.execute(select(func.count()).select_from(threshold_alerts).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(threshold_alerts.c.record)
+                    .where(*where)
+                    .order_by(threshold_alerts.c.created_at.desc(), threshold_alerts.c.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([Alert.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    # --- schedules -----------------------------------------------------------------------------
+
+    async def create_schedule(self, principal: Principal, project_id: str, schedule: Schedule) -> Schedule:
+        if schedule.project_id != project_id:
+            raise StoreError("invalid", "the schedule belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[Schedule, bool]:
+            if stored := self._one(connection, schedules, space, project_id, id=schedule.id):
+                return Schedule.model_validate(stored), False
+            now = _now()
+            saved = schedule.model_copy(
+                update={
+                    "revision": 1,
+                    "created_at": schedule.created_at or now,
+                    "updated_at": now,
+                    "active_since": schedule.active_since or schedule.created_at or now,
+                    "created_by": schedule.created_by or principal.user_id,
+                }
+            )
+            connection.execute(
+                insert(schedules).values(
+                    space=space,
+                    project_id=project_id,
+                    id=schedule.id,
+                    state=saved.state,
+                    revision=1,
+                    record=_json(saved),
+                    progress=_json(ScheduleProgress()),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "schedule", project_id, schedule.id)
+        return saved
+
+    async def get_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> Schedule | None:
+        def work(connection: Connection, space: str) -> Schedule | None:
+            stored = self._one(connection, schedules, space, project_id, id=schedule_id)
+            return Schedule.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_schedules(self, principal: Principal, project_id: str) -> list[Schedule]:
+        def work(connection: Connection, space: str) -> list[Schedule]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(schedules.c.record).where(schedules.c.space == space, schedules.c.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+            return sorted((Schedule.model_validate(r) for r in rows), key=lambda s: (s.name, s.id))
+
+        return await self._run(principal, work)
+
+    async def update_schedule(
+        self, principal: Principal, project_id: str, schedule: Schedule, *, expected_revision: int
+    ) -> Schedule:
+        def work(connection: Connection, space: str) -> Schedule:
+            stored = self._one(connection, schedules, space, project_id, id=schedule.id)
+            if stored is None:
+                raise StoreError("not_found", "schedule not found")
+            earlier = Schedule.model_validate(stored)
+            saved = schedule.model_copy(
+                update={
+                    "revision": expected_revision + 1,
+                    "created_at": earlier.created_at,
+                    "created_by": earlier.created_by,
+                    "updated_at": _now(),
+                }
+            )
+            changed = connection.execute(
+                update(schedules)
+                .where(
+                    schedules.c.space == space,
+                    schedules.c.project_id == project_id,
+                    schedules.c.id == schedule.id,
+                    schedules.c.revision == expected_revision,
+                )
+                .values(state=saved.state, revision=saved.revision, record=_json(saved))
+            ).rowcount
+            if changed == 0:
+                raise StoreError("conflict", "the schedule was changed by someone else; reload it")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "schedule", project_id, schedule.id)
+        return saved
+
+    async def delete_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> None:
+        def work(connection: Connection, space: str) -> list[str]:
+            if self._one(connection, schedules, space, project_id, id=schedule_id) is None:
+                raise StoreError("not_found", "schedule not found")
+            gone = self._delete_thresholds_on(connection, space, project_id, "gate", schedule_id)
+            for table, key in ((schedule_runs, schedule_runs.c.schedule_id), (schedules, schedules.c.id)):
+                connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == schedule_id)
+                )
+            return gone
+
+        for threshold_id in await self._run(principal, work):
+            self._emit(principal, "threshold", project_id, threshold_id)
+        self._emit(principal, "schedule", project_id, schedule_id)
+
+    @staticmethod
+    def _delete_thresholds_on(
+        connection: Connection, space: str, project_id: str, source_kind: str, source_id: str
+    ) -> list[str]:
+        """Remove the thresholds on one source, with their alerts; their ids."""
+        on_it = (
+            thresholds.c.space == space,
+            thresholds.c.project_id == project_id,
+            thresholds.c.source_kind == source_kind,
+            thresholds.c.source_id == source_id,
+        )
+        gone: list[str] = list(connection.execute(select(thresholds.c.id).where(*on_it)).scalars().all())
+        if gone:
+            connection.execute(
+                delete(threshold_alerts).where(
+                    threshold_alerts.c.space == space,
+                    threshold_alerts.c.project_id == project_id,
+                    threshold_alerts.c.threshold_id.in_(gone),
+                )
+            )
+            connection.execute(delete(thresholds).where(*on_it))
+        return gone
+
+    async def schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str
+    ) -> ScheduleProgress | None:
+        def work(connection: Connection, space: str) -> ScheduleProgress | None:
+            stored = connection.execute(
+                select(schedules.c.progress).where(
+                    schedules.c.space == space, schedules.c.project_id == project_id, schedules.c.id == schedule_id
+                )
+            ).scalar_one_or_none()
+            return ScheduleProgress.model_validate(stored) if stored is not None else None
+
+        return await self._run(principal, work)
+
+    async def set_schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str, progress: ScheduleProgress
+    ) -> None:
+        def work(connection: Connection, space: str) -> int:
+            return connection.execute(
+                update(schedules)
+                .where(schedules.c.space == space, schedules.c.project_id == project_id, schedules.c.id == schedule_id)
+                .values(progress=_json(progress))
+            ).rowcount
+
+        if await self._run(principal, work):
+            self._emit(principal, "schedule", project_id, schedule_id)
+
+    def _scheduled_run(
+        self, connection: Connection, space: str, project_id: str, schedule_id: str, slot: datetime
+    ) -> ScheduledRun | None:
+        stored = connection.execute(
+            select(schedule_runs.c.record).where(
+                schedule_runs.c.space == space,
+                schedule_runs.c.project_id == project_id,
+                schedule_runs.c.schedule_id == schedule_id,
+                schedule_runs.c.slot == slot,
+            )
+        ).scalar_one_or_none()
+        return ScheduledRun.model_validate(stored) if stored is not None else None
+
+    async def add_scheduled_run(self, principal: Principal, project_id: str, entry: ScheduledRun) -> ScheduledRun:
+        def work(connection: Connection, space: str) -> tuple[ScheduledRun, bool]:
+            if self._one(connection, schedules, space, project_id, id=entry.schedule_id) is None:
+                raise StoreError("not_found", "schedule not found")
+            if found := self._scheduled_run(connection, space, project_id, entry.schedule_id, entry.slot):
+                return found, False
+            saved = entry.model_copy(update={"created_at": entry.created_at or _now()})
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(schedule_runs).values(
+                            space=space,
+                            project_id=project_id,
+                            schedule_id=entry.schedule_id,
+                            slot=entry.slot,
+                            state=entry.state,
+                            run_id=entry.run_id,
+                            record=_json(saved),
+                        )
+                    )
+            except IntegrityError:  # another turn recorded the slot at the same moment
+                found = self._scheduled_run(connection, space, project_id, entry.schedule_id, entry.slot)
+                if found is None:
+                    raise
+                return found, False
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "schedule", project_id, entry.schedule_id)
+        return saved
+
+    async def get_scheduled_run(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime
+    ) -> ScheduledRun | None:
+        def work(connection: Connection, space: str) -> ScheduledRun | None:
+            return self._scheduled_run(connection, space, project_id, schedule_id, slot)
+
+        return await self._run(principal, work)
+
+    async def list_scheduled_runs(
+        self, principal: Principal, project_id: str, schedule_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[ScheduledRun]:
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
+        _bounds(offset, limit)
+
+        def work(connection: Connection, space: str) -> Page[ScheduledRun]:
+            where = [
+                schedule_runs.c.space == space,
+                schedule_runs.c.project_id == project_id,
+                schedule_runs.c.schedule_id == schedule_id,
+            ]
+            total = connection.execute(select(func.count()).select_from(schedule_runs).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(schedule_runs.c.record)
+                    .where(*where)
+                    .order_by(schedule_runs.c.slot.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([ScheduledRun.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    async def set_scheduled_run_gate(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime, gate: str
+    ) -> ScheduledRun | None:
+        def work(connection: Connection, space: str) -> ScheduledRun | None:
+            found = self._scheduled_run(connection, space, project_id, schedule_id, slot)
+            if found is None:
+                return None
+            gated = ScheduledRun.model_validate({**found.model_dump(mode="json"), "gate": gate})
+            connection.execute(
+                update(schedule_runs)
+                .where(
+                    schedule_runs.c.space == space,
+                    schedule_runs.c.project_id == project_id,
+                    schedule_runs.c.schedule_id == schedule_id,
+                    schedule_runs.c.slot == slot,
+                )
+                .values(record=_json(gated))
+            )
+            return gated
+
+        gated = await self._run(principal, work)
+        if gated is not None:
+            self._emit(principal, "schedule", project_id, schedule_id)
+        return gated

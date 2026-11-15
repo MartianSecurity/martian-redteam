@@ -30,7 +30,7 @@ RUN set -eu; set -- /dist/*.whl; \
 
 FROM ${PYTHON_IMAGE}
 LABEL org.opencontainers.image.title="Martian Evals, local edition" \
-      org.opencontainers.image.source="https://github.com/MorningHQ/martian-redteam" \
+      org.opencontainers.image.source="https://github.com/MartianSecurity/martian-redteam" \
       org.opencontainers.image.licenses="Apache-2.0"
 RUN groupadd --gid 10001 martian \
  && useradd --uid 10001 --gid martian --home-dir /home/martian --create-home --shell /usr/sbin/nologin martian \
