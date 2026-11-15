@@ -136,7 +136,7 @@ each turn of a [conversation](#conversations) or the conversation once.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator` |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -547,13 +547,16 @@ only the last call, the one after the budget is spent, fails, the goal alone has
 | Where | What |
 | --- | --- |
 | `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
-| `summary.json` | `simulator`: the `model`, the simulator's instruction `version` and how many `cases` it played; `goal_reached` among the `checks`, with scope `conversation` |
-| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
+| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation` |
+| The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
 | The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
+| The Evals UI | A **Simulated** badge on a run with simulated users, in Runs and on its page, and on each simulated conversation's row and in its **Inspect** drawer, which names the simulator model. Single-turn and scripted conversation cases have none |
 
-Changing a simulated user, or the simulator's `model` or `inference_params`, grades its cases
-again; cases without a simulated user keep their results. How close simulated users come to real
-ones is not measured yet (MorningHQ/martian-notes#194).
+A run without simulated users writes and shows none of these. Changing a simulated user, or the
+simulator's `model` or `inference_params`, grades its cases again; cases without a simulated user
+keep their results. How close a simulator's users come to real ones is what the
+[fidelity report](#simulator-fidelity) measures.
 
 ### Personas from real conversations
 
@@ -568,6 +571,8 @@ martian evals personas --session SESSION_ID --session SESSION_ID --model "openai
 - **From a file**, JSON Lines with one conversation per line: `{"id": "...", "messages": [{"role":
   "user", "content": "..."}, ...]}`. `id` is optional (`transcript-<line>` without one); a role is
   `user`, `assistant` or `system`, and a `system` message, the assistant's instructions, is left out.
+  A line can also have `goal_reached`, `true` or `false`, whether that user got what they came for;
+  only the [fidelity report](#simulator-fidelity) reads it.
 - **From the local Evals UI's data folder**, by session id (`--session`, repeatable, and
   `--data-dir`): the session's traces oldest first, each trace's request as the user's message
   and its response as the reply. A conversation case's turns and an application's traces that
@@ -586,6 +591,111 @@ martian evals personas --session SESSION_ID --session SESSION_ID --model "openai
 `martian.evals.personas` does the same from Python: `read_transcripts(path)` or
 `transcripts_from_store(data_dir, session_ids)`, then `build_personas(transcripts, model=...)`,
 with the simulator's settings as arguments, and `write_personas(built, path)`.
+
+### Simulator fidelity
+
+A simulator can flatter the agent: its users may be more patient, say less, and be satisfied
+sooner than real ones, so a suite passes that real users would fail. `martian evals fidelity`
+compares the simulated conversations of one or more runs with real conversations, the same
+transcripts file or sessions `martian evals personas` reads, on how long they run, how often the
+user corrects or repeats a request, and how often the user reaches their goal. It calls no model.
+
+```bash
+martian evals run evals.yaml                       # a suite with simulated users, into results/
+martian evals fidelity transcripts.jsonl --results results -o fidelity.json
+martian evals fidelity --session SESSION_ID --session SESSION_ID --results results -o fidelity.json
+```
+
+`--results` is the output folder of a run, repeatable; `--session` and `--data-dir` are as for
+`personas`; `-o` (default `fidelity.json`) is the report. The command prints one table per setup
+and writes the report. For the [simulated-users example](#simulated-users), with its data file
+named `personas.jsonl`, against four short real conversations (one labelled):
+
+```text
+Simulator setup: openai:/your-model, parameters {"temperature": 0.7}, instructions simulated-user-v1, personas personas.jsonl (dataset digest 1eb20c78b07a)
+                            Fidelity of openai:/your-model with personas from personas.jsonl
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Measure                         ┃ Simulated           ┃ Real                 ┃ Difference (95% CI)                   ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Turns per conversation          │ 2.5 (-16.6 to 21.6) │ 2.2 (0.7 to 3.8)     │ +0.2 (-18.9 to +19.4), within noise   │
+│ Conversations with a correction │ 1 of 2, 50% (9–91%) │ 2 of 4, 50% (15–85%) │ +0 points (-54 to +54), within noise  │
+│ Corrections per turn            │ 1 of 5              │ 2 of 9               │ —                                     │
+│ Goal reached                    │ 1 of 2, 50% (9–91%) │ 2 of 3, 67% (20–94%) │ -17 points (-66 to +45), within noise │
+└─────────────────────────────────┴─────────────────────┴──────────────────────┴───────────────────────────────────────┘
+Simulated: 2 conversations of 2 cases in results. Real: 4 conversations from transcripts.jsonl; goal reached as labelled
+for 1, by the outcome rule for 2, unknown for 1. Corrections and the outcome rule: fidelity-v1 (docs/evals.md, simulator
+fidelity).
+```
+
+Two simulated conversations and four real ones are far too few to tell anything apart: every
+difference is within noise, and a mean of two conversations has a very wide interval.
+
+**One report per simulator setup.** A setup is what the run's `summary.json` names under
+`simulator`: the model, its parameters, the simulator's instruction version and the persona source
+(the data file and the dataset's digest). Folders of the same setup are read together, so repeated
+runs add conversations; each other setup gets its own report. The simulated conversations are
+those of each folder's last run: every attempt of every case with a simulated user. One that ended
+on an error, a failed target or simulator call, is left out and counted.
+
+**The measures**, each for the simulated and the real side, with how many conversations it rests
+on:
+
+| Measure | Simulated | Real |
+| --- | --- | --- |
+| Turns | The messages the simulated user sent | The `user` messages |
+| Corrections | Messages that correct or repeat a request, by the rules below; the share of conversations with at least one, and corrections per turn | The same rules |
+| Goal reached | The case's `goal_reached` verdict, which the simulator gives | The transcript's `goal_reached` label, else the outcome rule below; a conversation the rule cannot read is unknown, counted and left out of the share |
+
+**Corrections**, found the same way on both sides. The first message is never a correction. A
+later user message is one when, compared case-insensitively with curly apostrophes made straight:
+
+- it holds one of these phrases as whole words: *i meant*, *i said*, *i asked*, *i already*,
+  *i told you*, *as i said*, *like i said*, *not what i*, *that's not right*, *that's not
+  correct*, *that's wrong*, *that's incorrect* (each also with *that is*), *you misunderstood*,
+  *you got it wrong*, *let me rephrase*, *to clarify*, *to be clear*, *doesn't answer*, *does not
+  answer*, *didn't answer*, *did not answer*; or
+- it repeats an earlier user message: each has at least two content words, the runs of letters or
+  digits less single letters and a fixed list of pleasantries and grammar words
+  (`martian.evals.fidelity.STOPWORDS`; *no* and *not* are content), and the words they share are at
+  least 60% of the words either has.
+
+**The outcome rule**, for a real conversation without a label, reads the last user message: the
+goal was not reached when it is a correction or says the help failed (*didn't help*, *doesn't
+work*, *still not*, *never mind*, *forget it*, *give up*, *useless* and their variants); it was
+reached when it thanks or confirms (*thank*, *thanks*, *perfect*, *great*, *that works*, *that
+helps*, *got it*, *all set*, *sorted*, *resolved* and the like); otherwise it is unknown.
+`martian.evals.fidelity` lists every phrase (`CORRECTION_PHRASES`, `UNRESOLVED_PHRASES`,
+`CLOSING_PHRASES`). The phrases are English, and a rule is not a reader: label the transcripts'
+outcomes when they matter.
+
+**Intervals and differences.** Each side's mean has its Student t interval and each share its
+Wilson interval ([pass rates and intervals](#pass-rates-and-confidence-intervals)). The attempts of
+one case, and the same case in several folders, are conversations of one persona, so the simulated
+side groups them by case; real conversations are independent. The difference, simulated minus
+real, has Newcombe's hybrid score interval for two shares and the same construction (MOVER, from
+the two sides' intervals) for two means. It reads **simulated higher** or **simulated lower** when
+its interval leaves out 0, and **within noise** otherwise. A mean of one conversation has no
+interval, so neither has its difference.
+
+**What the report holds.** `fidelity.json` has `version` (`fidelity-v1`, the rules' version),
+`real` (`source`, the transcripts file as given and its SHA-256, or the session ids, and
+`conversations`) and `reports`, one per setup: `setup`, `results` (the folders), `cases`,
+`left_out`, `turns`, `corrections` and `goal_reached` (each with `simulated`, `real` and
+`difference`), and `conversations`. Each conversation is its id (a case id, `<case> attempt <n>`
+with repeats, or a transcript's id), its `turns`, the numbers of the turns that are
+`corrections`, its `goal_reached` and where that came from (`outcome`: `simulator`, `label`,
+`rule`, or null when unknown). Ids have the personal data
+[`no_personal_data`](#policy-checks) finds replaced by its kind; no message is written.
+
+**What it cannot tell.** A built persona's `max_turns` is the real conversation's length, so its
+simulated conversation cannot run longer, only shorter. The simulated goal verdict is the
+simulator's own opinion, and the real one a label or a rule, so a gap between them is evidence to
+read, not a measurement of the agent. The report compares the two sides as a whole; it does not
+pair a persona with the transcript it was built from.
+
+`martian.evals.fidelity` does the same from Python: `read_simulated(folder)`,
+`real_conversations(transcripts)`, then `fidelity_report(simulated, real, source)` and
+`write_report(report, path)`; `corrections(messages)` and `outcome_by_rule(messages)` are the rules.
 
 ## Pass rates and confidence intervals
 

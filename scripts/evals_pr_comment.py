@@ -110,8 +110,12 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             "",
         ]
     else:
+        # A simulated user's cases are counted in the headline, so their verdicts cannot pass for
+        # real users'.
+        simulated = summary.get("simulator")
+        played = f" ({simulated['cases']} simulated)" if simulated else ""
         lines += [
-            f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases, {summary['passed']} passed, "
+            f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases{played}, {summary['passed']} passed, "
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
         ]
@@ -137,6 +141,12 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
                 f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
                 f"{reliable['errors']} | {rate(reliable)} |"
             )
+        # With simulated users, the verdicts of the cases a model played the user of.
+        if simulated:
+            lines.append(
+                f"| **Simulated** (cases) | {simulated['passed']} | {simulated['failed']} | "
+                f"{simulated['errors']} | {rate(simulated)} |"
+            )
         # With conversation cases, their turns' own verdicts, which count turns, not cases.
         if talks := summary.get("conversations"):
             turns = talks["turns"]
@@ -152,7 +162,7 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             lines.append(f"\n{_repeats(repeats)}")
         if talks:
             lines.append(f"\n{_conversations(talks)}")
-        if simulated := summary.get("simulator"):
+        if simulated:
             lines.append(f"\n{_simulated(simulated)}")
         if reliable:
             lines.append(f"\n{_flaky(reliable['flaky'])}")
@@ -195,7 +205,11 @@ def _table(
     heading: str, column: str, cases: list[dict[str, Any]], detail: Callable[[dict[str, Any]], str]
 ) -> list[str]:
     lines = [f"#### {heading}", "", f"| Case | {column} |", "| --- | --- |"]
-    lines += [f"| {code(case['id'])} | {detail(case)} |" for case in cases[:MAX_ROWS]]
+    # A case whose user a model played says so beside its id.
+    lines += [
+        f"| {code(case['id'])}{' (simulated)' if case.get('simulated') is True else ''} | {detail(case)} |"
+        for case in cases[:MAX_ROWS]
+    ]
     if len(cases) > MAX_ROWS:
         lines.append(f"\n{len(cases) - MAX_ROWS} more; results.jsonl in the output folder has every case.")
     return [*lines, ""]
@@ -226,8 +240,8 @@ def _simulated(simulated: Mapping[str, Any]) -> str:
     """How many conversations had a simulated user, and which model played them."""
     cases = "1 conversation has" if simulated["cases"] == 1 else f"{simulated['cases']} conversations have"
     return (
-        f"{cases} a simulated user, played by {code(simulated['model'], 120, cell=False)}; "
-        f"{code('goal_reached', cell=False)} is whether each reached its goal."
+        f"{cases} a simulated user, played by {code(simulated['model'], 120, cell=False)}: **Simulated** "
+        f"counts their verdicts, and {code('goal_reached', cell=False)} is whether each reached its goal."
     )
 
 

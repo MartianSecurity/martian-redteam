@@ -1359,7 +1359,9 @@ reliability and flaky cases, a resumed run, a run that stops early, and a data f
 `tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
 conversation verdicts, the turns route, each turn's trace and the session its turns share.
 `tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
-the simulator model, and for personas built from transcripts and from the data folder's sessions.
+the simulator model, and for personas built from transcripts and from the data folder's sessions;
+`tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
+[fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
 
 ## Not built yet
 
@@ -1370,7 +1372,6 @@ the simulator model, and for personas built from transcripts and from the data f
 | A durable worker | MorningHQ/martian-notes#139 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
-| How close simulated users come to real ones | MorningHQ/martian-notes#194 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
