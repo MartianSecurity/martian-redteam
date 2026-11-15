@@ -1748,6 +1748,8 @@ def run_suite(
             limit=limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
             repeats=repeat_plan if repeated else None,
+            # Scripted and simulated alike: the Evals UI reads the turns route of a run with any.
+            conversations=sum(_conversation(case) for case in cases),
             simulator=None if simulator is None else simulator.definition,
         )
         # Leave MLflow as it was found: another evaluation in this process must not inherit this

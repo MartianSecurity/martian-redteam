@@ -237,7 +237,9 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
 - **Conversation cases.** A conversation case result is one item, with its conversation's status,
   its first turn's prompt as `prompt` and the conversation as messages, in JSON, as `output`.
   `EvalItemOut` has no place for turns, so they are served by the turns route above, which the
-  frozen contract does not type. The item's trace is the turn that shows the conversation's
+  frozen contract does not type. The run's `provenance.conversations` on the run routes, how many
+  of its cases are conversations, says whether the turns route has any; a run without
+  conversation cases has no such key. The item's trace is the turn that shows the conversation's
   verdict, and its scores, the conversation's verdicts, are on no trace. Each turn's trace has
   the conversation's `session_id`, so the Sessions search groups a conversation's turns into one
   session with no route of its own.

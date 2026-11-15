@@ -223,6 +223,8 @@ def test_a_simulated_user_reaches_or_fails_its_goal_and_is_recorded_turn_by_turn
     run_id = summary["run"]["id"]
     detail = client.get(f"/v1/evals/{run_id}").json()
     validate_response("get", "/v1/evals/{run_id}", detail)
+    # Simulated conversations count among the run's conversations, so the UI asks for their turns.
+    assert detail["provenance"]["conversations"] == 2
     assert {item["dataset_item_id"]: item["status"] for item in detail["items"]} == {
         "cancel-clearly": "passed",
         "cancel-after-chat": "failed",

@@ -18,9 +18,11 @@
   each attempt's trace is recorded with that attempt's verdicts. The case result's trace is its
   representative attempt's (:func:`martian.evals.repeats.representative`). Its scores are the
   attempts combined, which no one trace carries, so they name no trace.
-- A conversation case's result holds its session id and every turn it sent. Each turn's trace is
-  recorded with that turn's verdicts and the conversation's session id, so the turns group into
-  one session; with repeats each attempt's turns are, under that attempt's own session id. The
+- When the run has conversation cases, the run's ``provenance`` holds how many under
+  ``conversations``. A conversation case's result holds its session id and every turn it sent.
+  Each turn's trace is recorded with that turn's verdicts and the conversation's session id, so
+  the turns group into one session; with repeats each attempt's turns are, under that attempt's
+  own session id. The
   case result's trace is that of its first turn whose verdict is the conversation's, else of its
   first turn, its latency the turns' latencies added up. Its scores are the conversation's
   verdicts, which no one trace carries, so they name no trace.
@@ -132,12 +134,14 @@ class RunRecorder:
         limit: int | None,
         reused: list[GradedCase],
         repeats: dict[str, Any] | None = None,
+        conversations: int = 0,
         simulator: Simulator | None = None,
     ) -> Run:
         """Record that the run started over ``planned`` of the dataset's ``total`` cases, with the
-        results it reuses from earlier runs, with ``repeats``, the suite's repeat plan, when it runs
-        each case more than once, and with ``simulator``, the model that plays its simulated users,
-        when it has any."""
+        results it reuses from earlier runs, with ``repeats``, the suite's repeat plan, when it
+        runs each case more than once, with ``conversations``, how many of the planned cases are
+        conversations, and with ``simulator``, the model that plays its simulated users, when it
+        has any."""
         if simulator is not None:
             # The goal verdict is the simulator's judgment of each simulated conversation.
             self._scorers[GOAL] = ScorerVersion(
@@ -150,7 +154,15 @@ class RunRecorder:
                 scope="conversation",
             )
         return _wait(
-            self._start(planned=planned, total=total, limit=limit, reused=reused, repeats=repeats, simulator=simulator)
+            self._start(
+                planned=planned,
+                total=total,
+                limit=limit,
+                reused=reused,
+                repeats=repeats,
+                conversations=conversations,
+                simulator=simulator,
+            )
         )
 
     async def _start(
@@ -161,6 +173,7 @@ class RunRecorder:
         limit: int | None,
         reused: list[GradedCase],
         repeats: dict[str, Any] | None,
+        conversations: int,
         simulator: Simulator | None,
     ) -> Run:
         from martian.evals.local_runs import PROCESS, RunLock
@@ -174,6 +187,8 @@ class RunRecorder:
         }
         if repeats is not None:
             provenance["repeats"] = repeats
+        if conversations:
+            provenance["conversations"] = conversations
         if simulator is not None:
             provenance["simulator"] = {**simulator.model_dump(mode="json"), "version": SIMULATOR_VERSION}
         run = Run(
