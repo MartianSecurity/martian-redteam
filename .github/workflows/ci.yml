@@ -159,6 +159,7 @@ jobs:
           tests/evals/test_write_contract.py tests/evals/test_user_ids.py tests/evals/test_worker.py
           tests/evals/test_worker_process.py
           tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py tests/evals/test_worker_queue.py
+          tests/evals/test_no_outbound.py
 
   mlflow-compat:
     name: MLflow compatibility
@@ -227,6 +228,8 @@ jobs:
           uv build
           uv run --all-extras twine check --strict dist/*
           uv run --all-extras python scripts/check_release.py --install
+          # The release's licence check: a dependency under a licence outside scripts/licence-policy.json fails here.
+          uv run --all-extras python scripts/sbom.py wheel --out-dir release-sbom
           shopt -s nullglob
           wheels=(dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then

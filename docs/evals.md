@@ -50,9 +50,12 @@ run is recorded in the data folder of the
 [`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
-to the target as keyword arguments), and optional `id`, `output` and `expectations`. CSV takes
-the columns `input`, optional `id` and `output`; every other column becomes an expectation of
-that name. There is no row limit.
+to the target as keyword arguments), and optional `id`, `output`, `expectations` and `group`.
+`group` is a string that names a set of related cases, such as paraphrases of one attack or turns
+of one conversation, so the summary's intervals allow for them
+([pass rates and intervals](#pass-rates-and-confidence-intervals)). CSV takes the columns `input`,
+optional `id` and `output`; every other column becomes an expectation of that name, so a CSV case
+has no group. There is no row limit.
 
 **URL target.** When the agent is behind an HTTP endpoint, name the endpoint instead of a
 Python file:
@@ -70,7 +73,7 @@ target:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case |
+| `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case, or per attempt with [repeats](#repeated-attempts) |
 | `body` | Yes | The JSON body, with placeholders in its string values |
 | `headers` | No | Request headers |
 | `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
@@ -126,21 +129,25 @@ types a `name`.
 
 | File | Content |
 | --- | --- |
-| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`), and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused |
-| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
-they are sensitive. The command also prints a table, with the false-refusal rate under it for a
-suite with a policy check, and the reasons cases had no verdict, and exits `0` when every case
-passed, `1` when a case failed, and `2` when a case has no verdict or the suite file is invalid.
+they are sensitive. The command also prints a table of the counts and each pass rate with its
+interval, such as `67% (20–94%)`, with repeats the rule each check's attempts combined by and
+the [reliability](#reliability-and-flaky-cases) and flaky cases; under it, the false-refusal
+rate for a suite with a policy check and the reasons cases had no verdict. It exits `0` when
+every case passed, `1` when a case failed, and `2` when a case has no verdict or the suite file
+is invalid.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
-run that is stopped can be started again: finished cases are skipped, and cases that errored are
-tried again. `--fresh` discards earlier results. `--data-dir` names the local Evals UI's data
-folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`, else
-`~/.martian/evals`.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh` and
+`--data-dir DIR`. A run that is stopped can be started again: finished cases are skipped, and
+cases that errored are tried again. `--repeats` runs each case N times, 1 to 100, in place of the
+suite file's `repeats` ([repeated attempts](#repeated-attempts)). `--fresh` discards earlier
+results. `--data-dir` names the local Evals UI's data folder the run is recorded in, as for
+`martian ui`; without it, `MARTIAN_EVALS_HOME`, else `~/.martian/evals`.
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
 comment on the pull request with the result, still with no Martian account. See
@@ -148,7 +155,8 @@ comment on the pull request with the result, still with no Martian account. See
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
-inputs, expectations and stored output, and the SDK version. A function target counts by the
+inputs, expectations and stored output, the number of attempts and the rule each check's attempts
+combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
@@ -169,7 +177,8 @@ Run evals-3 is in the local Evals UI: martian ui
 The run is in **Runs**, named after the suite file and numbered among that suite's runs, as a
 **Local run** of the data file's dataset. Its detail shows each case's verdict, reply and check
 reasons, and each case's trace with your target's own spans. **Compare** pairs two runs of the
-same data case by case, and **Traces** lists every case's trace. A case reused from an earlier
+same data case by case and labels the change better, worse or within noise
+([comparing two runs](#comparing-two-runs)), and **Traces** lists every case's trace. A case reused from an earlier
 run keeps its verdict but not its trace, which stays with the run that graded it. A run that
 stops early shows as failed, or cancelled when interrupted. A run whose process was killed shows
 as running for about ten seconds while `martian ui` serves the folder, or until it next starts,
@@ -215,6 +224,209 @@ results, with a message naming the setting to check, and the rest of the run car
 
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
+
+## Repeated attempts
+
+A case that fails one time in five passes a gate that runs it once four times out of five.
+`repeats` runs each case several times and combines each check's verdicts over the attempts by a
+rule, so a case that is not reliably right fails:
+
+```yaml
+repeats: 5                 # attempts of each case, 1 to 100; default 1
+combine: majority          # the suite's rule: all (the default), majority or any
+checks:
+  - type: not_contains     # a security check: all, whatever the suite's rule
+    name: no_secret_leak
+    expectation: secret
+  - type: rubric           # the suite's rule: majority
+    rubric: "Pass if the reply answers the question."
+  - type: contains
+    values: ["thank"]
+    combine: any           # its own rule
+```
+
+`martian evals run evals.yaml --repeats 5`, or `run_suite(path, repeats=5)` from
+`martian.evals.runner`, replaces the file's `repeats` for one run. Each attempt calls the target
+and every judge again, so five attempts cost five times as much.
+
+| Rule | A check passes the case when |
+| --- | --- |
+| `all` | Every attempt passed it |
+| `majority` | More than half of the attempts passed it; a tie fails |
+| `any` | At least one attempt passed it |
+
+- **Which rule a check uses.** Its own `combine`, when it names one. Otherwise `all` for a
+  security check, and the suite's `combine` for any other. The suite's `combine` is `all` unless
+  it names another, so a suite that names no rule needs every attempt to pass every check.
+- **Security checks** are `not_contains`, `not_matches` and the [policy checks](#policy-checks)
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets` and `resists_injection`: the checks
+  that fail a reply for holding something it must never hold, such as a secret, a key, personal
+  data, a prohibited phrase or an injected instruction's marker. One leak in five attempts fails
+  the case, even when the suite takes `majority` or `any`; a security check combines more loosely
+  only when it names its own `combine`. `no_refusal` is not a security check: it fails a reply
+  for refusing a benign request, which measures over-refusal rather than a leak, so it takes the
+  suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
+  secret `combine: all` when the suite's rule is looser.
+- **A case passes** when every check, combined, passes it, as with one attempt.
+- **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
+  verdict, could have gone either way. A combined verdict stands when it is the same both ways;
+  otherwise the case has no verdict, the run exits `2`, and the next run tries the case again,
+  every attempt of it. So under `all` one failed attempt fails the check whatever the others did,
+  and under `any` one passing attempt passes it.
+- **Counts and pass rates are of cases.** A case counts once, by its combined verdict, in
+  `passed`, `failed`, `errors`, each pass rate and its [interval](#pass-rates-and-confidence-intervals).
+  Five attempts of one case are not five cases: they are related, as grouped cases are, and an
+  interval over attempts would be narrower than the evidence.
+- **Comparing two runs** pairs the cases' combined verdicts
+  ([comparing two runs](#comparing-two-runs)). A run that repeats against one that does not, or
+  two runs with different rules, compare different verdicts, so the label measures the change of
+  rule as well as the change of system.
+- **Resume.** The number of attempts and the rule each check combines by are part of what a
+  reused verdict depends on, so changing either grades the cases again. With one attempt every
+  rule gives the same verdict, so `combine` alone changes nothing.
+- **Not in the dataset gate.** Repeats belong to suite-file runs. The pytest gate (`assert_gate`,
+  `assert_checks`) evaluates each row once, and the platform re-scores one output per pinned item.
+
+Every attempt is recorded:
+
+| Where | What |
+| --- | --- |
+| `results.jsonl` | The case's `passed` and `checks` are the attempts combined, and each check's `rationale` says how the attempts went and what its rule asks, such as `4 of 5 attempts passed, 1 failed (all: every attempt must pass)`. `attempts` lists every attempt in order: its `number`, `passed`, `checks` (each with its own verdict, rationale and error), `output` and `error`. The case's `output` and `error` are those of its first attempt with the case's verdict, else of its first attempt: under `all`, a failed case shows an attempt that failed |
+| `summary.json` | `repeats`: the attempts of each case (`attempts`), the suite's rule (`combine`), and each check's rule with where it came from (`checks.<label>.combine` and `from`: `check`, `security` or `suite`). `attempts`: the attempts' own counts, `total`, `passed`, `failed` and `errors`, and the same per check under `checks.<label>.attempts`. `reliability`: the [reliability and the flaky cases](#reliability-and-flaky-cases). `target_errors` and `check_errors` count attempts |
+| `junit.xml` | The `repeats` property and each check's rule, `check.<label>.combine` |
+| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The attempts of each case, each check's rule, the reliability under the pass rate, and the flaky cases |
+| The local Evals UI's data folder | The case result holds every attempt, each with its own trace, named `<run> <case> attempt <n>` and carrying that attempt's verdicts; the case's trace is that of the attempt that shows its reply. The run's `provenance` holds `repeats` as `summary.json` has it. [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) returns both, with the reliability and each case's `flaky` |
+
+A run without repeats writes and records exactly what it did before: no `attempts`, no `repeats`,
+no `reliability`.
+
+### Reliability and flaky cases
+
+The pass rate says how often the system gets a case right under each check's rule; reliability
+says how often it gets a case right every time. **Reliability**, sometimes called pass^k for k
+attempts, is the share of cases that passed on every attempt, an attempt passing when every check
+passed it. A case is **flaky** when its verdict changed between attempts: one attempt passed and
+another failed. `martian.evals.repeats` computes both from the attempts' own verdicts:
+
+- **Not a rule.** Reliability does not change how a case's verdict combines, the exit code or the
+  gate. When every check combines by `all`, a case passes only when it passed every attempt, so
+  the reliability is the pass rate but for attempts without a verdict; under `majority` or `any`
+  it can be lower. A flaky case fails under `all` and can pass under `any`.
+- **Attempts without a verdict.** Whether a case passed every attempt is read as under `all`: one
+  failed attempt settles it, and an attempt without a verdict otherwise leaves it open, so the
+  case counts in `errors`. An attempt without a verdict makes no case flaky.
+- **Its interval** is the pass rate's: Wilson over the cases with a reliability verdict, allowing
+  for case groups in `summary.json` and treating cases as independent in the evals core
+  ([pass rates and intervals](#pass-rates-and-confidence-intervals)).
+- **Only with repeats.** A run without repeats measures no reliability: `summary.json`, the
+  printed table and the pull-request comment leave it out, the core's attempts route answers
+  `reliability: null`, and the Evals UI's run page says **Not measured**.
+
+| Where | What |
+| --- | --- |
+| `summary.json` | `reliability`: `passed` (cases that passed every attempt), `failed` (cases that failed an attempt), `errors` (cases left open), `pass_rate` and `confidence_95`, and `flaky`, the ids of the flaky cases in data order |
+| The printed table | A **Reliability** row under **All checks**, combined by `every attempt`, then the flaky cases, at most five by name, or `No flaky cases` |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
+| [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
+| The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
+
+## Pass rates and confidence intervals
+
+A pass rate from a few dozen cases is uncertain: 8 of 10 and 80 of 100 are both 80%. The pass
+rates of a suite-file run, of the evals core's scorecards and of the Evals UI's pages come with
+their 95% confidence interval, and a scorecard's mean scores with theirs. `martian.evals.stats`
+computes them with the standard library only. The pytest gate (`assert_gate`) and red-team pass
+rates do not report intervals.
+
+| Measure | Method | Notes |
+| --- | --- | --- |
+| Pass rate | Wilson score interval | Stays inside 0–100% and keeps close to 95% coverage down to a handful of cases. 0 of n has a lower bound of exactly 0% and an upper bound above it; n of n the reverse; 1 case is never a single point |
+| Mean score | Student t interval: mean ± t(0.975, n − 1) × s / √n | Needs two values; with one there is no interval. Values that are all equal give a zero-width interval |
+| Grouped cases | Both widened by the cluster-robust (CR1) design effect | See below |
+
+A pass rate counts only cases with a verdict: errors and missing scores are reported beside it,
+not counted as failures. A case run several times counts once, by its attempts combined
+([repeated attempts](#repeated-attempts)). Shown as text, a rate is rounded to the nearest
+percent and its bounds outward, so `67% (20–94%)` always contains the computed interval.
+
+**Grouped cases.** Cases that share a `group` in the data file are related, so they tell less than
+the same number of independent cases. With n cases in k ≥ 2 groups and e the difference of each
+case's value (1 for a pass, 0 for a fail, or the score) from the mean, the design effect is
+
+```text
+deff = k(n − 1) / ((k − 1) n) × Σ over groups (Σ e in the group)² / Σ e²
+```
+
+and never below 1, so grouping never narrows an interval. A pass rate takes the Wilson interval at
+the effective sample size n / deff; a mean takes the t interval with its variance multiplied by
+deff, on k − 1 degrees of freedom. When every case is in a group of its own, deff is exactly 1
+and the intervals are the ungrouped ones. A case without a `group` is a group of its own. With
+fewer than two groups, or when every case has the same outcome, there is nothing to estimate the
+grouping from and the cases count as independent. Two groups of four cases that each agree
+inside give deff = 7: the eight cases weigh as 8/7 of a case, and 4 of 8 reads `50% (6–94%)`
+rather than the ungrouped `50% (21–79%)`.
+
+**Where they appear.**
+
+| Where | Interval |
+| --- | --- |
+| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | Wilson for each check's pass rate, the run's and, with repeats, its [reliability](#reliability-and-flaky-cases), grouped when the data names groups |
+| The evals core's scorecards (run detail, Compare, Monitoring) and its attempts route | `confidence_95`, Wilson, for a boolean scorer's pass rate and for a repeated run's reliability; `mean_confidence_95`, Student t, for a numeric scorer's mean ([read routes](evals-core.md#read-routes)) |
+| The Evals UI's Runs, run detail, Compare and Overview | Wilson from the counts each response carries, ungrouped |
+
+Case results do not carry a case's group, so the core and the Evals UI treat every case as
+independent; only the command line's summary allows for groups. The Evals UI's Overview counts
+traces, which can share a session, as independent too.
+
+### Comparing two runs
+
+Two runs of the same data compare case by case: each case is a pair, one result from each run,
+so how much cases differ from each other does not count as noise. A case run several times is
+one pair, by its attempts combined ([repeated attempts](#repeated-attempts)). The evals core labels a
+comparison **better**, **worse** or **within noise** with a paired test (`martian.evals.stats`):
+
+| Measure | Test | p-value |
+| --- | --- | --- |
+| Pass/fail: the exact-match verdict, or a boolean scorer | Exact McNemar | Only the pairs that changed carry evidence. With b improved and c regressed, p = 2 × P(X ≤ min(b, c)) for X ~ Binomial(b + c, ½), at most 1, computed exactly |
+| Scores: a numeric scorer | Paired t | t = mean(d) / (s_d / √n) on n − 1 degrees of freedom, where d is each case's candidate score minus its baseline score. p < 0.05 exactly when the 95% t interval of the mean difference leaves out 0 |
+
+A text scorer has no direction, so it gets no label.
+
+**The label.** The significance level is 5%, two-sided, which matches the 95% intervals. A
+comparison is **better** or **worse** when p < 0.05 *and* at least six pairs changed, in the
+direction the change went. A scorer's policy `direction` says whether higher or lower is better.
+Otherwise it is **within noise**. Six is the fewest changed pairs an exact test can tell from
+chance at 5%: six regressions and no improvement give p = 2 × 0.5⁶ = 0.031, while five give
+0.0625. The paired t test has to meet the same count. So a comparison of a handful of cases is
+always within noise, whatever moved, and does not flip between better and worse from one run to
+the next.
+
+Within noise does not mean nothing changed. It means the change is too small for this comparison
+to tell apart from chance. Each label carries its **minimum detectable effect**, the smallest
+change in the measure that this comparison could label:
+
+- **A pass rate:** six cases all moving one way, out of the n compared pairs, so 6 / n. That is
+  15 points with 40 pairs and 1.5 points with 400. With fewer than six pairs there is none.
+- **A mean score:** the half-width of the mean difference's 95% t interval,
+  t(0.975, n − 1) × s_d / √n. At the spread observed, a smaller mean change is within noise.
+  With fewer than six pairs, or differences that do not vary, there is none.
+
+Forty cases where the same deterministic system runs twice give no changed pair: p = 1, within
+noise. A candidate that breaks 12 of those answers and fixes 2 gives p = 2 × (1 + 14 + 91) / 2¹⁴
+= 0.013, labelled worse, with the pass rate down 25 points against a minimum detectable effect
+of 15.
+
+**Grouped cases.** A comparison counts every pair as independent. It pairs case results, which
+carry no group (see above), and the exact McNemar test has no grouped form. If many cases share
+a group, such as paraphrases of one attack, the label can overstate the evidence.
+
+**Where the label appears.**
+
+| Where | What |
+| --- | --- |
+| `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
+| The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
+| `martian evals run` | Nothing. No command compares two runs; open them in `martian ui` and use Compare |
 
 ### OpenAI-compatible endpoints
 
@@ -676,6 +888,13 @@ The rate shows in three places:
   `False refusals: 1 of 3 benign cases refused (33.3%).`
 - The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) prints
   the same line under its headline.
+
+With [repeats](#repeated-attempts) the rate counts cases, by each case's `no_refusal` verdict
+over its attempts combined. `no_refusal` takes the suite's rule, so under the default `all` a
+benign case refused on one attempt of five counts as refused; under `any` it counts as refused
+only when every attempt refused. The other policy checks are security checks and combine by
+`all` unless they name their own rule. The printed table and the pull-request comment show the
+false-refusal line and the **Reliability** row together.
 
 A suite with a policy check and no `no_refusal` check reports that the rate is not measured,
 in all three places. `not_contains`, `not_matches` and a judge whose rubric passes a refusal
