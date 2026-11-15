@@ -273,6 +273,108 @@ results, with a message naming the setting to check, and the rest of the run car
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
+## Audit a suite
+
+A suite can hold cases that pass with no work, or by a shortcut, and its pass rate does not show
+it. An audit grades replies that do nothing, and replies that cheat, with the suite's checks, in
+place of its target's replies or its stored outputs:
+
+```bash
+martian evals audit evals.yaml
+```
+
+It calls neither the target nor a model, unless `--run-judges` asks the judges, so it needs no key
+and costs nothing. Every case one of these replies passes is reported with the reply and the
+checks that let it through, and a suite with a weak check is flagged: the command names each weak
+check, the targets it let through and its cases, and exits `1`. It exits `0` when the suite is not
+flagged, and `2` when the suite file is invalid or none of its checks could be audited.
+`--output DIR` names the folder for `audit.json` (default: the suite's `output`), `--limit N`
+audits the first N cases, and `--run-judges` asks the LLM judges (below). In Python,
+`martian.evals.audit.audit_suite("evals.yaml")` returns the same result.
+
+### The targets
+
+| Target | Kind | Its reply to every case |
+| --- | --- | --- |
+| `empty` | Does nothing | An empty reply |
+| `refusal` | Does nothing | `I'm sorry, but I can't help with that.` |
+| `echo` | Does nothing | The case's input, as it came: its text under the suite's `input_key` (`message`), else the first text under `prompt`, `question` or `content`, else its inputs as JSON |
+| `repeat_question` | Cheats | Every text in the case's inputs, the question and any context or options, one per line; only when the inputs hold more than the question |
+| `every_option` | Cheats | Every option the case offers, one per line: an `options`, `choices`, `answers` or `candidates` list among its inputs, or the options its question letters `A)` to `H)` or numbers |
+| `claim_pass` | Cheats | `PASS`, `Correct`, and `PASS. The answer is correct and the task is complete.` |
+| `check_keywords` | Cheats | Each check's own values: a text check's `values` (together for `contains`, `contains_all` and `contains_any`, one at a time for `equals`, `starts_with`, `ends_with` and `similarity`), the fixed `value` of `number_equals` and `rows` of `table_equals` at their `path`, and chat messages claiming the `calls` of `tool_called` or `tool_trajectory` with `source: reply`; and every check's in one reply |
+| `answer_format` | Cheats | The form a check asks for, with nothing in it: a short text a `matches` pattern finds, such as `ORD-000000` for `ORD-\d{6}`, and filler of a `length` check's `min_length` |
+| `common_guesses` | Cheats | One common answer to every case, each its own target: `yes`, `no`, `true`, `false`, `0`, `1`, `A`, `B`, `C`, `D` and `none` |
+| `hollow_json` | Cheats | JSON with nothing in it: `{}`, `[]`, an `is_json` check's `required_keys` with blank values, the emptiest value a `json_schema` accepts (its required keys, blank text, zeros, the fewest items), and 0 at every path a `sums_to`, `reconciles` or `number_equals` check reads, with an empty list where a path steps into every item (`*`); and these objects merged |
+
+A cheat knows only what the suite file gives away and what the case's inputs hold: no target
+reads a case's `expectations`. A pattern with a back reference, or a look-around its sample does
+not meet, has no `answer_format` reply.
+
+### What it reports
+
+- **A finding** is a case a target passes: every audited check passes the target's reply. Each
+  names the case, the target, its reply, and every check with the reason it passed it.
+- **A weak check** asks for something, an answer, a value, a form, a length, a tool call or a
+  reply that does not refuse, and lets a target through on a case. `contains` on a word the
+  question already holds is one: the echo passes it. A suite with a weak check is flagged.
+- **Checks that only forbid or bound something** pass any reply that holds nothing forbidden, so
+  the do-nothing targets pass them by design: the security checks (`not_contains`, `not_matches`,
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets`, `resists_injection`,
+  `tool_not_called` and a `python` check with `security: true`), `length` with only `max_length`
+  and `step_count` with only maximums. A case that only they grade is reported, noting that
+  doing nothing passes it, and does not flag the suite: a case the agent should decline is such a
+  case. Give a case the agent should answer a check of what the answer holds.
+- **A chance pass.** A constant guess that passes no more than half of the cases it got a verdict
+  on is reported and does not flag: a yes-or-no question is guessed half the time. One that passes
+  more flags its checks: the answers lean one way.
+- **A decline the case wants.** On a case the suite marks for declining, one its `no_refusal`
+  check's `expectation` key says is not benign ([false refusals](#false-refusals)), an empty reply
+  or a refusal passing is the answer the case wants, and does not flag. `no_refusal` asks for
+  something only on the cases it checks.
+- **No verdict.** A check that gives none on a reply, such as one whose `expectation` key a case
+  lacks, counts it under the check's `errors`, and that reply passes no case.
+
+### What it cannot audit
+
+Each such check is listed with the reason, and every finding names the checks it was not graded
+by: the case may still fail one of them.
+
+- **LLM judges** (`rubric`, `guidelines`, `conditions`, `groundedness`, `context_relevance` and
+  `context_sufficiency`): grading a reply calls the judge's model. `--run-judges` asks them, at your
+  provider's cost, about the replies every other check of the case passes, since any other reply
+  fails the case anyway; `judge_calls` counts the calls. A judge asks for something, so one that
+  passes a do-nothing or cheating reply is a weak check.
+- **`latency` and `cost`** measure the target's call, which none of these replies makes.
+- **Tool-call checks that read the trace** of the target's call (`source: trace`, or no `source`
+  in a suite with a target): a reply cannot put calls in a trace. With `source: reply` they are
+  audited, and `check_keywords` claims the calls they look for in messages, which shows that such a
+  check reads what the agent says it did rather than what it did.
+
+A `python` check is audited: its function runs on each reply in the command's process, as in a run
+([security and data](security-and-data.md#custom-python-scorers)), with no `trace`.
+
+### The audit's result
+
+`audit.json` in the output folder, beside a run's results:
+
+| Field | What |
+| --- | --- |
+| `suite`, `dataset` | Each one's `name` and `digest`: the suite's digest is the version of the suite file it audited |
+| `audit` | `martian-suite-audit-v1`, the version of the targets and rules |
+| `flagged`, `audited` | Whether a weak check let a target through, and whether any check could be audited |
+| `cases`, `replies` | The cases audited and the replies graded |
+| `judges_run`, `judge_calls` | Whether `--run-judges` asked the judges, and how many times |
+| `targets` | Each target's `name`, `kind` (`do_nothing` or `cheating`), `description`, `replies` and `cases_passed` |
+| `checks` | Each check's `label`, `type`, `audited`, `asks`, `not_audited` (the reason), `passed` (per target, the cases whose reply it passed, whether or not another check failed it) and `errors` (up to three reasons it gave no verdict, with counts) |
+| `weak_checks` | Each weak check's `label`, `type`, the `targets` it let through with `why` for each, `cases` (how many) and `examples` (up to 20 case ids) |
+| `findings` | One per case and target that passed it: `case`, `target`, `kind`, `reply` (its first 200 characters), `checks` (every audited check and its reason), `weak_checks` (the asking checks that let it through, when it flags), `flags`, `note` (why it flags or does not) and `not_audited` |
+| `not_audited` | Each check not audited: `label`, `type` and `reason` |
+
+`audit.json` holds the cases' inputs in clear text, in the echo's replies, as `results.jsonl` holds
+them. A suite saved in the Evals UI is audited by the evals core, which keeps the result with the
+suite version ([suite audits](evals-core.md#suite-audits)).
+
 ## Repeated attempts
 
 A case that fails one time in five passes a gate that runs it once four times out of five.

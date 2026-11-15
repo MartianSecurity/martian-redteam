@@ -45,6 +45,9 @@ push and keeps one comment with the result, also without a Martian account. See
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian evals audit`: the same suite graded on replies that do nothing or cheat, to find
+  checks that pass them; see
+  [audit a suite](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md#audit-a-suite).
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
   [imported Inspect logs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
