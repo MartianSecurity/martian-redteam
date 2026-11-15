@@ -39,6 +39,7 @@ from martian.evals.model import (
     TraceState,
     Value,
     digest,
+    is_expectation,
 )
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
 
@@ -353,13 +354,6 @@ def queue_out(queue: ReviewQueue) -> dict[str, Any]:
 
 
 # --- traces ---------------------------------------------------------------------------------
-
-
-def is_expectation(score: Score) -> bool:
-    """Whether a score is a person's expectation on a trace rather than a verdict. The core records
-    an expectation annotation as a score whose metadata has ``martian.annotation: expectation``, and
-    a store binding reads MLflow's expectation assessments the same way."""
-    return score.metadata.get("martian.annotation") == "expectation"
 
 
 def mlflow_assessment(score: Score, trace_id: str) -> dict[str, Any]:
