@@ -14,6 +14,8 @@ from martian.evals.model import (
     Case,
     Counts,
     Project,
+    Prompt,
+    PromptVersion,
     ReviewQuestion,
     ReviewQueue,
     Run,
@@ -501,6 +503,39 @@ class StoreContract:
         await store.create_prompt(ORG_B, "support.terse")
         assert (await store.add_prompt_version(ORG_B, "support.terse", "Bonjour.")).version == 1
         assert len(await store.prompt_versions(ORG_A, "support.terse")) == 3
+
+    async def test_an_imported_prompt_keeps_its_versions_authors_and_times(self, store: EvalStore) -> None:
+        made = T0 - timedelta(days=30)
+        prompt = Prompt(name="support.terse", description="Imported", created_at=made, created_by="user-z")
+        texts = [("Answer in one sentence.", "First", "user-z"), ("Answer briefly.\n", "", None)]
+        versions = [
+            PromptVersion(
+                name="support.terse",
+                version=number,
+                text=text,
+                digest=prompt_digest(text),
+                message=message,
+                created_at=made + timedelta(days=number, milliseconds=250),
+                created_by=author,
+            )
+            for number, (text, message, author) in enumerate(texts, 1)
+        ]
+        assert await store.import_prompt(ORG_A, prompt, versions) == versions
+        assert await store.get_prompt(ORG_A, "support.terse") == prompt
+        assert await store.prompt_versions(ORG_A, "support.terse") == versions
+        assert await store.find_prompt_versions(ORG_A, versions[0].digest) == [versions[0]]
+        # The next version anyone adds follows them, by its own author and time.
+        added = await store.add_prompt_version(ORG_A, "support.terse", "Answer in two sentences.")
+        assert (added.version, added.created_by) == (3, "user-a") and added.created_at is not None
+        assert added.created_at > versions[-1].created_at  # type: ignore[operator]
+        await refused("conflict", store.import_prompt(ORG_A, prompt, versions))
+        other = prompt.model_copy(update={"name": "friendly"})
+        await refused("invalid", store.import_prompt(ORG_A, other, versions))  # another prompt's versions
+        await refused(
+            "invalid", store.import_prompt(ORG_A, other, [versions[1].model_copy(update={"name": "friendly"})])
+        )
+        assert await store.get_prompt(ORG_A, "friendly") is None
+        assert await store.list_prompts(ORG_B) == []
 
     async def test_review_questions_and_queues(self, store: EvalStore, project: Project) -> None:
         question = ReviewQuestion(name="correct", instruction="Is the answer correct?")

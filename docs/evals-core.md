@@ -1162,10 +1162,14 @@ optional commit message, its author and its time ([the model](eval-model.md#obje
   by digest, when it records the run ([prompt versions](evals.md#prompt-versions)); a run the UI
   launches has no matrix and names none. Reading a prompt reads every run of every project.
 - **In the store** the group is `create_prompt`, `get_prompt`, `list_prompts`,
-  `add_prompt_version`, `prompt_versions` and `find_prompt_versions` (by digest). On the in-process
+  `add_prompt_version`, `prompt_versions` and `find_prompt_versions` (by digest), and
+  `import_prompt`, which creates a prompt with its versions as another install had them, each
+  version's number, author and time kept, for the [data export](data-export.md). On the in-process
   binding it is MLflow's prompt registry: a prompt is an MLflow prompt, a version an MLflow prompt
   version, its text the template and its commit message MLflow's, with the digest and author in
-  version tags ([the in-process binding](#the-in-process-binding)). MLflow keeps the registry in its
+  version tags ([the in-process binding](#the-in-process-binding)). MLflow stamps the time it
+  creates each; an import sets the prompt's and each version's creation time to the export's
+  (`PromptRegistryStore.keep_prompt_times` in `martian.evals._mlflow`). MLflow keeps the registry in its
   model registry tables, in the same database, in the principal's workspace. No table of the
   record store holds prompts.
 - `martian evals prompts push SUITE` registers a suite file's prompts in the local edition's data
@@ -1955,7 +1959,7 @@ store keeps the watch, its progress and the noted changes on both databases.
   | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces` |
   | Scores | `log_score`, `list_scores` |
   | Registered scorers | `register_scorer`, `list_scorers`, `scorer_versions` |
-  | Prompts | `create_prompt`, `get_prompt`, `list_prompts`, `add_prompt_version`, `prompt_versions`, `find_prompt_versions` |
+  | Prompts | `create_prompt`, `get_prompt`, `list_prompts`, `add_prompt_version`, `prompt_versions`, `find_prompt_versions`, `import_prompt` |
   | Review | `save_question`, `list_questions`, `create_queue`, `get_queue`, `queue_items`, `set_queue_item` |
   | Run artifacts | `put_artifact`, `get_artifact`, `list_artifacts` |
   | Readiness | `status` |
@@ -2266,7 +2270,9 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     `martian.prompt.digest` and `martian.prompt.author` version tags. MLflow keeps them in its
     model registry tables, beside its tracking tables, and the binding reaches them through
     `martian.evals._mlflow.PromptRegistryStore`, MLflow's model registry store with workspaces on
-    for it alone. A version is found by its digest with MLflow's search of prompt versions.
+    for it alone. A version is found by its digest with MLflow's search of prompt versions. Its
+    creation time is MLflow's; an imported prompt and version keep the export's, which the binding
+    sets on MLflow's rows after creating them (`keep_prompt_times`).
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts, `martian/run.json` among them, are files in the run's folder,

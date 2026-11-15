@@ -33,7 +33,9 @@ imported.references["dataset_id"]  # each source dataset version id and the rece
 ## What an export holds
 
 Everything the store and the record store hold for the principal's organisation (or the single
-local user), and nothing of another organisation's: every project the store lists, and in each
+local user), and nothing of another organisation's: the organisation's
+[prompts](evals-core.md#prompt-versions) with every version, each with its number, author and
+time, which a run's `provenance.prompts` names; and every project the store lists, and in each
 
 - its registered scorers, every version; its review questions;
 - its dataset versions with their cases, in case order;
@@ -62,10 +64,13 @@ describe, and what the two stores do not hold:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
-- [Prompts and their versions](evals-core.md#prompt-versions). An import through the store
-  interface would give each version the importing user and the time of the import, so they are
-  not exported yet. A run's `provenance.prompts`, which names the versions it used, is exported
-  with the run.
+- What a suite-file run keeps outside the stores: its output folder (`results.jsonl`,
+  `summary.json`, `verdicts.json`, the `comparison.json` a `--baseline` comparison writes and a
+  matrix's `matrix.json`), which a later `--baseline` reads, and the
+  [cache of model calls](evals.md#a-cache-of-model-calls), replies kept on disk to replay, which
+  expire. The run each one recorded is exported, with its `provenance` (a matrix's combination,
+  its prompt versions, and how much of the cache it used); copy an output folder that a baseline
+  should read, and let the fresh install's cache fill again.
 - A threshold's webhook secret. The record store keeps it apart from the threshold
   (`martian_thresholds.secret`) and the export never reads it, so a threshold with a webhook comes
   back without it and its secret is given again (see Importing). The SMTP server's login and the
@@ -97,13 +102,15 @@ evals-export/
 ```
 
 Each `.jsonl` file is [JSON Lines](https://jsonlines.org/): UTF-8, one JSON object per line, each
-line ending in `\n`. Every line has `project_id`, the keys that place the object, and the object
-itself in the [shared eval model](eval-model.md)'s JSON (`model_dump(mode="json")` of the named
+line ending in `\n`. Every line has `project_id` (but the prompt files', whose objects are the
+organisation's), the keys that place the object, and the object itself in the [shared eval model](eval-model.md)'s JSON (`model_dump(mode="json")` of the named
 class, with its `store` references as the source store had them). Every file is present, empty
 when there is nothing of its kind. An import reads them in this order:
 
 | File | One line per | Line |
 | --- | --- | --- |
+| `prompts.jsonl` | Prompt of the organisation, by name | `prompt`: `Prompt`; no `project_id`, as a prompt is the organisation's |
+| `prompt_versions.jsonl` | Version of a prompt, oldest first; consecutive per prompt, in the order of `prompts.jsonl` | `version`: `PromptVersion`, with its text, digest, commit message, author and time; no `project_id` |
 | `projects.jsonl` | Project | `project_id`, `project`: `Project` |
 | `scorers.jsonl` | Version of a registered scorer, oldest first | `project_id`, `scorer`: `ScorerVersion` |
 | `questions.jsonl` | Review question | `project_id`, `question`: `ReviewQuestion` |
@@ -136,7 +143,7 @@ classes (`martian.evals.records`), not the shared model's.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 2,
+  "version": 3,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -148,14 +155,15 @@ classes (`martian.evals.records`), not the shared model's.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `2`): a new
+`null` for the single local user. `version` is the format's version (`VERSION`, here `3`): a new
 file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
-Version 2 added the six monitoring files: import an export of version 1 with the SDK that wrote
-it, and export again with this one.
+Version 2 added the six monitoring files, and version 3 the two prompt files: import an export of
+an earlier version with the SDK that wrote it, and export again with this one.
 
 ## Exporting and resuming
 
-An export runs in steps, in a fixed order: for each project, its definitions (the project, its
+An export runs in steps, in a fixed order: first the organisation's prompts with their versions,
+then for each project, its definitions (the project, its
 scorers, questions, suites, drafts and views), then each dataset version, each run, its monitoring
 (monitors, schedules and thresholds with their history), and each page of 500 traces. Monitoring
 comes before the traces, so every trace a monitor took is among the traces exported. Before the first step it lists the projects, their dataset versions and their runs
@@ -183,19 +191,21 @@ as it does for any run no process is working on. An import does not refuse the e
 ## Importing
 
 An import goes into a fresh install: one whose projects hold no runs, datasets, traces, suites,
-drafts, views, scorers, review questions, monitors, schedules or thresholds for the principal. A project the install already has
+drafts, views, scorers, review questions, monitors, schedules or thresholds for the principal, and
+no prompts. A project the install already has
 under the same id, such as the local edition's empty default project, is used as it is; one with
 another name is refused.
 
 Before anything is written, the import checks the manifest's format and version and each file's
 size, line count and SHA-256, and each artifact's SHA-256. It then writes every object through the
-interfaces, creating what an object refers to before the object: projects, scorers, questions,
+interfaces, creating what an object refers to before the object: prompts with their versions,
+each with its number, author and time (`EvalStore.import_prompt`), projects, scorers, questions,
 dataset versions, suites, runs (in the store, then in the record store), traces with their scores,
 case results, scores, scoring jobs, reviews, queues, artifacts, drafts and views, then monitors
 with the traces they took, schedules with their slots, and thresholds with their status and
 alerts; projects that were archived are archived last. A dataset version that does not come back with its digest,
-version and case count, or a suite or scorer version given another version number, stops the
-import. An import that stops leaves what it
+version and case count, or a suite, scorer or prompt version given another version number, stops
+the import. An import that stops leaves what it
 wrote; import into a fresh install again.
 
 The receiving store assigns its own identifiers and bookkeeping for what it creates; the import
@@ -242,7 +252,9 @@ finished as interrupted), and on a data folder that `martian evals import mlflow
 first two it also checks that every table the export carries holds rows in the source and as many
 in the fresh install, that the import queued nothing, and that no file of the export holds the
 threshold's webhook secret (a canary), which the fresh install does not have until it is given
-again, once. It checks that every table of the record store and every kind of object of the two
+again, once. Prompt versions another member added come back with that member as their author, not
+the importing user, and their own times; `tests/evals/store_contract.py` checks
+`import_prompt` on both bindings. It checks that every table of the record store and every kind of object of the two
 interfaces is exported or left out with a reason. It interrupts an export inside a run's
 step, inside the monitoring step and on a page of traces, resumes it and compares the files byte
 for byte with an uninterrupted export, and covers what an export and an import refuse (a slot whose

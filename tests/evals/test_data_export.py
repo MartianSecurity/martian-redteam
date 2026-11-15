@@ -2,12 +2,13 @@
 and exported again with nothing lost, on the in-memory store and on the local edition's MLflow
 store; every table of the record store and every kind of object of the two store interfaces either
 exported or left out with a reason; monitors and schedules imported paused, and a threshold's
-webhook secret in no export; an interrupted export resumed to the same files; and what an import
-refuses."""
+webhook secret in no export; prompt versions imported with their authors and times; an interrupted
+export resumed to the same files; and what an import refuses."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import typing
 import uuid
@@ -400,6 +401,15 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         )
     await store.archive_project(principal, retired.id)
 
+    # The organisation's prompts, added by another member: an import keeps who added each version
+    # and when, and the version numbers, which a run's provenance.prompts names.
+    editor = dataclasses.replace(principal, user_id="user-e")
+    await store.create_prompt(editor, "support.terse", description="The terse support prompt")
+    await store.add_prompt_version(editor, "support.terse", "Answer in one sentence.", message="First")
+    await store.add_prompt_version(editor, "support.terse", "Answer in one short sentence.\n")
+    await store.create_prompt(editor, "friendly")
+    await store.add_prompt_version(editor, "friendly", "Greet the customer, then answer.")
+
 
 async def monitoring(
     store: EvalStore,
@@ -768,6 +778,10 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
+    # Prompt versions keep their numbers, who added them (not the importing user) and when.
+    kept = await target.prompt_versions(ORG_A, "support.terse")
+    assert kept == await source.prompt_versions(ORG_A, "support.terse")
+    assert [(v.version, v.created_by) for v in kept] == [(1, "user-e"), (2, "user-e")]
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
     [schedule] = await target_records.list_schedules(ORG_A, "default")
@@ -969,8 +983,8 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 1}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 1; this SDK reads version 2"):
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 2}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 2; this SDK reads version 3"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")

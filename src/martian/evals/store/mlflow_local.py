@@ -146,6 +146,7 @@ from martian.evals.store import (
     RESPONSE_PREVIEW_TRUNCATED,
     StoreError,
     StoreStatus,
+    check_imported_prompt,
     check_prompt,
     check_session_search,
 )
@@ -971,6 +972,36 @@ class MlflowStore:
                 found.extend(_prompt_version(version) for version in page)
                 if not (token := page.token):
                     return sorted(found, key=lambda version: version.version)
+
+        return await self._call(principal, work)
+
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        check_imported_prompt(prompt, versions)
+        name = prompt.name
+
+        def work() -> list[PromptVersion]:
+            if self._prompts.get_prompt(name) is not None:
+                raise StoreError("conflict", "a prompt with this name already exists")
+            made_by = {} if prompt.created_by is None else {PROMPT_CREATED_BY: prompt.created_by}
+            self._prompts.create_prompt(name, description=prompt.description or None, tags=made_by)
+            for version in versions:
+                author = {} if version.created_by is None else {PROMPT_AUTHOR: version.created_by}
+                made = self._prompts.create_prompt_version(
+                    name,
+                    version.text,
+                    description=version.message or None,
+                    tags={PROMPT_DIGEST: version.digest, **author},
+                )
+                if int(made.version) != version.version:
+                    raise StoreError(
+                        "conflict", f"version {version.version} of prompt {name} got number {made.version}"
+                    )
+            # MLflow stamps the current time on what it creates; keep the export's.
+            times = {version.version: _ms(version.created_at) for version in versions}
+            self._prompts.keep_prompt_times(name, _ms(prompt.created_at), times)
+            return [_prompt_version(self._prompts.get_prompt_version(name, version.version)) for version in versions]
 
         return await self._call(principal, work)
 
