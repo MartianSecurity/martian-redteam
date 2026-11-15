@@ -20,9 +20,10 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/calibration.py` | A judge version's calibration: whether its newest one checks the model it runs on and what it means (`judge_definition`), what a judge score names as the calibration that applied, and `save_calibration` and `recheck_calibration` for the local data folder ([evals](evals.md#calibration)) |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
-| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`, and the core's own `agreement.py` and `calibration.py`, which also saves a calibration and asks for its re-check), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`) and OpenTelemetry's `POST /v1/traces` (`otlp.py`), shaped by `projection.py` and `quality.py` |
+| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`, and the core's own `agreement.py` and `calibration.py`, which also saves a calibration and asks for its re-check), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), OpenTelemetry's `POST /v1/traces` (`otlp.py`), and the core's own monitor and threshold routes (`monitors.py`, `thresholds.py`), shaped by `projection.py` and `quality.py` |
 | `src/martian/evals/worker/` | The worker interface the write routes hand runs, scoring jobs and re-checks to, the work itself (`execute.py`, and `recheck.py` for a calibration's re-check), the console's built-in scorers (`scorers.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
+| `src/martian/evals/thresholds.py`, `alerts.py` | Thresholds on monitor scores judged on their 95% intervals, with the state machine that raises one alert per breach and recovery, and the alerts' delivery by signed webhook and SMTP ([evals core](evals-core.md#thresholds-and-alerts)) |
 | `src/martian/evals/trace_conventions.py` | The versioned table that maps OpenTelemetry GenAI, OpenInference and MLflow span attributes onto the trace fields ([evals core](evals-core.md#trace-conventions)) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
 | `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run queued in the data folder and run in a process of its own |
@@ -113,7 +114,16 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 
 - **No live network.** `respx` intercepts `https://agents.test.example/runs/wait`.
 - Fixtures in `tests/conftest.py` plus JSON under `tests/fixtures/`.
-- `pytest-asyncio` mode `auto`.
+- **No test touches the developer's `~/.martian`.** An autouse, session-scoped fixture in
+  `tests/conftest.py` points `HOME` and `MARTIAN_EVALS_HOME` at a temporary folder for the whole
+  session, so the local edition's default data folder (`~/.martian/evals`) and MLflow's
+  `~/.config` resolve there, and every subprocess a test starts inherits both. A test that needs
+  another home sets its own (`test_no_outbound.py` starts its processes in a clean environment
+  with a new `HOME`). At the end of the session the fixture fails the run if a test reached the
+  default data folder (the temporary home gained a `.martian`). In CI (`CI` set) it also fails if
+  the real `~/.martian` or `~/.martian/evals` changed; it checks the real folders by `stat` only,
+  never reads or lists them, and never deletes anything. Outside CI that second check is skipped,
+  because `martian ui` or another checkout's tests may change the folder during the session.
 - The evals store contract (`tests/evals/store_contract.py`) runs on every store binding. The
   in-process `mlflow-skinny` binding runs it on SQLite always, and on Postgres when
   `MARTIAN_TEST_POSTGRES_URL` is set (for example

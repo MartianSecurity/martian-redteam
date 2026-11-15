@@ -20,7 +20,7 @@ import time
 import urllib.request
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +115,22 @@ class QueueContract:
         await queue.release(first)
         again = await queue.claim(60)
         assert again is not None and again.attempt == 1 and again.token != first.token
+
+    async def test_rescheduled_work_is_not_taken_before_it_is_due(self, queue: SqlWorkQueue) -> None:
+        await queue.put(ORG_A, "p1", "monitor:m1", "monitor", {"n": 1})
+        first = await queue.claim(60)
+        assert first is not None and first.attempt == 1
+        assert await queue.reschedule(first, datetime.now(UTC) + timedelta(seconds=0.6))
+        assert not await queue.reschedule(first, datetime.now(UTC))  # the claim no longer holds it
+        # Not due yet: no claim takes it, and the queue counts it as nothing to wait for.
+        assert await queue.claim(60) is None and await queue.pending() == 0
+        await queue.put(ORG_A, "p1", "monitor:m1", "monitor", {"n": 99})  # still in the queue: unchanged
+        await asyncio.sleep(0.8)
+        assert await queue.pending() == 1
+        again = await queue.claim(60)
+        assert again is not None and (again.work, again.attempt) == ({"n": 1}, 1)
+        await queue.done(again)
+        assert await queue.pending() == 0
 
     async def test_two_workers_never_hold_the_same_work(self, queue: SqlWorkQueue, other: SqlWorkQueue) -> None:
         for number in range(12):
