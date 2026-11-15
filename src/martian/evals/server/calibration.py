@@ -10,8 +10,9 @@ the server's contract does not have.
   calibration, and the same ``request_id`` for another judge version is ``409``. It needs
   ``manageJudges``; an archived project takes none (``409``).
 - ``GET /v1/evals/judge-calibrations`` lists every registered judge version of the project and
-  the built-in model judges, each with the model it runs on now, its newest calibration and
-  whether that calibration checks it.
+  the built-in model judges, each with the model it runs on now (or the members of its panel),
+  its newest calibration and whether that calibration checks it. A judge graded by a panel is
+  calibrated as one judge, on its panel's members (:mod:`martian.evals.calibration`).
 - ``GET /v1/evals/judge-calibrations/{calibration_id}`` is one calibration, as a judge score's
   ``martian.calibration_id`` names it.
 
@@ -76,6 +77,7 @@ def calibration_out(calibration: JudgeCalibration) -> dict[str, Any]:
         "version": calibration.version,
         "model": calibration.model,
         "endpoint": calibration.endpoint,
+        "panel": [member.model_dump(mode="json") for member in calibration.panel],
         "labelled": calibration.labelled,
         "traces_examined": calibration.traces_examined,
         "traces_truncated": calibration.traces_truncated,
@@ -152,6 +154,7 @@ async def record_calibration(
         version=version,
         model=pinned.model,
         endpoint=pinned.endpoint,
+        panel=list(pinned.panel),
         labelled=item["labelled"],
         traces_examined=report["traces_examined"],
         traces_truncated=report["traces_truncated"],
@@ -183,13 +186,14 @@ async def judge_calibrations(
     items = []
     for scorer in pinned:
         latest = newest.get((scorer.name, scorer.version))
-        status, reason = calibration_state(latest, scorer.model, scorer.endpoint)
+        status, reason = calibration_state(latest, scorer.model, scorer.endpoint, scorer.panel)
         items.append(
             {
                 "judge": scorer.name,
                 "version": scorer.version,
                 "model": scorer.model,
                 "endpoint": scorer.endpoint,
+                "panel": [member.model_dump(mode="json") for member in scorer.panel],
                 "status": status,
                 "reason": reason,
                 "calibration": calibration_out(latest) if latest else None,

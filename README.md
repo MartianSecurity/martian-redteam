@@ -56,6 +56,7 @@ push and keeps one comment with the result, also without a Martian account. See
   ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  a panel of several judge models decided by a strict majority (`judge_panel`),
   twenty-four deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, and the call's latency and
   cost, each judge version's agreement with human labels and its saved calibration, pinned
