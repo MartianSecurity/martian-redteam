@@ -546,11 +546,10 @@ All paths are under `/v1/evals`. How the core carries them out:
   run that is not `stopped` is `409` ("Only a run stopped at one of its limits can be resumed"),
   one the worker did not run (`martian evals run`) `422`, and it is refused as a launch is while
   the organisation has its `concurrent_runs` in progress, while a dataset is being published and
-  when the record store's admission, the seam through which a server pauses new work
-  (`SqlRecordStore(..., admission=...)`), refuses it (`409` or what the admission raises), and for
-  an archived project. The admission is asked once before the run restarts and its answer's code
-  is not used: the run keeps its code. It needs the `run` capability and answers `202` with the
-  queued run.
+  when the record store's [run admission](#run-admission), the seam through which a server pauses
+  new work, refuses it (`RunAdmission.resume`: `409`, or what the admission raises), and for an
+  archived project. The admission is asked once before the run restarts and numbers nothing: the
+  run keeps its code. It needs the `run` capability and answers `202` with the queued run.
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
@@ -3048,6 +3047,7 @@ add to both:
 ```python
 class RunAdmission(Protocol):
     async def admit(self, principal: Principal, run: Run) -> Run: ...
+    async def resume(self, principal: Principal, run: Run) -> None: ...
 ```
 
 - The store calls `admit` for each new run whose `source` is `console` (`LAUNCHED`), the runs the
@@ -3061,6 +3061,14 @@ class RunAdmission(Protocol):
   that handles `StoreError` answer as `409`.
 - A code taken for a run that is then not stored, because the launch fails after it or two
   requests for the same new run race, is not given back.
+- A run that stopped at one of its limits resumes through the store's update, not as a new run,
+  so the store never asks `admit` about it. The resume route (`POST /{run_id}/resume`, and the
+  local edition's) asks `resume` instead, after the edition's `concurrent_runs` and the
+  publication pause and before the run is queued again: an admission that pauses an organisation
+  refuses a resume as it refuses a launch, by raising the same error, and the run stays
+  `stopped`. `resume` returns nothing and numbers nothing, so a numbering admission does not take
+  a second code for a run that has one, and the next launch takes the next number. The store's
+  `admission` attribute is part of `RecordStore` (`None` without one).
 - The store has no admission by default, and the local edition has none: a run keeps the code
   the launch counted. The core names nothing of why a server refuses or where its codes come from.
   A launch's other checks run first, in the launch's order: the edition's `concurrent_runs`, then

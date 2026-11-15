@@ -270,8 +270,8 @@ async def resume_run(
     the run's own when given, and the run keeps them. The organisation's ``concurrent_runs`` apply,
     as for a launch (``409``), and so do a launch's pause while a dataset is being published
     (``409``, ``PAUSED``) and the record store's admission, which may refuse the resume as it
-    refuses a launch; a run that is not ``stopped`` is ``409`` too, and one the worker did not
-    run, such as a ``martian evals run``, ``422``."""
+    refuses a launch but takes no code for it; a run that is not ``stopped`` is ``409`` too, and
+    one the worker did not run, such as a ``martian evals run``, ``422``."""
     if run.state != "stopped":
         raise HTTPException(409, NOT_STOPPED)
     if run.source != "console":  # recorded by the process that ran it, such as martian evals run
@@ -279,11 +279,10 @@ async def resume_run(
     await ensure_run_place(store, records, principal, entitlements)
     if await publishing(records, principal, DEFAULT_PROJECT, _now()):
         raise HTTPException(409, PAUSED)
-    # A server's own pause holds a resume as it holds a launch: the store's admission, if it has one
-    # (``SqlRecordStore(..., admission=...)``), is asked and may refuse by raising. The run keeps its code,
-    # so what the admission answers is not used.
-    if (admission := getattr(records, "admission", None)) is not None:
-        await admission.admit(principal, run)
+    # A server's own pause holds a resume as it holds a launch: the store's admission, if it has one,
+    # may refuse it by raising (:meth:`~martian.evals.records.RunAdmission.resume`). It numbers nothing.
+    if records.admission is not None:
+        await records.admission.resume(principal, run)
     provenance = {key: value for key, value in run.provenance.items() if key != execute.STOPPED_KEY}
     if limits is not None:
         provenance[execute.LIMITS_KEY] = limits.model_dump(mode="json")

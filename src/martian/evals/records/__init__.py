@@ -651,6 +651,7 @@ class Alert(_Record):
 @runtime_checkable
 class RecordStore(Protocol):
     events: EventBus
+    admission: RunAdmission | None
 
     # Runs.
     async def create_run(self, principal: Principal, run: Run) -> Run:
