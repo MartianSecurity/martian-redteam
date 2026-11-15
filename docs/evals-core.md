@@ -1990,6 +1990,9 @@ store keeps the watch, its progress and the noted changes on both databases.
 - `martian evals export` writes everything an organisation's store and record store hold as JSON
   Lines files with a manifest, and `martian evals import martian` loads them into a fresh install:
   [data export](#data-export).
+- `martian evals push` sends the local edition's finished runs, with their case results, scores,
+  scoring jobs and traces, to a server's push routes, idempotently and resumably:
+  [pushed runs](#pushed-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
   and the core's own routes for the attempts of repeated cases, with the run's reliability and its
   flaky cases, and for the turns of conversation cases.
@@ -2562,7 +2565,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   promptfoo results there as runs ([promptfoo results and configs](#promptfoo-results-and-configs)),
   `martian evals import mlflow` copies an MLflow tracking store there
   ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
-  ([data export](#data-export)), and an application can record its traces there with MLflow
+  ([data export](#data-export)), `martian evals push` sends its finished runs to a server
+  ([pushed runs](#pushed-runs)), and an application can record its traces there with MLflow
   tracing or send them over OpenTelemetry ([below](#traces-from-an-application)). What another
   process writes while the UI is open shows when a page reads again, since the UI gets no live
   event from it.
@@ -3351,6 +3355,99 @@ core in its own process calls `export_data` and `import_data` with its store, re
 organisation's principal. Both work only through `EvalStore` and `RecordStore`. Monitors and
 schedules come back paused, and a threshold's webhook without its secret. The format, what an
 export holds, resuming, and what the receiving store assigns are in [data export](data-export.md).
+`martian evals push` sends runs to a server as lines of the same format ([pushed runs](#pushed-runs)).
+
+## Pushed runs
+
+`martian evals push` sends runs from the local edition's data folder to a server that serves the
+core, so one user's results become a team's: each finished run with its case results, its scores,
+its finished scoring jobs and its traces, with their spans and scores (`martian.evals.push`). The
+command and how it signs in are in [the eval guide](evals.md#push-runs-to-a-server). The server's
+side is the core's own routes (`martian.evals.server.push`). They are under `/v1/push`, beside
+`/v1/evals` as OpenTelemetry's `/v1/traces` is: an API for machines that send data in, outside the
+frozen contract, which holds every `/v1/evals` route the Martian server serves, so the server
+serves them without a new contract version.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/push` | The export format and version the server reads, and the organisation a push writes into (`organisation_id`, `organisation_name`) |
+| `PUT /v1/push/runs/{run_id}` | The run, its project and its finished scoring jobs. `200` with `created`, whether this request recorded the run, and `cases`: each case the server holds a result of, with the scorer and scoring job (empty for the run's own) of each score it holds of it |
+| `POST /v1/push/runs/{run_id}/cases` | Some of the run's cases, each with its result, its scores and every trace they refer to, or traces of the run that no case refers to. `200` with how many it took |
+
+A push carries the lines of the [data export's format](data-export.md#the-format) under its name
+and version, written by the export's own code (`run_records` and `export_line` in
+`martian.evals.data_export`): the run's `runs.jsonl` line, its project's `projects.jsonl` line, and
+its `scoring_jobs.jsonl`, `case_results.jsonl`, `scores.jsonl` and `traces.jsonl` lines. A server
+reads only its own version and refuses another with `422`. A batch of cases:
+
+```json
+{"format": "martian-evals-export", "version": 3,
+ "run": {"project_id": "default", "run": {"id": "…", "state": "completed", "…": "…"}, "store_run": {"…": "…"}},
+ "case_results": [{"project_id": "default", "result": {"run_id": "…", "case_id": "c1", "…": "…"}}],
+ "scores": [{"project_id": "default", "score": {"run_id": "…", "case_id": "c1", "scorer": "exact_match", "…": "…"}}],
+ "traces": [{"project_id": "default", "trace": {"id": "tr-…", "spans": ["…"], "scores": ["…"], "…": "…"}}]}
+```
+
+- **Identifiers.** Runs, case results, scores and scoring jobs keep their ids: the record store keeps
+  each organisation's rows apart. Trace ids do not. A tracking store's trace ids are one namespace,
+  whatever the MLflow workspace, so the same trace pushed into two organisations would be one row,
+  and the second push would take the first organisation's trace. A pushed trace's id is
+  `pushed_trace_id`: `tr-` and the first 32 hex digits of the SHA-256 of `martian-push`, the
+  organisation's id (`local` for the single local user) and the trace's own id, one to a line. It is
+  in MLflow's form, so every binding keeps it as it is; it is the same each time the trace is pushed
+  into one organisation, so a second push finds it, and another in each other organisation. Every
+  reference to a trace follows it: a case result's, an attempt's, a turn's and a score's. The store's
+  own identifiers (the experiment, the MLflow run and each assessment) are the receiving store's, as
+  an [import](data-export.md#importing) assigns them: each score on a trace is matched to the one the
+  receiving store holds by its content (`score_key`), and the records that named its assessment name
+  the receiving store's. A run's `store.dataset_id` still names the dataset version it read in the
+  data folder, which is not pushed.
+- **Idempotent.** Every request can be sent again. The project, the run in the store, the run in the
+  record store and each scoring job are created once, and a run or scoring job the server holds with
+  other content is refused (`409`, "The server holds this run with other content"); a trace is
+  recorded again in place, and a score is added to it only when it has none with the same content;
+  case results and their scores replace those of the same case, scorer and scoring job. Pushing
+  twice, or a request delivered twice, adds nothing.
+- **Resumable.** A batch writes its traces first, then its case results with their scores in one
+  transaction (`put_results`), so the server holds a case with its scores and traces, or holds no
+  result of it. The `PUT`'s `cases` say which cases the server holds and with which scores; the next
+  push sends the cases it lacks, and those it holds without some of their scores, such as a scoring
+  job's that finished after the last push. The run's traces that no case refers to are sent again
+  each time.
+- **Refused.** A run or scoring job still `queued` or `running` (`422`): no worker on the server
+  would finish it, and it would count against the organisation's runs in progress for good. A line
+  of another run or project, a score of a case whose result the batch does not carry, a trace of
+  another run (`422`). A run whose id the server holds in another project, since the run routes find
+  a run by its id alone (`409`). A batch for a run the server does not hold yet (`409`). Pushing
+  needs the `run` capability (`403`). A run's project that the server lacks is created under the
+  same id, name and description when the principal may manage projects (`manageProjects`, else
+  `403`) and the organisation has fewer than 25 projects besides the default one (`409`); the
+  default project is created on its first write, as for any write, and an archived project takes no
+  more runs (`409`).
+- **Who writes.** The routes write as `push_principal` (`martian.evals.server.push`), a dependency
+  that is the edition's principal unless the edition binds another for these routes alone. The
+  Martian server binds its organisation API keys to it ([below](#the-martian-server)).
+- **What a push leaves.** A run's reviews and review queues, its artifacts and its dataset version,
+  scoring jobs still queued or running with their scores, traces of no run, and the rest of the data
+  folder: [the data export](data-export.md) moves a whole install. A score given to a trace after its
+  case was pushed, such as an annotation, is not sent: the push knows a case by its result and its
+  scores in the record store. A pushed run keeps its `source` (`local` for a command-line or imported
+  run, `console` for one started in the local UI) and carries nothing that says it was pushed.
+
+`tests/evals/test_push.py` fills a data folder with suite-file runs with repeated attempts and with
+conversations, Inspect AI logs, a console run with scored traces, a scoring job, reviews and a
+review queue, a run in a project of its own with a trace no case refers to, a queued run and live
+traffic, and pushes it to a second core standing in for the server, with stores of its own on
+SQLite and on Postgres, signed in with organisation API keys. It checks that each finished run is
+on the server as the data folder holds it, as the export writes both, but for the store's own
+identifiers and the mapped trace ids; that each record names the server's assessment where it
+named one here, and the same score; that the push sent the export's own lines; and that the
+server's run routes show each run as the local UI does. It pushes twice, and with every request
+delivered twice into another organisation, and checks that nothing was added; sends a scoring job
+that finished after a push with the next; stops a push before its first batch, after a batch the
+server wrote whose answer was lost, and before a later batch, and checks that the next push sends
+only the cases the server lacks and ends the same; pushes the same traces into two organisations,
+which each get their own; and covers what a push and the server refuse, and the command.
 
 ## Not built yet
 
@@ -3378,7 +3475,11 @@ scoring job, with the agent's target lease; not the durable queue yet), `current
 each organisation's default judge model, and `current_agent_names` its agent registry. It
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
 names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
-contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`). So a route reads
+contract (`GET /v1/evals/{run_id}/attempts` and `/turns`, OpenTelemetry's `POST /v1/traces`) but
+the [push routes](#pushed-runs), which it mounts beside the contract with `push_principal` bound
+to its organisation API keys: a key with `evals:write`, bound to no agent and no datasets, pushes
+as a member of its organisation on behalf of the member who created it, and any other bearer is a
+signed-in member, as on every route. So a route reads
 what an edition supplies only through these dependencies, never from `create_app`'s
 `app.state` (the OTLP route's write lock is the exception, and the server does not mount it).
 `tests/evals/test_write_routes.py` serves the scorers route on an application of its own that
@@ -3391,6 +3492,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
 `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
 `test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_schedules.py`,
-`test_model_changes.py`, `test_no_outbound.py` and the store and record
+`test_model_changes.py`, `test_no_outbound.py`, `test_push.py` and the store and record
 tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.

@@ -64,6 +64,10 @@ push and keeps one comment with the result, also without a Martian account. See
   folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
   JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
   see [data export](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/data-export.md).
+- `martian evals push`: `martian ui`'s finished runs, with their case results, scores and traces,
+  sent to a Martian server with an organisation API key; pushing again sends only what the server
+  lacks; see
+  [pushed runs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#pushed-runs).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see

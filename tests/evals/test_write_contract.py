@@ -99,6 +99,12 @@ OWN_NAMES |= {
     ("post", "/v1/evals/schedules/{schedule_id}/resume"),
     ("delete", "/v1/evals/schedules/{schedule_id}"),
 }
+# And the routes another installation pushes its runs to (MartianSecurity/martian-notes#117).
+OWN_NAMES |= {
+    ("get", "/v1/push"),
+    ("put", "/v1/push/runs/{run_id}"),
+    ("post", "/v1/push/runs/{run_id}/cases"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),
