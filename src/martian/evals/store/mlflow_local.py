@@ -37,6 +37,11 @@ How the shared model sits in MLflow:
   request and response from it, before it maps.
 - A score is a feedback assessment on its trace.
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
+- A prompt is a prompt of MLflow's prompt registry, in the workspace, with its creator in the
+  ``martian.prompt.created_by`` tag; a prompt version is an MLflow prompt version, its text the
+  template, its commit message MLflow's, its digest and author in the ``martian.prompt.digest`` and
+  ``martian.prompt.author`` version tags. MLflow keeps the registry in its model registry tables,
+  beside the tracking tables in the same database.
 - A review question is a label schema; a review queue is an MLflow review queue named by the
   queue id, with its definition in an experiment tag.
 - Run artifacts are files in the run's artifact folder,
@@ -86,8 +91,10 @@ from mlflow.exceptions import MlflowException
 from mlflow.genai.label_schemas import InputCategorical, InputNumeric, InputPassFail, InputText, LabelSchemaType
 
 from martian.evals._mlflow import (
+    IS_PROMPT_TAG_KEY,
     RUN_ARTIFACT_URI_LENGTH,
     TRACE_PREVIEW_LENGTH,
+    PromptRegistryStore,
     ServerWorkspaceContext,
     SpansLocation,
     TraceTagKey,
@@ -113,6 +120,8 @@ from martian.evals.model import (
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     ReviewQuestion,
     ReviewQueue,
@@ -127,6 +136,7 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    prompt_digest,
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
@@ -135,6 +145,7 @@ from martian.evals.store import (
     RESPONSE_PREVIEW_TRUNCATED,
     StoreError,
     StoreStatus,
+    check_prompt,
     check_session_search,
 )
 from martian.evals.trace_conventions import map_trace
@@ -168,6 +179,15 @@ _CURSOR_OFFSET = re.compile(r"[0-9]{1,18}")
 """One MLflow search's offset in a cursor: at most 18 of the digits 0-9, so it fits SQL's 64-bit
 ``OFFSET`` and ``int()`` reads it as written."""
 _CURSOR_REFUSED = "cursor is not a next_cursor this store returned"
+
+PROMPT_CREATED_BY = "martian.prompt.created_by"
+"""The prompt tag that keeps who created a prompt."""
+PROMPT_DIGEST = "martian.prompt.digest"
+"""The prompt version tag that keeps the digest of its text, which a run's prompt is matched by."""
+PROMPT_AUTHOR = "martian.prompt.author"
+"""The prompt version tag that keeps who added the version."""
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -253,6 +273,8 @@ class MlflowStore:
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]
         hide_sql_parameters(self._store)
+        self._prompts: Any = PromptRegistryStore(url)  # type: ignore[no-untyped-call]
+        hide_sql_parameters(self._prompts)
         self._ready: set[str] = set()
 
     # --- plumbing ----------------------------------------------------------------------------
@@ -885,6 +907,84 @@ class MlflowStore:
 
         return await self._call(principal, work)
 
+    # --- prompts -----------------------------------------------------------------------------
+
+    async def create_prompt(self, principal: Principal, name: str, *, description: str = "") -> Prompt:
+        check_prompt(name, description=description)
+
+        def work() -> Prompt:
+            if (existing := self._prompts.get_prompt(name)) is not None:
+                found = _prompt(existing)
+                if found.description != description:
+                    raise StoreError("conflict", "a prompt with this name already exists")
+                return found
+            tags = {PROMPT_CREATED_BY: principal.user_id}
+            return _prompt(self._prompts.create_prompt(name, description=description or None, tags=tags))
+
+        return await self._call(principal, work)
+
+    async def get_prompt(self, principal: Principal, name: str) -> Prompt | None:
+        def work() -> Prompt | None:
+            found = self._prompts.get_prompt(name)
+            return None if found is None else _prompt(found)
+
+        return await self._call(principal, work)
+
+    async def list_prompts(self, principal: Principal) -> list[Prompt]:
+        def work() -> list[Prompt]:
+            found: list[Prompt] = []
+            token = None
+            while True:
+                page = self._prompts.search_prompts(max_results=100, page_token=token)
+                found.extend(_prompt(prompt) for prompt in page)
+                if not (token := page.token):
+                    return sorted(found, key=lambda prompt: prompt.name)
+
+        return await self._call(principal, work)
+
+    async def add_prompt_version(
+        self, principal: Principal, name: str, text: str, *, message: str = ""
+    ) -> PromptVersion:
+        check_prompt(name, text, message=message)
+
+        def work() -> PromptVersion:
+            if self._prompts.get_prompt(name) is None:
+                raise StoreError("not_found", "prompt not found")
+            tags = {PROMPT_DIGEST: prompt_digest(text), PROMPT_AUTHOR: principal.user_id}
+            return _prompt_version(
+                self._prompts.create_prompt_version(name, text, description=message or None, tags=tags)
+            )
+
+        return await self._call(principal, work)
+
+    async def prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        def work() -> list[PromptVersion]:
+            if self._prompts.get_prompt(name) is None:
+                raise StoreError("not_found", "prompt not found")
+            found: list[PromptVersion] = []
+            token = None
+            while True:
+                page = self._prompts.search_prompt_versions(name, max_results=100, page_token=token)
+                found.extend(_prompt_version(version) for version in page)
+                if not (token := page.token):
+                    return sorted(found, key=lambda version: version.version)
+
+        return await self._call(principal, work)
+
+    async def find_prompt_versions(self, principal: Principal, digest: str) -> list[PromptVersion]:
+        if not _DIGEST.fullmatch(digest):
+            return []
+
+        def work() -> list[PromptVersion]:
+            # MLflow searches prompt versions only when the filter names its prompt tag.
+            matching = self._prompts.search_model_versions(
+                filter_string=f"tag.`{IS_PROMPT_TAG_KEY}` = 'true' AND tag.`{PROMPT_DIGEST}` = '{digest}'"
+            )
+            found = [_prompt_version(self._prompts.get_prompt_version(m.name, m.version)) for m in matching]
+            return sorted(found, key=lambda version: (version.created_at or _EPOCH, version.name, version.version))
+
+        return await self._call(principal, work)
+
     # --- review questions and queues --------------------------------------------------------
 
     def _question(self, experiment_id: str, question: ReviewQuestion) -> Any:
@@ -1388,6 +1488,29 @@ def _scorer(found: Any) -> ScorerVersion:
     if stored is None:
         return ScorerVersion(name=found.scorer_name, kind="llm_judge", type="mlflow", version=str(found.scorer_version))
     return ScorerVersion.model_validate({**stored, "version": str(found.scorer_version)})
+
+
+def _prompt(found: Any) -> Prompt:
+    tags = dict(found.tags or {})
+    return Prompt(
+        name=found.name,
+        description=found.description or "",
+        created_at=_from_ms(found.creation_timestamp),
+        created_by=tags.get(PROMPT_CREATED_BY),
+    )
+
+
+def _prompt_version(found: Any) -> PromptVersion:
+    tags = dict(found.tags or {})
+    return PromptVersion(
+        name=found.name,
+        version=int(found.version),
+        text=found.template,
+        digest=prompt_digest(found.template),
+        message=found.commit_message or "",
+        created_at=_from_ms(found.creation_timestamp),
+        created_by=tags.get(PROMPT_AUTHOR),
+    )
 
 
 def _label_input(question: ReviewQuestion) -> Any:

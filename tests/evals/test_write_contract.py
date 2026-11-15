@@ -65,8 +65,15 @@ WRITE_OPERATIONS = [
 # (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and the
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
-# The core's own route, which the server's contract does not have (MorningHQ/martian-notes#180).
+# The core's own routes, which the server's contract does not have: the attempts of repeated cases
+# (MorningHQ/martian-notes#180) and prompt versions (MorningHQ/martian-notes#207).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts")}
+OWN_NAMES |= {
+    ("get", "/v1/evals/prompts"),
+    ("post", "/v1/evals/prompts"),
+    ("get", "/v1/evals/prompts/{name}"),
+    ("post", "/v1/evals/prompts/{name}/versions"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),

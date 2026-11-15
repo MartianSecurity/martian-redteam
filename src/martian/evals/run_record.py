@@ -25,7 +25,10 @@
 - A suite with a matrix records one run per combination (:mod:`martian.evals.matrix`). Its
   ``provenance`` holds the combination under ``matrix`` (:func:`martian.evals.matrix.provenance`),
   and its code is the suite's name with the combination's id in brackets and its number among
-  that combination's runs, such as ``evals[model=large,prompt=terse]-2``.
+  that combination's runs, such as ``evals[model=large,prompt=terse]-2``. Each of the
+  combination's text values that is a registered prompt version's text, by content digest, is
+  named under ``prompts`` (:func:`martian.evals.prompts.matched_prompts`), with the prompt's name
+  and version, so the run shows the prompt version it used.
 - A run with the cache of model calls on (:mod:`martian.evals.cache`) has it in ``provenance``
   under ``cache``: its folder, time to live and whether function targets are cached from the
   start, and once the run ends how many target and judge replies came from the cache, so a
@@ -72,6 +75,7 @@ from martian.evals.model import (
     Trace,
     from_results_record,
 )
+from martian.evals.prompts import PROVENANCE_KEY, matched_prompts
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
@@ -178,6 +182,10 @@ class RunRecorder:
             provenance["limits"] = self._limits.model_dump(mode="json")
         if self.matrix is not None:
             provenance["matrix"] = self.matrix
+            # The combination's text values that are registered prompt versions, by content digest.
+            used = await matched_prompts(self.store, SINGLE_USER, suite.matrix, self.matrix["values"])
+            if used:
+                provenance[PROVENANCE_KEY] = used
         if self.cache is not None:
             provenance["cache"] = self.cache
         run = Run(

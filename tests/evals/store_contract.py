@@ -24,6 +24,7 @@ from martian.evals.model import (
     Span,
     Trace,
     TraceQuery,
+    prompt_digest,
 )
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore, StoreError
@@ -419,6 +420,47 @@ class StoreContract:
         ]
         assert await store.scorer_versions(ORG_A, "p1", "politeness") == [first, second]
         assert await store.scorer_versions(ORG_A, "p1", "missing") == []
+
+    async def test_prompts_keep_immutable_versions_found_by_their_text(self, store: EvalStore) -> None:
+        prompt = await store.create_prompt(ORG_A, "support.terse", description="The terse support prompt")
+        assert (prompt.name, prompt.created_by) == ("support.terse", "user-a") and prompt.created_at is not None
+        assert await store.create_prompt(ORG_A, "support.terse", description="The terse support prompt") == prompt
+        await refused("conflict", store.create_prompt(ORG_A, "support.terse", description="Another"))
+        assert await store.prompt_versions(ORG_A, "support.terse") == []
+
+        first = await store.add_prompt_version(ORG_A, "support.terse", "Answer in one sentence.", message="First")
+        second = await store.add_prompt_version(ORG_A, "support.terse", "Answer in one short sentence.\n")
+        again = await store.add_prompt_version(ORG_A, "support.terse", "Answer in one sentence.", message="Back")
+        assert [(v.version, v.message) for v in (first, second, again)] == [(1, "First"), (2, ""), (3, "Back")]
+        assert first.digest == prompt_digest("Answer in one sentence.") == again.digest != second.digest
+        assert (first.created_by, first.created_at is not None) == ("user-a", True)
+        assert second.text == "Answer in one short sentence.\n"  # kept exactly as written
+        # Every version stays as it was added.
+        assert await store.prompt_versions(ORG_A, "support.terse") == [first, second, again]
+
+        await store.create_prompt(ORG_A, "friendly")
+        other = await store.add_prompt_version(ORG_A, "friendly", "Answer in one sentence.")
+        assert [p.name for p in await store.list_prompts(ORG_A)] == ["friendly", "support.terse"]
+        assert await store.get_prompt(ORG_A, "friendly") == (await store.list_prompts(ORG_A))[0]
+        found = await store.find_prompt_versions(ORG_A, first.digest)
+        assert [(v.name, v.version) for v in found] == [("support.terse", 1), ("support.terse", 3), ("friendly", 1)]
+        assert found[-1] == other
+        assert await store.find_prompt_versions(ORG_A, prompt_digest("never registered")) == []
+
+        assert await store.get_prompt(ORG_A, "missing") is None
+        await refused("not_found", store.add_prompt_version(ORG_A, "missing", "text"))
+        await refused("not_found", store.prompt_versions(ORG_A, "missing"))
+        await refused("invalid", store.create_prompt(ORG_A, "two words"))
+        await refused("invalid", store.add_prompt_version(ORG_A, "support.terse", ""))
+        # Another organisation, and the single local user, see none of them and keep their own.
+        for other_principal in (ORG_B, SINGLE_USER):
+            assert await store.list_prompts(other_principal) == []
+            assert await store.get_prompt(other_principal, "support.terse") is None
+            assert await store.find_prompt_versions(other_principal, first.digest) == []
+            await refused("not_found", store.prompt_versions(other_principal, "support.terse"))
+        await store.create_prompt(ORG_B, "support.terse")
+        assert (await store.add_prompt_version(ORG_B, "support.terse", "Bonjour.")).version == 1
+        assert len(await store.prompt_versions(ORG_A, "support.terse")) == 3
 
     async def test_review_questions_and_queues(self, store: EvalStore, project: Project) -> None:
         question = ReviewQuestion(name="correct", instruction="Is the answer correct?")

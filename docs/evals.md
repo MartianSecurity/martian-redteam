@@ -475,7 +475,7 @@ target that stands in for the model, so it runs with no key:
 | `<output>/verdicts.json` | Every combination's `verdicts.json` under `combinations`, by id (format `martian-evals-matrix-verdicts/1`): what a later run of the matrix compares with |
 | The printed table | One row per combination: its counts and pass rate with its 95% interval, with repeats its reliability, and with `--baseline` its label and gate. Under it, each combination's flaky cases, false refusals, errors and comparison, each line starting with the combination's id |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
-| The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file |
+| The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file. A value that is a [registered prompt version](#prompt-versions)'s text is named in `provenance.prompts` |
 
 - **The gate.** A combination's `gate` is `error` when a case has no verdict, or when it stopped
   at a limit before a case (below); with a baseline, its comparison's gate; otherwise `failed`
@@ -504,6 +504,46 @@ target that stands in for the model, so it runs with no key:
 - **A suite without a matrix** runs, writes and records exactly what it did before: no
   `matrix.json`, no folder per combination, a run named `evals-<n>` with no `provenance.matrix`,
   and the fingerprint and digest it had.
+
+## Prompt versions
+
+A prompt edited in a suite file has no history of its own. `martian evals prompts push` keeps each
+prompt of a suite file's matrix as a numbered, immutable version in the local Evals UI's data
+folder, and each run then records the version it used:
+
+```bash
+martian evals prompts push evals.yaml -m "Greet by name"   # terse: version 2 added
+martian evals run evals.yaml                               # each combination names its prompt version
+martian ui                                                 # Prompts: versions, differences and runs
+```
+
+- **What it pushes.** Each value of the matrix axis `prompt` (`--axis NAME` for another), or only
+  those named with `--value NAME`, as a version of the prompt named by the value's name: the
+  mapped value `terse: "Answer in one sentence."` is a version of the prompt `terse`. A prompt
+  that does not exist yet is created. A value whose text is the prompt's latest version adds
+  nothing (`terse: version 1 unchanged`), so pushing an unchanged suite file is harmless; text
+  the prompt had in an older version adds a new version with that text. A value must be text,
+  and its name a prompt's name: 1 to 64 letters, digits and `. _ -`, starting with a letter or
+  digit. Anything else is refused with exit code `2` before anything is pushed.
+- **A version** keeps its text exactly as written, at most 100,000 characters, its digest (SHA-256
+  of the text as UTF-8), the commit message (`-m`, optional), its author (the local user) and its
+  time. It never changes. `--data-dir` names the data folder, as for `martian evals run`.
+- **Which version a run used.** When `martian evals run` records a combination, each of its text
+  values whose digest is a registered version's is named in the run's `provenance.prompts`:
+  `axis`, `value` (the value's name), and the version's prompt `name`, `version` and `digest`.
+  When several versions have the text, the run takes the newest of the prompt named as the value,
+  else the newest of any prompt. The run's page shows the version, and the Prompts page lists the
+  run under it. A run is matched when it is recorded: push before running, since a run recorded
+  before its text was pushed names no version.
+- **The suite file names no version.** It keeps the prompt's text, not a reference such as
+  `terse@2`, so it stays the whole definition of what it runs and runs the same on a machine with
+  no registry, such as a CI runner. A suite without a matrix has no prompt of its own and records
+  none.
+- **The local Evals UI's Prompts page** lists the prompts, each prompt's versions with their
+  messages, authors and times, the difference between two versions, and the runs that used each
+  version. The prompts are the evals core's, served by its own routes
+  ([prompt routes](evals-core.md#prompt-versions)); Python can push one with
+  `martian.evals.prompts.push_suite_prompts`.
 
 ## A cache of model calls
 

@@ -181,6 +181,52 @@ class ScorerVersion(_Object):
         return written
 
 
+PROMPT_NAME = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+"""A prompt's name: 1 to 64 letters, digits and ``. _ -``, starting with a letter or a digit. A
+name MLflow's prompt registry takes, and one a URL path holds as written."""
+
+MAX_PROMPT_LENGTH = 100_000
+"""The longest a prompt version's text is, in characters: the most MLflow's prompt registry keeps."""
+
+PromptName = Annotated[str, Field(pattern=PROMPT_NAME)]
+
+
+def prompt_digest(text: str) -> str:
+    """The content digest of a prompt's text: SHA-256 of the text as UTF-8, exactly as written. A
+    run's prompt is matched to a registered version by it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class Prompt(_Object):
+    """A named prompt whose text changes over time, each change an immutable ``PromptVersion``. A
+    prompt belongs to an organisation, not a project. In MLflow, a prompt of its prompt registry."""
+
+    name: PromptName
+    description: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+
+class PromptVersion(_Object):
+    """One version of a prompt: its text, the digest of the text (:func:`prompt_digest`), the
+    commit message that came with it, and who added it when. ``version`` counts up from 1 in each
+    prompt and is assigned when the version is added; a version never changes."""
+
+    name: PromptName
+    version: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
+    digest: Digest
+    message: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+    @model_validator(mode="after")
+    def digest_is_the_texts(self) -> PromptVersion:
+        if self.digest != prompt_digest(self.text):
+            raise ValueError("digest is not the digest of the text")
+        return self
+
+
 class Policy(_Object):
     """When a scorer's results pass the suite."""
 
@@ -745,7 +791,9 @@ def from_results_record(
 __all__ = [
     "ATTEMPT_RECORD_FIELDS",
     "MAX_ATTEMPTS",
+    "MAX_PROMPT_LENGTH",
     "MODEL_VERSION",
+    "PROMPT_NAME",
     "SESSION_TRACE_LIMIT",
     "Attempt",
     "CheckVerdict",
@@ -769,6 +817,8 @@ __all__ = [
     "DatasetVersion",
     "Policy",
     "Project",
+    "Prompt",
+    "PromptVersion",
     "Review",
     "ReviewQuestion",
     "ReviewQueue",
@@ -786,6 +836,7 @@ __all__ = [
     "case_status",
     "digest",
     "from_results_record",
+    "prompt_digest",
     "sessions_from_traces",
     "suite_digest",
 ]

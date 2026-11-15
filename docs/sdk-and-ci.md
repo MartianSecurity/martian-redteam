@@ -129,6 +129,8 @@ martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-expo
 martian evals run evals.yaml
 # The same, compared case by case with an earlier run's output folder and gated on the comparison:
 martian evals run evals.yaml --output results/pr --baseline results/main
+# A suite file's prompts as versions in the local Evals UI, which each later run names (see the eval guide):
+martian evals prompts push evals.yaml -m "Shorter greeting"
 # The Evals UI on this machine, one user and no login (see the evals core guide):
 martian ui
 # Inspect AI logs as runs in that UI (see the evals core guide):

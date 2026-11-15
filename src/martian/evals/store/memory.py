@@ -16,6 +16,8 @@ from martian.evals.model import (
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     ReviewQuestion,
     ReviewQueue,
@@ -28,9 +30,10 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    prompt_digest,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import StoreError, StoreStatus, check_prompt, check_session_search
 from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
@@ -70,6 +73,7 @@ class MemoryStore:
         self._traces: dict[tuple[str, str, str], Trace] = {}
         self._scores: dict[tuple[str, str, str], list[Score]] = {}
         self._scorers: dict[tuple[str, str, str], list[ScorerVersion]] = {}
+        self._prompts: dict[tuple[str, str], tuple[Prompt, list[PromptVersion]]] = {}
         self._questions: dict[tuple[str, str, str], ReviewQuestion] = {}
         self._queues: dict[tuple[str, str, str], ReviewQueue] = {}
         self._items: dict[tuple[str, str, str], dict[str, QueueItem]] = {}
@@ -338,6 +342,58 @@ class MemoryStore:
     async def scorer_versions(self, principal: Principal, project_id: str, name: str) -> list[ScorerVersion]:
         self._project(principal, project_id)
         return list(self._scorers.get((_space(principal), project_id, name), []))
+
+    # --- prompts -----------------------------------------------------------------------------
+
+    async def create_prompt(self, principal: Principal, name: str, *, description: str = "") -> Prompt:
+        check_prompt(name, description=description)
+        prompt = Prompt(name=name, description=description, created_at=_now(), created_by=principal.user_id)
+        key = (_space(principal), name)
+        if (existing := self._prompts.get(key)) is not None:
+            if existing[0].description != description:
+                raise StoreError("conflict", "a prompt with this name already exists")
+            return existing[0]
+        self._prompts[key] = (prompt, [])
+        return prompt
+
+    async def get_prompt(self, principal: Principal, name: str) -> Prompt | None:
+        found = self._prompts.get((_space(principal), name))
+        return None if found is None else found[0]
+
+    async def list_prompts(self, principal: Principal) -> list[Prompt]:
+        space = _space(principal)
+        return sorted((p for (s, _), (p, _) in self._prompts.items() if s == space), key=lambda p: p.name)
+
+    async def add_prompt_version(
+        self, principal: Principal, name: str, text: str, *, message: str = ""
+    ) -> PromptVersion:
+        check_prompt(name, text, message=message)
+        versions = self._prompt_versions(principal, name)
+        version = PromptVersion(
+            name=name,
+            version=len(versions) + 1,
+            text=text,
+            digest=prompt_digest(text),
+            message=message,
+            created_at=_now(),
+            created_by=principal.user_id,
+        )
+        versions.append(version)
+        return version
+
+    async def prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        return list(self._prompt_versions(principal, name))
+
+    async def find_prompt_versions(self, principal: Principal, digest: str) -> list[PromptVersion]:
+        space = _space(principal)
+        found = [v for (s, _), (_, versions) in self._prompts.items() if s == space for v in versions]
+        return sorted((v for v in found if v.digest == digest), key=lambda v: (v.created_at or _now(), v.name))
+
+    def _prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        found = self._prompts.get((_space(principal), name))
+        if found is None:
+            raise StoreError("not_found", "prompt not found")
+        return found[1]
 
     # --- review questions and queues --------------------------------------------------------
 
