@@ -501,11 +501,11 @@ All paths are under `/v1/evals`. How the core carries them out:
   launch, scoring request or re-check.
 - **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
   target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
-  id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. An
-  HTTP target the worker has but refuses, such as an entry of its `targets` that is not
-  `kind: http` or one whose `response_path` indexes a list with digits other than 0-9, is `422`
-  with the reason, which names `targets['ID']` once, and no run is recorded. An organisation has
-  at most its edition's `concurrent_runs` queued or running at once
+  id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. A
+  target of its `targets` the worker has but refuses, such as one that is neither `kind: http` nor
+  `kind: function`, or an HTTP target whose `response_path` indexes a list with digits other than
+  0-9, is `422` with the reason, which names `targets['ID']` once, and no run is recorded. An
+  organisation has at most its edition's `concurrent_runs` queued or running at once
   ([editions and entitlements](#editions-and-entitlements)): one more is `409`, "An eval run is
   already in progress" at a limit of 1, else "5 eval runs are already in progress, as many as this
   organisation may have at once". Run codes count up from `EV-1001`. The worker runs the
@@ -776,9 +776,11 @@ no registered agent, so an install with no martian-agents service runs functions
   name inputs only; one that names anything else, such as `{{expectations.answer}}`, is refused
   with a `ValueError` naming `targets['ID'].body` each time a check or a run names the target.
 - **A function target runs where it cannot reach the grader.** The run starts its process before
-  the first case, outside that case's time limit, and ends it after the last; a target it cannot
-  import fails the run with the reason. The process is `martian.evals.isolation.TargetProcess`,
-  as for a suite file's function target: it holds no memory of the work's process, its
+  the first case, outside that case's time limit and its trace's latency, so the trace search's
+  latency filter and order see each call, not the process starting; it ends the process after
+  the last case. A target it cannot import fails the run with the reason. The process is
+  `martian.evals.isolation.TargetProcess`, as for a suite file's function target: it holds no
+  memory of the work's process, its
   environment has no `MARTIAN_*` variables or MLflow location variables, and on Linux with
   Landlock it cannot read, change or create the worker's private paths (`private_paths` of
   `InProcessWorker`, `WorkerServices.private_paths` from a `ProcessWorker`'s setup), which name the
