@@ -50,6 +50,7 @@ from mlflow.entities import Feedback, ViewType
 from mlflow.exceptions import MlflowException
 
 from martian._version import __version__
+from martian.evals._digits import ascii_digits
 from martian.evals._mlflow import (
     AssessmentMetadataKey,
     ReadOnlyTrackingStore,
@@ -399,7 +400,7 @@ class _Reader:
             page = self.store.search_experiments(view_type=ViewType.ALL, max_results=1000, page_token=token)
             found += list(page)
             if not (token := page.token):
-                return sorted(found, key=lambda e: int(e.experiment_id) if e.experiment_id.isdigit() else 0)
+                return sorted(found, key=lambda e: int(e.experiment_id) if ascii_digits(e.experiment_id) else 0)
 
     def _trace_infos(self, experiment_id: str, filter_string: str | None = None) -> list[Any]:
         found, token = [], None

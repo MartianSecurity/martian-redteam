@@ -15,6 +15,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from martian.evals._digits import ascii_digits
+
 # --- text as a check compares it ---------------------------------------------------------------
 
 # Letters from other scripts that look like Latin ones, as a reply might use them to slip a phrase
@@ -567,7 +569,7 @@ class DataOptions:
             return any(
                 min(len(value), len(other)) >= 10 and (value.endswith(other) or other.endswith(value))
                 for other in self.allow
-                if other.isdigit()
+                if ascii_digits(other)
             )
         return False
 

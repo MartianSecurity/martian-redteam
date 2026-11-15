@@ -37,10 +37,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from martian.evals.manifests import PAUSED, publishing
 from martian.evals.model import DatasetVersion, Run, RunLimits, ScoringJob, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.admission import ACTIVE, ensure_run_place, ensure_scoring_place
 from martian.evals.server.dependencies import (
+    AgentNamesDep,
     EntitlementsDep,
     OptionalWorkerDep,
     PrincipalDep,
@@ -52,7 +54,15 @@ from martian.evals.server.dependencies import (
 from martian.evals.server.entitlements import Entitlements
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out, suite_version_id
-from martian.evals.server.runs import find_run, lookup_run, project_keys, project_runs, writable_project
+from martian.evals.server.runs import (
+    agent_names,
+    find_run,
+    lookup_run,
+    name_of,
+    project_keys,
+    project_runs,
+    writable_project,
+)
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
@@ -60,6 +70,7 @@ from martian.evals.store import EvalStore, StoreError
 # `execute` as a module: the worker package imports these routes while it is importing it.
 from martian.evals.worker import InterruptedRuns, Work, Worker, execute
 from martian.evals.worker.scorers import builtin_scorer
+from martian.evals.worker.targets import TargetRefused
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
@@ -120,8 +131,11 @@ async def admit_run(
     version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
     ``provenance.suite``, which says whether the suite has a model judge), and adds its own
     ``provenance``. The run's limits, ``provenance.limits``, are the ones ``provenance`` gives,
-    else the suite's (``Suite.settings.limits``); without either, the worker's apply."""
+    else the suite's (``Suite.settings.limits``); without either, the worker's apply. While a
+    dataset of the project is being published, no run is admitted (``409``, ``PAUSED``)."""
     await ensure_run_place(store, records, principal, entitlements)
+    if await publishing(records, principal, DEFAULT_PROJECT, _now()):
+        raise HTTPException(409, PAUSED)
     provenance = dict(provenance or {})
     if suite is not None and suite.settings.limits is not None and execute.LIMITS_KEY not in provenance:
         provenance[execute.LIMITS_KEY] = suite.settings.limits.model_dump(mode="json")
@@ -175,15 +189,19 @@ async def request_run(
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
+    names: AgentNamesDep,
 ) -> EvalRunOut:
     run_id = run_id_for(body.request_id)
     if existing := await lookup_run(store, records, principal, run_id):
         if not _same_request(existing, body, principal):
             raise HTTPException(409, "request_id was already used for a different eval")
-        return run_out(existing)
+        return run_out(existing, name_of(await agent_names(names, principal, [existing]), existing))
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    pin = await worker.check_target(principal, target)
+    try:
+        pin = await worker.check_target(principal, target)
+    except TargetRefused as error:
+        raise HTTPException(422, str(error)) from None
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
@@ -200,7 +218,7 @@ async def request_run(
         dataset=dataset,
         max_cases=body.max_items,
     )
-    return run_out(run)
+    return run_out(run, name_of(await agent_names(names, principal, [run]), run))
 
 
 NOT_STOPPED = "Only a run stopped at one of its limits can be resumed"
@@ -224,13 +242,16 @@ async def resume_run(
     """Queue ``run``, which stopped at one of its limits, again and submit it to the worker, which
     resumes it after the cases it finished: their target is not called again. ``limits`` replace
     the run's own when given, and the run keeps them. The organisation's ``concurrent_runs`` apply,
-    as for a launch (``409``); a run that is not ``stopped`` is ``409`` too, and one the worker did
-    not run, such as a ``martian evals run``, ``422``."""
+    as for a launch (``409``), and so does a launch's pause while a dataset is being published
+    (``409``, ``PAUSED``); a run that is not ``stopped`` is ``409`` too, and one the worker did not
+    run, such as a ``martian evals run``, ``422``."""
     if run.state != "stopped":
         raise HTTPException(409, NOT_STOPPED)
     if run.source != "console":  # recorded by the process that ran it, such as martian evals run
         raise HTTPException(422, NOT_THE_WORKERS)
     await ensure_run_place(store, records, principal, entitlements)
+    if await publishing(records, principal, DEFAULT_PROJECT, _now()):
+        raise HTTPException(409, PAUSED)
     provenance = {key: value for key, value in run.provenance.items() if key != execute.STOPPED_KEY}
     if limits is not None:
         provenance[execute.LIMITS_KEY] = limits.model_dump(mode="json")
@@ -301,26 +322,31 @@ async def _cancel_interrupted(worker: Worker | None, principal: Principal, run: 
     dependencies=[Depends(require_capability("run"))],
 )
 async def cancel_eval(
-    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: OptionalWorkerDep
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: OptionalWorkerDep,
+    names: AgentNamesDep,
 ) -> EvalRunOut:
     # A queued run is cancelled at once; a running one when its worker reaches the next case, or at
     # once when its worker says nothing is working on it any more, even if a stop was asked before.
     run = await find_run(store, records, principal, run_id)
+    named = await agent_names(names, principal, [run])
     for _ in range(3):
         try:
             if (stopped := await _cancel_interrupted(worker, principal, run)) is not None:
-                return run_out(stopped)
+                return run_out(stopped, name_of(named, stopped))
             if run.cancel_requested_at is not None:
-                return run_out(run)
+                return run_out(run, name_of(named, run))
             if run.state not in ACTIVE or run.finished_at is not None:
                 raise HTTPException(409, "Execution has finished; its recorded results remain available")
             now = _now()
             changes: dict[str, object] = {"cancel_requested_at": now}
             if run.state == "queued":
                 changes |= {"state": "cancelled", "finished_at": now}
-            return run_out(
-                await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
-            )
+            moved = await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
+            return run_out(moved, name_of(named, moved))
         except StoreError as error:
             if error.kind != "conflict":
                 raise

@@ -189,6 +189,50 @@ class StoreContract:
         assert full is not None and full.spans == [span] and full.session_id == "sess"
         assert await store.get_trace(ORG_A, "p1", "missing") is None
 
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; int() refuses
+    # more than 4,300 digits.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 5000, id="5000-nines")])
+    async def test_a_trace_cursor_the_store_did_not_return_is_refused(
+        self, store: EvalStore, project: Project, cursor: str
+    ) -> None:
+        await store.record_trace(ORG_A, trace("t1"))
+        with pytest.raises(StoreError) as caught:
+            await store.search_traces(ORG_A, TraceQuery(project_id="p1", cursor=cursor))
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+
+    async def test_latency_and_verdicts_filter_and_order_before_paging(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        # Latencies 50, 300, 900, none; t2 and t3 have an exact_match verdict, t1 an expectation of the name.
+        for name, minutes, latency in (("t1", 0, 50.0), ("t2", 1, 300.0), ("t3", 2, 900.0), ("t4", 3, None)):
+            await store.record_trace(ORG_A, trace(name, minutes=minutes, latency_ms=latency))
+        await store.log_score(ORG_A, "p1", "t2", Score(scorer="exact_match", source="code", value=False))
+        await store.log_score(ORG_A, "p1", "t3", Score(scorer="exact_match", source="code", value=True))
+        expectation = Score(
+            scorer="exact_match", source="human", value=True, metadata={"martian.annotation": "expectation"}
+        )
+        await store.log_score(ORG_A, "p1", "t1", expectation)
+
+        async def ids(**query: object) -> list[str]:
+            page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", **query))  # type: ignore[arg-type]
+            return [t.id for t in page.items]
+
+        assert await ids(min_latency_ms=300) == ["t3", "t2"]
+        assert await ids(verdicts={"exact_match": True}) == ["t3"]  # an expectation is no verdict
+        assert await ids(verdicts={"exact_match": False}) == ["t2"]
+        assert await ids(slowest_first=True) == ["t3", "t2", "t1", "t4"]
+        assert await ids(slowest_first=False) == ["t1", "t2", "t3", "t4"]
+        # The page is the query's: filtered and ordered first, then cut.
+        first = await store.search_traces(
+            ORG_A, TraceQuery(project_id="p1", min_latency_ms=100, slowest_first=False, limit=1)
+        )
+        assert [t.id for t in first.items] == ["t2"] and first.next_cursor is not None
+        rest = TraceQuery(project_id="p1", min_latency_ms=100, slowest_first=False, limit=1, cursor=first.next_cursor)
+        assert [t.id for t in (await store.search_traces(ORG_A, rest)).items] == ["t3"]
+        slow = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", min_latency_ms=300))
+        assert slow.traces_examined == 2
+
     async def test_sessions_and_users_come_from_the_traces(self, store: EvalStore, project: Project) -> None:
         # s2 starts first; s1 has the newest turn; t4 has no session.
         await store.record_trace(ORG_A, trace("t1", minutes=0, session_id="s2", user_id="bob", tokens=5))
