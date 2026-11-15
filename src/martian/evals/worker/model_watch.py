@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from martian.evals.model import Run, TraceQuery
+from martian.evals.model import Run, Trace, TraceQuery
 from martian.evals.records import ModelChange, ModelWatch, ModelWatchProgress, RecordStore, Schedule
 from martian.evals.store import EvalStore
 
@@ -129,6 +129,21 @@ def _start(schedule: Schedule, watch: ModelWatchProgress) -> datetime | None:
     return max(starts) if starts else None
 
 
+async def _latest_model(store: EvalStore, principal: Principal, project_id: str, until: datetime) -> str | None:
+    """The model of the newest live trace among the :data:`BASELINE_PAGE` newest before ``until``.
+    A page of a trace search may hold fewer traces than its limit, or none, and still have a
+    ``next_cursor``, so the search reads on until it has looked through that many or ends."""
+    query = TraceQuery(project_id=project_id, until=until, states=["ok", "error"], limit=BASELINE_PAGE)
+    looked: list[Trace] = []
+    while True:
+        page = await store.search_traces(principal, query)
+        looked += page.items
+        if len(looked) >= BASELINE_PAGE or page.next_cursor is None:
+            break
+        query = query.model_copy(update={"cursor": page.next_cursor})
+    return next((t.model for t in looked[:BASELINE_PAGE] if t.run_id is None and t.model), None)
+
+
 async def read_traces(
     store: EvalStore,
     principal: Principal,
@@ -143,11 +158,7 @@ async def read_traces(
     until = now - timedelta(seconds=settle_seconds)
     since = _start(schedule, watch) or until
     if watch.model is None and watch.watermark is None:
-        before = await store.search_traces(
-            principal,
-            TraceQuery(project_id=schedule.project_id, until=since, states=["ok", "error"], limit=BASELINE_PAGE),
-        )
-        latest = next((t.model for t in before.items if t.run_id is None and t.model), None)
+        latest = await _latest_model(store, principal, schedule.project_id, since)
         if latest is not None:
             watch = watch.model_copy(update={"model": latest})
     if since >= until:
