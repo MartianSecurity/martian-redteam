@@ -22,9 +22,10 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   refers to before the object. The receiving store assigns its own identifiers for what it
   stores (``StoreRef``, dataset version ids, assessment ids), and the import points every
   reference at them. Monitors and schedules come back paused, and a threshold's webhook comes
-  back without its secret, which an export never holds. Prompt versions keep their numbers,
-  authors and times (``EvalStore.import_prompt``), so a run's ``provenance.prompts`` names the
-  same versions.
+  back without its secret, which an export never holds. A judge calibration's re-check that was
+  queued or running comes back failed (:data:`RECHECK_INTERRUPTED`): nothing works on it in the
+  fresh install. Prompt versions keep their numbers, authors and times
+  (``EvalStore.import_prompt``), so a run's ``provenance.prompts`` names the same versions.
 - :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
   kind of object of the two interfaces that an export carries, and the files it is in;
   :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
@@ -72,6 +73,9 @@ from martian.evals.model import (
 )
 from martian.evals.records import (
     Alert,
+    CalibrationRecheck,
+    DatasetManifest,
+    JudgeCalibration,
     Monitor,
     MonitoredTrace,
     MonitorProgress,
@@ -94,10 +98,12 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 3
+VERSION = 5
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
-alerts; version 3 the organisation's prompts and their versions."""
+alerts. Version 3 added the dataset publications (``manifests.jsonl``), version 4 the judge
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), and version 5 the
+organisation's prompts and their versions (``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -112,6 +118,7 @@ FILES = (
     "questions.jsonl",
     "datasets.jsonl",
     "cases.jsonl",
+    "manifests.jsonl",
     "suites.jsonl",
     "drafts.jsonl",
     "draft_cases.jsonl",
@@ -130,6 +137,8 @@ FILES = (
     "scheduled_runs.jsonl",
     "thresholds.jsonl",
     "alerts.jsonl",
+    "calibrations.jsonl",
+    "rechecks.jsonl",
 )
 """Every file of an export, in the order an import reads them."""
 
@@ -143,12 +152,15 @@ EXPORTED_TABLES = {
     "martian_dataset_drafts": "drafts.jsonl",
     "martian_dataset_draft_cases": "draft_cases.jsonl",
     "martian_saved_views": "views.jsonl",
+    "martian_dataset_manifests": "manifests.jsonl",
     "martian_monitors": "monitors.jsonl",
     "martian_monitored_traces": "monitored_traces.jsonl",
     "martian_schedules": "schedules.jsonl",
     "martian_schedule_runs": "scheduled_runs.jsonl",
     "martian_thresholds": "thresholds.jsonl",
     "martian_threshold_alerts": "alerts.jsonl",
+    "martian_judge_calibrations": "calibrations.jsonl",
+    "martian_calibration_rechecks": "rechecks.jsonl",
 }
 """Each table of the record store (``martian.evals.records.tables``) that an export carries, and
 the file its rows are in."""
@@ -159,6 +171,12 @@ LEFT_OUT_TABLES = {
         "schedules' next turns: transient. A run exported queued or running is finished as "
         "interrupted when the local edition opens the data folder it was imported into; a monitor "
         "or a schedule is imported paused, and resuming it puts its turn back in the queue"
+    ),
+    "martian_deliveries": (
+        "the outbox, store writes on their way from the record store to the store: transient. A "
+        "delivered write is in the store and exported from there. A pending one is not carried: its "
+        "score is exported with the record store's scores, but its trace or review queue item is "
+        "exported as the store holds it, so let the outbox deliver before exporting"
     ),
 }
 """Each table of the record store that an export leaves out, and why."""
@@ -174,6 +192,7 @@ EXPORTED_KINDS = {
     "Suite": ("suites.jsonl",),
     "DatasetDraft": ("drafts.jsonl",),
     "SavedView": ("views.jsonl",),
+    "DatasetManifest": ("manifests.jsonl",),
     "Run": ("runs.jsonl",),
     "CaseResult": ("case_results.jsonl",),
     "Score": ("scores.jsonl", "traces.jsonl", "monitored_traces.jsonl"),
@@ -191,6 +210,8 @@ EXPORTED_KINDS = {
     "Threshold": ("thresholds.jsonl",),
     "ThresholdStatus": ("thresholds.jsonl",),
     "Alert": ("alerts.jsonl",),
+    "JudgeCalibration": ("calibrations.jsonl",),
+    "CalibrationRecheck": ("rechecks.jsonl",),
 }
 """Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
 return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
@@ -204,6 +225,7 @@ LEFT_OUT_KINDS = {
     "TraceQuery": "a trace search, not data",
     "SessionSearch": "sessions grouped from a search's traces; the export writes the traces",
     "Counts": "a run's counts, written with its run",
+    "Delivery": "a store write on its way from the record store to the store (the outbox, left out)",
 }
 """Each model class the two interfaces take or return that is not a kind of object an export
 carries, and why."""
@@ -222,6 +244,13 @@ WRITE_BATCH = 500
 """Case results or scores written per call on import."""
 
 UNFINISHED = ("queued", "running")
+
+RECHECK_INTERRUPTED = (
+    "Interrupted: this re-check was queued or running when its data was exported, and nothing works on it "
+    "in the install it was imported into; ask for it again"
+)
+"""The error of a judge calibration's re-check that an import finishes as failed: exported queued or
+running, it would otherwise stay so, and block the next re-check of its judge version."""
 
 
 class ExportError(Exception):
@@ -457,7 +486,8 @@ async def _prompts(store: EvalStore, principal: Principal, files: _Files) -> Non
 async def _project(
     store: EvalStore, records: RecordStore, principal: Principal, files: _Files, project_id: str
 ) -> None:
-    """The project and what is defined in it: scorers, questions, suites, drafts and views."""
+    """The project and what is defined in it: scorers, questions, suites, drafts, dataset
+    publications and views, and its judges' calibrations and their re-checks, newest first."""
     project = await store.get_project(principal, project_id)
     if project is None:
         raise ExportError(f"project {project_id} is no longer in the store")
@@ -482,8 +512,14 @@ async def _project(
             if page.next_cursor is None:
                 break
             offset += PAGE
+    for manifest in await records.list_publications(principal, project_id):
+        files.write("manifests.jsonl", _line(project_id, manifest=manifest))
     for view in await records.list_views(principal, project_id):
         files.write("views.jsonl", _line(project_id, view=view))
+    for calibration in await records.list_calibrations(principal, project_id):
+        files.write("calibrations.jsonl", _line(project_id, calibration=calibration))
+    for recheck in await records.list_rechecks(principal, project_id):
+        files.write("rechecks.jsonl", _line(project_id, recheck=recheck))
 
 
 async def _dataset(store: EvalStore, principal: Principal, files: _Files, project_id: str, dataset_id: str) -> None:
@@ -763,6 +799,19 @@ def _score_key(score: Score) -> str:
     return json.dumps(score.model_dump(mode="json", exclude={"store", "created_at"}), sort_keys=True)
 
 
+async def _holds_traces(store: EvalStore, principal: Principal, project_id: str) -> bool:
+    """Whether the project holds a trace. A page of a trace search may hold none and still have a
+    ``next_cursor``, so the search reads on until it finds one or ends."""
+    query = TraceQuery(project_id=project_id, limit=1)
+    while True:
+        page = await store.search_traces(principal, query)
+        if page.items:
+            return True
+        if page.next_cursor is None:
+            return False
+        query = query.model_copy(update={"cursor": page.next_cursor})
+
+
 async def _refuse_data(store: EvalStore, records: RecordStore, principal: Principal, exported: list[Project]) -> None:
     """Refuse an install that holds data for the principal: an import goes into a fresh one."""
     present = {project.id: project for project in await store.list_projects(principal)}
@@ -779,6 +828,8 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("suites")
         if await records.list_drafts(principal, project_id):
             found.append("dataset drafts")
+        if await records.list_publications(principal, project_id):
+            found.append("dataset publications")
         if await records.list_views(principal, project_id):
             found.append("saved views")
         if await records.list_monitors(principal, project_id):
@@ -787,10 +838,14 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("schedules")
         if await records.list_thresholds(principal, project_id):
             found.append("thresholds")
+        if await records.list_calibrations(principal, project_id):
+            found.append("judge calibrations")
+        if await records.list_rechecks(principal, project_id):
+            found.append("calibration re-checks")
         if project_id in present:
             if await store.list_datasets(principal, project_id):
                 found.append("datasets")
-            if (await store.search_traces(principal, TraceQuery(project_id=project_id, limit=1))).items:
+            if await _holds_traces(store, principal, project_id):
                 found.append("traces")
             if await store.list_scorers(principal, project_id):
                 found.append("scorers")
@@ -886,6 +941,7 @@ async def _import(
     for project_id, question in _objects(folder, "questions.jsonl", "question", ReviewQuestion):
         await store.save_question(principal, project_id, question)
     await _import_datasets(store, principal, folder, refs)
+    await _import_manifests(records, principal, folder, refs)
     for project_id, suite in _objects(folder, "suites.jsonl", "suite", Suite):
         saved = await records.save_suite(principal, project_id, suite)
         if saved.version != suite.version:
@@ -910,6 +966,7 @@ async def _import(
     paused = await _import_monitors(records, principal, folder, refs)
     paused += await _import_schedules(records, principal, folder, refs)
     needs_secret = await _import_thresholds(records, principal, folder)
+    await _import_calibrations(records, principal, folder)
     for project in projects:
         if project.archived_at is not None:
             await store.archive_project(principal, project.id)
@@ -958,6 +1015,16 @@ async def _import_datasets(store: EvalStore, principal: Principal, folder: Path,
         refs.add("experiment_id", dataset.store.experiment_id, created.store.experiment_id)
     if not cases.done():
         raise ExportError("cases.jsonl holds cases of a dataset version datasets.jsonl does not list")
+
+
+async def _import_manifests(records: RecordStore, principal: Principal, folder: Path, refs: _References) -> None:
+    """Each dataset publication, with its start time; a published one is finished again as the
+    receiving store's dataset version, so a run of that version is still checked against it."""
+    for project_id, manifest in _objects(folder, "manifests.jsonl", "manifest", DatasetManifest):
+        await records.begin_publication(principal, project_id, manifest)
+        if manifest.state == "published" and manifest.dataset_id is not None:
+            dataset_id = refs.get("dataset_id", manifest.dataset_id)
+            await records.finish_publication(principal, project_id, manifest.id, str(dataset_id))
 
 
 async def _import_runs(
@@ -1104,6 +1171,18 @@ async def _import_thresholds(records: RecordStore, principal: Principal, folder:
     return tuple(needs_secret)
 
 
+async def _import_calibrations(records: RecordStore, principal: Principal, folder: Path) -> None:
+    """Each judge calibration and each re-check as the export holds it, who made it and when
+    included; a re-check that was queued or running is failed (:data:`RECHECK_INTERRUPTED`)."""
+    for project_id, calibration in _objects(folder, "calibrations.jsonl", "calibration", JudgeCalibration):
+        await records.save_calibration(principal, project_id, calibration)
+    for project_id, recheck in _objects(folder, "rechecks.jsonl", "recheck", CalibrationRecheck):
+        if recheck.state in UNFINISHED:
+            changes = {"state": "failed", "error": RECHECK_INTERRUPTED, "finished_at": datetime.now(UTC)}
+            recheck = recheck.model_copy(update=changes)
+        await records.create_recheck(principal, project_id, recheck)
+
+
 # --- the local edition -------------------------------------------------------------------------------
 
 
@@ -1153,6 +1232,7 @@ __all__ = [
     "FORMAT",
     "LEFT_OUT_KINDS",
     "LEFT_OUT_TABLES",
+    "RECHECK_INTERRUPTED",
     "VERSION",
     "ExportError",
     "ExportSummary",
