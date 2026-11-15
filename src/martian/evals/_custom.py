@@ -2,7 +2,8 @@
 
 One set of rules for every place a custom scorer runs: ``python_check`` in Python, ``type: python``
 in a suite file (``martian evals run``), and the scorers a worker's setup installs for the evals
-core (``WorkerServices.scorers``).
+core (``WorkerServices.scorers``). The checks a worker's setup installs (``WorkerServices.checks``)
+keep the same rules with their own arguments (:data:`CHECK_ARGUMENTS`).
 
 **What it is given.** A scorer function names, as its parameters, the arguments it reads, and is
 called with those as keyword arguments:
@@ -44,11 +45,20 @@ from martian.config import ConfigError
 CODE_TYPES = ("python",)
 """The scorer types that run a team's own code: a suite file's ``type: python``, a ``code`` scorer in the model."""
 
+INSTALLED_TYPES = ("installed",)
+"""The scorer type that names a check a worker installs (``WorkerServices.checks``): a suite file's
+``type: installed``, a ``code`` scorer in the model. The suite file holds only its name and options;
+``martian evals run`` installs none (:mod:`martian.evals.worker.hooks`)."""
+
 ARGUMENTS = ("inputs", "outputs", "expectations", "trace")
 """The arguments a scorer may read in a suite-file run and in ``evaluate``."""
 
 WORKER_ARGUMENTS = ("inputs", "outputs", "expectations")
 """The arguments a scorer installed in a worker may read: a worker scores saved outputs, with no trace."""
+
+CHECK_ARGUMENTS = ("inputs", "outputs", "expectations", "state", "options")
+"""The arguments an installed check may read: a custom scorer's in a worker, the case's state from its
+hooks (``None`` in a scoring job) and the options the suite gives the check."""
 
 ERROR_LENGTH = 300
 
@@ -203,7 +213,9 @@ def module_name(file: Path) -> str:
 
 __all__ = [
     "ARGUMENTS",
+    "CHECK_ARGUMENTS",
     "CODE_TYPES",
+    "INSTALLED_TYPES",
     "WORKER_ARGUMENTS",
     "ScorerError",
     "arguments",

@@ -86,6 +86,11 @@ NO_EMAIL = "This installation sends no email alerts"
 Channel = Literal["webhook", "email"]
 
 
+def _now() -> datetime:
+    """The time a delivery reads which alerts are due, and from which it schedules a retry."""
+    return datetime.now(UTC)
+
+
 def sign(secret: str, timestamp: str, body: bytes) -> str:
     """The ``X-Martian-Signature`` value: ``v1=`` and the hex HMAC-SHA256 of ``timestamp``, ``.``
     and ``body``, keyed with ``secret``."""
@@ -268,7 +273,7 @@ class AlertSender:
         :data:`PER_DELIVERY`, and record each attempt. The alerts as the attempts left them."""
         done: list[Alert] = []
         for _ in range(PER_DELIVERY):
-            now = datetime.now(UTC)
+            now = _now()
             taken = await records.take_due_alerts(
                 principal, project_id, threshold_ids, now=now, hold_until=now + timedelta(seconds=HOLD_SECONDS), limit=1
             )
@@ -327,7 +332,7 @@ class AlertSender:
                 reason,
                 "; giving up" if last else "",
             )
-            retry = datetime.now(UTC) + timedelta(seconds=self._retry_after(attempts))
+            retry = _now() + timedelta(seconds=self._retry_after(attempts))
             return alert.model_copy(
                 update={
                     "state": "failed" if last else "pending",
@@ -342,7 +347,7 @@ class AlertSender:
                 "attempts": attempts,
                 "last_error": "",
                 "next_attempt_at": None,
-                "delivered_at": datetime.now(UTC),
+                "delivered_at": _now(),
             }
         )
 

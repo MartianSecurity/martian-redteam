@@ -297,6 +297,45 @@ def test_a_suite_file_panel_and_a_python_check_grade_side_by_side(provider, tmp_
         load_suite_file(path)
 
 
+def test_every_combination_of_a_matrix_is_graded_by_the_panel_on_its_own_replies(provider, tmp_path):
+    (tmp_path / "agent.py").write_text("def answer(message, greeting):\n    return f'{greeting} How can I help?'\n")
+    cases = [{"id": f"case-{i}", "input": f"Question {i}"} for i in (1, 2)]
+    (tmp_path / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases), encoding="utf-8")
+    suite = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent.py", "function": "answer"},
+        "matrix": {"greeting": {"plain": "Hi.", "warm": "Hello, and welcome!"}},
+        "judge": {"max_retries": 0, "rate_limit_wait_seconds": 0},
+        "checks": [
+            {
+                "type": "rubric",
+                "rubric": "Pass if polite.",
+                "panel": ["openai:/pass-a", "openai:/pass-b", "openai:/fail-a"],
+            }
+        ],
+    }
+    (tmp_path / "evals.yaml").write_text(yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
+    summary = run_suite(tmp_path / "evals.yaml")
+    # Each member graded each case of each combination once, the combination's own reply.
+    assert len(provider.requests) == 2 * 2 * 3
+    graded = [json.dumps(sent["body"]["messages"]) for sent in provider.requests]
+    assert (
+        sum("Hello, and welcome!" in text for text in graded)
+        == sum("Hi. How can I help?" in text for text in graded)
+        == 6
+    )
+    members = [f"openai:/{m}" for m in ("pass-a", "pass-b", "fail-a")]
+    for entry in summary["combinations"]:
+        assert (entry["summary"]["passed"], entry["gate"]) == (2, "passed")
+        lines = (tmp_path / "results" / entry["folder"] / "results.jsonl").read_text().splitlines()
+        for record in map(json.loads, lines):
+            votes = record["checks"]["rubric_judge"]["metadata"]
+            assert (votes["martian.panel.passed"], votes["martian.panel.failed"]) == ("2", "1")
+        # Each combination's recorded run names the panel as its scores' source.
+        scores = local_scores(tmp_path, entry["run"]["id"])
+        assert {score.source_id for score in scores} == {panel_source((model, None) for model in members)}
+
+
 # --- a registered judge the core's worker grades -------------------------------------------------
 
 MEMBERS = {"tone": ["a", "b", "c"], "strict": ["a", "b", "d"]}
@@ -425,6 +464,67 @@ def test_a_scoring_job_grades_a_panel_judge_and_an_installed_python_scorer_side_
     }
     assert not any(key.startswith("martian.panel.") for a in found["cites_link"] for key in a["provenance"])
     assert CALIBRATION_KEY not in found["cites_link"][0]["provenance"]
+    votes = found["correctness"][0]["provenance"]
+    assert [votes[f"martian.panel.{n}.model"] for n in (1, 2, 3)] == [f"openai:/{m}" for m in "abc"]
+    assert votes[CALIBRATION_KEY] == NO_CALIBRATION
+    assert {names for _, names in asked} == {("correctness",)}
+    assert sorted({model for model, _ in asked}) == [f"openai:/{m}" for m in "abc"]
+
+
+def test_a_scoring_job_grades_a_panel_judge_and_an_installed_check_side_by_side(tmp_path):
+    """A check the worker installs by name (MartianSecurity/martian-notes#216) beside a panel judge
+    and its calibration in one scoring job: the check is graded once, with no state and nothing of
+    the panel's or a calibration's; only the panel's members are asked, each for the judge only."""
+    from fastapi.testclient import TestClient
+
+    from martian.evals.server import create_app
+    from martian.evals.worker import InProcessWorker, Work
+    from martian.evals.worker.execute import NO_OUTPUT
+    from martian.evals.worker.hooks import installed_check
+    from martian.evals.worker.scorers import builtin_scorer
+    from tests.evals.test_custom_scorers import scoring_job
+    from tests.evals.write_fixture import AGENT, agent, judge, publish
+
+    asked: list[tuple[str | None, tuple[str, ...]]] = []
+    given: list[Any] = []
+
+    async def recording(request: JudgeRequest) -> JudgeResult:
+        asked.append((request.model, tuple(s.name for s in request.scorers)))
+        return await judge(request)
+
+    def had_state(state, options):
+        given.append(state)
+        return state is None and options == {"strict": True}, "graded with no state"
+
+    members = [PanelMember(model=f"openai:/{m}") for m in "abc"]
+    panel = builtin_scorer("correctness").model_copy(update={"model": None, "endpoint": None, "panel": members})
+    store, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    asyncio.run(publish(store))
+    worker = InProcessWorker(store, records, targets={AGENT: agent}, judge=recording, checks={"had_state": had_state})
+    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=worker)
+    with TestClient(app) as client:
+        assert client.portal is not None
+        body = {"agent_id": AGENT, "dataset_name": "support-faq", "request_id": request_id()}
+        run_id = client.post("/v1/evals", json=body).json()["id"]
+        client.portal.call(worker.drain)
+        job = scoring_job(run_id, [installed_check("had_state", {"strict": True}), panel])
+        client.portal.call(records.create_scoring_job, SINGLE_USER, DEFAULT_PROJECT, job)
+        work = Work(kind="scoring", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run_id, job_id=job.id)
+        client.portal.call(worker.submit, work)
+        client.portal.call(worker.drain)
+        bench = client.get(f"/v1/evals/{run_id}/workbench").json()
+    records.close()
+    found: dict[str, list[dict[str, Any]]] = {}
+    for assessment in bench["assessments"]:
+        if assessment["error"] != NO_OUTPUT:
+            found.setdefault(assessment["name"], []).append(assessment)
+    checked = found["had_state"]
+    assert {(a["value"], a["rationale"], a["source_id"]) for a in checked} == {
+        (True, "graded with no state", "installed:had_state")
+    }
+    assert len(given) == len(checked) == 2 and given == [None, None]
+    kept = {key for a in checked for key in a["provenance"]}
+    assert CALIBRATION_KEY not in kept and not any(key.startswith("martian.panel.") for key in kept)
     votes = found["correctness"][0]["provenance"]
     assert [votes[f"martian.panel.{n}.model"] for n in (1, 2, 3)] == [f"openai:/{m}" for m in "abc"]
     assert votes[CALIBRATION_KEY] == NO_CALIBRATION
