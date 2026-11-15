@@ -13,7 +13,9 @@ import pytest
 from martian.evals.model import Counts, Project, Run, Trace, TraceQuery
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.store_contract import ORG_A, StoreContract
+from tests.evals.trace_samples import MODEL, QUESTION, sample_spans
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
 LONGEST_ARTIFACT_ROOT = 157
@@ -103,6 +105,25 @@ class MlflowTracingContract:
         assert [t.id for t in by_user.items] == recorded["bob"]
         bob_sessions = await store.search_sessions(SINGLE_USER, TraceQuery(project_id="p1", user_id="bob"))
         assert [s.id for s in bob_sessions.items] == ["conversation-2"]
+
+    async def test_a_trace_mlflow_tracing_recorded_is_mapped_as_it_is_read(
+        self, store: EvalStore, tracking_uri: str, monkeypatch
+    ) -> None:
+        import mlflow
+
+        project = await store.create_project(SINGLE_USER, Project(id="p1", name="Support agent"))
+        model_call = sample_spans("openinference")[1]
+        with application_tracing(monkeypatch, tracking_uri, project), mlflow.start_span(name="support agent") as root:
+            root.set_inputs({"message": QUESTION})
+            with mlflow.start_span(name=model_call.name) as span:
+                span.set_attributes(model_call.attributes)
+        # It never went through record_trace, so the store maps it as it reads it.
+        (found,) = (await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1"))).items
+        assert found.metadata[MAPPING_KEY] == MAPPING_VERSION and found.tokens == 20
+        read = await store.get_trace(SINGLE_USER, "p1", found.id)
+        assert read is not None and read.metadata[MAPPING_KEY] == MAPPING_VERSION
+        assert (read.model, [s.kind for s in read.spans]) == (MODEL, ["UNKNOWN", "LLM"])
+        assert read.spans[1].attributes["llm.model_name"] == MODEL
 
     async def test_a_trace_recorded_inside_a_runs_mlflow_run_belongs_to_the_run(
         self, store: EvalStore, tracking_uri: str, monkeypatch

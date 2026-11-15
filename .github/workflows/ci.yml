@@ -156,7 +156,7 @@ jobs:
           tests/evals/test_mlflow_private.py tests/evals/test_entitlements.py tests/evals/test_bootstrap.py
           tests/evals/test_local.py tests/evals/test_read_routes.py tests/evals/test_read_contract.py tests/evals/test_write_routes.py
           tests/evals/test_write_contract.py tests/evals/test_worker.py tests/evals/test_worker_process.py
-          tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py
+          tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py tests/evals/test_trace_conventions.py
 
   mlflow-compat:
     name: MLflow compatibility
