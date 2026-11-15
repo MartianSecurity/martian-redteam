@@ -1830,6 +1830,13 @@ trace) says what it measured.
 | `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
 | `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
 
+A check of this table can also be applied to the saved outputs of a run, without a suite file: a
+scoring request or a saved suite names it as `{type, name?, options}` with the options above
+([the worker](evals-core.md#deterministic-checks-in-the-worker)), and the Evals UI has a form for
+each check. Its scores are the suite file's for the same outputs; a check that reads the target's
+call (`latency`, `cost`, and the tool-call checks that read the trace) reads what a run's saved
+output has of it.
+
 The same checks in a test, with `evaluate` and `assert_checks`:
 
 ```python

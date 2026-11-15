@@ -161,8 +161,11 @@ path that could reach one:
 - **Suite loading and validation** check the shape only, as above.
 - **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
   scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
-  scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
-  custom scorer there needs a contract change (MartianSecurity/martian-notes#334).
+  scorers and the [deterministic checks](evals-core.md#deterministic-checks-in-the-worker) of a
+  suite file only, as the frozen contract does; any other name, and a `python` or `installed` check, is refused
+  with `422`. A check's regular expression runs in the worker's process, as a suite file's does on
+  the machine that runs it, and is not time-limited; a worker that serves other people's requests
+  should treat a pattern as such.
 - **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
   custom scorer.
 - **The worker's setup** is imported by module in the API process, to check that a new process can

@@ -40,6 +40,7 @@ from martian.evals.server.dependencies import (
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
+    checks_out,
     derived_id,
     policy_out,
     project_key,
@@ -47,6 +48,7 @@ from martian.evals.server.projection import (
     user_out,
 )
 from martian.evals.server.runs import writable_project
+from martian.evals.server.scoring import requested_checks
 from martian.evals.server.write_schemas import (
     JudgeModelOut,
     JudgeModelRequest,
@@ -86,6 +88,7 @@ def suite_out(suite: Suite) -> dict[str, Any]:
             ),
             "revision": CRITERIA_REVISION,
             "policies": [policy_out(p) for p in sorted(suite.policies, key=lambda p: p.scorer)],
+            **checks_out(suite.scorers),
         },
         "digest": suite.digest,
         "actor_id": user_out(suite.created_by) if suite.created_by else None,
@@ -124,7 +127,10 @@ async def save_suite(body: SuiteRequest, principal: PrincipalDep, records: Recor
     draft = Suite(
         id=suite_id,
         name=body.name.strip(),
-        scorers=[builtin_scorer(name, guidelines=body.guidelines) for name in sorted(body.scorers)],
+        scorers=sorted(
+            [builtin_scorer(name, guidelines=body.guidelines) for name in body.scorers] + requested_checks(body),
+            key=lambda scorer: scorer.name,
+        ),
         policies=[
             Policy(scorer=p.name, direction=p.direction, threshold=p.threshold, minimum_coverage=p.minimum_coverage)
             for p in sorted(body.policies, key=lambda p: p.name)
