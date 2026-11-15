@@ -766,11 +766,16 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   the length and takes any root. A project whose
   experiment an earlier SDK release created keeps MLflow's layout, for its earlier runs and its
   new ones, so a data folder an earlier release wrote reads back unchanged.
-- Trace search applies MLflow's own filters (run, session, user, tags, time), then the text filter
-  in this process, so a text search reads every trace the other filters match. MLflow's filters
-  have no "or", so a search for a run's traces is two searches, on the tag and on
-  `mlflow.sourceRun`. A session search reads the same traces and groups the first of them in this
-  process.
+- Trace search applies MLflow's own filters (run, session, user, tags, time), reads every trace
+  they match into this process, and there applies the text filter, sorts and takes the page. A
+  search's time and memory therefore grow with the traces its MLflow filters match, not with its
+  page: the Traces page with no filters reads the whole project. MLflow's filters have
+  no "or", so a search for a run's traces is two searches, on the tag and on `mlflow.sourceRun`.
+  A session search reads the same traces and groups the first of them in this process.
+- On Postgres, a trace's request and its response are each at most 8,000 characters: the binding
+  keeps them whole in MLflow's trace metadata, a `varchar(8000)` column, and a longer one is
+  refused as `invalid`. SQLite does not enforce the length.
+- How far these hold, measured: [trace store limits](trace-store-limits.md).
 - An experiment named by a project's id that the store did not create, such as one MLflow tracing
   created for an application before the project existed, is not that project: creating the
   project is refused as a `conflict`.

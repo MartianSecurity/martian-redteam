@@ -112,6 +112,10 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
+- `scripts/trace_store_load.py` is the in-process store's trace load test. It is not part of the
+  suite: `tests/evals/test_trace_store_load.py` only checks its arguments and runs every phase on
+  a few traces on SQLite. Its results and how to re-run it are in
+  [trace store limits](trace-store-limits.md).
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
