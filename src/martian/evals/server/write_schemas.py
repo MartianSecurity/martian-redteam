@@ -1,6 +1,6 @@
 """The typed request and response bodies of the write routes, as the frozen evals contract has them.
 
-Each class is the schema of the same name in version 3 of ``contracts/evals-api.json`` in
+Each class is the schema of the same name in version 4 of ``contracts/evals-api.json`` in
 MartianSecurity/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
 ``app/schemas.py``, the scoring, review and suite requests from ``app/evals_workbench_schema.py``,
 the project, judge, question, annotation and view requests from ``app/evals_explorer_schema.py``,
@@ -31,7 +31,7 @@ from pydantic import (
 )
 
 from martian.evals.judge_settings import ENDPOINT_PATTERN, MODEL_URI_PATTERN, judge_model_problem
-from martian.evals.model import MAX_PANEL, MIN_PANEL
+from martian.evals.model import MAX_PANEL, MIN_PANEL, RunLimits
 from martian.evals.server.schemas import TraceQuery
 from martian.evals.worker.scorers import CODE_SCORERS, JUDGE_SCORERS
 
@@ -55,6 +55,13 @@ class EvalRunRequest(BaseModel):
     project_id: uuid.UUID | None = None
     max_items: int = Field(default=100, ge=1, le=1000)
     dataset_name: str = Field(min_length=1, max_length=200)
+    limits: RunLimits | None = None
+
+
+class ResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limits: RunLimits | None = None
 
 
 # --- scoring, reviews and suites ------------------------------------------------------------

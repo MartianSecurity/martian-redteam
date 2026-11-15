@@ -162,7 +162,7 @@ assigning review work to someone else needs `assignReviews`, and changing anothe
 ## Bootstrap response
 
 `GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
-same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3 of
+same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 4 of
 `contracts/evals-api.json` in MartianSecurity/MartianBackend). The local edition answers:
 
 ```json
@@ -211,7 +211,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
 Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
-version 3 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
+version 4 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
@@ -401,7 +401,7 @@ answering a queue through the review route, and its statistics, and
 `tests/evals/test_calibration.py` and `test_calibration_recheck.py` the calibration and re-check
 routes.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v4.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 
@@ -461,12 +461,12 @@ that it neither reads nor lists as answering with no run.
 
 The core serves the routes that launch, score and review runs and that edit datasets, suites,
 judges, review queues, projects and saved views. Each is a port of the server's route onto the
-store, the record store and the worker, and each operation is the one in version 3 of the frozen
+store, the record store and the worker, and each operation is the one in version 4 of the frozen
 contract:
 
 | Routes | What they do | Module |
 | --- | --- | --- |
-| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
+| `POST /v1/evals`, `POST /{run_id}/cancel`, `POST /{run_id}/resume` | Admit a run of a target the worker knows over a published dataset, optionally under its own limits, and hand it to the worker; stop it; go on with a run that stopped at a limit | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
 | `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on; `GET` lists a judge graded by a panel with `panel` in its `definition` | `suites` |
@@ -514,9 +514,19 @@ All paths are under `/v1/evals`. How the core carries them out:
   organisation may have at once". Run codes count up from `EV-1001`. The worker runs the
   dataset's active cases up to `max_items`, skips a case with no usable prompt or expected text,
   calls the target once per case with no retry, within the worker's time limit, grades each
-  output by exact match and records a trace per called case. The frozen launch body has no field
-  for a run's limits, so a launched run runs under the worker's
-  ([limits](#limits-stopping-and-resuming)).
+  output by exact match and records a trace per called case. The launch body takes optional
+  `limits` (`max_seconds`, `max_judge_tokens`, each above 0 and each optional): the run keeps them
+  in `provenance.limits`, and without them it runs under the worker's
+  ([limits](#limits-stopping-and-resuming)). The same `request_id` with other `limits` is `409`;
+  one without `limits` is the same request.
+- **Resuming.** `POST /{run_id}/resume` queues a run that stopped at one of its limits again, with
+  the body `{"limits": {...}}` (optional, as is the body itself): new limits replace the run's own,
+  and the worker goes on after the cases it finished ([limits](#limits-stopping-and-resuming)). A
+  run that is not `stopped` is `409` ("Only a run stopped at one of its limits can be resumed"),
+  one the worker did not run (`martian evals run`) `422`, and it is refused as a launch is while
+  the organisation has its `concurrent_runs` in progress and while a dataset is being published
+  (`409`), and for an archived project. It needs the `run` capability and answers `202` with the
+  queued run.
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
@@ -623,7 +633,7 @@ whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
 ### Suite audits
 
 The core adds two routes of its own (`martian.evals.server.audits`), which the server's frozen
-contract does not have, so its version 3 is unchanged. They [audit](evals.md#audit-a-suite) a saved
+contract does not have, so the contract's version is unchanged by them. They [audit](evals.md#audit-a-suite) a saved
 suite version: its scorers grade the replies of the built-in do-nothing and cheating targets in
 place of a target's, and the result is kept with that suite version.
 
@@ -1210,9 +1220,9 @@ conversations, so here it counts judges only.
 - **Whose limits.** A run's own, in `provenance.limits`: those its launch gave, else its suite
   version's (`Suite.settings.limits`). Without either, the worker's (`InProcessWorker(limits=...)`,
   `WorkerServices.limits`), which the run then keeps in `provenance.limits` when it starts. A
-  scoring job runs under its run's limits, else the worker's. The frozen contract's launch body has
-  no field for limits (`additionalProperties: false`), so a run launched through `POST /v1/evals`
-  runs under the worker's: that is the server setting. The local edition's own launch takes them
+  scoring job runs under its run's limits, else the worker's. The contract's launch body takes
+  `limits` (version 4); without them a run launched through `POST /v1/evals` runs under the
+  worker's: that is the server setting. The local edition's own launch takes them too
   ([local runs](#local-runs)).
 - **Stopping.** Before each case, work that has run for `max_seconds` since it started, or whose
   judges have used `max_judge_tokens`, stops. A run is `stopped`, with the limit as a message in
@@ -1236,10 +1246,13 @@ conversations, so here it counts judges only.
   that is not `stopped`, while the organisation has its edition's `concurrent_runs` or
   `concurrent_scoring_jobs` in progress ([editions and entitlements](#editions-and-entitlements))
   or the run another active scoring job, and (`422`) for a run the worker did not run, such as a
-  `martian evals run`, which resumes when its command runs again. The frozen contract has no
-  resume route; the local edition serves one.
+  `martian evals run`, which resumes when its command runs again. The contract's `POST
+  /{run_id}/resume` resumes a stopped run (version 4); a stopped scoring job has no route in the
+  contract, and the local edition's `POST /v1/local/runs/{run_id}/resume` resumes either.
 
-`tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
+`tests/evals/test_run_limits_contract.py` launches a run through the contract with a wall-time
+limit, checks that it stops there and that a resume through the contract calls only the cases
+without a result, and checks the refusals. `tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
 ignores being cancelled, each ending as `item timed out` while the run completes; stops a run at
 its time limit with one case kept, refuses to cancel it, resumes it with a higher limit and checks
 that only the cases without a result are called; stops a scoring job at its judge token limit and
@@ -3166,7 +3179,7 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
+| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`, `limits`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
 | `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ..., "limits": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
 | `POST /v1/local/runs/{run_id}/resume` | `{"limits": ...}`: go on with a run that stopped at one of its limits, or whose suite's scoring job did, after what it finished, optionally under new limits. `202` with the run |
 
@@ -3744,7 +3757,7 @@ export holds, resuming, and what the receiving store assigns are in [data export
 | The Martian server's queue worker process | MartianSecurity/martian-notes#139, after MartianSecurity/martian-notes#102 |
 | The Martian server's work on the durable queue (`QueueWorker`) with a worker process of its own ([the Martian server](#the-martian-server)) | MartianSecurity/martian-notes#139 |
 | LLM judges of a whole conversation | MartianSecurity/martian-notes#176 |
-| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
+| A resume route for a stopped scoring job in the frozen contract, and the Evals UI's control for it; the contract resumes runs only | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 | Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |

@@ -238,6 +238,11 @@ limits:
   flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
+- **In the Evals UI** the **Run eval** dialog sets the same two limits for a run it launches
+  (`limits` in the launch body of `POST /v1/evals`, [write routes](evals-core.md#write-routes)),
+  and a stopped run shows the limit it reached and a **Resume** action (`POST
+  /v1/evals/{run_id}/resume`, optionally with new limits), which goes on after the cases the run
+  finished. Without limits of its own, a run launched from the UI has the server's.
 - **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
   each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
   output together, as the provider reports them. A provider that reports none leaves the limit

@@ -21,9 +21,11 @@ names none.
 
 A run, or a scoring job, that stopped at one of its limits (``stopped``) is resumed by
 :func:`resume_run` or :func:`resume_scoring`: queued again, optionally under new limits, so that
-the worker goes on after the cases it finished (``execute_run``'s checkpoints). The frozen contract
-has no route for either and its launch body no field for limits, so a launch through it runs under
-the worker's limits; the local edition's routes take both (:mod:`martian.evals.local_runs`).
+the worker goes on after the cases it finished (``execute_run``'s checkpoints). The contract's
+launch body takes optional ``limits`` (``RunLimits``, kept in ``provenance.limits``, without them
+the worker's apply) and ``POST /{run_id}/resume`` resumes a stopped run, optionally under new
+limits (version 4); neither route exists for a scoring job, and the local edition's own routes
+take both (:mod:`martian.evals.local_runs`).
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -35,9 +37,9 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from martian.evals.manifests import PAUSED, publishing
 from martian.evals.model import DatasetVersion, Run, RunLimits, ScorerVersion, ScoringJob, StoreRef, Suite, Target
@@ -63,10 +65,11 @@ from martian.evals.server.runs import (
     name_of,
     project_keys,
     project_runs,
+    writable_key,
     writable_project,
 )
 from martian.evals.server.schemas import EvalRunOut
-from martian.evals.server.write_schemas import EvalRunRequest
+from martian.evals.server.write_schemas import EvalRunRequest, ResumeRequest
 from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
@@ -98,6 +101,17 @@ async def _next_code(store: EvalStore, records: RecordStore, principal: Principa
     return f"EV-{highest + 1}"
 
 
+def limits_provenance(limits: RunLimits | None) -> dict[str, Any]:
+    """The provenance that keeps a run's own limits, when it is given some."""
+    return {} if limits is None else {execute.LIMITS_KEY: limits.model_dump(mode="json")}
+
+
+def same_limits(run: Run, limits: RunLimits | None) -> bool:
+    """Whether a repeated request's ``limits`` are the run's. Without limits of its own the run has
+    its suite's or the worker's, which the request did not name, so a request without any matches."""
+    return limits is None or run.provenance.get(execute.LIMITS_KEY) == limits_provenance(limits)[execute.LIMITS_KEY]
+
+
 def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
     return (
         run.target is not None
@@ -105,6 +119,7 @@ def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
         and run.dataset_name == body.dataset_name
         and run.project_id == project_key(body.project_id)
         and run.max_cases == body.max_items
+        and same_limits(run, body.limits)
         and run.requested_by == principal.user_id
     )
 
@@ -227,6 +242,7 @@ async def request_run(
         pin=pin,
         dataset=dataset,
         max_cases=body.max_items,
+        provenance=limits_provenance(body.limits),
     )
     return run_out(run, name_of(await agent_names(names, principal, [run]), run))
 
@@ -277,6 +293,28 @@ async def resume_run(
     work = Work(kind="run", principal=principal, project_id=run.project_id, run_id=run.id)
     await execute.submit_or_fail(worker, records, work)
     return queued
+
+
+@router.post(
+    "/{run_id:uuid}/resume",
+    response_model=EvalRunOut,
+    status_code=202,
+    dependencies=[Depends(require_capability("run"))],
+)
+async def resume_eval(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    entitlements: EntitlementsDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
+    names: AgentNamesDep,
+    body: Annotated[ResumeRequest, Body(default_factory=ResumeRequest)],
+) -> EvalRunOut:
+    run = await find_run(store, records, principal, run_id)
+    await writable_key(store, principal, run.project_id)
+    queued = await resume_run(store, records, worker, principal, run, entitlements=entitlements, limits=body.limits)
+    return run_out(queued, name_of(await agent_names(names, principal, [queued]), queued))
 
 
 async def resume_scoring(
@@ -364,4 +402,13 @@ async def cancel_eval(
     raise HTTPException(409, "The run changed while stopping it; try again")
 
 
-__all__ = ["ACTIVE", "admit_run", "resume_run", "resume_scoring", "router", "run_id_for"]
+__all__ = [
+    "ACTIVE",
+    "admit_run",
+    "limits_provenance",
+    "resume_run",
+    "resume_scoring",
+    "router",
+    "run_id_for",
+    "same_limits",
+]

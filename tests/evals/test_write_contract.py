@@ -16,6 +16,7 @@ from tests.evals.write_fixture import AGENT, Inert, request_id, serve
 WRITE_OPERATIONS = [
     ("post", "/v1/evals"),
     ("post", "/v1/evals/{run_id}/cancel"),
+    ("post", "/v1/evals/{run_id}/resume"),
     ("get", "/v1/evals/scorers"),
     ("post", "/v1/evals/{run_id}/scores"),
     ("post", "/v1/evals/{run_id}/scores/{job_id}/cancel"),
