@@ -647,3 +647,38 @@ def test_a_stopped_run_records_how_much_of_the_cache_it_used(tmp_path, endpoint)
     endpoint.reset()
     resumed = run_suite(path)
     assert endpoint.counts() == {"target": 2, "judge": 2} and resumed["not_run"] == 0
+
+
+def test_a_body_that_carries_a_conversation_is_cached_for_cases_of_one_input(tmp_path, endpoint):
+    # A case of one input is a conversation of one turn: its key holds its one message, and the new
+    # session id each call sends as written, so a second run replays every reply.
+    body = {"message": "{{input}}", "session": "{{session_id}}", "messages": "{{messages}}", "history": "{{history}}"}
+    target = {**suite_file(endpoint)["target"], "body": body}
+    suite = write(tmp_path / "suite", suite_file(endpoint, target=target))
+    first = run_suite(suite)
+    assert (first["cases"], first["passed"], first["errors"]) == (3, 3, 0)
+    sent = endpoint.seen["target"][0]["body"]
+    assert sent["history"] == [] and sent["messages"] == [{"role": "user", "content": sent["message"]}]
+    endpoint.reset()
+    again = run_suite(suite, resume=False)
+    assert (again["passed"], endpoint.counts()) == (3, {"target": 0, "judge": 0})
+    assert again["cache"]["target"] == {"hits": 3, "calls": 0, "stored": 0}
+
+
+def test_a_suite_with_conversation_cases_is_refused_with_the_cache_on(tmp_path, endpoint):
+    talk = {
+        "id": "talk",
+        "turns": [
+            {"input": "Hi", "expectations": {"secret": "piano"}},
+            {"input": "What is the key?", "expectations": {"secret": "piano"}},
+        ],
+    }
+    body = {"message": "{{input}}", "messages": "{{messages}}"}
+    target = {**suite_file(endpoint)["target"], "body": body}
+    suite = write(tmp_path / "suite", suite_file(endpoint, target=target), cases=[*CASES, talk])
+    with pytest.raises(ConfigError, match="conversation cases, and the cache of model calls does not hold"):
+        run_suite(suite)
+    assert endpoint.counts() == {"target": 0, "judge": 0}
+    # Without the cache it runs, every turn sent.
+    found = run_suite(suite, cache=False)
+    assert (found["cases"], found["errors"], endpoint.counts()["target"]) == (4, 0, 3 + 2)

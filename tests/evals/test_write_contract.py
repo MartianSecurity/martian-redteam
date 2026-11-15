@@ -66,8 +66,9 @@ WRITE_OPERATIONS = [
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: the attempts of repeated cases
-# (MorningHQ/martian-notes#180) and prompt versions (MorningHQ/martian-notes#207).
-OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts")}
+# (MorningHQ/martian-notes#180), the turns of conversation cases (MorningHQ/martian-notes#191) and
+# prompt versions (MorningHQ/martian-notes#207).
+OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
 OWN_NAMES |= {
     ("get", "/v1/evals/prompts"),
     ("post", "/v1/evals/prompts"),

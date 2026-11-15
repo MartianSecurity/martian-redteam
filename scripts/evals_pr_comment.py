@@ -5,9 +5,9 @@ output folder, writes the report to the job summary, and on a pull request edits
 that carries this suite's hidden marker, creating it only when there is none. Standard library
 only, so it runs on the action's Python without further installs.
 
-The comment holds counts, pass rates with their intervals, check names and case ids, never
-inputs, replies or judge reasons. When the action compares the run with the last result of the
-baseline branch, it also says how the run compares (comparison.json, written by
+The comment holds counts, pass rates with their intervals, check names, case ids and turn
+numbers, never inputs, replies or judge reasons. When the action compares the run with the last
+result of the baseline branch, it also says how the run compares (comparison.json, written by
 `martian evals run --baseline`), names first each case that newly failed a security check, which
 fails the gate whatever the noise label, then each other case that went from pass to fail, with
 their failed checks and the reasons the SDK keeps only when they cannot quote the reply; or it
@@ -197,8 +197,12 @@ def render(
             "",
         ]
     else:
+        # A simulated user's cases are counted in the headline, so their verdicts cannot pass for
+        # real users'.
+        simulated = summary.get("simulator")
+        played = f" ({simulated['cases']} simulated)" if simulated else ""
         lines += [
-            f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases, {summary['passed']} passed, "
+            f"Suite {code(suite, 120, cell=False)}: {summary['cases']} cases{played}, {summary['passed']} passed, "
             f"{summary['failed']} failed, {summary['errors']} errors.",
             "",
         ]
@@ -241,6 +245,18 @@ def render(
                 f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
                 f"{reliable['errors']} | {rate(reliable)} |"
             )
+        # With simulated users, the verdicts of the cases a model played the user of.
+        if simulated:
+            lines.append(
+                f"| **Simulated** (cases) | {simulated['passed']} | {simulated['failed']} | "
+                f"{simulated['errors']} | {rate(simulated)} |"
+            )
+        # With conversation cases, their turns' own verdicts, which count turns, not cases.
+        if talks := summary.get("conversations"):
+            turns = talks["turns"]
+            lines.append(
+                f"| **Turns** (of conversations) | {turns['passed']} | {turns['failed']} | {turns['errors']} | — |"
+            )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
         if summary["groups"]:
@@ -248,6 +264,10 @@ def render(
             lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
         if repeats := summary.get("repeats"):
             lines.append(f"\n{_repeats(repeats)}")
+        if talks:
+            lines.append(f"\n{_conversations(talks)}")
+        if simulated:
+            lines.append(f"\n{_simulated(simulated)}")
         if reliable:
             lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
@@ -561,7 +581,11 @@ def _table(
     heading: str, column: str, cases: list[dict[str, Any]], detail: Callable[[dict[str, Any]], str]
 ) -> list[str]:
     lines = [f"#### {heading}", "", f"| Case | {column} |", "| --- | --- |"]
-    lines += [f"| {code(case['id'])} | {detail(case)} |" for case in cases[:MAX_ROWS]]
+    # A case whose user a model played says so beside its id.
+    lines += [
+        f"| {code(case['id'])}{' (simulated)' if case.get('simulated') is True else ''} | {detail(case)} |"
+        for case in cases[:MAX_ROWS]
+    ]
     if len(cases) > MAX_ROWS:
         lines.append(f"\n{len(cases) - MAX_ROWS} more; results.jsonl in the output folder has every case.")
     return [*lines, ""]
@@ -576,6 +600,24 @@ def _repeats(repeats: Mapping[str, Any]) -> str:
     return (
         f"Each case ran {repeats['attempts']} times, and the counts are of cases: each check's attempts "
         f"combine by its rule, {rules}."
+    )
+
+
+def _conversations(talks: Mapping[str, Any]) -> str:
+    """How many cases are conversations, and what their verdict means."""
+    cases = "1 case is a conversation" if talks["cases"] == 1 else f"{talks['cases']} cases are conversations"
+    return (
+        f"{cases} of {talks['turns']['total']} turns in all. A conversation counts once: it passes when each "
+        "turn check passed every turn it grades and each conversation check passed the whole conversation."
+    )
+
+
+def _simulated(simulated: Mapping[str, Any]) -> str:
+    """How many conversations had a simulated user, and which model played them."""
+    cases = "1 conversation has" if simulated["cases"] == 1 else f"{simulated['cases']} conversations have"
+    return (
+        f"{cases} a simulated user, played by {code(simulated['model'], 120, cell=False)}: **Simulated** "
+        f"counts their verdicts, and {code('goal_reached', cell=False)} is whether each reached its goal."
     )
 
 
@@ -594,15 +636,24 @@ def _names(names: list[str], *, cell: bool = True) -> str:
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
+def _turns(numbers: list[int]) -> str:
+    return ("turn " if len(numbers) == 1 else "turns ") + ", ".join(str(number) for number in numbers[:10])
+
+
 def _failed_checks(case: dict[str, Any]) -> str:
-    return _names([name for name, check in case["checks"].items() if check.get("passed") is False])
+    shown = _names([name for name, check in case["checks"].items() if check.get("passed") is False])
+    # A conversation also says which of its turns failed.
+    if failed := [turn["number"] for turn in case.get("turns", []) if turn.get("passed") is False]:
+        shown += f" (failed {_turns(failed)})"
+    return shown
 
 
 def _reason(case: dict[str, Any]) -> str:
     # The case error is the SDK's own wording (the target failed, and how). A check's error can
     # hold judge or scorer text, so only the check's name is shown.
     if case.get("error"):
-        return code(case["error"], 120)
+        failed = [turn["number"] for turn in case.get("turns", []) if turn.get("error")]
+        return (f"{_turns(failed[:1]).capitalize()}: " if failed else "") + code(case["error"], 120)
     return "No verdict from " + _names([name for name, check in case["checks"].items() if check.get("passed") is None])
 
 

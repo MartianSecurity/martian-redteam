@@ -130,9 +130,16 @@ def digest(value: Any) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def case_digest(inputs: Mapping[str, Any], expectations: Mapping[str, Any]) -> str:
-    """What makes two runs' results of a case a pair: its inputs and expectations, not its reply."""
-    return digest({"inputs": inputs, "expectations": expectations})
+def case_digest(
+    inputs: Mapping[str, Any], expectations: Mapping[str, Any], conversation: Mapping[str, Any] | None = None
+) -> str:
+    """What makes two runs' results of a case a pair: its inputs and expectations, not its reply,
+    and a conversation case's ``turns`` or ``simulated_user`` (``conversation``). A case of one
+    input has the digest it had before conversations existed."""
+    found: dict[str, Any] = {"inputs": inputs, "expectations": expectations}
+    if conversation:
+        found["conversation"] = conversation
+    return digest(found)
 
 
 def verdicts(
