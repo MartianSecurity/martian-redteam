@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from martian.evals.server.capabilities import capabilities_for, highest_role
 from martian.evals.server.entitlements import EDITION_NAMES, Edition, Entitlements
 from martian.evals.server.principal import Principal, Role
+from martian.evals.server.projection import user_out
 from martian.evals.store import StoreStatus
 
 
@@ -87,7 +88,7 @@ def principal_out(principal: Principal) -> BootstrapPrincipal:
     )
     return BootstrapPrincipal(
         kind=principal.kind,
-        user=BootstrapUser(id=principal.user_id, email=principal.email, display_name=principal.display_name),
+        user=BootstrapUser(id=user_out(principal.user_id), email=principal.email, display_name=principal.display_name),
         organisation=organisation,
         role=highest_role(principal.roles),
         platform_admin=principal.platform_admin,
