@@ -220,8 +220,11 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   question.
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
-  spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
-  spans are not one tree is refused with `409`.
+  spans as the UI's span inspector reads them (span times are epoch milliseconds). A span's
+  `type`, `model`, `token_usage`, `inputs` and `outputs` are what the
+  [trace conventions](#trace-conventions) mapping reads from it, and `info.trace_metadata` names
+  the mapping version as `martian.trace_mapping`. A trace whose spans are not one tree, or whose
+  mapping version this release does not have, is refused with `409`.
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
   time and orders by time. The core applies the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
@@ -639,12 +642,16 @@ endpoint, and keeps the local edition's default in its data folder.
   `StoreError` with `kind` `not_found`, `conflict` or `invalid`. Another organisation's object
   is `not_found`, the same as a missing one.
 - `MemoryStore` is the reference implementation, in memory.
+- [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
+  OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
+  `record_trace`.
 - `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
   store in the same process, with no MLflow server: SQLite for the local edition, Postgres for
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, scores kept with their trace, versioned scorers,
+  search filters and paging, sessions and users, traces in each attribute style mapped with their
+  attributes kept, scores kept with their trace, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -685,11 +692,95 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   `TRACE_USER`, which `mlflow.update_current_trace(session_id=..., user=...)` writes).
   `record_trace` writes `Trace.session_id` and `Trace.user_id` to the same keys, so traces from
   Martian runs and traces an application records with MLflow tracing group the same way. The
-  server reads the same keys from its MLflow server. OpenTelemetry's attributes for sessions and
-  users are not read yet; mapping them is MorningHQ/martian-notes#150.
+  server reads the same keys from its MLflow server.
+- A trace that names no session or user gets them from its spans' `gen_ai.conversation.id`,
+  `session.id` and `user.id` attributes ([trace conventions](#trace-conventions)).
 
 The core's `POST /v1/evals/sessions/search` answers with this method's `SessionSearch` (see
 [read routes](#read-routes)).
+
+## Trace conventions
+
+Applications describe a model call, a tool call or an agent step in span attributes, in one of
+three styles: the OpenTelemetry GenAI semantic conventions, OpenInference, or MLflow's own span
+attributes. `martian.evals.trace_conventions` maps all three onto the trace fields the core reads,
+through one versioned table. The current table is `martian-trace-mapping-v1` (`MAPPING_VERSION`),
+and it follows these releases:
+
+| Style | Release mapped |
+| --- | --- |
+| OpenTelemetry GenAI (`gen_ai.*`) | Semantic conventions 1.41.0. Release 1.42.0 moved the GenAI conventions to their own repository, `open-telemetry/semantic-conventions-genai`, which has not released yet. Two older keys are read too: `gen_ai.system` (before 1.37.0) and `gen_ai.usage.prompt_tokens` / `completion_tokens` (before 1.27.0) |
+| OpenInference | `openinference-semantic-conventions` 0.1.45 |
+| MLflow | The span attributes of MLflow 3.18, the release the SDK pins |
+
+A field's keys are tried in the order listed, styles in the order of the columns, and the first
+that gives a value wins:
+
+| Field | OpenTelemetry GenAI | OpenInference | MLflow |
+| --- | --- | --- | --- |
+| Span kind | `gen_ai.operation.name` | `openinference.span.kind` | `mlflow.spanType` |
+| Model | `gen_ai.response.model`, `gen_ai.request.model` | `llm.response.model_name`, `llm.model_name`, `llm.request.model_name`, `embedding.model_name` | `mlflow.llm.model` |
+| Provider | `gen_ai.provider.name`, `gen_ai.system` | `llm.provider`, `llm.system` | `mlflow.llm.provider` |
+| Input tokens | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens` | `llm.token_count.prompt` | `input_tokens` of `mlflow.chat.tokenUsage` |
+| Output tokens | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens` | `llm.token_count.completion` | `output_tokens` of `mlflow.chat.tokenUsage` |
+| Total tokens | none (input plus output) | `llm.token_count.total` | `total_tokens` of `mlflow.chat.tokenUsage` |
+| Inputs | `gen_ai.input.messages`, `gen_ai.tool.call.arguments`, `gen_ai.retrieval.query.text` | `input.value` (decoded when `input.mime_type` is `application/json`), then the flattened `llm.input_messages.*` | `mlflow.spanInputs` |
+| Outputs | `gen_ai.output.messages`, `gen_ai.tool.call.result`, `gen_ai.retrieval.documents` | `output.value`, then the flattened `llm.output_messages.*` | `mlflow.spanOutputs` |
+| Tool executed | `gen_ai.tool.name`, `gen_ai.tool.call.id` | `tool.name`, `tool.id` | A `TOOL` span's name |
+| Tool calls asked for | `tool_call` parts of `gen_ai.output.messages` | `message.tool_calls` of `llm.output_messages.*` | OpenAI's chat format in the outputs (`choices[].message.tool_calls`) |
+| Session | `gen_ai.conversation.id` | `session.id` | `session.id`, as MLflow writes it on a root span it exports |
+| User | `user.id` (OpenTelemetry's general attribute) | `user.id` | `user.id` |
+
+Span kinds are MLflow's span types. OpenTelemetry's operations map as `chat` to `CHAT_MODEL`,
+`text_completion` and `generate_content` to `LLM`, `embeddings` to `EMBEDDING`, `retrieval` to
+`RETRIEVER`, `execute_tool` to `TOOL`, `create_agent` and `invoke_agent` to `AGENT` and
+`invoke_workflow` to `WORKFLOW`. OpenInference's kinds keep their names, except `PROMPT`,
+`DECISION` and `UNKNOWN`, which MLflow has no type for and are not mapped. A value the table does
+not list is not mapped either. Structured values are read whether they arrive as structures or
+as JSON text, and MLflow's JSON-encoded values are decoded.
+
+- `map_attributes(attributes, version=...)` is a pure function over one span's attributes. It
+  returns `SpanFields`: the kind, model, provider, input, output and total tokens (input plus
+  output when no total is reported), inputs, outputs, `tool` (the call a tool span executes, with
+  its inputs as the arguments) and `tool_calls` (the calls a model span asked for), and the
+  session and user. `map_span(span)` adds what the span's own fields say: a `Span`'s kind, inputs
+  and outputs are MLflow's span type, inputs and outputs, and win over its attributes. A kind of
+  `UNKNOWN` counts as unset.
+- `map_trace(trace)` fills what a trace leaves unset from its spans: each span's kind, inputs and
+  outputs; the model, session and user the first span (by start time) gives; the tokens, adding
+  each span's total but leaving out a span whose ancestor reports a total, as MLflow does; and the
+  request and response, as the root span's inputs and outputs in text or JSON. It records the
+  table's version in the trace's metadata as `martian.trace_mapping`. A trace that already names a
+  version is left as it is, so it keeps the fields it was mapped with.
+- **Nothing is dropped.** The mapping never removes or rewrites an attribute, so attributes no
+  convention defines stay on their spans and are shown in the span view's `attributes`. The
+  in-process binding keeps `mlflow.spanType`, `mlflow.spanInputs` and `mlflow.spanOutputs` as the
+  span's kind, inputs and outputs, and MLflow adds its own `mlflow.*` attributes to the spans it
+  stores.
+- **Where it applies.** Every store binding's `record_trace` maps the trace it stores, so traces
+  from `martian evals run`, the worker and an OpenTelemetry endpoint (MorningHQ/martian-notes#149)
+  are mapped once, as they are recorded. The in-process binding maps a trace that names no
+  version as it reads it, such as one an application recorded with MLflow tracing; a search reads
+  no spans, so such a trace has its model only when it is read on its own. The span view of
+  `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
+  the trace names (the current one when it names none), and refuses a version this release does
+  not have with `409`.
+- **Tool calls** are spans in the shared model: a `TOOL` span whose inputs are the arguments and
+  whose outputs are the result, and the calls a model asked for are in its output messages. The
+  span view keeps the server's fields, so the normalized `tool` and `tool_calls` of `SpanFields`
+  are not in it.
+- **Not mapped** by `martian-trace-mapping-v1`: span events (the model keeps none, so messages that
+  GenAI conventions before 1.37.0 recorded as events are not read), cost (the span view shows
+  `mlflow.llm.cost` as before), cache and reasoning token counts, server tool calls, and tool calls
+  in MLflow outputs other than OpenAI's chat format.
+
+A convention change is a new table, never an edit to a released one. Add a `MappingTable` with a
+new version, such as `martian-trace-mapping-v2`, with the rules and kinds it changes; add it to
+`TABLES` and make `MAPPING_VERSION` its version. Keep every earlier table in `TABLES`: traces
+mapped with it keep showing what they showed, and only traces recorded afterwards, or read without
+a version, use the new one. `tests/evals/test_trace_conventions.py` maps a hand-written sample turn
+in each style (`tests/evals/trace_samples.py`); the store contract records the same samples on every
+binding, and `tests/evals/test_read_routes.py` reads them through the trace routes.
 
 ## The in-process binding
 
@@ -720,7 +811,11 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     metrics.
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
     tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
-    metadata keys, [above](#sessions-and-users).
+    metadata keys, [above](#sessions-and-users). A span's kind, inputs and outputs are MLflow's
+    span type, inputs and outputs, and its other attributes are kept as they are; an attribute
+    never overwrites the store's own. A trace's mapping version is its `martian.trace_mapping`
+    metadata, and a trace without one is mapped as it is read
+    ([trace conventions](#trace-conventions)).
   - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
     a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
@@ -752,8 +847,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
-database and reads back through the binding their sessions, turns and users, and the run of a
-trace recorded inside a run's MLflow run. It starts a run with a 157-character artifact root,
+database and reads back through the binding their sessions, turns and users, the run of a
+trace recorded inside a run's MLflow run, and the mapping of a span's OpenInference attributes. It starts a run with a 157-character artifact root,
 reads runs an earlier release wrote in MLflow's layout, and checks that Postgres refuses a
 longer root before writing. That module belongs to the
 [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
@@ -908,6 +1003,9 @@ def answer(message: str, conversation: str, user: str) -> str:
 
 - A trace's session and user are the ones [above](#sessions-and-users). A trace without a session
   is in Traces only.
+- Spans may carry OpenTelemetry GenAI or OpenInference attributes, such as those of an
+  instrumentation library, beside MLflow's. The store maps them as it reads the trace, so the
+  span view shows their model, tokens, inputs and outputs ([trace conventions](#trace-conventions)).
 - A trace recorded inside the application's own MLflow run (`mlflow.start_run()`) belongs to no
   run in the UI; one recorded inside a run's MLflow run belongs to that run
   ([the in-process binding](#the-in-process-binding)).
@@ -1039,7 +1137,8 @@ cannot be opened.
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
-`test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py` and
-the store and record tests run the core without the backend. The `Evals core`
+`test_trace_conventions.py`, `test_read_routes.py`, `test_read_contract.py`,
+`test_write_routes.py`, `test_write_contract.py`, `test_worker.py`, `test_worker_process.py`,
+`test_worker_targets.py`, `test_worker_judges.py` and the store and record tests run the core
+without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

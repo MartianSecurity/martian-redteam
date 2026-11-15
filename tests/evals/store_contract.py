@@ -27,6 +27,8 @@ from martian.evals.model import (
 )
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import EvalStore, StoreError
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
+from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, UNKNOWN, sample_trace
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -224,6 +226,33 @@ class StoreContract:
         await refused("invalid", store.search_sessions(ORG_A, TraceQuery(project_id="p1", cursor="2")))
         await refused("invalid", store.search_sessions(ORG_A, TraceQuery(project_id="p1"), max_traces=1001))
         await refused("not_found", store.search_sessions(ORG_A, TraceQuery(project_id="missing")))
+
+    async def test_traces_in_each_convention_are_mapped_and_keep_their_attributes(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        for minutes, style in enumerate(STYLES):
+            sample = sample_trace(style, f"tr-{minutes + 1:032x}", project_id="p1")
+            saved = await store.record_trace(
+                ORG_A, sample.model_copy(update={"request_time": T0 + timedelta(minutes=minutes)})
+            )
+            assert saved.metadata[MAPPING_KEY] == MAPPING_VERSION, style
+            assert (saved.model, saved.tokens, saved.session_id, saved.user_id) == (
+                MODEL,
+                20,
+                "conversation-1",
+                "alice",
+            )
+            assert QUESTION in saved.request and [s.kind for s in saved.spans][::2] == ["AGENT", "TOOL"]
+            assert (saved.spans[2].inputs, saved.spans[2].outputs) == (ARGUMENTS, RESULT)
+            assert saved.spans[0].attributes.items() >= UNKNOWN.items(), style
+        page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", oldest_first=True))
+        assert [(t.model, t.tokens, t.metadata.get(MAPPING_KEY)) for t in page.items] == [
+            (MODEL, 20, MAPPING_VERSION)
+        ] * 3
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1"))
+        assert [(s.id, s.turns, s.tokens) for s in sessions.items] == [("conversation-1", 3, 60)]
+        alice = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="alice"))
+        assert len(alice.items) == 3
 
     async def test_traces_take_tags_and_join_runs(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
