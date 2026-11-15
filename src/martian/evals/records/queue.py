@@ -25,6 +25,10 @@ A process that does work itself, outside any worker, can hold it in the queue th
 no worker runs, and which the worker that claims it after its lease ran out finishes as
 interrupted.
 
+Work that comes back, such as a monitor's next pass, is given back with :meth:`reschedule`
+instead of removed: queued again, taken by no claim before its ``available_at``, and then behind
+the work queued before that time.
+
 The queue keeps the work as JSON and knows nothing of what it means; the worker writes and reads
 it (:mod:`martian.evals.worker.queue`). Each row belongs to the organisation's space, as every
 record does. On Postgres row-level security filters on it again; a claim, which takes the next
@@ -58,7 +62,7 @@ QUEUED = "queued"
 CLAIMED = "claimed"
 RECORDING = "recording"
 """The kind of a run that a process records itself and holds in the queue (:meth:`SqlWorkQueue.hold`),
-beside the kinds of work a worker runs, ``run`` and ``scoring``."""
+beside the kinds of work a worker runs, ``run``, ``scoring`` and ``monitor``."""
 
 
 @dataclass(frozen=True)
@@ -207,7 +211,10 @@ class SqlWorkQueue:
         def claim(connection: Connection) -> Claim | None:
             now = _now()
             claimable = or_(
-                work_queue.c.state == QUEUED,
+                and_(
+                    work_queue.c.state == QUEUED,
+                    or_(work_queue.c.available_at.is_(None), work_queue.c.available_at <= now),
+                ),
                 and_(work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at < now),
             )
             other = work_queue.alias("running")
@@ -295,6 +302,31 @@ class SqlWorkQueue:
         """Remove the work, which has ended. Does nothing once the claim no longer holds it."""
         await self._run(claim.space, lambda connection: connection.execute(delete(work_queue).where(self._key(claim))))
 
+    async def reschedule(self, claim: Claim, available_at: datetime) -> bool:
+        """Give back work that has ended for now and comes back, such as a monitor's next pass: it
+        is queued again, with no attempt counted, and no claim takes it before ``available_at``;
+        it then waits behind the work queued before that time. False when the claim no longer
+        holds it."""
+        return bool(
+            await self._run(
+                claim.space,
+                lambda connection: (
+                    connection.execute(
+                        update(work_queue)
+                        .where(self._key(claim))
+                        .values(
+                            state=QUEUED,
+                            token=None,
+                            lease_expires_at=None,
+                            attempts=0,
+                            available_at=available_at,
+                            created_at=available_at,
+                        )
+                    ).rowcount
+                ),
+            )
+        )
+
     async def held(self, principal: Principal, project_id: str, entry_id: str) -> bool:
         """Whether a claim whose lease has not run out holds ``entry_id``: whether a worker is on it."""
         space = space_of(principal)
@@ -328,12 +360,14 @@ class SqlWorkQueue:
         return await self._run(space, contains)
 
     async def pending(self) -> int:
-        """How many pieces of work, of every organisation, are in the queue: queued or claimed."""
-        return int(
-            await self._run(
-                None, lambda connection: connection.execute(select(func.count()).select_from(work_queue)).scalar_one()
-            )
-        )
+        """How many pieces of work, of every organisation, are in the queue, queued or claimed,
+        leaving out work rescheduled for later that is not due yet."""
+
+        def pending(connection: Connection) -> int:
+            due = or_(work_queue.c.available_at.is_(None), work_queue.c.available_at <= _now())
+            return int(connection.execute(select(func.count()).select_from(work_queue).where(due)).scalar_one())
+
+        return await self._run(None, pending)
 
 
 __all__ = ["CLAIMED", "QUEUED", "RECORDING", "AlreadyHeld", "Claim", "SqlWorkQueue"]
