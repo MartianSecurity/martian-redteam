@@ -13,7 +13,10 @@
 - Each case graded in the run is a ``CaseResult`` with a ``Score`` per check, mapped from its
   ``results.jsonl`` record by :func:`~martian.evals.model.from_results_record`, and a trace: the one
   MLflow's evaluation harness recorded for the case, with its spans, copied into the store under a
-  new id and carrying the scores.
+  new id and carrying the scores. A judge check's score names no calibration
+  (:data:`~martian.evals.calibration.NO_CALIBRATION`): a suite file's judge is no judge version
+  the core registers, so it has none. A panel check's score names the panel as its source and
+  keeps its votes in its metadata (``martian.panel.*``, :mod:`martian.evals.panel`).
 - A case whose verdict is reused from an earlier run in the same output folder keeps that verdict.
   Its result in this run has no trace: the trace stays with the run that graded the case.
 - When the suite runs each case more than once, the run's ``provenance`` holds the repeats under
@@ -44,9 +47,10 @@
   named under ``prompts`` (:func:`martian.evals.prompts.matched_prompts`), with the prompt's name
   and version, so the run shows the prompt version it used.
 - A run with the cache of model calls on (:mod:`martian.evals.cache`) has it in ``provenance``
-  under ``cache``: its folder, time to live and whether function targets are cached from the
-  start, and once the run ends how many target and judge replies came from the cache, so a
-  replayed result is never taken for a fresh one.
+  under ``cache``: ``on: true``, its folder, time to live and whether function targets are cached
+  from the start, and once the run ends how many target and judge replies came from the cache, so
+  a replayed result is never taken for a fresh one. The run routes show only ``on`` and the counts
+  (``READER_PROVENANCE``), never the folder.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -75,6 +79,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals.calibration import CALIBRATION_KEY, NO_CALIBRATION
 from martian.evals.model import (
     CaseResult,
     CaseStatus,
@@ -92,6 +97,7 @@ from martian.evals.model import (
     TurnResult,
     from_results_record,
 )
+from martian.evals.panel import panel_source
 from martian.evals.prompts import PROVENANCE_KEY, matched_prompts
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
@@ -129,6 +135,13 @@ def _wait[T](work: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(work)
 
 
+def _judge_source(scorer: ScorerVersion) -> str:
+    """A suite-file judge score's ``source_id``: the judge's model, or its panel's source."""
+    if scorer.panel:
+        return panel_source((member.model, member.endpoint) for member in scorer.panel)
+    return scorer.model or ""
+
+
 class RunRecorder:
     """Records one run of ``suite`` in the data folder ``home``, as a context manager:
     :meth:`start`, :meth:`graded` for each batch, then :meth:`finish`. Open it before the run
@@ -146,8 +159,9 @@ class RunRecorder:
     ) -> None:
         """``limits`` are the run's (``provenance.limits`` when it has any), and ``matrix`` the run's
         combination of the suite's matrix, as ``provenance.matrix`` holds it, for a suite with a
-        matrix. ``cache`` is the cache of model calls the run uses, as ``provenance.cache`` holds it
-        from the start; :meth:`used_cache` gives its counts, which ending the run adds."""
+        matrix. ``cache`` is the cache of model calls the run uses, which ``provenance.cache`` holds
+        from the start with ``on: true``; :meth:`used_cache` gives its counts, which ending the run
+        adds."""
         from martian.evals.local import LocalEditionError, open_stores
 
         self._hold: RunHold | None = None
@@ -244,7 +258,7 @@ class RunRecorder:
             if used:
                 provenance[PROVENANCE_KEY] = used
         if self.cache is not None:
-            provenance["cache"] = self.cache
+            provenance["cache"] = {"on": True, **self.cache}
         if simulator is not None:
             provenance["simulator"] = {**simulator.model_dump(mode="json"), "version": SIMULATOR_VERSION}
         run = Run(
@@ -374,7 +388,7 @@ class RunRecorder:
         if stopped is not None:
             provenance["stopped"] = stopped
         if self._cache_used is not None:
-            provenance["cache"] = self._cache_used
+            provenance["cache"] = {"on": True, **self._cache_used}
         if provenance != current.provenance:
             changes["provenance"] = provenance
         finished = current.model_copy(update=changes)
@@ -448,7 +462,13 @@ class RunRecorder:
         now = datetime.now(UTC)
         result = result.model_copy(update={"expectations": dict(case.expectations), "finished_at": now})
         judged = [
-            score.model_copy(update={"source_id": scorer.model or "", "created_at": now})
+            score.model_copy(
+                update={
+                    "source_id": _judge_source(scorer),
+                    "created_at": now,
+                    "metadata": {**score.metadata, CALIBRATION_KEY: NO_CALIBRATION},
+                }
+            )
             if (scorer := self._scorers.get(score.scorer)) is not None and scorer.kind == "llm_judge"
             else score.model_copy(update={"created_at": now})
             for score in scores
@@ -582,11 +602,12 @@ class RunRecorder:
             scorer=label,
             scorer_version=scorer.version if scorer else "",
             source="llm_judge" if judge else "code",
-            source_id=(scorer.model or "") if scorer is not None and judge else "",
+            source_id=_judge_source(scorer) if scorer is not None and judge else "",
             value=verdict.passed,
             passed=verdict.passed,
             rationale=verdict.rationale,
             error=verdict.error,
+            metadata={**verdict.metadata, CALIBRATION_KEY: NO_CALIBRATION} if judge else dict(verdict.metadata),
             created_at=result.finished_at,
         )
 

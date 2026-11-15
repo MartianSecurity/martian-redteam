@@ -60,7 +60,7 @@ class FakeModel:
 
     def __init__(self):
         self.requests = []
-        self.behaviour = {"fail": None, "persona": None, "silent": False}
+        self.behaviour = {"fail": None, "persona": None, "silent": False, "usage": True}
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -93,14 +93,16 @@ class FakeModel:
         system, user = (message["content"] for message in body["messages"])
         reply = self.persona(user) if system.startswith("You read a real conversation") else self.step(system, user)
         message = {"role": "assistant", "content": json.dumps(reply)}
-        return 200, {
+        completion = {
             "id": "chatcmpl-fake",
             "object": "chat.completion",
             "created": 0,
             "model": body["model"],
             "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
+        if self.behaviour["usage"]:
+            completion["usage"] = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        return 200, completion
 
     def step(self, system, user):
         played = json.loads(system.split("The user you play:\n", 1)[1].split("\nOutput schema:", 1)[0])
@@ -236,6 +238,12 @@ def test_a_simulated_user_reaches_or_fails_its_goal_and_is_recorded_turn_by_turn
     validate_response("get", "/v1/evals/{run_id}", detail)
     # Simulated conversations count among the run's conversations, so the UI asks for their turns.
     assert detail["provenance"]["conversations"] == 2
+    # The Simulated badge names the model that played the user (READER_PROVENANCE).
+    assert detail["provenance"]["simulator"] == {
+        "model": f"openai:/{MODEL}",
+        "parameters": {"temperature": 0.7},
+        "version": "simulated-user-v1",
+    }
     assert {item["dataset_item_id"]: item["status"] for item in detail["items"]} == {
         "cancel-clearly": "passed",
         "cancel-after-chat": "failed",
@@ -343,6 +351,79 @@ def test_changing_the_simulator_grades_only_the_simulated_cases_again(tmp_path, 
     again = run_suite(path, progress=messages.append)
     assert again["invalidated"] == 2 and messages[0].startswith("3 cases, 1 already done")
     assert "2 with a simulated user played by openai:/your-model" in messages[0]
+
+
+# ---------- the run's token limit counts the simulator (MartianSecurity/martian-notes#359) ----------
+
+
+def test_a_run_with_simulated_users_stops_at_its_token_limit_counting_the_simulator(tmp_path, fake):
+    path = example(tmp_path)
+    # Each simulator reply reports 10 + 5 tokens. Both users write their first message (30 tokens);
+    # then the clear customer ends its conversation and the chatty one writes its second (60), past
+    # the limit of 45, so that turn is not sent and the run stops. The example has no LLM judge.
+    summary = run_suite(path, max_judge_tokens=45)
+    assert len(fake.simulated()) == 4
+    assert (summary["cases"], summary["passed"], summary["not_run"]) == (1, 1, 1)
+    assert set(results_of(tmp_path)) == {"cancel-clearly"}
+    assert summary["stopped"] == {
+        "limit": "max_judge_tokens",
+        "value": 45,
+        "used": 60,
+        "message": "Stopped at its judge token limit (max_judge_tokens 45) after 60 tokens "
+        "(0 by its judges, 60 by its simulated users)",
+    }
+    assert summary["tokens_this_run"] == {"judges": 0, "simulator": 60}
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["error"]) == ("stopped", summary["stopped"]["message"])
+
+    # Run again without the limit: the finished conversation is kept, the other talks from the start.
+    messages: list[str] = []
+    again = run_suite(path, progress=messages.append)
+    assert messages[0].startswith("2 cases, 1 already done")
+    assert (again["cases"], again["not_run"], again["stopped"]) == (2, 0, None)
+    # Four messages and the goal verdict, each run counting its own.
+    assert again["tokens_this_run"] == {"judges": 0, "simulator": 75}
+
+
+def test_a_simulator_that_reports_no_usage_stops_a_run_with_a_token_limit(tmp_path, fake):
+    fake.behaviour["usage"] = False
+    path = example(tmp_path)
+    # A suite with simulated users and no LLM judge can set the limit in its file.
+    path.write_text(path.read_text() + "limits:\n  max_judge_tokens: 1000\n", encoding="utf-8")
+    summary = run_suite(path)
+    assert len(fake.simulated()) == 2 and summary["not_run"] == 2
+    assert summary["stopped"]["message"] == (
+        "Stopped: the simulated user reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+    )
+    assert summary["tokens_this_run"] == {"judges": 0, "simulator": None}
+
+
+def test_each_combination_of_a_matrix_plays_its_simulated_users_under_its_own_token_limit(tmp_path, fake):
+    path = example(tmp_path)
+    agent = tmp_path / "agent.py"
+    agent.write_text(agent.read_text().replace("def reply(message, history):", "def reply(message, history, tone):"))
+    path.write_text(path.read_text() + "matrix:\n  tone: [plain, warm]\n", encoding="utf-8")
+    # Each combination is a run of its own with its limits afresh, and its simulated users spend
+    # them: in each, the users write 60 tokens, past the limit of 45, and one conversation is not run.
+    summary = run_suite(path, max_judge_tokens=45)
+    assert len(fake.simulated()) == 8
+    entries = summary["combinations"]
+    assert [entry["id"] for entry in entries] == ["tone=plain", "tone=warm"]
+    for entry in entries:
+        own = entry["summary"]
+        assert (own["cases"], own["passed"], own["not_run"], entry["gate"]) == (1, 1, 1, "error")
+        assert own["tokens_this_run"] == {"judges": 0, "simulator": 60}
+        assert own["stopped"]["message"].endswith("after 60 tokens (0 by its judges, 60 by its simulated users)")
+        assert own["simulator"]["model"] == f"openai:/{MODEL}"
+    # Each combination's run is recorded stopped, with its combination and its simulator.
+    client = local_ui(tmp_path)
+    runs = client.get("/v1/evals").json()
+    assert sorted(run["run_code"] for run in runs) == ["evals[tone=plain]-1", "evals[tone=warm]-1"]
+    for run in runs:
+        provenance = client.get(f"/v1/evals/{run['id']}").json()["provenance"]
+        assert run["state"] == "stopped" and provenance["stopped"]["used"] == 60
+        assert provenance["matrix"]["values"] in ({"tone": "plain"}, {"tone": "warm"})
+        assert provenance["simulator"]["model"] == f"openai:/{MODEL}"
 
 
 # ---------- the suite file and the model ----------

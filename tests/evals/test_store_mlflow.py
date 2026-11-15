@@ -215,6 +215,7 @@ class MlflowPagingContract:
                     user_id=f"u{number % 2}",
                     tags={"route": f"r{number % 2}"},
                     run_id="r1" if number < 6 else None,
+                    latency_ms=100.0 * (11 - number),  # the newest the fastest
                 ),
             )
         # Each query's page of three (or fewer when fewer match) is all MLflow returns.
@@ -229,6 +230,10 @@ class MlflowPagingContract:
             ({"since": T0 + timedelta(minutes=10)}, 2),
             ({"until": T0 + timedelta(minutes=1)}, 1),
             ({"run_id": "r1"}, 3),
+            ({"min_latency_ms": 850}, 3),
+            ({"min_latency_ms": 999.5}, 2),
+            ({"slowest_first": True}, 3),
+            ({"slowest_first": False, "min_latency_ms": 650}, 3),
         ):
             reads.clear()
             page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", limit=3, **fields))  # type: ignore[arg-type]

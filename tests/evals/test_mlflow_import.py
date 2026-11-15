@@ -149,10 +149,16 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
     assert [(a["name"], a["value"], a["source"]) for a in first["assessments"]] == [
         ("helpful", True, {"source_type": "HUMAN", "source_id": "alice@example.com"})
     ]
+    # Trace search lists verdicts, so the expectation is on the trace's detail only.
     assert {(a["name"], a["value"], a["source"]["source_type"]) for a in second["assessments"]} == {
-        ("expected_response", "No. Refunds are available within 30 days of purchase.", "HUMAN"),
         ("correct", "no", "LLM_JUDGE"),
     }
+    second_info = client.get(f"/v1/evals/traces/{second['id']}", params={"project_id": project}).json()["info"]
+    expected = {a["assessment_name"]: a for a in second_info["assessments"]}["expected_response"]
+    assert (expected["expectation"], "feedback" in expected) == (
+        {"value": "No. Refunds are available within 30 days of purchase."},
+        False,
+    )
     # MLflow keeps the feedback a correction overrides; only the correction is copied.
     assert [(a["name"], a["value"], a["rationale"]) for a in third["assessments"]] == [("helpful", True, "It is fine.")]
 

@@ -65,16 +65,29 @@ WRITE_OPERATIONS = [
 # (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and the
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
-# The core's own routes, which the server's contract does not have: the attempts of repeated cases
-# (MartianSecurity/martian-notes#180), the turns of conversation cases (MartianSecurity/martian-notes#191) and
-# prompt versions (MartianSecurity/martian-notes#207).
+# The core's own routes, which the server's contract does not have: a run's attempts
+# (MartianSecurity/martian-notes#180) and turns (MartianSecurity/martian-notes#191), the judges' agreement
+# with people (MartianSecurity/martian-notes#185), people's agreement with each other
+# (MartianSecurity/martian-notes#189), each judge version's calibration (MartianSecurity/martian-notes#186)
+# and prompt versions (MartianSecurity/martian-notes#207).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
+OWN_NAMES |= {("get", "/v1/evals/judge-agreement"), ("get", "/v1/evals/reviewer-agreement")}
+OWN_NAMES |= {
+    ("get", "/v1/evals/judge-calibrations"),
+    ("post", "/v1/evals/judge-calibrations"),
+    ("get", "/v1/evals/judge-calibrations/{calibration_id}"),
+}
 OWN_NAMES |= {
     ("get", "/v1/evals/prompts"),
     ("post", "/v1/evals/prompts"),
     ("get", "/v1/evals/prompts/{name}"),
     ("post", "/v1/evals/prompts/{name}/versions"),
 }
+# Registering a judge graded by a panel of judge models (MartianSecurity/martian-notes#187), which the
+# contract's POST /judges has no field for.
+OWN_NAMES |= {("post", "/v1/evals/judge-panels")}
+# Re-checking a judge version's calibration (MartianSecurity/martian-notes#188).
+OWN_NAMES |= {("post", "/v1/evals/judge-rechecks"), ("get", "/v1/evals/judge-rechecks/{recheck_id}")}
 # The core's own monitor routes, which the contract does not have either (MartianSecurity/martian-notes#196).
 OWN_NAMES |= {
     ("get", "/v1/evals/monitors"),

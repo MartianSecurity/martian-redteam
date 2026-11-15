@@ -82,10 +82,14 @@ pull request with the last result of `main` and name the cases that went from pa
   ([in a container](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  a panel of several judge models decided by a strict majority (`judge_panel`),
+  conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`),
   twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
   their order, turn by turn, and the call's latency and cost, custom checks written as Python
-  functions (unsandboxed: they run with the caller's privileges), pinned datasets, Backend-scored
+  functions (unsandboxed: they run with the caller's privileges), each judge version's agreement
+  with human labels beside people's agreement with each other, and its saved calibration,
+  re-checked on request after its model or rubric changes, pinned datasets, Backend-scored
   regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
@@ -149,3 +153,7 @@ qualification. See [development](https://github.com/MartianSecurity/martian-redt
 
 Apache-2.0. See [LICENSE](https://github.com/MartianSecurity/martian-redteam/blob/main/LICENSE)
 and [NOTICE](https://github.com/MartianSecurity/martian-redteam/blob/main/NOTICE).
+
+The evals core here is the open-source Community edition of Martian Evals. Martian Cloud and
+On-Premises serve the same core, with its paid features turned on by feature keys; see
+[editions](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#editions-and-entitlements).

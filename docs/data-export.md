@@ -37,8 +37,10 @@ local user), and nothing of another organisation's: the organisation's
 [prompts](evals-core.md#prompt-versions) with every version, each with its number, author and
 time, which a run's `provenance.prompts` names; and every project the store lists, and in each
 
-- its registered scorers, every version; its review questions;
-- its dataset versions with their cases, in case order;
+- its registered scorers, every version, a judge graded by a
+  [panel of judges](evals.md#a-panel-of-judges) with its members; its review questions;
+- its dataset versions with their cases, in case order, and its dataset publications: each
+  manifest that pins the version publishing wrote, and any publication that never finished;
 - its suites, every version; its dataset drafts with their cases; its saved views;
 - its runs as the record store holds them and as the store holds them, each with its case
   results, scores, scoring jobs, every review of every chain (replaced ones too), the review
@@ -48,7 +50,9 @@ time, which a run's `provenance.prompts` names; and every project the store list
 - its [monitors](evals-core.md#monitors) with their progress and every trace each took for
   scoring, its [schedules](evals-core.md#schedules) with their progress and every slot each ran or
   skipped, and the [thresholds](evals-core.md#thresholds-and-alerts) on either with their status
-  and every alert, delivered or not.
+  and every alert, delivered or not;
+- its judges' [calibrations](evals.md#calibration), every one with the labelled items it rests
+  on, and their re-checks, finished or not.
 
 It leaves out what is not durable data, what the interfaces cannot list or the model does not
 describe, and what the two stores do not hold:
@@ -57,6 +61,12 @@ describe, and what the two stores do not hold:
   worker has finished, and the next turns of monitors and schedules. It is transient; a run
   exported queued or running is finished as interrupted in the fresh install (see Exporting and
   resuming), and a monitor or a schedule comes back paused (see Importing).
+- The outbox (the record store's `martian_deliveries` table, `Delivery`): store writes on their
+  way from the record store to the store. It is transient. A delivered write is in the store and
+  exported from there. A pending one is not carried: the score it carries is exported with the
+  record store's scores, but the trace or review queue item it was to change is exported as the
+  store holds it. Let the outbox deliver before exporting; it retries while the local edition
+  serves (`martian ui`) or the server's outbox loop runs.
 - A review queue that no review names (the store cannot list queues; creating one through the
   core adds a pending review per case and question), and a run in the store that the record store
   does not hold.
@@ -83,10 +93,13 @@ describe, and what the two stores do not hold:
 `martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
 store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store
 and the record store take or return to its files; `LEFT_OUT_TABLES` and `LEFT_OUT_KINDS` give
-the rest, each with why. Every table but the worker's queue is exported, and every kind of
-object; the model classes left out are not data of their own (the store's status, a trace search
-and the sessions it groups, a page of a listing, a run's counts). The webhook secret is a column,
-not an object, and no file carries it. A table or a kind added to
+the rest, each with why. Every table but the worker's queue and the outbox is exported, and every
+kind of object but the outbox's deliveries; the other model classes left out are not data of
+their own (the store's status, a trace search and the sessions it groups, a page of a listing, a
+run's counts). The webhook secret is a column, not an object, and no file carries it. The judges'
+agreement with people and the reviewers' agreement with each other are computed from the runs,
+scores, reviews and traces when they are read, so they are not stored and come back with those. A
+table or a kind added to
 either store fails `tests/evals/test_data_export.py` until the export carries it, in a new file
 of a new format version, or names it as left out and why.
 
@@ -116,6 +129,7 @@ when there is nothing of its kind. An import reads them in this order:
 | `questions.jsonl` | Review question | `project_id`, `question`: `ReviewQuestion` |
 | `datasets.jsonl` | Dataset version, by name then version | `project_id`, `dataset`: `DatasetVersion` |
 | `cases.jsonl` | Case of a dataset version, in order; a version's cases are consecutive, in the order of `datasets.jsonl` | `project_id`, `dataset_id`, `case`: `Case` |
+| `manifests.jsonl` | Dataset publication, newest first | `project_id`, `manifest`: `DatasetManifest`, with the `dataset_id` of the version it pins once `published` |
 | `suites.jsonl` | Version of a suite, oldest first | `project_id`, `suite`: `Suite` |
 | `drafts.jsonl` | Dataset draft | `project_id`, `draft`: `DatasetDraft` |
 | `draft_cases.jsonl` | Case of a draft, in order; consecutive per draft, in the order of `drafts.jsonl` | `project_id`, `draft_id`, `case`: `Case` |
@@ -134,16 +148,20 @@ when there is nothing of its kind. An import reads them in this order:
 | `scheduled_runs.jsonl` | Slot a schedule ran or skipped, latest first; consecutive per schedule, in the order of `schedules.jsonl` | `project_id`, `scheduled_run`: `ScheduledRun` |
 | `thresholds.jsonl` | Threshold, by name | `project_id`, `threshold`: `Threshold`, `status`: `ThresholdStatus`; never the webhook's secret |
 | `alerts.jsonl` | Alert, newest first; consecutive per threshold, in the order of `thresholds.jsonl` | `project_id`, `alert`: `Alert` |
+| `calibrations.jsonl` | Judge calibration, newest first | `project_id`, `calibration`: `JudgeCalibration`, with its labelled `items` (each a case result's `run_id` and `case_id`, or a trace's `trace_id`), its `report`, who saved it and when |
+| `rechecks.jsonl` | Re-check of a calibration, newest first | `project_id`, `recheck`: `CalibrationRecheck`, with its pinned `scorer` and the calibration it saved, `result_id` |
 
-`Monitor`, `Schedule`, `Threshold` and the rest of the monitoring kinds are the record store's own
-classes (`martian.evals.records`), not the shared model's.
+`Monitor`, `Schedule`, `Threshold` and the rest of the monitoring kinds, and `JudgeCalibration`
+and `CalibrationRecheck`, are the record store's own classes (`martian.evals.records`), not the
+shared model's. A calibration's items name runs and traces by the ids the export keeps, so they
+need no new references.
 
 `manifest.json`:
 
 ```json
 {
   "format": "martian-evals-export",
-  "version": 3,
+  "version": 6,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -155,18 +173,23 @@ classes (`martian.evals.records`), not the shared model's.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `3`): a new
+`null` for the single local user. `version` is the format's version (`VERSION`, here `6`): a new
 file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
-Version 2 added the six monitoring files, and version 3 the two prompt files: import an export of
-an earlier version with the SDK that wrote it, and export again with this one.
+Version 2 added the six monitoring files, version 3 added `manifests.jsonl`, version 4 added
+`calibrations.jsonl` and `rechecks.jsonl`, version 5 put a score's source in its key, so
+`scores.jsonl` can hold two lines for one scorer, and version 6 added `prompts.jsonl` and
+`prompt_versions.jsonl`. An export of an earlier version is refused: import it with the SDK that
+wrote it, and export again with this one.
 
 ## Exporting and resuming
 
 An export runs in steps, in a fixed order: first the organisation's prompts with their versions,
-then for each project, its definitions (the project, its
-scorers, questions, suites, drafts and views), then each dataset version, each run, its monitoring
-(monitors, schedules and thresholds with their history), and each page of 500 traces. Monitoring
-comes before the traces, so every trace a monitor took is among the traces exported. Before the first step it lists the projects, their dataset versions and their runs
+then for each project, its definitions (the project, its scorers, questions, suites, drafts,
+dataset publications and views, and its judges' calibrations and re-checks), then each dataset
+version, each run, its monitoring (monitors, schedules and thresholds with their history), and
+each page of 500 traces. Monitoring comes before the traces, so every trace a monitor took is
+among the traces exported. Before the first step it lists the projects, their dataset versions and
+their runs
 in `export-plan.json`. After each step it flushes the files and records in
 `export-progress.json` how long each file is and where the next step starts.
 
@@ -191,8 +214,8 @@ as it does for any run no process is working on. An import does not refuse the e
 ## Importing
 
 An import goes into a fresh install: one whose projects hold no runs, datasets, traces, suites,
-drafts, views, scorers, review questions, monitors, schedules or thresholds for the principal, and
-no prompts. A project the install already has
+drafts, dataset publications, views, scorers, review questions, monitors, schedules, thresholds,
+judge calibrations or re-checks for the principal, and no prompts. A project the install already has
 under the same id, such as the local edition's empty default project, is used as it is; one with
 another name is refused.
 
@@ -200,10 +223,13 @@ Before anything is written, the import checks the manifest's format and version 
 size, line count and SHA-256, and each artifact's SHA-256. It then writes every object through the
 interfaces, creating what an object refers to before the object: prompts with their versions,
 each with its number, author and time (`EvalStore.import_prompt`), projects, scorers, questions,
-dataset versions, suites, runs (in the store, then in the record store), traces with their scores,
-case results, scores, scoring jobs, reviews, queues, artifacts, drafts and views, then monitors
-with the traces they took, schedules with their slots, and thresholds with their status and
-alerts; projects that were archived are archived last. A dataset version that does not come back with its digest,
+dataset versions, dataset publications (a published one finished again as the receiving store's
+version, so a run of that version is still checked against its manifest), suites, runs (in the
+store, then in the record store), traces with their scores, case results, scores, scoring jobs,
+reviews, queues, artifacts, drafts and views, then monitors with the traces they took, schedules
+with their slots, thresholds with their status and alerts, and judge calibrations and their
+re-checks, each as it was saved, who saved it and when included; projects that were archived are
+archived last. A dataset version that does not come back with its digest,
 version and case count, or a suite, scorer or prompt version given another version number, stops
 the import. An import that stops leaves what it
 wrote; import into a fresh install again.
@@ -215,7 +241,9 @@ receiving store's:
 - `store` references (`StoreRef`): MLflow's experiment, run and assessment ids, and dataset ids.
   A reference the source store could not resolve either is kept as it was.
 - A dataset version's `id`, `created_at` and `created_by` (the importing user). Drafts'
-  `source_dataset_id` and runs' `store.dataset_id` follow the new id.
+  `source_dataset_id`, runs' `store.dataset_id` and publications' `dataset_id` follow the new id.
+- A dataset publication's `published_at`, the time of the import. Its `started_at` is kept, so a
+  publication that never finished holds no runs back once its lease is over.
 - A project's `created_at`, where the store sets it (the MLflow binding: the experiment's creation
   time), and `archived_at`, the time of the import.
 - A dataset draft's `revision`, `updated_at` and `updated_by`, and a saved view's `revision` and
@@ -223,7 +251,7 @@ receiving store's:
 - A monitor's and a schedule's `revision` and `updated_at`. A schedule's `dataset_id` follows the
   dataset version's new id.
 
-Three changes are the import's own:
+Four changes are the import's own:
 
 - **Monitors and schedules come back paused** (`state`), whatever they were, and nothing is put in
   the worker's queue for them: an import scores no trace, runs no suite and sends no alert.
@@ -237,6 +265,11 @@ Three changes are the import's own:
   ([thresholds](evals-core.md#thresholds-and-alerts)). Until then it shows `"signed": false`.
   `ImportSummary.needs_secret` names them, and `martian evals import martian` says how many.
   Its email recipients come back with it; the SMTP server is the fresh install's worker's.
+- **A re-check exported queued or running comes back `failed`**, with the error
+  `RECHECK_INTERRUPTED` and the time of the import as its `finished_at`. Nothing works on it in
+  the fresh install, and a re-check left queued would refuse every new re-check of its judge
+  version ("already queued or running"); ask for it again
+  (`POST /v1/evals/judge-rechecks`, [calibration](evals.md#calibration)).
 - A run exported queued or running is finished as interrupted when the local edition opens the
   folder (see Exporting and resuming); that comes after the import, not in it.
 
@@ -245,17 +278,20 @@ Every other field of every object comes back as it was exported.
 `tests/evals/test_data_export.py` fills an organisation with every kind of object, exports it,
 imports it into a fresh install and exports that again, and compares the two exports field by
 field with only the fields above set aside (a monitor's and a schedule's `state` too, which it
-checks went from active to paused): on the in-memory store, on the local edition's data
+checks went from active to paused, and an unfinished re-check's state, error and `finished_at`,
+which it checks the import failed): on the in-memory store, on the local edition's data
 folder (with Inspect AI logs imported into it, and with the Evals UI's routes answering the same
 for every run and review, but for the store's own ids and the moment a run exported queued was
 finished as interrupted), and on a data folder that `martian evals import mlflow` filled. On the
 first two it also checks that every table the export carries holds rows in the source and as many
-in the fresh install, that the import queued nothing, and that no file of the export holds the
-threshold's webhook secret (a canary), which the fresh install does not have until it is given
-again, once. Prompt versions another member added come back with that member as their author, not
-the importing user, and their own times; `tests/evals/store_contract.py` checks
-`import_prompt` on both bindings. It checks that every table of the record store and every kind of object of the two
-interfaces is exported or left out with a reason. It interrupts an export inside a run's
-step, inside the monitoring step and on a page of traces, resumes it and compares the files byte
-for byte with an uninterrupted export, and covers what an export and an import refuse (a slot whose
-run started after the export did among them) and both commands.
+in the fresh install, that the outbox's deliveries stay behind, that the import queued nothing,
+and that no file of the export holds the threshold's webhook secret (a canary), which the fresh
+install does not have until it is given again, once; on the in-memory store, that the published
+version is still pinned by its manifest in the fresh install. Prompt versions another member added
+come back with that member as their author, not the importing user, and their own times;
+`tests/evals/store_contract.py` checks `import_prompt` on both bindings. It checks that every table
+of the record store and every kind of object of the two interfaces is exported or left out with a
+reason. It interrupts an export inside a run's step, inside the monitoring step and on a page of
+traces, resumes it and compares the files byte for byte with an uninterrupted export, and covers
+what an export and an import refuse (a slot whose run started after the export did among them) and
+both commands.
