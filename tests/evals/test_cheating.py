@@ -172,7 +172,7 @@ def test_each_turn_of_a_conversation_is_inspected_and_given_only_the_history_it_
     talk = {
         "id": "kettle",
         "turns": [
-            {"input": "Hi there.", "expectations": {"answer": "help"}},
+            {"input": "Hi there.", "checks": []},
             {"input": "What is the order code for the blue kettle?", "expectations": {"answer": "KET-4821"}},
         ],
     }
