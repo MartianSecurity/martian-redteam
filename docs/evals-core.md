@@ -2151,7 +2151,7 @@ a score threshold.
 
 | Listed, not converted | Why |
 | --- | --- |
-| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code. Custom Python scorers come with the scorer library release |
 | `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
 | `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
@@ -2162,7 +2162,8 @@ a score threshold.
 | Other red team graders | Graded by a model with their own prompts |
 | `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
 | `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
-| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata |
+| `is-valid-function-call`, `is-valid-openai-function-call`, `is-valid-openai-tools-call`, `tool-call-f1`, `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | Tool-call assertions. The closest checks are `tool_called`, `tool_trajectory` and `step_count`, but none matches a promptfoo assertion exactly (promptfoo reads the provider's own format and scores some of them), so the converter maps none; the tool-call checks come with the scorer library release, and the rule is then added by hand |
+| Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
 | `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
 | `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 

@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from martian.cli import app
 from martian.evals import runner
 from martian.evals.promptfoo_convert import (
+    _TOOL_CALLS,
     ASSERTION_CHECKS,
     CALL_CHECKS,
     UNSUPPORTED,
@@ -242,6 +243,14 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
     ("assertion", "line"),
     [
         ({"type": "javascript", "value": "output.length < 9"}, "javascript: runs custom code"),
+        ({"type": "python", "value": "file://check.py"}, "write the rule as a custom Python scorer"),
+        ({"type": "ruby", "value": "true"}, "`def scorer(inputs, outputs, expectations)`"),
+        ({"type": "webhook", "value": "https://x.test"}, "with `type: python` (`file:` and `function:`)"),
+        ({"type": "trajectory:tool-used", "value": "search"}, "the closest check is tool_called"),
+        ({"type": "trajectory:tool-sequence", "value": ["a"]}, "the closest check is tool_trajectory"),
+        ({"type": "trajectory:step-count", "value": {"max": 3}}, "the closest check is step_count"),
+        ({"type": "is-valid-openai-tools-call"}, "scorer library release, and then the rule is added by hand"),
+        ({"type": "finish-reason", "value": "stop"}, "reads the provider's trace or metadata"),
         ({"type": "contains-json"}, "contains-json: finds JSON inside other text"),
         ({"type": "is-refusal"}, "is-refusal: passes only a refusal; no check on main does"),
         ({"type": "not-is-refusal"}, "so the two decide some replies differently (add no_refusal by hand"),
@@ -290,6 +299,14 @@ def test_every_documented_type_converts_or_has_a_reason():
         ASSERTION_CHECKS
     )
     assert {"javascript", "contains-json", "similar", "python", "is-refusal", "not-is-refusal"} <= set(UNSUPPORTED)
+    # No reason says custom code or tool calls have no equivalent: both name the check to use.
+    for kind in ("javascript", "python", "ruby", "webhook"):
+        assert "custom Python scorer" in UNSUPPORTED[kind]
+    for kind in _TOOL_CALLS:
+        assert any(
+            f"closest check is {check}" in UNSUPPORTED[kind]
+            for check in ("tool_called", "tool_trajectory", "step_count")
+        )
 
 
 def call(milliseconds=None, spent=None):
@@ -399,7 +416,7 @@ def test_tests_options_and_prompts_that_do_not_convert_are_listed(tmp_path):
         "tests[0].threshold: passes the test on a weighted score; a suite's case passes when every check passes",
         "tests[1].vars.q: is a list, which promptfoo runs once per value; the test is not converted",
         "tests[2].vars.q: is read from a file, which this converter does not read; the test is not converted",
-        "tests[3].assert[0] javascript: runs custom code, and a suite file's checks run none",
+        "tests[3].assert[0] javascript: " + UNSUPPORTED["javascript"],
         "tests[3]: no assertion converts, so the test is in no suite",
         "tests[4].providerOutput: is not used: the suite calls agent.py:answer",
     ]
