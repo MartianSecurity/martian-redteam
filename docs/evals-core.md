@@ -9,7 +9,7 @@ builds it with `create_app` and supplies these:
 
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
-| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process | Its MLflow server over REST (planned) |
+| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST (planned) |
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
@@ -196,7 +196,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
-  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. `dataset_id` is the run's
+  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
+  without an agent name by its dataset, and one whose `source` is `local` as a **Local run**. `dataset_id` is the run's
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
   digest (or store dataset).
@@ -370,6 +371,10 @@ What builds on it:
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
+- `martian ui`, the local edition: the core and the Evals UI from one process, with no login. See
+  [the local edition](#the-local-edition-martian-ui).
+- `martian evals run` records each suite-file run in the local edition's data folder, so it shows
+  in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
@@ -534,6 +539,159 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 `MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
 so row-level security applies.
 
+## The local edition (`martian ui`)
+
+`martian ui` serves the core and the Evals UI from one process on this machine, with no login and
+no other service, and opens the UI in the default browser. It needs `martian-sdk[evals]`, which
+includes the `uvicorn` server, and works offline. `martian.evals.local` builds it. The wheel ships
+the built UI; [the release guide](releasing.md#the-evals-ui-in-the-wheel) says which build and how
+it is checked.
+
+```bash
+martian ui                                   # http://127.0.0.1:7600/
+martian ui --port 7601 --data-dir ./evals-data --no-open
+martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run build:evals` in the frontend
+```
+
+| Option | Default | What it sets |
+| --- | --- | --- |
+| `--port` | `7600` | The port to listen on. A port another process holds stops the command with exit code `2`. |
+| `--data-dir`, or `MARTIAN_EVALS_HOME` | `~/.martian/evals` | The data folder |
+| `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package, which the wheel ships | The built Evals UI: a folder holding `index.html` and `assets/` |
+| `--open` / `--no-open` | `--open` | Whether to open the UI in the default browser (Python's `webbrowser`; `BROWSER` names another) |
+
+- The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
+  [above](#bootstrap-response).
+- The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
+  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start
+  (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
+  folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
+  page reads again, since the UI gets no live event from another process.
+- The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
+  and a session. The local edition answers it with the fixed principal, so the UI needs no
+  sign-in:
+
+  ```json
+  {
+    "access_token": "local",
+    "session": {
+      "kind": "single_user",
+      "user": {"id": "local", "email": null, "display_name": null},
+      "organisation": null,
+      "role": "owner",
+      "platform_admin": false,
+      "session_id": "local"
+    }
+  }
+  ```
+
+  `session` is the bootstrap's `principal` with a `session_id`. Nothing checks the token. The
+  route belongs to the local edition, not to the core: the Martian server answers the same call
+  from its own sign-in.
+- Every path outside the API is a file of the built UI. The UI uses hash routes and relative
+  asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
+  the frontend commit it was built from.
+- The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
+  `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
+  to this machine. There is no login: any program on this machine can call it. The container
+  image listens on the container's interfaces instead, with the same check; see
+  [below](#the-local-edition-in-a-container).
+- If the UI folder holds no `index.html`, because an install has lost the packaged UI or
+  `--ui-dir` names another folder, the command stops with exit code `2` and says so.
+
+`tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
+the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
+when no `--ui-dir` is given, and the container settings below with their warning.
+
+### The local edition in a container
+
+The repository's `Dockerfile` builds the local edition as an image, for one user who runs it on a
+small server rather than a laptop. It runs the same `martian ui`: the wheel built from the
+checkout with the `evals` extra, with its dependencies at the versions `uv.lock` pins, on
+`python:3.12-slim`. Both base images are pinned by digest. The server runs as the user `martian`
+(uid 10001), with the data folder in `/data`, a volume, and without opening a browser.
+
+```bash
+docker build -t martian-evals .
+docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data martian-evals
+```
+
+Then open http://127.0.0.1:7600/ on the server. The `martian-evals` volume holds `mlflow.db`,
+`artifacts/` and `martian.db`, so the data outlives `docker stop` and `docker start`, and a new
+container started on the same volume. To keep the data in a folder of the server instead, mount
+that folder at `/data`; the image's user, uid 10001, must be able to write to it.
+
+**It has no login. Do not expose it publicly.** Anyone who can reach the port can read and change
+everything in it. The command above publishes the port on the server's 127.0.0.1 only. From
+another machine, forward the port over SSH (`ssh -L 7600:127.0.0.1:7600 <server>`) and open
+http://127.0.0.1:7600/ there. Do not publish it on an address other machines can reach
+(`-p 7600:7600` publishes it on every address of the server), and do not put it behind a proxy
+that the internet can reach. Other containers on the same Docker network can reach it too. The
+startup log carries the same warning:
+
+```text
+Martian Evals is listening on 0.0.0.0:7600 (data in /data). Press Ctrl+C to stop.
+WARNING: Martian Evals has no login. Anyone who can reach this port can read and change everything in it. Do not expose it publicly: publish it on 127.0.0.1 only (docker run -p 127.0.0.1:7600:7600 ...) and reach it from another machine through an SSH tunnel.
+```
+
+Inside a container, the server must listen on the container's interfaces for Docker to publish the
+port. Two environment variables, which `martian ui` reads and offers no flag for, set this up. The
+image sets the first. Where both are unset, as for `martian ui` on a laptop, the server stays on
+127.0.0.1 and answers only `127.0.0.1` and `localhost`.
+
+| Setting | In the image | What it sets |
+| --- | --- | --- |
+| `MARTIAN_EVALS_BIND` | `0.0.0.0` | The IPv4 address to listen on. Unset, `127.0.0.1`. On any address but loopback, `martian ui` prints the warning above. A value that is not an IPv4 address stops the command with exit code `2`. |
+| `MARTIAN_EVALS_ALLOWED_HOSTS` | Unset | Host names, separated by commas, that the `Host` check answers besides `127.0.0.1` and `localhost`: for a private network where users reach the server by its own name, as `-e MARTIAN_EVALS_ALLOWED_HOSTS=evals.internal`. A name with a port, a scheme or a wildcard stops the command with exit code `2`: the check compares the name alone, and a wildcard would switch it off. |
+
+The `Host` check stays on in the container. A request through the published port carries the name
+the browser used, `127.0.0.1` or `localhost`, and any other name is refused with `400`, as on a
+laptop. The check keeps a web page from reaching the server through a name that resolves to it;
+it does not keep out a program that reaches the port, which is why the port must stay private.
+
+`tests/test_container_image.py` checks that the `Dockerfile` pins its base images, runs as a user
+other than root and sets the variable `martian ui` reads, and that `.dockerignore` lets in every
+file the build copies. CI does not build the image. Nothing
+publishes it to a registry yet: MorningHQ/martian-notes#223 builds the package and the image from
+one tagged release.
+
+## Command-line runs
+
+`martian evals run` records each suite-file run in the local edition's data folder
+(`martian.evals.run_record`), so `martian ui` shows it in Runs, the run detail, Compare and
+Traces. The data folder is `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as
+for `martian ui`. The run writes through the store and the record store as `SINGLE_USER`, in the
+default project:
+
+| Object | What a run writes |
+| --- | --- |
+| `Project` | The default project, named `Default`, on the first run |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id` |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply |
+
+- The run is `running` while it grades, and its results and counts are written after each batch,
+  so it shows while it runs. It is `completed` once every case has a result, with a verdict or
+  not. A run that stops on an error is `failed`, with `error` naming the exception's type, and an
+  interrupted one is `cancelled`.
+- A resumed run is a new run. A case whose verdict it reuses from the output folder's
+  `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
+  that graded the case; that result's trace route answers `409`.
+- The data folder is opened before anything in the output folder changes. One that cannot be
+  opened stops the run with exit code `2`.
+- The output folder is written as before: `results.jsonl`, `summary.json` and `junit.xml` hold
+  what they held. `run_suite` returns the summary with the recorded run under `run`, and the
+  command prints the run's code and how to open it. The output folder's `mlflow.db` stays as the
+  store of MLflow's evaluation harness, or the server `mlflow.tracking_uri` names gets those
+  runs. The core does not read it.
+- Traces that an application records with MLflow tracing, and mapping their `mlflow.sourceRun`
+  to a run, are MorningHQ/martian-notes#148.
+
+`tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
+edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
+trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
+cannot be opened.
+
 ## Not built yet
 
 | Piece | Issue |
@@ -543,9 +701,10 @@ so row-level security applies.
 | A durable worker, and one process per evaluation run | MorningHQ/martian-notes#139, #140 |
 | HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
-`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_read_routes.py`,
-`test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`, `test_worker.py` and the
-store and record tests run the core without the backend. The `Evals core` job in CI runs them with
-the model tests, on Postgres as well as SQLite.
+`tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
+`test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
+`test_worker.py` and the store and record tests run the core without the backend. The `Evals core`
+job in CI runs them with the model tests, on Postgres as well as SQLite.

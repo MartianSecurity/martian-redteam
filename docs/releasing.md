@@ -28,10 +28,12 @@ uv run --all-extras python scripts/check_release.py --install
 
 The guard requires one wheel and one sdist, matching versions, Apache-2.0
 metadata and license files, Python 3.12+, both modules, typed markers, CLI
-entry points and the documented extras. It rejects repository/direct-URL
+entry points, the documented extras and the pinned Evals UI
+([below](#the-evals-ui-in-the-wheel)). It rejects repository/direct-URL
 runtime dependencies and private/generated source archive content. It installs
 each distribution in a fresh environment, checks dependencies and imports from
-outside the checkout using isolated Python, and exercises the installed CLIs.
+outside the checkout using isolated Python, exercises the installed CLIs and
+serves the packaged UI with `martian ui`.
 `release-checksums.json` is a delivery manifest **outside** `dist/`; only the
 two distributions go to the publisher. The release workflow retains the
 manifest separately as `sdk-release-checksums`, alongside `sdk-distributions`. Rebuild after any code/docs change and
@@ -39,9 +41,67 @@ retain the checksums of the actual validated artifacts.
 
 The base dependencies support redteam. `evals` adds MLflow-skinny 3.18.0/pandas/pytest
 and its local SQL store prerequisites. `mcp` retains the optional MCP runtime.
-CI checks Python 3.12 and 3.13. The sdist contains source, tests, examples,
-documentation, build configuration, lockfile and license/notice; no task-owned
-credentials, raw live logs, local MLflow stores or browser auth state are bundled.
+CI checks Python 3.12 and 3.13. The sdist contains source (with the built Evals UI), tests, examples,
+documentation, build configuration (with the `Dockerfile` and `.dockerignore`), lockfile and
+license/notice; no task-owned credentials, raw live logs, local MLflow stores or browser auth
+state are bundled.
+
+The `Dockerfile` builds the local edition's image from the checkout and `uv.lock`
+([evals core](evals-core.md#the-local-edition-in-a-container)). No workflow builds or publishes
+it yet; MorningHQ/martian-notes#223 publishes it with the package from one tagged release.
+
+## The Evals UI in the wheel
+
+`martian ui` serves the Evals UI that the wheel ships in `martian/ui/`. It is a build of the
+stand-alone Evals app in MorningHQ/MartianFrontend (`packages/evals/app`, `npm run build:evals`),
+copied into `src/martian/ui/` and committed here. A build from a checkout or from the sdist
+therefore needs no Node.js, no network and no access to that private repository, and the release
+workflow builds exactly what the tag holds. The frontend build is reproducible: the same commit
+and lockfile give the same files.
+
+- **Identity.** The build writes `ui-version.json`: the Evals package's `version`, the frontend
+  `commit` it was built from, and `dirty`, true when that tree had uncommitted changes. The
+  `[tool.martian.ui]` table in `pyproject.toml` pins the `version`, the `commit` and a `digest`,
+  SHA-256 over every file of the build (`ui_digest` in `scripts/check_release.py`). The release
+  workflow writes the pinned commit into its summary.
+- **Once.** The UI is part of the `martian` package, so the wheel holds it once, in `martian/ui/`,
+  and the sdist once, in `src/martian/ui/`. `.gitattributes` keeps those files byte for byte (no
+  line-ending conversion), out of diffs and merges, and marked as generated.
+- **The check.** `scripts/check_release.py` refuses a wheel or sdist that holds a file twice, holds
+  no UI or two, or whose UI is not the pinned build: a dirty stamp, another version or commit, or
+  a file added, removed or changed. With `--install` it starts each clean install's `martian ui`
+  without `--ui-dir` and reads `/`, `/ui-version.json`, the session call and the bootstrap.
+  `tests/test_packaged_ui.py` checks the committed copy against the pin on every pull request.
+- **Without it.** If an install has no `martian/ui/index.html`, `martian ui` stops with exit code
+  `2` and says so; `--ui-dir` names another build.
+
+To ship another UI, build the frontend commit to ship, on its `main`, from a clean checkout, and
+copy the build in:
+
+```bash
+# In MorningHQ/MartianFrontend, at the commit to ship:
+git status --porcelain     # prints nothing
+npm ci
+npm run build:evals        # -> dist-evals/
+# Here:
+uv run python scripts/vendor_ui.py <frontend>/dist-evals
+git add src/martian/ui pyproject.toml
+```
+
+`vendor_ui.py` refuses a build from a dirty tree, replaces `src/martian/ui/` and rewrites the pin.
+A reviewer can rebuild the pinned commit the same way and run
+`uv run python scripts/vendor_ui.py --check <frontend>/dist-evals`, which writes nothing and names
+any file that differs.
+
+**Size.** Installed, the UI is about 1.0 MB in 40 files: JavaScript, CSS, the Inter font files
+(about 220 KB) and `third-party-licenses.md` (about 50 KB). It takes the wheel from about 170 KB
+to about 640 KB, and the sdist from about 410 KB to about 860 KB. `ls -l dist` after `uv build`
+shows the current figures.
+
+**Licences.** `third-party-licenses.md` in the build holds the licences of the packages bundled in
+it: MIT, ISC and Apache-2.0, and OFL-1.1 for the Inter font. The Evals app's own packages in the
+frontend carry no licence yet (MorningHQ/martian-notes#220); settle that before publishing a
+release that ships the UI.
 
 ## Trusted Publishing setup
 
