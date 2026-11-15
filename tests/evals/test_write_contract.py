@@ -72,6 +72,8 @@ OWN_NAMES |= {
     ("get", "/v1/evals/suites/{suite_version_id}/audit"),
     ("post", "/v1/evals/suites/{suite_version_id}/audit"),
 }
+# The core's inspection of a run for cheating (MorningHQ/martian-notes#217).
+OWN_NAMES |= {("get", "/v1/evals/{run_id}/cheating"), ("post", "/v1/evals/{run_id}/cheating/review-queue")}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),
