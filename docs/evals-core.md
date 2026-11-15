@@ -15,6 +15,7 @@ builds it with `create_app` and supplies these:
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
 | `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the targets it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
+| `agent_names` | An async function from a principal and agent ids to the agents' display names (`AgentNames`), optional | None: its runs carry no agent name | Its agent registry |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -198,7 +199,7 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
-  (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
+  (`NO_AGENT`). `agent_name` is the agent's display name from the edition's `agent_names` lookup, asked once per page of runs, and `null` without one. A CI run's `ci` is its provenance's `ci`, or its whole provenance. The Evals UI names a run
   without an agent name by its dataset, and one whose `source` is `local` as a **Local run**. `dataset_id` is the run's
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset

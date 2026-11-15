@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from martian.evals.model import Run, RunState, StoreRef, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
+    AgentNamesDep,
     PrincipalDep,
     RecordsDep,
     StoreDep,
@@ -33,7 +34,15 @@ from martian.evals.server.dependencies import (
 )
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
-from martian.evals.server.runs import find_run, lookup_run, project_keys, project_runs, writable_project
+from martian.evals.server.runs import (
+    agent_names,
+    find_run,
+    lookup_run,
+    name_of,
+    project_keys,
+    project_runs,
+    writable_project,
+)
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
@@ -84,13 +93,18 @@ def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
 
 @router.post("", response_model=EvalRunOut, status_code=202, dependencies=[Depends(require_capability("run"))])
 async def request_run(
-    body: EvalRunRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: WorkerDep
+    body: EvalRunRequest,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
+    names: AgentNamesDep,
 ) -> EvalRunOut:
     run_id = run_id_for(body.request_id)
     if existing := await lookup_run(store, records, principal, run_id):
         if not _same_request(existing, body, principal):
             raise HTTPException(409, "request_id was already used for a different eval")
-        return run_out(existing)
+        return run_out(existing, name_of(await agent_names(names, principal, [existing]), existing))
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
     pin = await worker.check_target(principal, target)
@@ -123,7 +137,7 @@ async def request_run(
     )
     run = await records.create_run(principal, run)
     await worker.submit(Work(kind="run", principal=principal, project_id=project, run_id=run.id))
-    return run_out(run)
+    return run_out(run, name_of(await agent_names(names, principal, [run]), run))
 
 
 @router.post(
@@ -132,12 +146,15 @@ async def request_run(
     status_code=202,
     dependencies=[Depends(require_capability("run"))],
 )
-async def cancel_eval(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunOut:
+async def cancel_eval(
+    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, names: AgentNamesDep
+) -> EvalRunOut:
     # A queued run is cancelled at once; a running one when its worker reaches the next case.
     run = await find_run(store, records, principal, run_id)
+    named = await agent_names(names, principal, [run])
     for _ in range(3):
         if run.cancel_requested_at is not None:
-            return run_out(run)
+            return run_out(run, name_of(named, run))
         if run.state not in ACTIVE or run.finished_at is not None:
             raise HTTPException(409, "Execution has finished; its recorded results remain available")
         now = _now()
@@ -145,9 +162,8 @@ async def cancel_eval(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDe
         if run.state == "queued":
             changes |= {"state": "cancelled", "finished_at": now}
         try:
-            return run_out(
-                await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
-            )
+            stopped = await records.update_run(principal, run.model_copy(update=changes), expected_state=run.state)
+            return run_out(stopped, name_of(named, stopped))
         except StoreError as error:
             if error.kind != "conflict":
                 raise

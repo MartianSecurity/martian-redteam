@@ -19,6 +19,9 @@ from martian.evals.worker import Worker
 
 PrincipalProvider = Callable[..., Principal | Awaitable[Principal]]
 EntitlementsProvider = Callable[[Principal], Entitlements]
+AgentNames = Callable[[Principal, list[str]], Awaitable[dict[str, str]]]
+"""An edition's lookup of registered agents' display names: from a principal and agent ids to the
+names it knows. The server reads its agent registry; the local edition has none."""
 
 
 def current_store(request: Request) -> EvalStore:
@@ -43,6 +46,12 @@ def current_judge_settings(request: Request) -> JudgeSettings | None:
     """Where the edition keeps the default judge model, or ``None`` when it keeps none."""
     settings: JudgeSettings | None = request.app.state.martian_evals_judge_settings
     return settings
+
+
+def current_agent_names(request: Request) -> AgentNames | None:
+    """The edition's agent name lookup, or ``None`` when it has none."""
+    names: AgentNames | None = request.app.state.martian_evals_agent_names
+    return names
 
 
 def current_principal() -> Principal:
@@ -106,3 +115,4 @@ StoreDep = Annotated[EvalStore, Depends(current_store)]
 RecordsDep = Annotated[RecordStore, Depends(current_records)]
 WorkerDep = Annotated[Worker, Depends(current_worker)]
 JudgeSettingsDep = Annotated[JudgeSettings | None, Depends(current_judge_settings)]
+AgentNamesDep = Annotated[AgentNames | None, Depends(current_agent_names)]

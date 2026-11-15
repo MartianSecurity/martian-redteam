@@ -171,8 +171,15 @@ def item_out(result: CaseResult) -> EvalItemOut:
     )
 
 
-def _run_fields(run: Run) -> dict[str, Any]:
+def agent_of(run: Run) -> str | None:
+    """The registered agent a run calls, or ``None`` for any other target."""
     target = run.target
+    return target.agent_id if target and target.kind == "agent" and target.agent_id else None
+
+
+def _run_fields(run: Run, agent_name: str | None) -> dict[str, Any]:
+    target = run.target
+    ci = run.provenance.get("ci") if isinstance(run.provenance.get("ci"), dict) else dict(run.provenance)
     return {
         "id": uuid.UUID(run.id),
         "run_code": run.code,
@@ -190,21 +197,24 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "errored": run.counts.errors,
         "error": run.error,
         "agent_id": uuid.UUID(target.agent_id) if target and target.kind == "agent" and target.agent_id else NO_AGENT,
+        "agent_name": agent_name,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "cancel_requested_at": run.cancel_requested_at,
         "source": run.source,
-        "ci": dict(run.provenance) if run.source == "ci" else None,
+        "ci": ci if run.source == "ci" else None,
     }
 
 
-def run_out(run: Run) -> EvalRunOut:
-    return EvalRunOut(**_run_fields(run))
+def run_out(run: Run, agent_name: str | None = None) -> EvalRunOut:
+    """A run in the contract's shape. ``agent_name`` is its agent's display name, when the edition
+    can name it; a CI run's ``ci`` is its provenance's ``ci``, or its whole provenance."""
+    return EvalRunOut(**_run_fields(run, agent_name))
 
 
-def run_detail(run: Run, results: list[CaseResult]) -> EvalRunDetailOut:
-    return EvalRunDetailOut(**_run_fields(run), items=[item_out(result) for result in results])
+def run_detail(run: Run, results: list[CaseResult], agent_name: str | None = None) -> EvalRunDetailOut:
+    return EvalRunDetailOut(**_run_fields(run, agent_name), items=[item_out(result) for result in results])
 
 
 def dataset_identity(run: Run) -> str | None:
