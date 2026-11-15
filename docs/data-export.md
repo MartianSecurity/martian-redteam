@@ -150,7 +150,7 @@ need no new references.
 ```json
 {
   "format": "martian-evals-export",
-  "version": 4,
+  "version": 5,
   "model_version": "martian-eval-model-v1",
   "sdk_version": "0.1.3",
   "organisation_id": null,
@@ -162,11 +162,16 @@ need no new references.
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`, here `4`): a new
-file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
-Version 2 added the six monitoring files, version 3 added `manifests.jsonl`, and version 4 added
-`calibrations.jsonl` and `rechecks.jsonl`. An export of an earlier version is refused: import it
-with the SDK that wrote it, and export again with this one.
+`null` for the single local user. `version` is the format's version (`VERSION`, here `5`): a new
+file, or a change to a file, to a line's shape or to what a file's lines can hold, is a new
+version, and an import reads only its own. Version 2 added the six monitoring files, version 3
+added `manifests.jsonl`, version 4 added `calibrations.jsonl` and `rechecks.jsonl`, and version 5
+let `scores.jsonl` hold a score of each source for one case, scorer and scoring job: a person's
+answer named like a check or a judge is a line beside that scorer's, where version 4 had one line
+per case, scorer and scoring job. Its lines keep their shape, so an SDK that reads version 4
+would import such a pair as one score; it refuses version 5 instead. An export of an earlier
+version, version 4 too, is refused: import it with the SDK that wrote it, and export again with
+this one.
 
 ## Exporting and resuming
 

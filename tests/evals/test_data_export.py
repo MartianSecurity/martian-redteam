@@ -1094,9 +1094,9 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    # An export of the third format, before judge calibrations and their re-checks were in it.
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 3}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 3; this SDK reads version 4"):
+    # An export of the fourth format, which kept one score per case, scorer and scoring job.
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 4}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 4; this SDK reads version 5"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
