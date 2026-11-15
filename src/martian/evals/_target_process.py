@@ -157,6 +157,9 @@ class _Tracer:
     harness turns it on, so a target that calls a supported library records its spans as before."""
 
     def __init__(self) -> None:
+        # Two MLflow internals imported here, not through martian.evals._mlflow: this process never
+        # imports the evals package. tests/evals/test_mlflow_private.py allows them in this file
+        # only, and _mlflow.PRIVATE_DEPENDENCIES lists them.
         import mlflow
         from mlflow.models.evaluation.utils.trace import configure_autologging_for_evaluation
         from mlflow.tracing.trace_manager import InMemoryTraceManager

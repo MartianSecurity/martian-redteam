@@ -124,9 +124,9 @@ class TargetProcess:
         self._requests: IO[bytes] = self._process.stdin
         traced: list[str] = []
         if trace:
-            from mlflow.ml_package_versions import FLAVOR_TO_MODULE_NAME
+            from martian.evals._mlflow import autologged_modules
 
-            traced = sorted(set(FLAVOR_TO_MODULE_NAME.values()))
+            traced = autologged_modules()
         setup = {
             "file": str(file.resolve()),
             "function": function,
