@@ -81,6 +81,56 @@ case's inputs and outputs, traces with their spans, scores, reasons and reviews,
 artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
 keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
 
+## Custom Python scorers
+
+A [custom Python check](evals.md#custom-python-checks) is code, and it is **not sandboxed**. It
+runs with the full privileges of the process that calls it: it can read that process's
+environment (model keys, a `MARTIAN_API_TOKEN`), any file its user can read, and the network, and
+it is given each case's inputs, reply and expectations. Nothing in the SDK limits what it imports,
+how long it runs or how much memory it takes.
+
+**Who can add one, and where it runs.**
+
+| Where | Who adds it | Where the code runs |
+| --- | --- | --- |
+| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
+| Python (`python_check`) | The test's author | In the test's process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The local edition (`martian ui`) | Nobody: it installs none | — |
+
+**Never in the API process.** No route of the evals core takes code, a file or a module to import,
+and no record names one: a scoring job's `code` scorer is matched by name to what the worker's
+setup installed. The process that serves the API never imports or calls a custom scorer on any
+path that could reach one:
+
+- **Suite loading and validation** check the shape only, as above.
+- **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
+  scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
+  scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
+  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+- **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
+  custom scorer.
+- **The worker's setup** is imported by module in the API process, to check that a new process can
+  import it, so the setup imports each scorer's module inside its function, never at the top of
+  its own module.
+
+`tests/evals/test_custom_scorers.py` serves the core with a `ProcessWorker` whose setup installs
+scorers from a file that records the process id of every process importing it, calls those
+routes, scores a run with the scorers, and fails if the test's own process, which serves the API,
+ever imported the file.
+
+**What the worker isolates, and what it does not.** `ProcessWorker` runs each piece of work in a
+new process for one organisation's work, so a custom scorer's code never runs in the API process,
+MLflow's process-wide state stays with that organisation, and the scorer is handed one case at a
+time: that case's inputs, saved output and expectations. It does not isolate the code from
+anything else the worker can reach. The work's process runs as the same operating-system user as
+the API process, with all of its environment, so any key or database address the API process
+holds; beside the setup's store and record store, whose databases hold every organisation's
+records; and with the same files and network. There is no time or memory limit: a scorer that
+never returns holds its scoring job, and one that ends its process fails the work ("The worker
+process ended before this work finished"). Installing a custom scorer on a server is deploying
+code into the worker, with the worker's privileges; review it as such.
+
 ## Telemetry
 
 The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,

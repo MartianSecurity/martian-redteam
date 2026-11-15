@@ -11,12 +11,17 @@ are given when the scorer is created, or per row through ``expectation="<key>"``
 as exact decimals (:mod:`martian.evals._numeric`). :func:`latency` and :func:`cost` read the
 trace MLflow records for the row's call instead of the reply. :func:`no_prohibited_phrases`,
 :func:`no_personal_data`, :func:`no_secrets`, :func:`resists_injection` and :func:`no_refusal`
-are the policy checks (:mod:`martian.evals._policy`).
+are the policy checks (:mod:`martian.evals._policy`). :func:`tool_called`,
+:func:`tool_not_called`, :func:`tool_trajectory` and :func:`step_count` read the agent's tool
+calls, model turn by model turn, from the trace of its call or from its reply
+(:mod:`martian.evals._tool_calls`). :func:`python_check` passes or fails by a team's own Python
+function (:mod:`martian.evals._custom`), which runs unsandboxed in this process.
 """
 
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import math
 import re
@@ -27,7 +32,7 @@ from typing import Any
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
 
-from martian.evals import _json_schema, _numeric, _policy
+from martian.evals import _custom, _json_schema, _numeric, _policy, _tool_calls
 from martian.evals.scorers import output_text
 
 
@@ -732,11 +737,16 @@ def no_refusal(*, expectation: str | None = None, name: str = "no_refusal") -> S
 # --- the recorded call ------------------------------------------------------------------------
 
 
-def _call(trace: Any) -> Any:
-    """The trace of the row's call. A row that brings its output and no trace gets a stand-in
-    trace from MLflow, one ``root_span`` that took no time, which measures nothing."""
+def _stand_in(trace: Any) -> bool:
+    """Whether the row brought its output and no trace: MLflow then gives it a stand-in trace,
+    one ``root_span`` that took no time, which records nothing of a call."""
     spans = trace.data.spans if trace is not None else []
-    if trace is None or (len(spans) == 1 and spans[0].name == "root_span" and spans[0].span_type == "CHAIN"):
+    return trace is None or (len(spans) == 1 and spans[0].name == "root_span" and spans[0].span_type == "CHAIN")
+
+
+def _call(trace: Any) -> Any:
+    """The trace of the row's call, which a row with a stored output does not have."""
+    if _stand_in(trace):
         raise ValueError(
             "the row's output was given rather than produced by a call, so there is no call to measure; "
             "use a target (predict_fn), or give the row the trace of its call"
@@ -809,6 +819,196 @@ def cost(*, max_usd: float | None = None, max_tokens: int | None = None, name: s
     return check
 
 
+# --- the agent's tool calls -------------------------------------------------------------------
+
+# A call a check looks for: a tool's name, or {"name": ..., "arguments": ...}.
+ToolCall = str | Mapping[str, Any]
+
+
+def _trajectory(options: _tool_calls.ToolOptions, outputs: Any, trace: Any) -> _tool_calls.Trajectory:
+    """The row's tool calls, from ``options.source``. Unset, that is the trace of the row's call,
+    and the reply for a row that brings a stored output, which no call this evaluation saw made."""
+    source = options.source or ("reply" if _stand_in(trace) else "trace")
+    if source == "reply":
+        return _tool_calls.from_reply(*_parsed_json(outputs))
+    if _stand_in(trace):
+        raise ValueError(
+            "the row's output was given rather than produced by a call, so there is no trace of its tool calls; "
+            "read the tool calls in the stored reply (source: reply), or use a target (predict_fn)"
+        )
+    return _tool_calls.from_trace(trace)
+
+
+def _tool_scorer(name: str, options: _tool_calls.ToolOptions) -> Scorer:
+    """A tool-call check, declaring ``expectations`` only when it reads them."""
+
+    def decide(outputs: Any, trace: Any, expectations: dict[str, Any] | None) -> Feedback:
+        passed, rationale = options.decide(_trajectory(options, outputs, trace), expectations)
+        return Feedback(value=passed, rationale=rationale)
+
+    if options.expectation is None:
+
+        @scorer(name=name)
+        def check(outputs: Any, trace: Any) -> Feedback:
+            return decide(outputs, trace, None)
+
+        return check
+
+    @scorer(name=name)
+    def check_row(outputs: Any, trace: Any, expectations: dict[str, Any]) -> Feedback:
+        return decide(outputs, trace, expectations)
+
+    return check_row
+
+
+def tool_called(
+    *calls: ToolCall,
+    expectation: str | None = None,
+    arguments_match: str = "subset",
+    min_calls: int = 1,
+    max_calls: int | None = None,
+    source: str | None = None,
+    name: str = "tool_called",
+) -> Scorer:
+    """Pass when the agent made each call, at least ``min_calls`` (1) and at most ``max_calls``
+    times.
+
+    A call is a tool's name, which any arguments match, or ``{"name": ..., "arguments": ...}``,
+    whose arguments must match as ``arguments_match`` says: ``exact``, ``subset`` (the default:
+    the given arguments, with equal values, and any others), ``schema`` (the arguments are a JSON
+    Schema the call's must match) or ``pattern`` (each given argument is a regular expression the
+    whole value must match). With ``expectation="<key>"`` the calls are each row's
+    ``expectations[<key>]``, such as MLflow's ``expected_tool_calls``.
+
+    ``source`` says where the calls are read (:mod:`martian.evals._tool_calls`): ``trace``, the
+    spans of the row's call, or ``reply``, the messages the reply holds. Unset, it is the trace,
+    and the reply for a row that brings a stored output.
+    """
+    _expectation_key(name, expectation)
+    options = _tool_calls.tool_options(
+        "tool_called",
+        calls=calls,
+        expectation=expectation,
+        arguments_match=arguments_match,
+        min_calls=min_calls,
+        max_calls=max_calls,
+        source=source,
+    )
+    return _tool_scorer(name, options)
+
+
+def tool_not_called(
+    *calls: ToolCall,
+    expectation: str | None = None,
+    arguments_match: str = "subset",
+    source: str | None = None,
+    name: str = "tool_not_called",
+) -> Scorer:
+    """Pass when the agent made none of the calls: none of the tools, or, for a call given with
+    arguments, no call of its tool with matching arguments. Calls, arguments and ``source`` are
+    as for :func:`tool_called`."""
+    _expectation_key(name, expectation)
+    options = _tool_calls.tool_options(
+        "tool_not_called", calls=calls, expectation=expectation, arguments_match=arguments_match, source=source
+    )
+    return _tool_scorer(name, options)
+
+
+def tool_trajectory(
+    *steps: ToolCall | Sequence[ToolCall],
+    expectation: str | None = None,
+    order: str = "exact",
+    arguments_match: str = "subset",
+    source: str | None = None,
+    name: str = "tool_trajectory",
+) -> Scorer:
+    """Pass when the agent's tool calls follow the steps.
+
+    A step is a call, made in a model turn of its own, or a list of calls the model makes together
+    in one turn, in parallel. ``order`` says how the turns that make tool calls must follow them:
+
+    - ``exact`` (the default): one turn per step, in order, each making the step's calls and no
+      others, in any order within the turn;
+    - ``in_order``: each step in a turn after the one before it, the turns and calls between and
+      around them free;
+    - ``any_order``: every call made, in any order and any turns, others free; a step may not be
+      a list here, because turns do not count.
+
+    So a step for ``a`` then a step for ``b`` fails when ``a`` and ``b`` are called in the same
+    turn, and the step ``[a, b]`` fails when they are called in successive turns. Calls,
+    arguments and ``source`` are as for :func:`tool_called`.
+    """
+    _expectation_key(name, expectation)
+    options = _tool_calls.tool_options(
+        "tool_trajectory",
+        calls=steps,
+        expectation=expectation,
+        order=order,
+        arguments_match=arguments_match,
+        source=source,
+    )
+    return _tool_scorer(name, options)
+
+
+def step_count(
+    *,
+    min_turns: int | None = None,
+    max_turns: int | None = None,
+    min_calls: int | None = None,
+    max_calls: int | None = None,
+    source: str | None = None,
+    name: str = "step_count",
+) -> Scorer:
+    """Pass when the agent took ``min_turns`` to ``max_turns`` model turns and made ``min_calls`` to
+    ``max_calls`` tool calls in all; give any of the bounds. A model turn is one response of the
+    model, whether or not it calls a tool. ``source`` is as for :func:`tool_called`."""
+    _named(name)
+    options = _tool_calls.tool_options(
+        "step_count",
+        min_turns=min_turns,
+        max_turns=max_turns,
+        min_calls=min_calls,
+        max_calls=max_calls,
+        source=source,
+    )
+    return _tool_scorer(name, options)
+
+
+# --- a team's own rule ------------------------------------------------------------------------
+
+
+def python_check(
+    function: Callable[..., Any],
+    *,
+    name: str = "python",
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> Scorer:
+    """Pass or fail by ``function``, a team's own rule (:mod:`martian.evals._custom`).
+
+    ``function`` names the arguments it reads, any of ``inputs``, ``outputs``, ``expectations``
+    and ``trace``, and is called with them by name. It returns ``True`` or ``False``; a number,
+    which passes when it is at least ``min_score`` and at most ``max_score`` (give one or both);
+    or ``(value, reason)``, the reason becoming the check's. An exception it raises, or anything
+    else it returns, is a scorer error for that row, so the gate fails closed. A function that
+    reads nothing it is given, takes ``*args`` or ``**kwargs``, or is ``async`` is refused here.
+    The function runs in this process with its full privileges: it is not sandboxed."""
+    _named(name)
+    _custom.bounds(min_score, max_score)
+    reads = _custom.arguments(function)
+
+    def check(**given: Any) -> Feedback:
+        value, reason = _custom.call(function, given)
+        passed, rationale = _custom.verdict(value, reason, min_score=min_score, max_score=max_score)
+        return Feedback(value=passed, rationale=rationale)
+
+    # MLflow passes a scorer the arguments its signature names, so this one names the function's.
+    check.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [inspect.Parameter(argument, inspect.Parameter.KEYWORD_ONLY) for argument in reads]
+    )
+    return scorer(name=name)(check)
+
+
 __all__ = [
     "contains",
     "contains_all",
@@ -828,10 +1028,15 @@ __all__ = [
     "not_contains",
     "not_matches",
     "number_equals",
+    "python_check",
     "reconciles",
     "resists_injection",
     "similarity",
     "starts_with",
+    "step_count",
     "sums_to",
     "table_equals",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
 ]
