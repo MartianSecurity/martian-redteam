@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from martian._version import __version__
+from martian.evals._digits import ascii_digits
 
 if TYPE_CHECKING:
     from martian.evals import runner
@@ -422,8 +423,8 @@ def _emit(items: Any, depth: int) -> str:
 
 
 _CATEGORIES: dict[str, Callable[[str], bool]] = {
-    "CATEGORY_DIGIT": str.isdigit,
-    "CATEGORY_NOT_DIGIT": lambda c: not c.isdigit(),
+    "CATEGORY_DIGIT": ascii_digits,
+    "CATEGORY_NOT_DIGIT": lambda c: not ascii_digits(c),
     "CATEGORY_WORD": lambda c: c.isalnum() or c == "_",
     "CATEGORY_NOT_WORD": lambda c: not (c.isalnum() or c == "_"),
     "CATEGORY_SPACE": str.isspace,
@@ -522,7 +523,7 @@ def zeros_at(paths: Sequence[str]) -> Any:
     built: dict[str, Any] = {}
     for path in paths:
         steps = [step for step in path.split(".") if step]
-        if not steps or steps[0] == "*" or steps[0].isdigit():
+        if not steps or steps[0] == "*" or ascii_digits(steps[0]):
             continue
         node: Any = built
         for position, step in enumerate(steps):
@@ -531,7 +532,7 @@ def zeros_at(paths: Sequence[str]) -> Any:
             following = steps[position + 1] if position + 1 < len(steps) else None
             if following is None:
                 node.setdefault(step, 0)
-            elif following == "*" or following.isdigit():
+            elif following == "*" or ascii_digits(following):
                 node.setdefault(step, [])
                 break
             else:
@@ -542,7 +543,7 @@ def zeros_at(paths: Sequence[str]) -> Any:
 def value_at(path: str | None, value: Any) -> Any:
     """``value`` placed at a dotted path, or itself without one."""
     for step in reversed([step for step in (path or "").split(".") if step]):
-        value = [None] * int(step) + [value] if step.isdigit() else {step: value}
+        value = [None] * int(step) + [value] if ascii_digits(step) else {step: value}
     return value
 
 
