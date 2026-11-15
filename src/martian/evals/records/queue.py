@@ -25,6 +25,10 @@ A process that does work itself, outside any worker, can hold it in the queue th
 no worker runs, and which the worker that claims it after its lease ran out finishes as
 interrupted.
 
+Work that comes back, such as a monitor's next pass, is given back with :meth:`reschedule`
+instead of removed: queued again, taken by no claim before its ``available_at``, and then behind
+the work queued before that time.
+
 The queue keeps the work as JSON and knows nothing of what it means; the worker writes and reads
 it (:mod:`martian.evals.worker.queue`). Each row belongs to the organisation's space, as every
 record does. On Postgres row-level security filters on it again; a claim, which takes the next
@@ -41,11 +45,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy import Connection, and_, delete, func, or_, select, text, update
+from sqlalchemy.exc import DataError, IntegrityError
 
-from martian.evals._sql import is_postgres
+from martian.evals._sql import database_refusal, is_postgres, operation_name
 from martian.evals.records.events import space_of
 from martian.evals.records.sql import engine_for, upgrade
 from martian.evals.records.tables import work_queue
+from martian.evals.store import StoreError
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -56,7 +62,7 @@ QUEUED = "queued"
 CLAIMED = "claimed"
 RECORDING = "recording"
 """The kind of a run that a process records itself and holds in the queue (:meth:`SqlWorkQueue.hold`),
-beside the kinds of work a worker runs, ``run`` and ``scoring``."""
+beside the kinds of work a worker runs, ``run``, ``scoring`` and ``monitor``."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,14 @@ class Claim:
     work: dict[str, Any]
     token: str
     attempt: int
+
+
+class AlreadyHeld(StoreError):
+    """:meth:`SqlWorkQueue.hold` found its entry in the queue already. A ``conflict`` that names
+    the operation and the table, never the entry's id or the principal's organisation."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("conflict", detail)
 
 
 def _now() -> datetime:
@@ -91,16 +105,27 @@ class SqlWorkQueue:
         self._engine.dispose()
 
     async def _run(self, space: str | None, work: Callable[[Connection], T]) -> T:
-        """``work`` in one transaction, for ``space``, or for every space when it is None (a claim)."""
+        """``work`` in one transaction, for ``space``, or for every space when it is None (a claim).
+        A write the database refuses becomes a ``StoreError`` naming the method ``work`` belongs to
+        and the table, never a value (``database_refusal``)."""
+        operation = operation_name(work)
 
         def transaction() -> T:
-            with self._engine.begin() as connection:
-                if self._postgres:
-                    if space is None:
-                        connection.execute(text("SELECT set_config('martian.claim', 'on', true)"))
-                    else:
-                        connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
-                return work(connection)
+            try:
+                with self._engine.begin() as connection:
+                    if self._postgres:
+                        if space is None:
+                            connection.execute(text("SELECT set_config('martian.claim', 'on', true)"))
+                        else:
+                            connection.execute(
+                                text("SELECT set_config('martian.space', :space, true)"), {"space": space}
+                            )
+                    return work(connection)
+            except (DataError, IntegrityError) as error:
+                refused = database_refusal(operation, error)
+            # Raised outside the except clause, so that the database's error, which holds the
+            # values written, does not stay on it as its context.
+            raise refused
 
         return await asyncio.to_thread(transaction)
 
@@ -130,7 +155,11 @@ class SqlWorkQueue:
             created_at=_now(),
             work=work,
         )
-        await self._run(space, lambda connection: connection.execute(statement.on_conflict_do_nothing()))
+
+        def put(connection: Connection) -> None:
+            connection.execute(statement.on_conflict_do_nothing())
+
+        await self._run(space, put)
 
     async def hold(
         self,
@@ -144,7 +173,8 @@ class SqlWorkQueue:
         """Put ``work`` in the queue already claimed by the caller for ``lease_seconds``: a process
         that does the work itself, outside any worker, and holds it in the queue so that its end is
         noticed if it stops (``martian evals run`` holding the run it records). Renew and remove it
-        as a worker's claim. Raises ``IntegrityError`` when ``entry_id`` is in the queue already."""
+        as a worker's claim. Raises :class:`AlreadyHeld`, a ``StoreError``, when ``entry_id`` is in
+        the queue already; a refusal of any other value is a ``StoreError`` too."""
         space, token, now = space_of(principal), uuid.uuid4().hex, _now()
         statement = work_queue.insert().values(
             space=space,
@@ -158,8 +188,19 @@ class SqlWorkQueue:
             created_at=now,
             work=work,
         )
-        await self._run(space, lambda connection: connection.execute(statement))
-        return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
+
+        def hold(connection: Connection) -> None:
+            connection.execute(statement)
+
+        try:
+            await self._run(space, hold)
+        except StoreError as error:
+            if error.kind != "conflict":
+                raise
+            already = AlreadyHeld(error.detail)
+        else:
+            return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
+        raise already
 
     async def claim(self, lease_seconds: float) -> Claim | None:
         """Take a piece of work that is queued, or whose claim's lease ran out, and hold it for
@@ -170,7 +211,10 @@ class SqlWorkQueue:
         def claim(connection: Connection) -> Claim | None:
             now = _now()
             claimable = or_(
-                work_queue.c.state == QUEUED,
+                and_(
+                    work_queue.c.state == QUEUED,
+                    or_(work_queue.c.available_at.is_(None), work_queue.c.available_at <= now),
+                ),
                 and_(work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at < now),
             )
             other = work_queue.alias("running")
@@ -258,6 +302,31 @@ class SqlWorkQueue:
         """Remove the work, which has ended. Does nothing once the claim no longer holds it."""
         await self._run(claim.space, lambda connection: connection.execute(delete(work_queue).where(self._key(claim))))
 
+    async def reschedule(self, claim: Claim, available_at: datetime) -> bool:
+        """Give back work that has ended for now and comes back, such as a monitor's next pass: it
+        is queued again, with no attempt counted, and no claim takes it before ``available_at``;
+        it then waits behind the work queued before that time. False when the claim no longer
+        holds it."""
+        return bool(
+            await self._run(
+                claim.space,
+                lambda connection: (
+                    connection.execute(
+                        update(work_queue)
+                        .where(self._key(claim))
+                        .values(
+                            state=QUEUED,
+                            token=None,
+                            lease_expires_at=None,
+                            attempts=0,
+                            available_at=available_at,
+                            created_at=available_at,
+                        )
+                    ).rowcount
+                ),
+            )
+        )
+
     async def held(self, principal: Principal, project_id: str, entry_id: str) -> bool:
         """Whether a claim whose lease has not run out holds ``entry_id``: whether a worker is on it."""
         space = space_of(principal)
@@ -291,12 +360,14 @@ class SqlWorkQueue:
         return await self._run(space, contains)
 
     async def pending(self) -> int:
-        """How many pieces of work, of every organisation, are in the queue: queued or claimed."""
-        return int(
-            await self._run(
-                None, lambda connection: connection.execute(select(func.count()).select_from(work_queue)).scalar_one()
-            )
-        )
+        """How many pieces of work, of every organisation, are in the queue, queued or claimed,
+        leaving out work rescheduled for later that is not due yet."""
+
+        def pending(connection: Connection) -> int:
+            due = or_(work_queue.c.available_at.is_(None), work_queue.c.available_at <= _now())
+            return int(connection.execute(select(func.count()).select_from(work_queue).where(due)).scalar_one())
+
+        return await self._run(None, pending)
 
 
-__all__ = ["CLAIMED", "QUEUED", "RECORDING", "Claim", "SqlWorkQueue"]
+__all__ = ["CLAIMED", "QUEUED", "RECORDING", "AlreadyHeld", "Claim", "SqlWorkQueue"]
