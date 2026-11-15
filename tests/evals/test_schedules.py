@@ -131,6 +131,10 @@ def test_a_cron_expression_is_read_in_utc_with_cron_s_day_rules() -> None:
         ("5/2 * * * *", "takes a step after * or a range"),
         ("*/0 * * * *", "at least 1"),
         ("0 9-5 * * *", "runs backwards"),
+        # Digits int() refuses, which str.isdigit() takes: the digits 0-9 only.
+        ("² * * * *", "not *, a number or a range"),
+        ("0 1-² * * *", "not two numbers"),
+        ("*/² * * * *", "is not a number"),
     ],
 )
 def test_a_cron_expression_it_cannot_read_is_refused_naming_why(expression: str, detail: str) -> None:

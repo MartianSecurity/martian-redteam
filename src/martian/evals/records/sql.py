@@ -41,6 +41,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import DataError, IntegrityError
 
+from martian.evals._digits import ascii_digits
 from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
 from martian.evals.model import (
     Case,
@@ -1389,7 +1390,7 @@ class SqlRecordStore:
     async def list_monitored_traces(
         self, principal: Principal, project_id: str, monitor_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[MonitoredTrace]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[MonitoredTrace]:
@@ -1703,7 +1704,7 @@ class SqlRecordStore:
     async def list_alerts(
         self, principal: Principal, project_id: str, threshold_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[Alert]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[Alert]:
@@ -1939,7 +1940,7 @@ class SqlRecordStore:
     async def list_scheduled_runs(
         self, principal: Principal, project_id: str, schedule_id: str, *, limit: int = 50, cursor: str | None = None
     ) -> Page[ScheduledRun]:
-        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        offset = int(cursor) if cursor and ascii_digits(cursor) else 0
         _bounds(offset, limit)
 
         def work(connection: Connection, space: str) -> Page[ScheduledRun]:

@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import MODEL_NAME_LENGTH, Case, Run, Target, digest
 from martian.evals.runner import (
     TargetCallError,
@@ -195,7 +196,7 @@ def response_model(response: httpx.Response, target: Target, steps: list[str]) -
     for step in steps:
         if isinstance(found, dict) and step in found:
             found = found[step]
-        elif isinstance(found, list) and step.isascii() and step.isdigit() and int(step) < len(found):
+        elif isinstance(found, list) and ascii_digits(step) and int(step) < len(found):
             found = found[int(step)]
         else:
             return None

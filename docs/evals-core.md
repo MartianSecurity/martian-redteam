@@ -1597,7 +1597,7 @@ import time
 def verify_martian_webhook(secret: str, body: bytes, timestamp: str, signature: str) -> bool:
     """Whether a request is a Martian alert: ``body`` is the raw request body, ``timestamp`` the
     X-Martian-Timestamp header and ``signature`` the X-Martian-Signature header."""
-    if not timestamp.isdigit() or abs(time.time() - int(timestamp)) > 300:
+    if not (timestamp.isascii() and timestamp.isdigit()) or abs(time.time() - int(timestamp)) > 300:
         return False
     digest = hmac.new(secret.encode("utf-8"), timestamp.encode("ascii") + b"." + body, hashlib.sha256)
     return hmac.compare_digest("v1=" + digest.hexdigest(), signature)
