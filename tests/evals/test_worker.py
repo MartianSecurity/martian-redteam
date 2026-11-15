@@ -9,7 +9,7 @@ import pytest
 
 from martian.evals.model import Case, Run, ScoringJob, StoreRef, Target
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER
+from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER, organisation_principal
 from martian.evals.store import MemoryStore, StoreError
 from martian.evals.worker import InProcessWorker, Work, Worker, execute_run, execute_scoring
 from martian.evals.worker.scorers import builtin_scorer, code_score
@@ -47,6 +47,18 @@ async def test_the_in_process_worker_knows_only_the_agents_it_was_given(records)
         await worker.check_target(SINGLE_USER, Target(kind="agent", agent_id=str(uuid.uuid4())))
     assert (refused.value.kind, refused.value.detail) == ("not_found", "Agent not found")
     assert not worker.judges
+
+
+async def test_the_in_process_worker_runs_only_its_own_organisations_work(records):
+    worker = InProcessWorker(MemoryStore(), records, organisation_id="org-a", targets={AGENT: lambda case: None})  # type: ignore[dict-item]
+    own = organisation_principal("member-a", "org-a", frozenset({"member"}))
+    assert await worker.check_target(own, Target(kind="agent", agent_id=AGENT))
+    for other in (organisation_principal("member-b", "org-b", frozenset({"member"})), SINGLE_USER):
+        with pytest.raises(ValueError, match="one organisation's work"):
+            await worker.check_target(other, Target(kind="agent", agent_id=AGENT))
+        with pytest.raises(ValueError, match="one organisation's work"):
+            await worker.submit(Work(kind="run", principal=other, project_id=DEFAULT_PROJECT, run_id="r"))
+    await worker.drain()  # nothing was started
 
 
 def test_a_launch_and_a_scoring_request_hand_their_work_over_without_running_it(records):
