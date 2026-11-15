@@ -40,7 +40,7 @@ PUBLIC_IMPORTS: dict[str, set[str] | None] = {
     "mlflow.genai.label_schemas": {"InputCategorical", "InputNumeric", "InputPassFail", "InputText", "LabelSchemaType"},
     "mlflow.genai.scorers": {"scorer", "Scorer"},
     "mlflow.types.llm": {"ChatMessage"},
-    "mlflow.environment_variables": {"MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS"},
+    "mlflow.environment_variables": {"MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS", "MLFLOW_MODEL_CATALOG_URI"},
 }
 PUBLIC_ATTRIBUTES = {
     "mlflow": {
