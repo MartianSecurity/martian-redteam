@@ -57,8 +57,10 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
   slot is due, as the API process admits a launch, and queues it here
   (:mod:`martian.evals.worker.schedule`). The worker then gives the row back, due at the
   schedule's next slot. After each run's work ends, the worker queues or cancels the suite
-  scoring job of a run a schedule admitted. A schedule whose turn failed ``max_attempts`` times
-  is paused, with :data:`SCHEDULE_STOPPED_TOO_OFTEN` as its progress's error. A worker given no
+  scoring job of a run a schedule admitted. A schedule that watches the model behind its target
+  is also due every ``ScheduleServices.model_watch_seconds``, and at once while its watch has more
+  to read. A schedule whose turn failed ``max_attempts`` times is paused, with
+  :data:`SCHEDULE_STOPPED_TOO_OFTEN` as its progress's error. A worker given no
   ``schedules`` that takes a schedule's row gives it back for another worker, one lease later.
 
 So restarting the API process loses no queued or running run, whether its worker runs in that
@@ -304,7 +306,8 @@ class QueueWorker:
             await self._queue.done(claim)
             return
         progress = await self._records.schedule_progress(work.principal, work.project_id, schedule_id)
-        await self._queue.reschedule(claim, next_due(schedule, progress, datetime.now(UTC)))
+        watch = self._schedules.model_watch_seconds if self._schedules is not None else None
+        await self._queue.reschedule(claim, next_due(schedule, progress, datetime.now(UTC), watch_seconds=watch))
 
     async def _next_pass(self, claim: Claim, work: Work) -> None:
         """Give a monitor's row back for its next pass, due ``monitor_seconds`` from now, or at once

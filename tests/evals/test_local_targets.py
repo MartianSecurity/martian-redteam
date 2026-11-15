@@ -153,6 +153,7 @@ def test_each_kind_is_the_shared_models_http_target_with_the_key_as_a_reference(
         body={"model": "example-1", "messages": [{"role": "user", "content": "{{input}}"}]},
         response_path="choices.0.message.content",
         headers={"Authorization": "Bearer ${MARTIAN_TARGET_KEY}"},
+        model_path="model",
     )
     assert targets.model_target(found[open_endpoint["id"]]).headers == {}
 

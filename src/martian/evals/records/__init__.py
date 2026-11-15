@@ -5,7 +5,8 @@ and review queues. The evals core also needs runs with their lifecycle, case res
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
 Traces page's saved views, the monitors that score a project's live traces with what each has
 scored, the thresholds on their scores with the alerts they raise, and the schedules that run a
-suite against a target with the slots each has run.
+suite against a target with the slots each has run, and with how far each has watched the model
+behind its target.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from martian.evals.model import (
+    MODEL_NAME_LENGTH,
     Case,
     CaseResult,
     DatasetDraft,
@@ -169,6 +171,59 @@ class MonitoredTrace(_Record):
     finished_at: datetime | None = None
 
 
+class ModelWatch(_Record):
+    """What makes a schedule also run its suite when the model behind its target changes
+    (MorningHQ/martian-notes#200), besides its slots.
+
+    ``source`` is where the model is read: ``traces``, the model of the project's live traces
+    (not those of eval runs), read by time as a monitor reads them; or ``runs``, the model the
+    target reported on the project's runs of it (``Run.provenance["model"]``). A new model is a
+    change once it has been the only one seen for ``settle_seconds``, and a change starts the
+    suite at most once every ``min_interval_seconds``, so a model that flaps back and forth starts
+    no storm of runs (:mod:`martian.evals.worker.schedule`)."""
+
+    source: Literal["traces", "runs"]
+    settle_seconds: float = Field(default=300, ge=0, le=7 * 86400, allow_inf_nan=False)
+    min_interval_seconds: float = Field(default=3600, ge=0, le=30 * 86400, allow_inf_nan=False)
+
+
+class ModelChange(_Record):
+    """A change of the model behind a schedule's target, from ``previous`` to ``current``, that
+    starts the schedule's suite: the run its slot ``at`` holds in the history, a slot of its own or
+    the regular slot due at the same turn."""
+
+    previous: str = Field(min_length=1, max_length=MODEL_NAME_LENGTH)
+    current: str = Field(min_length=1, max_length=MODEL_NAME_LENGTH)
+    at: datetime
+
+    @property
+    def note(self) -> str:
+        return f"model changed from {self.previous} to {self.current}"
+
+
+class ModelWatchProgress(_Record):
+    """How far a schedule's model watch has read, written only by the worker.
+
+    ``model`` is the model the schedule last ran its suite for, or the first it saw. ``candidate``
+    is another model seen since, with ``candidate_since`` when it was first seen after the last
+    sight of any other: a change once ``settle_seconds`` pass with nothing else seen. ``watermark``:
+    every trace with an earlier request time, or every run that finished at or before it, has been
+    read. ``last_change_at`` is when a change last started the suite, and ``change`` a change
+    decided but not yet in the history. ``caught_up`` is False when the last read stopped at its
+    bound with more to read; ``error`` is why the last read failed, or empty."""
+
+    model: str | None = Field(default=None, max_length=MODEL_NAME_LENGTH)
+    candidate: str | None = Field(default=None, max_length=MODEL_NAME_LENGTH)
+    candidate_since: datetime | None = None
+    watermark: datetime | None = None
+    observed: int = Field(default=0, ge=0)
+    last_change_at: datetime | None = None
+    change: ModelChange | None = None
+    caught_up: bool = True
+    error: str = ""
+    checked_at: datetime | None = None
+
+
 class Schedule(_Record):
     """A saved suite version run against a target on a schedule (MorningHQ/martian-notes#197): a
     regression run, admitted by the worker at each slot as a launch is admitted. The core's own
@@ -181,14 +236,16 @@ class Schedule(_Record):
     every run reads, so the schedule's runs compare with each other. ``target`` is pinned again
     at each run's admission, as a launch pins it: a changed target is what a regression run is
     for. ``limits`` are each run's own (``RunLimits``), or None for the worker's. Its runs are due
-    from ``active_since``: when it was created or last resumed. Every change raises
-    ``revision``."""
+    from ``active_since``: when it was created or last resumed. ``on_model_change``, when set,
+    also runs the suite when the model behind the target changes (:class:`ModelWatch`). Every
+    change raises ``revision``."""
 
     id: Identifier
     project_id: Identifier
     name: str = Field(min_length=1, max_length=120)
     every_seconds: int | None = Field(default=None, ge=1)
     cron: str | None = Field(default=None, max_length=200)
+    on_model_change: ModelWatch | None = None
     suite_id: Identifier
     suite_version: int = Field(ge=1)
     suite_name: str = ""
@@ -215,13 +272,15 @@ class Schedule(_Record):
 
 class ScheduleProgress(_Record):
     """Where a schedule stands, written only by the worker: ``next_slot``, when its next run is
-    due, ``last_slot``, the slot it last ran or skipped, and ``error``, why its last turn failed,
-    or empty."""
+    due, ``last_slot``, the slot it last ran or skipped, ``error``, why its last turn failed, or
+    empty, and ``model_watch``, how far its model watch has read, for a schedule with
+    ``on_model_change``."""
 
     next_slot: datetime | None = None
     last_slot: datetime | None = None
     error: str = ""
     last_turn_at: datetime | None = None
+    model_watch: ModelWatchProgress | None = None
 
 
 class ScheduledRun(_Record):
@@ -231,7 +290,12 @@ class ScheduledRun(_Record):
     each, and ``created_at`` is when the turn came. ``gate`` is its run's gate result once the
     run's suite has scored it: the suite scorecard's gate, ``passed``, ``failed``,
     ``insufficient_coverage`` or ``unconfigured``; None until then, and for a run that did not
-    complete."""
+    complete.
+
+    ``trigger`` is why the slot ran: ``slot``, its schedule's timing, or ``model_change``, a slot
+    of its own that a change of the model behind the target started. ``model_change`` is the
+    change the slot's run was started for, on either kind: a change noticed at a turn whose regular
+    slot was due rides on that slot's run."""
 
     schedule_id: Identifier
     slot: datetime
@@ -241,11 +305,15 @@ class ScheduledRun(_Record):
     missed: int = Field(default=0, ge=0)
     created_at: datetime | None = None
     gate: Literal["passed", "failed", "insufficient_coverage", "unconfigured"] | None = None
+    trigger: Literal["slot", "model_change"] = "slot"
+    model_change: ModelChange | None = None
 
     @model_validator(mode="after")
     def run_when_admitted(self) -> ScheduledRun:
         if (self.state == "admitted") != (self.run_id is not None):
             raise ValueError("an admitted slot names its run, and a skipped one none")
+        if self.trigger == "model_change" and self.model_change is None:
+            raise ValueError("a slot a model change started names the change")
         return self
 
 
@@ -781,6 +849,9 @@ __all__ = [
     "EventBus",
     "EventsLost",
     "InProcessEvents",
+    "ModelChange",
+    "ModelWatch",
+    "ModelWatchProgress",
     "Monitor",
     "MonitorFilter",
     "MonitorProgress",

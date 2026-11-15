@@ -24,6 +24,9 @@ the request calls no target and no model.
   completed (:func:`martian.evals.server.quality.compare_runs`).
 - Pausing stops its turns admitting runs; resuming runs its slots from then on, not the ones that
   passed while it was paused. Deleting removes it, its progress and its history; its runs stay.
+- ``on_model_change`` also runs the suite when the model behind the target changes, read from the
+  project's live traces or from the model the target reported on its runs, debounced
+  (:mod:`martian.evals.worker.model_watch`). The history notes each change that started a run.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the core's routes follow the contract's style.
@@ -41,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from martian.evals import slots
 from martian.evals.model import CaseResult, Run, RunLimits, Score, ScoringJob, Target
-from martian.evals.records import RecordStore, Schedule, ScheduledRun, ScheduleProgress
+from martian.evals.records import ModelWatch, RecordStore, Schedule, ScheduledRun, ScheduleProgress
 from martian.evals.server.dependencies import (
     JudgeSettingsDep,
     PrincipalDep,
@@ -113,6 +116,7 @@ class ScheduleRequest(BaseModel):
     every_seconds: int | None = None
     cron: str | None = Field(default=None, max_length=200)
     limits: RunLimits | None = None
+    on_model_change: ModelWatch | None = None
     acknowledge_model_cost: bool = False
 
     @field_validator("cron")
@@ -125,6 +129,9 @@ class ScheduleRequest(BaseModel):
         slots.timing(every_seconds=self.every_seconds, cron=self.cron)
         if self.every_seconds is not None and self.every_seconds < slots.MIN_INTERVAL_SECONDS:
             raise ValueError(f"every_seconds is at least {slots.MIN_INTERVAL_SECONDS}")
+        watch = self.on_model_change
+        if watch is not None and watch.min_interval_seconds < slots.MIN_INTERVAL_SECONDS:
+            raise ValueError(f"on_model_change.min_interval_seconds is at least {slots.MIN_INTERVAL_SECONDS}")
         return self
 
 
@@ -159,6 +166,7 @@ def schedule_out(schedule: Schedule, progress: ScheduleProgress | None) -> dict[
         "dataset_digest": schedule.dataset_digest,
         "max_items": schedule.max_cases,
         "limits": schedule.limits.model_dump(mode="json") if schedule.limits else None,
+        "on_model_change": schedule.on_model_change.model_dump(mode="json") if schedule.on_model_change else None,
         "active_since": schedule.active_since,
         "created_by": user_out(schedule.created_by) if schedule.created_by else None,
         "created_at": schedule.created_at,
@@ -206,6 +214,7 @@ def _same_request(schedule: Schedule, body: ScheduleRequest, project: str) -> bo
         and schedule.dataset_name == body.dataset_name
         and schedule.max_cases == body.max_items
         and schedule.limits == body.limits
+        and schedule.on_model_change == body.on_model_change
     )
 
 
@@ -266,6 +275,7 @@ async def create_schedule(
         dataset_digest=dataset.digest,
         max_cases=body.max_items,
         limits=body.limits,
+        on_model_change=body.on_model_change,
         active_since=now,
         created_by=principal.user_id,
         created_at=now,
@@ -380,15 +390,23 @@ class _History:
         return job, [Assessment.of(s) for s in self._scores[run.id] if s.scoring_job_id == job.id]
 
     async def entry(self, entry: ScheduledRun, earlier: Sequence[ScheduledRun]) -> dict[str, Any]:
+        # The work's module imports the routes' projection, so it is imported when a history needs it.
+        from martian.evals.worker.execute import run_model
+
+        change = entry.model_change
         found: dict[str, Any] = {
             "slot": entry.slot,
             "missed": entry.missed,
             "fired_at": entry.created_at,
+            "trigger": entry.trigger,
+            "model_change": {"from": change.previous, "to": change.current} if change else None,
+            "note": change.note if change else "",
             "state": entry.state,
             "reason": entry.reason,
             "error": "",
             "run_id": entry.run_id,
             "run_code": None,
+            "model": None,
             "pass_rate": None,
             "counts": None,
             "scoring": None,
@@ -404,6 +422,7 @@ class _History:
             "state": run.state,
             "error": run.error,
             "run_code": run.code,
+            "model": run_model(run),
             "pass_rate": counts.passed / graded if graded else None,
             "counts": {
                 "passed": counts.passed,

@@ -13,7 +13,8 @@ one of these:
   ``{{inputs.NAME}}`` and ``{{uuid}}``. The output is the response's text, or the value at
   ``response_path``. A response that is not 2xx, a missing value or an unreachable endpoint is the
   case's error, in words that name the setting to check and never repeat the address, a header
-  or the response;
+  or the response. The model that answered is the text at ``model_path`` in the response's JSON,
+  or the ``model_header`` header, when the target names one (:func:`response_model`);
 - a registered agent of the worker's :class:`~martian.evals.worker.AgentExecutor`, which needs
   leased credentials and runs through martian-agents. The worker asks the executor only for ids
   it does not know itself.
@@ -53,7 +54,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from martian.evals.model import Case, Run, Target, digest
+from martian.evals.model import MODEL_NAME_LENGTH, Case, Run, Target, digest
 from martian.evals.runner import (
     TargetCallError,
     _case_values,
@@ -66,7 +67,7 @@ from martian.evals.runner import (
 )
 from martian.evals.server.projection import prompt_text
 from martian.evals.store import StoreError
-from martian.evals.worker import AgentExecutor, Credentials, TargetCall
+from martian.evals.worker import AgentExecutor, Credentials, TargetCall, TargetReply
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -145,6 +146,15 @@ FUNCTIONS = FunctionTargets()
 """The function targets' thread, one for the process."""
 
 
+def reported_model(value: Any) -> str | None:
+    """The model a target reported, as a run and a trace keep it: text, stripped, of at most
+    :data:`~martian.evals.model.MODEL_NAME_LENGTH` characters; None for anything else."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return name if 0 < len(name) <= MODEL_NAME_LENGTH and name.isprintable() else None
+
+
 def http_target(target: Target) -> Target:
     """``target``, which must be an HTTP target."""
     if target.kind != "http":
@@ -159,9 +169,37 @@ def _steps(target_id: str, target: Target) -> list[str]:
     return _response_steps(http_target(target).response_path, f"targets[{target_id!r}].response_path")
 
 
+def _model_steps(target_id: str, target: Target) -> list[str]:
+    """The steps of the HTTP target's ``model_path``, refused as its ``response_path`` is."""
+    return _response_steps(http_target(target).model_path, f"targets[{target_id!r}].model_path")
+
+
+def response_model(response: httpx.Response, target: Target, steps: list[str]) -> str | None:
+    """The model an HTTP target's response reports: the ``model_header`` header, or the text at
+    ``model_path`` (``steps``) in its JSON. None when the target names neither, or the response
+    has no such text; that is not the case's error, and the case's output stands."""
+    if target.model_header:
+        return reported_model(response.headers.get(target.model_header))
+    if not steps:
+        return None
+    try:
+        found = response.json()
+    except ValueError:
+        return None
+    for step in steps:
+        if isinstance(found, dict) and step in found:
+            found = found[step]
+        elif isinstance(found, list) and step.isascii() and step.isdigit() and int(step) < len(found):
+            found = found[int(step)]
+        else:
+            return None
+    return reported_model(found)
+
+
 def http_pin(target_id: str, target: Target) -> dict[str, Any]:
     """What pins a run of an HTTP target: its id and a digest of it as written, never a value."""
     _steps(target_id, target)
+    _model_steps(target_id, target)
     return {"kind": "http", "agent_id": target_id, "digest": digest(target.model_dump(mode="json"))}
 
 
@@ -174,8 +212,10 @@ def http_call(
     timeout_seconds: float,
 ) -> TargetCall:
     """Call the HTTP target ``target_id`` once per case, with ``${NAME}`` filled in from
-    ``credentials``. ``timeout_seconds`` is the worker's bound on one call."""
-    steps = _steps(target_id, target)
+    ``credentials``. ``timeout_seconds`` is the worker's bound on one call. Each call returns a
+    :class:`~martian.evals.worker.TargetReply` with the model the response reports
+    (:func:`response_model`)."""
+    steps, model_steps = _steps(target_id, target), _model_steps(target_id, target)
 
     def value_of(name: str) -> str | None:
         return credentials(principal, target_id, name) if credentials is not None else None
@@ -202,7 +242,7 @@ def http_call(
                 response = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as error:
             raise _unreachable(error) from None
-        return _reply(response, steps)
+        return TargetReply(_reply(response, steps), response_model(response, target, model_steps))
 
     return call
 
@@ -284,6 +324,8 @@ __all__ = [
     "http_call",
     "http_pin",
     "http_target",
+    "reported_model",
+    "response_model",
     "target_call",
     "target_pin",
 ]
