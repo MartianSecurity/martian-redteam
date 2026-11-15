@@ -16,7 +16,9 @@ webhook, its email recipients, or both (:mod:`martian.evals.alerts`).
   neither unless it is configured to, so either is ``422`` until then.
 - A webhook's ``secret`` is written once, with the threshold, and no route returns it: a
   threshold shows ``"signed": true`` in its place. To change it, delete the threshold and create
-  it again.
+  it again. A threshold an import wrote (``martian.evals.data_export``) has its webhook and no
+  secret, and shows ``"signed": false`` until ``POST /thresholds/{id}/secret`` gives it one; that
+  route refuses a threshold that has one (``409``).
 - The id is derived from ``request_id``: the same request again returns the same threshold. A
   project has at most :data:`THRESHOLD_LIMIT` thresholds. Deleting the monitor or the schedule
   deletes its thresholds and their alerts.
@@ -85,9 +87,24 @@ class WebhookRequest(BaseModel):
     @field_validator("secret")
     @classmethod
     def printable(cls, secret: str) -> str:
-        if not secret.isascii() or not secret.isprintable() or secret != secret.strip():
-            raise ValueError("A webhook secret is printable ASCII with no space at either end")
-        return secret
+        return printable_secret(secret)
+
+
+def printable_secret(secret: str) -> str:
+    if not secret.isascii() or not secret.isprintable() or secret != secret.strip():
+        raise ValueError("A webhook secret is printable ASCII with no space at either end")
+    return secret
+
+
+class SecretRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    secret: str = Field(min_length=16, max_length=256)
+
+    @field_validator("secret")
+    @classmethod
+    def printable(cls, secret: str) -> str:
+        return printable_secret(secret)
 
 
 class SourceRequest(BaseModel):
@@ -129,8 +146,9 @@ class ThresholdRequest(BaseModel):
         return self
 
 
-def threshold_out(threshold: Threshold, status: ThresholdStatus | None) -> dict[str, Any]:
-    """A threshold as a route returns it: its webhook's secret is never in it, only that it signs."""
+def threshold_out(threshold: Threshold, status: ThresholdStatus | None, *, signed: bool) -> dict[str, Any]:
+    """A threshold as a route returns it: its webhook's secret is never in it, only whether it
+    signs (``signed``: False for a threshold an import wrote, until its secret is given again)."""
     return {
         "id": threshold.id,
         "project_id": project_out(threshold.project_id),
@@ -141,7 +159,7 @@ def threshold_out(threshold: Threshold, status: ThresholdStatus | None) -> dict[
         "value": threshold.value,
         "window_seconds": threshold.window_seconds,
         "min_count": threshold.min_count,
-        "webhook": None if threshold.webhook is None else {"url": threshold.webhook.url, "signed": True},
+        "webhook": None if threshold.webhook is None else {"url": threshold.webhook.url, "signed": signed},
         "email": None if threshold.email is None else {"to": list(threshold.email.to)},
         "status": (status or ThresholdStatus()).model_dump(mode="json"),
         "created_by": user_out(threshold.created_by) if threshold.created_by else None,
@@ -150,7 +168,11 @@ def threshold_out(threshold: Threshold, status: ThresholdStatus | None) -> dict[
 
 
 async def _out(records: RecordStore, principal: Principal, threshold: Threshold) -> dict[str, Any]:
-    return threshold_out(threshold, await records.threshold_status(principal, threshold.project_id, threshold.id))
+    status = await records.threshold_status(principal, threshold.project_id, threshold.id)
+    signed = threshold.webhook is not None and await records.threshold_signed(
+        principal, threshold.project_id, threshold.id
+    )
+    return threshold_out(threshold, status, signed=signed)
 
 
 async def _find(store: EvalStore, records: RecordStore, principal: Principal, threshold_id: uuid.UUID) -> Threshold:
@@ -283,6 +305,21 @@ async def list_alerts(
     return {"items": [a.model_dump(mode="json") for a in page.items], "next_cursor": page.next_cursor}
 
 
+@router.post("/thresholds/{threshold_id}/secret", response_model=None, dependencies=[MONITORING, SCORE])
+async def set_threshold_secret(
+    threshold_id: uuid.UUID, body: SecretRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep
+) -> dict[str, Any]:
+    threshold = await _find(store, records, principal, threshold_id)
+    if threshold.webhook is None:
+        raise HTTPException(422, "The threshold has no webhook to sign")
+    await writable_key(store, principal, threshold.project_id)
+    if not await records.set_threshold_secret(principal, threshold.project_id, threshold.id, body.secret):
+        raise HTTPException(
+            409, "The threshold's webhook has its secret already; to change it, delete the threshold and create another"
+        )
+    return await _out(records, principal, threshold)
+
+
 @router.delete("/thresholds/{threshold_id}", status_code=204, dependencies=[MONITORING, SCORE])
 async def delete_threshold(
     threshold_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep
@@ -292,4 +329,4 @@ async def delete_threshold(
     return Response(status_code=204)
 
 
-__all__ = ["THRESHOLD_LIMIT", "ThresholdRequest", "router", "threshold_out"]
+__all__ = ["THRESHOLD_LIMIT", "SecretRequest", "ThresholdRequest", "router", "threshold_out"]

@@ -8,9 +8,11 @@ one of these:
 - an HTTP target, the shared model's ``Target(kind="http")``. The worker POSTs each case to its
   ``url`` itself, so a run needs no martian-agents service. The rules are a suite file's URL
   target's (:func:`martian.evals.runner._http_target`, whose pieces this reuses): one request per
-  case, no retry, no redirect, no proxy from the environment, and ``body`` filled in with
-  ``{{input}}`` (the case's prompt, the text the server sends a registered agent),
-  ``{{inputs.NAME}}`` and ``{{uuid}}``. The output is the response's text, or the value at
+  case, no retry, no redirect, no proxy from the environment, and ``body`` filled in by
+  :func:`martian.evals.runner.request_body` with ``{{input}}`` (the case's prompt, the text the
+  server sends a registered agent), ``{{inputs.NAME}}``, ``{{uuid}}``, and the placeholders of a
+  conversation of one turn: ``{{session_id}}`` a new id, ``{{history}}`` empty and
+  ``{{messages}}`` the prompt as one user message. The output is the response's text, or the value at
   ``response_path``. A response that is not 2xx, a missing value or an unreachable endpoint is the
   case's error, in words that name the setting to check and never repeat the address, a header
   or the response. The model that answered is the text at ``model_path`` in the response's JSON,
@@ -57,13 +59,12 @@ import httpx
 from martian.evals.model import MODEL_NAME_LENGTH, Case, Run, Target, digest
 from martian.evals.runner import (
     TargetCallError,
-    _case_values,
     _check_url,
     _expand,
-    _fill,
     _reply,
     _response_steps,
     _unreachable,
+    request_body,
 )
 from martian.evals.server.projection import prompt_text
 from martian.evals.store import StoreError
@@ -234,8 +235,7 @@ def http_call(
 
     async def call(case: Case) -> Any:
         url, headers = request()
-        prompt, values = prompt_text(case.inputs), _case_values(case.inputs, "message")
-        body = _fill(target.body, lambda name: prompt if name == "input" else values(name))
+        body = request_body(target.body, case.inputs, "message", prompt=prompt_text(case.inputs))
         timeout = timeout_seconds + CLIENT_SLACK_SECONDS
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:

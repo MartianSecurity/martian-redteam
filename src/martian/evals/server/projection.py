@@ -14,7 +14,8 @@ stay a port of the server's and the mapping is in one place:
 - A case's text (``prompt``, ``expected``, ``output``) is what the server shows: the first text
   under ``message``, ``prompt``, ``question`` or ``content`` of the inputs, and under
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
-  with none of those keys are shown as their JSON.
+  with none of those keys are shown as their JSON. A conversation case's ``prompt`` is its first
+  turn's, and its ``output`` the conversation as messages.
 - Traces are shown in MLflow's terms, as the contract's MLflow-shaped responses are: states such as
   ``OK``, assessment sources such as ``LLM_JUDGE``, and a ``TraceInfo`` built from the trace. A
   span's type, model, usage, inputs and outputs are what the trace conventions mapping
@@ -42,6 +43,7 @@ from martian.evals.model import (
     ScoringJob,
     Trace,
     TraceState,
+    TurnResult,
     Value,
     digest,
 )
@@ -176,7 +178,7 @@ def item_out(result: CaseResult) -> EvalItemOut:
         dataset_item_id=result.case_id,
         position=result.position,
         status=result.status,
-        prompt=prompt_text(result.inputs),
+        prompt=prompt_text(result.turns[0].inputs if result.turns else result.inputs),
         expected=expected_text(result.expectations),
         output=text_of(result.output),
         error=result.error,
@@ -219,25 +221,67 @@ def attempts_out(result: CaseResult) -> dict[str, Any]:
     """A case result's attempts, for the core's own attempts route: each attempt's verdict, each
     check's verdict, the reply as text, the target error, latency and trace, and whether the
     case is flaky, its verdict changing between attempts. Empty, and not flaky, for a case that
-    ran once."""
+    ran once. An attempt of a conversation case also has its ``session_id`` and its ``turns``."""
+    attempts = []
+    for attempt in result.attempts:
+        found: dict[str, Any] = {
+            "number": attempt.number,
+            "status": attempt.status,
+            "output": text_of(attempt.output),
+            "error": attempt.error,
+            "latency_ms": attempt.latency_ms,
+            "trace_id": attempt.trace_id,
+            "checks": {label: verdict.model_dump(mode="json") for label, verdict in attempt.checks.items()},
+        }
+        if attempt.turns:
+            found |= {"session_id": attempt.session_id, "turns": [turn_out(turn) for turn in attempt.turns]}
+        attempts.append(found)
     return {
         "id": result_id(result.run_id, result.case_id),
         "dataset_item_id": result.case_id,
         "position": result.position,
         "status": result.status,
         "flaky": flaky(attempt_verdicts(result)),
-        "attempts": [
-            {
-                "number": attempt.number,
-                "status": attempt.status,
-                "output": text_of(attempt.output),
-                "error": attempt.error,
-                "latency_ms": attempt.latency_ms,
-                "trace_id": attempt.trace_id,
-                "checks": {label: verdict.model_dump(mode="json") for label, verdict in attempt.checks.items()},
-            }
-            for attempt in result.attempts
-        ],
+        "attempts": attempts,
+    }
+
+
+def turn_out(turn: TurnResult) -> dict[str, Any]:
+    """One turn of a conversation, for the core's own routes: its verdict, its prompt, expected text
+    and reply as the run detail shows a case's, the target error, latency, trace and each check's
+    verdict on it."""
+    return {
+        "number": turn.number,
+        "status": turn.status,
+        "prompt": prompt_text(turn.inputs),
+        "expected": expected_text(turn.expectations),
+        "output": text_of(turn.output),
+        "error": turn.error,
+        "latency_ms": turn.latency_ms,
+        "trace_id": turn.trace_id,
+        "checks": {label: verdict.model_dump(mode="json") for label, verdict in turn.checks.items()},
+    }
+
+
+def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, Any]:
+    """A conversation case's result, for the core's own turns route: its verdict and each check's
+    verdict on the whole conversation (``scores``, the run's own scores of the case), its session
+    id, which its turns' traces share, its latency, its turns, and whether a simulator wrote its
+    user's turns (``simulated``). With repeats these are the attempt's that stands for the case;
+    the attempts route has every attempt's."""
+    own = [score for score in scores if score.scoring_job_id is None]
+    return {
+        "id": result_id(result.run_id, result.case_id),
+        "dataset_item_id": result.case_id,
+        "position": result.position,
+        "status": result.status,
+        "session_id": result.session_id,
+        "simulated": result.simulated,
+        "latency_ms": result.latency_ms,
+        "checks": {
+            score.scorer: {"passed": score.passed, "rationale": score.rationale, "error": score.error} for score in own
+        },
+        "turns": [turn_out(turn) for turn in result.turns],
     }
 
 

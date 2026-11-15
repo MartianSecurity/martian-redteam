@@ -435,8 +435,25 @@ class RecordContract:
         assert "s3cret" not in made.model_dump_json()
         assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
         assert await records.threshold_secret(ORG_A, "p1", "t0") is None
-        await refused("invalid", records.create_threshold(ORG_A, "p1", threshold("t2"), webhook_secret=None))
+        await refused(
+            "invalid", records.create_threshold(ORG_A, "p1", threshold("t2", webhook=False), webhook_secret="y" * 16)
+        )
         assert await records.threshold_status(ORG_A, "p1", "t1") == ThresholdStatus()
+        assert [await records.threshold_signed(ORG_A, "p1", t) for t in ("t0", "t1")] == [False, True]
+        # A webhook an import wrote has no secret until it is given one, once (data export).
+        await records.create_threshold(ORG_A, "p1", threshold("t3", name="Imported"), webhook_secret=None)
+        assert not await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.set_threshold_secret(ORG_B, "p1", "t3", "o" * 16)
+        assert await records.set_threshold_secret(ORG_A, "p1", "t3", "n3w-s3cret-n3w-s3cret")
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t3", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t1", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t0", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "gone", "z" * 16)
+        assert await records.threshold_secret(ORG_A, "p1", "t3") == "n3w-s3cret-n3w-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.threshold_signed(ORG_B, "p1", "t3")
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
 
         # A change of state and its alerts are written together, once, conditioned on the sequence.
         breached = ThresholdStatus(state="breached", sequence=1, since=T0)

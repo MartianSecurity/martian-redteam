@@ -1280,8 +1280,8 @@ class SqlRecordStore:
     ) -> Threshold:
         if threshold.project_id != project_id:
             raise StoreError("invalid", "the threshold belongs to another project")
-        if (threshold.webhook is None) != (webhook_secret is None):
-            raise StoreError("invalid", "a threshold with a webhook has a secret, and one without has none")
+        if threshold.webhook is None and webhook_secret is not None:
+            raise StoreError("invalid", "a threshold without a webhook has no secret")
 
         def work(connection: Connection, space: str) -> tuple[Threshold, bool]:
             if stored := self._one(connection, thresholds, space, project_id, id=threshold.id):
@@ -1431,6 +1431,45 @@ class SqlRecordStore:
             return found
 
         return await self._run(principal, work)
+
+    async def threshold_signed(self, principal: Principal, project_id: str, threshold_id: str) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            return (
+                connection.execute(
+                    select(thresholds.c.id).where(
+                        thresholds.c.space == space,
+                        thresholds.c.project_id == project_id,
+                        thresholds.c.id == threshold_id,
+                        thresholds.c.secret.is_not(None),
+                    )
+                ).first()
+                is not None
+            )
+
+        return await self._run(principal, work)
+
+    async def set_threshold_secret(self, principal: Principal, project_id: str, threshold_id: str, secret: str) -> bool:
+        def work(connection: Connection, space: str) -> bool:
+            stored = self._one(connection, thresholds, space, project_id, id=threshold_id)
+            if stored is None or Threshold.model_validate(stored).webhook is None:
+                return False
+            return bool(
+                connection.execute(
+                    update(thresholds)
+                    .where(
+                        thresholds.c.space == space,
+                        thresholds.c.project_id == project_id,
+                        thresholds.c.id == threshold_id,
+                        thresholds.c.secret.is_(None),
+                    )
+                    .values(secret=secret)
+                ).rowcount
+            )
+
+        written = await self._run(principal, work)
+        if written:
+            self._emit(principal, "threshold", project_id, threshold_id)
+        return written
 
     async def take_due_alerts(
         self,

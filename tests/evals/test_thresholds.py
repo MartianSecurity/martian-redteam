@@ -690,6 +690,54 @@ def test_a_breach_through_the_queue_sends_one_signed_webhook(
         assert SECRET not in json.dumps(alert)
 
 
+def test_an_imported_webhook_signs_once_its_secret_is_given_again(
+    records: SqlRecordStore, queue: SqlWorkQueue, receiver: Receiver, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A threshold an import wrote has its webhook and no secret (docs/data-export.md): it shows
+    unsigned until ``POST /thresholds/{id}/secret`` gives it one, once, and then signs with it."""
+    caplog.set_level(logging.DEBUG)
+    core = Core(records, queue, AlertSettings(webhook=WEBHOOKS))
+    with core.client:
+        monitor = create(core, "/v1/evals/monitors", **MONITOR)
+        assert core.client.portal is not None
+        imported = Threshold(
+            id=str(uuid.uuid4()),
+            project_id=DEFAULT_PROJECT,
+            name="Imported pass rate",
+            source=MonitorScores(monitor_id=monitor["id"], scorer="safety"),
+            measure="pass_rate",
+            direction="at_least",
+            value=0.5,
+            window_seconds=3600,
+            min_count=3,
+            webhook=WebhookChannel(url=receiver.url),
+        )
+        core.client.portal.call(
+            lambda: records.create_threshold(SINGLE_USER, DEFAULT_PROJECT, imported, webhook_secret=None)
+        )
+        path = f"/v1/evals/thresholds/{imported.id}"
+        assert core.call("GET", path, 200)["webhook"] == {"url": receiver.url, "signed": False}
+        core.principal["current"] = VIEWER
+        core.call("POST", f"{path}/secret", 403, json={"secret": SECRET})
+        core.principal["current"] = SINGLE_USER
+        assert "at least 16" in core.text("POST", f"{path}/secret", json={"secret": "short"})
+        signed = core.call("POST", f"{path}/secret", 200, json={"secret": SECRET})
+        assert signed["webhook"] == {"url": receiver.url, "signed": True} and SECRET not in json.dumps(signed)
+        # Written once: another is refused, and so is a threshold with no webhook, or none at all.
+        assert "delete the threshold" in core.call("POST", f"{path}/secret", 409, json={"secret": "x" * 16})["detail"]
+        plain = create(core, "/v1/evals/thresholds", **a_threshold(monitor["id"]))
+        core.call("POST", f"/v1/evals/thresholds/{plain['id']}/secret", 422, json={"secret": "x" * 16})
+        core.call("POST", f"/v1/evals/thresholds/{uuid.uuid4()}/secret", 404, json={"secret": "x" * 16})
+        # Its breach is signed with the secret it was given.
+        for number in range(5):  # the fake judge calls every reply unsafe
+            core.record(number)
+        until(lambda: len(receiver.requests) == 1)
+        [delivered] = receiver.requests
+        headers = delivered["headers"]
+        assert verify(SECRET, delivered["body"], headers[TIMESTAMP_HEADER], headers[SIGNATURE_HEADER])
+        assert SECRET not in caplog.text
+
+
 def test_threshold_routes_need_monitoring_the_score_capability_and_a_worker_that_sends(
     records: SqlRecordStore, queue: SqlWorkQueue, receiver: Receiver
 ) -> None:
