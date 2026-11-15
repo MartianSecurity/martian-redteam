@@ -16,7 +16,9 @@ stay a port of the server's and the mapping is in one place:
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
   with none of those keys are shown as their JSON.
 - Traces are shown in MLflow's terms, as the contract's MLflow-shaped responses are: states such as
-  ``OK``, assessment sources such as ``LLM_JUDGE``, and a ``TraceInfo`` built from the trace.
+  ``OK``, assessment sources such as ``LLM_JUDGE``, and a ``TraceInfo`` built from the trace. A
+  span's type, model, usage, inputs and outputs are what the trace conventions mapping
+  (``martian.evals.trace_conventions``) reads from it.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from martian.evals.model import (
 from martian.evals.repeats import flaky, reliability
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
 from martian.evals.stats import wilson
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION, map_span, mapping_table
 
 DEFAULT_PROJECT = "default"
 """The project a request without ``project_id`` reads: the contract's default project."""
@@ -67,6 +70,7 @@ RUN_STATUS = {
     "partial": "FINISHED",
     "failed": "FAILED",
     "cancelled": "KILLED",
+    "stopped": "KILLED",
 }
 USAGE_NOTE = "Native instrumented usage is shown when supplied; missing token/cost values remain unavailable."
 
@@ -525,15 +529,26 @@ def trace_info(trace: Trace, experiment_id: str) -> dict[str, Any]:
 
 def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
     """A trace's spans as the Evals UI's span inspector reads them, at most 200, with the trace's
-    usage. Refuses a trace whose spans are not one tree."""
+    usage. Each span's type, model, token usage, inputs and outputs are what the trace conventions
+    mapping reads from it, with the mapping version the trace names (the newest when it names
+    none): a tool call is a ``TOOL`` span whose inputs are its arguments and outputs its result,
+    and the calls a model asked for are in its output messages. The rows keep the server's
+    fields. Refuses a trace whose spans are not one tree, or whose mapping version this release
+    does not know."""
     spans = trace.spans
     roots = [span for span in spans if not span.parent_id]
     if spans and len(roots) != 1:
         raise HTTPException(409, "Unexpected saved trace structure")
+    version = trace.metadata.get(MAPPING_KEY, MAPPING_VERSION)
+    try:
+        mapping_table(version)
+    except ValueError as error:
+        raise HTTPException(409, f"The trace was mapped with {version}, which this release does not know") from error
     root_start = (roots[0].start_ms or 0) if roots else 0
     rows: list[dict[str, Any]] = []
     for span in spans[:200]:
         fields = span.attributes
+        mapped = map_span(span, version=version)
         start, end = span.start_ms or 0, span.end_ms or 0
         rows.append(
             {
@@ -542,13 +557,13 @@ def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
                 "name": span.name,
                 "duration_ms": max(0, end - start),
                 "offset_ms": max(0, start - root_start),
-                "type": span.kind or fields.get("mlflow.spanType", "UNKNOWN"),
-                "token_usage": fields.get("mlflow.chat.tokenUsage"),
+                "type": mapped.kind or "UNKNOWN",
+                "token_usage": mapped.token_usage(),
                 "cost": fields.get("mlflow.llm.cost"),
-                "model": fields.get("gen_ai.request.model") or fields.get("mlflow.llm.model"),
+                "model": mapped.model,
                 "retrieved_documents": fields.get("mlflow.retrievedDocuments"),
-                "inputs": span.inputs,
-                "outputs": span.outputs,
+                "inputs": mapped.inputs,
+                "outputs": mapped.outputs,
                 "status": {"code": SPAN_STATUS.get(span.status, "STATUS_CODE_UNSET")},
                 "attributes": fields,
                 "events": [],
@@ -567,12 +582,11 @@ def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
             parent = by_id[parent]["parent_id"]
         row["depth"] = len(seen) - 1
     root = roots[0].attributes if roots else {}
+    root_usage = map_span(roots[0], version=version).token_usage() if roots else None
     return {
         "trace_id": trace_id,
         "spans": rows,
-        "token_usage": {"total_tokens": trace.tokens}
-        if trace.tokens is not None
-        else root.get("mlflow.chat.tokenUsage"),
+        "token_usage": {"total_tokens": trace.tokens} if trace.tokens is not None else root_usage,
         "estimated_cost": {"total_cost": trace.cost} if trace.cost is not None else root.get("mlflow.llm.cost"),
         "truncated": len(spans) > 200,
         "usage_note": USAGE_NOTE,

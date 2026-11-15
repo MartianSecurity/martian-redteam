@@ -1,33 +1,37 @@
 """The local edition: the evals core and the Evals UI, served by one process on this machine.
 
 ``martian ui`` starts it. It has one fixed user (:data:`~martian.evals.server.SINGLE_USER`), no
-sign-in and the Community edition. It keeps everything in one data folder, ``~/.martian/evals``
-unless the caller names another:
+sign-in and the Community edition, with as many runs, and as many scoring jobs, in progress at
+once as its ``concurrency`` (:func:`local_entitlements`; 1 unless ``martian ui --concurrency`` or
+:data:`CONCURRENCY_ENV` names more), which is also how many its worker runs at once. It keeps
+everything in one data folder, ``~/.martian/evals`` unless the caller names another:
 
 - ``mlflow.db``: the core's store, :class:`~martian.evals.store.mlflow_local.MlflowStore` on SQLite;
 - ``artifacts/``: that store's run artifacts.
 - ``martian.db``: the core's records, :class:`~martian.evals.records.sql.SqlRecordStore` on SQLite:
-  runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
+  runs, case results, scores, scoring jobs, reviews, suites and dataset drafts; and the worker's
+  queue of runs and scoring jobs (:class:`~martian.evals.records.queue.SqlWorkQueue`), in which
+  each run is held by what works on it.
 - ``targets.json`` and ``target-keys.json``: the targets the user defines in the UI, in place of
   the hosted console's Agents registry, and their keys, in a file only the user can read
   (:mod:`martian.evals.local_targets`).
 - ``settings.json``: the local settings, :class:`~martian.evals.judge_settings.FileJudgeSettings`:
   the default judge model, which an organisation sets on the server. Written when it is first set.
-- ``locks/``: an empty file per process working on a run, which that process holds an OS lock on
-  (:class:`~martian.evals.local_runs.RunLock`), so that another process can tell it is alive.
 
 ``martian evals run`` records each suite-file run in the same folder
 (:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
 open the folder, so that an application can then record traces into the project's experiment with
 MLflow tracing (``docs/evals-core.md`` gives the settings).
 
-Runs started in the UI run in processes of their own, with the edition's worker
-(:class:`~martian.evals.local_runs.LocalWorker`), against the targets the user defines, and their
-suites' model judges run on the SDK judge, on the default judge model in ``settings.json`` or the
-judge's own. When it starts, the server finishes as interrupted each queued or running run that no
-process is working on any more (:func:`~martian.evals.local_runs.finish_interrupted`).
+Runs started in the UI are queued durably and run in processes of their own, with the edition's
+worker (:class:`~martian.evals.local_runs.LocalWorker`), which the server serves beside the app,
+against the targets the user defines, and their suites' model judges run on the SDK judge, on the
+default judge model in ``settings.json`` or the judge's own. A run whose server stopped is taken
+again when the next one starts. When it starts, the server finishes as interrupted each queued or
+running run that is not in the queue at all (:func:`~martian.evals.local_runs.finish_interrupted`).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
+The API is under ``/v1``: the core's ``/v1/evals`` routes, its OpenTelemetry ``POST /v1/traces``,
+which takes the fixed principal's traces without credentials, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
 ``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``
 (:mod:`martian.evals.local_runs`). Every other path is a file of the built Evals UI, by default
@@ -58,7 +62,15 @@ from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
 from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
+from martian.evals.server import (
+    COMMUNITY,
+    DEFAULT_PROJECT,
+    SINGLE_USER,
+    Entitlements,
+    Principal,
+    create_app,
+    current_principal,
+)
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
 from martian.evals.store import StoreError
 from martian.evals.store.mlflow_local import MlflowStore
@@ -93,6 +105,18 @@ SESSION_ID = "local"
 
 SETTINGS_FILE = "settings.json"
 """The data folder's local settings: the default judge model."""
+
+CONCURRENCY_ENV = "MARTIAN_EVALS_CONCURRENCY"
+"""``martian ui --concurrency``: how many runs, and how many scoring jobs, may be in progress at
+once, and how many pieces of work the worker runs at once. Unset, 1, the Community edition's."""
+
+
+def local_entitlements(concurrency: int = 1) -> Entitlements:
+    """The local edition's entitlements: Community, with ``concurrency`` as its limits on runs and
+    on scoring jobs in progress at once. The user's own machine runs the work, so the user sets
+    them."""
+    limits = {"concurrent_runs": concurrency, "concurrent_scoring_jobs": concurrency}
+    return Entitlements(edition=COMMUNITY.edition, features=COMMUNITY.features, limits=limits)
 
 
 class LocalEditionError(Exception):
@@ -185,23 +209,27 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
     return LocalToken(access_token=ACCESS_TOKEN, session=session)
 
 
-def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS) -> FastAPI:
+def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS, *, concurrency: int = 1) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
-    user, with a worker that runs each run in a process of its own, the session call, the local
-    targets in ``home`` and the local runs, and the built UI in ``ui``, a folder holding
-    ``index.html``. It answers a request only when its ``Host`` header names one of ``hosts``.
-    Runs of ``home`` that no process is working on any more are finished as interrupted first."""
+    user, with a worker that serves the folder's queue beside the app and runs each run in a
+    process of its own, the session call, the local targets in ``home`` and the local runs, and
+    the built UI in ``ui``, a folder holding ``index.html``. It answers a request only when its
+    ``Host`` header names one of ``hosts``. ``concurrency`` runs, and as many scoring jobs, may be
+    in progress at once, and its worker runs that many pieces at once. Queued or running runs of
+    ``home`` that are not in its queue at all are finished as interrupted first."""
+    entitlements = local_entitlements(concurrency)
     if not (ui / "index.html").is_file():
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
     asyncio.run(local_runs.finish_interrupted(home, store, records))
     targets = local_targets.LocalTargets(home)
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
-    worker = local_runs.LocalWorker(home, records, targets, judge_settings)
+    worker = local_runs.LocalWorker(home, records, targets, judge_settings, concurrency=concurrency)
     app = create_app(
         store=store,
         records=records,
         principal=lambda: SINGLE_USER,
+        entitlements=lambda _principal: entitlements,
         worker=worker,
         judge_settings=judge_settings,
     )

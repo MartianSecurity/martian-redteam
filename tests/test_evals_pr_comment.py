@@ -273,6 +273,38 @@ def test_a_repeated_policy_suite_shows_its_false_refusals_and_its_reliability():
     assert "`all` for `no_secrets`; `any` for `no_refusal`." in "\n".join(lines)
 
 
+def test_a_stopped_run_says_how_many_cases_it_did_not_run_and_shows_no_earlier_result_for_them(tmp_path):
+    from martian.evals.runner import write_junit
+
+    stopped = "Stopped at its time limit (max_seconds 60) after 61 seconds"
+    counts = {"passed": 1, "failed": 0, "errors": 0, "pass_rate": 1.0, "confidence_95": [0.21, 1.0]}
+    summary = {
+        "cases": 1,
+        **counts,
+        "groups": None,
+        "checks": {"no_leak": counts},
+        "not_run": 1,
+        "stopped": {"limit": "max_seconds", "value": 60, "used": 61, "message": stopped},
+    }
+    done = {"id": "done", "passed": True, "checks": {"no_leak": {"passed": True}}, "error": None}
+    # An earlier run's record of the case this run stopped before.
+    earlier = {"id": "later", "passed": None, "checks": {}, "error": "the target call failed"}
+    lines = "".join(json.dumps(record) + "\n" for record in (done, earlier))
+    (tmp_path / "results.jsonl").write_text(lines, encoding="utf-8")
+    (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    write_junit([done], tmp_path / "junit.xml", suite_name="evals", summary=summary, not_run=["later"], stopped=stopped)
+    outcome = comment.load_outcome(tmp_path, 2)
+    assert [case["id"] for case in outcome.cases] == ["done"]
+    body = comment.render(outcome, suite=SUITE, key=SUITE)
+    assert body.splitlines()[1] == "### Martian evals did not finish"
+    assert f"{stopped}: 1 cases not run. Run the suite again to resume after the cases it finished." in body
+    assert "later" not in body and "Cases without a verdict" not in body
+    cancelled = comment.render(
+        comment.Outcome(2, {**summary, "stopped": None, "cancelled": True}), suite=SUITE, key=SUITE
+    )
+    assert "It was cancelled: 1 cases not run." in cancelled
+
+
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():
     cell = comment.code("a|b`c @team <b>x</b>")
     assert cell == "``a\\|b`c @team <b>x</b>``"  # one code span; the escaped pipe stays in its cell

@@ -15,8 +15,10 @@ import pytest
 
 from martian.evals.model import Counts, Project, Run, Span, Trace, TraceQuery
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
-from martian.evals.store import EvalStore, StoreError
+from martian.evals.store import REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED, EvalStore, StoreError
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.store_contract import LONG_REQUEST, LONG_RESPONSE, ORG_A, T0, StoreContract, trace
+from tests.evals.trace_samples import ANSWER, MODEL, QUESTION, sample_spans
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
 LONGEST_ARTIFACT_ROOT = 157
@@ -106,6 +108,25 @@ class MlflowTracingContract:
         assert [t.id for t in by_user.items] == recorded["bob"]
         bob_sessions = await store.search_sessions(SINGLE_USER, TraceQuery(project_id="p1", user_id="bob"))
         assert [s.id for s in bob_sessions.items] == ["conversation-2"]
+
+    async def test_a_trace_mlflow_tracing_recorded_is_mapped_as_it_is_read(
+        self, store: EvalStore, tracking_uri: str, monkeypatch
+    ) -> None:
+        import mlflow
+
+        project = await store.create_project(SINGLE_USER, Project(id="p1", name="Support agent"))
+        model_call = sample_spans("openinference")[1]
+        with application_tracing(monkeypatch, tracking_uri, project), mlflow.start_span(name="support agent") as root:
+            root.set_inputs({"message": QUESTION})
+            with mlflow.start_span(name=model_call.name) as span:
+                span.set_attributes(model_call.attributes)
+        # It never went through record_trace, so the store maps it as it reads it.
+        (found,) = (await store.search_traces(SINGLE_USER, TraceQuery(project_id="p1"))).items
+        assert found.metadata[MAPPING_KEY] == MAPPING_VERSION and found.tokens == 20
+        read = await store.get_trace(SINGLE_USER, "p1", found.id)
+        assert read is not None and read.metadata[MAPPING_KEY] == MAPPING_VERSION
+        assert (read.model, [s.kind for s in read.spans]) == (MODEL, ["UNKNOWN", "LLM"])
+        assert read.spans[1].attributes["llm.model_name"] == MODEL
 
     async def test_a_trace_recorded_inside_a_runs_mlflow_run_belongs_to_the_run(
         self, store: EvalStore, tracking_uri: str, monkeypatch
@@ -312,14 +333,80 @@ class TraceLayoutContract:
         read = await store.get_trace(ORG_A, "p1", "long")
         assert read is not None
         assert (read.request, read.response, read.spans) == (LONG_REQUEST, LONG_RESPONSE, [span])
+        # Every trace the binding records also names its trace conventions mapping version.
+        mapped = {MAPPING_KEY: MAPPING_VERSION}
         shortened = {"martian.request_preview_truncated": "true", "martian.response_preview_truncated": "true"}
-        assert read.metadata == shortened
+        assert read.metadata == {**shortened, **mapped}
         found = {t.id: t for t in (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items}
         previews = (long.info.request_preview, long.info.response_preview)
         assert (found["long"].request, found["long"].response) == previews
-        assert found["long"].metadata == shortened
-        assert (found["short"].request, found["short"].response, found["short"].metadata) == ("hi", "hello", {})
+        assert found["long"].metadata == {**shortened, **mapped}
+        assert (found["short"].request, found["short"].response, found["short"].metadata) == ("hi", "hello", mapped)
         assert (await store.get_trace(ORG_A, "p1", "short")).spans == []  # type: ignore[union-attr]
+
+    async def test_the_request_a_traces_own_root_span_gives_is_kept_whole_in_one_root_span(
+        self, store: EvalStore
+    ) -> None:
+        """A trace that says nothing but its spans, as the OpenTelemetry endpoint records one: the
+        mapping gives its request and response from its own root span, never the binding's, and
+        the binding's root span keeps them whole, once, when the trace is recorded again."""
+        from martian.evals.store.mlflow_local import TRACE_SPAN_KEY, MlflowStore, _mlflow_trace_id
+
+        assert isinstance(store, MlflowStore)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        agent, model_call, tool = sample_spans("openinference")
+        whole = {"input.value": LONG_REQUEST, "output.value": LONG_RESPONSE}
+        agent = agent.model_copy(update={"attributes": {**agent.attributes, **whole}})
+
+        def roots() -> list[Any]:
+            """The trace's spans without a parent, as MLflow itself reads them."""
+            native = store._store.get_trace(_mlflow_trace_id("t1"), allow_partial=True)
+            return [s for s in native.data.spans if s.parent_id is None]
+
+        for spans in ([agent, model_call], [agent, model_call, tool]):
+            # Recorded again with one more span, as the OpenTelemetry endpoint merges a later batch.
+            await store.record_trace(ORG_A, Trace(id="t1", project_id="p1", name="turn", state="ok", spans=spans))
+            read = await store.get_trace(ORG_A, "p1", "t1")
+            assert read is not None
+            assert (read.request, read.response, read.model) == (LONG_REQUEST, LONG_RESPONSE, MODEL)
+            assert [(s.id, s.parent_id) for s in read.spans] == [(agent.id, None)] + [
+                (s.id, agent.id) for s in spans[1:]
+            ]
+            assert [s.kind for s in read.spans] == ["AGENT", "LLM", "TOOL"][: len(spans)]
+            (root,) = await store._call(ORG_A, roots)
+            assert root.get_attribute(TRACE_SPAN_KEY) is True
+            assert (root.inputs, root.outputs) == (LONG_REQUEST, LONG_RESPONSE)
+            (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
+            assert (found.request, found.response) == (LONG_REQUEST[:997] + "...", LONG_RESPONSE[:997] + "...")
+            assert (found.metadata[REQUEST_PREVIEW_TRUNCATED], found.metadata[RESPONSE_PREVIEW_TRUNCATED]) == (
+                "true",
+                "true",
+            )
+
+    async def test_a_trace_recorded_without_a_mapping_version_is_mapped_from_its_own_spans(
+        self, store: EvalStore, monkeypatch
+    ) -> None:
+        """A trace the binding wrote, with its root span, before it mapped traces is mapped as it is
+        read: from the trace's own spans, with the request its own root span gives where the
+        trace's was empty, as if it had been mapped when it was recorded."""
+        from martian.evals.store import mlflow_local
+
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        agent, model_call, _ = sample_spans("openinference")
+        with monkeypatch.context() as unmapped:
+            unmapped.setattr(mlflow_local, "map_trace", lambda trace: trace)
+            await store.record_trace(
+                ORG_A, Trace(id="t1", project_id="p1", name="turn", state="ok", spans=[agent, model_call])
+            )
+        (found,) = (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items
+        assert (found.metadata[MAPPING_KEY], found.request, found.model) == (MAPPING_VERSION, "", None)
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.metadata[MAPPING_KEY] == MAPPING_VERSION
+        assert (read.request, read.response, read.model, read.tokens) == (QUESTION, ANSWER, MODEL, 20)
+        assert [(s.id, s.parent_id, s.kind) for s in read.spans] == [
+            (agent.id, None, "AGENT"),
+            (model_call.id, agent.id, "LLM"),
+        ]
 
 
 def artifact_root_of_length(tmp_path: Path, length: int) -> Path:
