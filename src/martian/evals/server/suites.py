@@ -33,7 +33,14 @@ from martian.evals.server.dependencies import (
     StoreDep,
     require_capability,
 )
-from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, policy_out, project_key, suite_version_id
+from martian.evals.server.projection import (
+    DEFAULT_PROJECT,
+    derived_id,
+    policy_out,
+    project_key,
+    suite_version_id,
+    user_out,
+)
 from martian.evals.server.runs import writable_project
 from martian.evals.server.write_schemas import JudgeModelOut, JudgeModelRequest, JudgeVersionRequest, SuiteRequest
 from martian.evals.worker.scorers import builtin_scorer
@@ -69,7 +76,7 @@ def suite_out(suite: Suite) -> dict[str, Any]:
             "policies": [policy_out(p) for p in sorted(suite.policies, key=lambda p: p.scorer)],
         },
         "digest": suite.digest,
-        "actor_id": suite.created_by,
+        "actor_id": user_out(suite.created_by) if suite.created_by else None,
         "created_at": suite.created_at,
     }
 
