@@ -122,6 +122,17 @@ class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
         return root
 
 
+def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore) -> None:
+    """Keep the values of the store's SQL statements out of SQLAlchemy's errors and log lines.
+
+    MLflow's SQL store creates its engine itself (``engine``, one per database URL, shared by every
+    MLflow store in the process on that URL), and SQLAlchemy writes a failed statement's values
+    into its error, which MLflow passes on in its own and logs for some database failures. The
+    values of a trace are its request and its response.
+    """
+    store.engine.hide_parameters = True
+
+
 def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, page_token: str | None) -> Any:
     """One page of a dataset's records and the next page token. MLflow has no public reader that
     takes a store."""
@@ -159,6 +170,7 @@ __all__ = [
     "error_text",
     "get_adapter",
     "get_request_workspace",
+    "hide_sql_parameters",
     "invoke_litellm",
     "is_context_window_error",
     "is_response_format_error",
