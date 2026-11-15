@@ -30,6 +30,12 @@ RunState = Literal["queued", "running", "completed", "partial", "failed", "cance
 CaseStatus = Literal["pending", "passed", "failed", "error", "skipped"]
 ScoreSource = Literal["code", "llm_judge", "human"]
 QuestionKind = Literal["boolean", "numeric", "categorical", "text"]
+CombineRule = Literal["all", "majority", "any"]
+"""How a check's verdicts over a case's attempts become one: every attempt passes, more than half
+pass, or at least one passes (``martian.evals.repeats``)."""
+
+MAX_ATTEMPTS = 100
+"""The most attempts a suite runs of each case."""
 
 
 def digest(value: Any) -> str:
@@ -195,12 +201,26 @@ class RunSettings(_Object):
     mlflow_experiment: str | None = None
 
 
+class Repeats(_Object):
+    """How many times a suite runs each case, and how each check's verdicts over those attempts
+    combine into the case's verdict for that check. ``combine`` is the suite's rule and ``checks``
+    the rules checks name for themselves, by scorer name. A check that names none takes ``all`` if
+    it is a security check and the suite's rule otherwise; the runner decides which checks are
+    security checks. Repeats change verdicts, so they are part of the suite's definition and of a
+    case result's fingerprint, not a run setting."""
+
+    attempts: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
+    combine: CombineRule = "all"
+    checks: dict[str, CombineRule] = Field(default_factory=dict)
+
+
 class Suite(_Object):
     """A dataset, a target and scorers, run together. A new version for every change.
 
     ``dataset_location`` is where the cases are read from: a suite file's ``data`` path, as written
     there. ``input_key`` names the input that judges grade against and that a plain-text case
-    input fills.
+    input fills. ``repeats`` is left out when it is the default (one attempt, rule ``all``, no
+    check rules), so a suite without repeats has the digest it had before the field existed.
     """
 
     id: Identifier
@@ -214,6 +234,7 @@ class Suite(_Object):
     scorers: list[ScorerVersion] = Field(min_length=1)
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
+    repeats: Repeats = Repeats()
     digest: Digest
     created_at: datetime | None = None
     created_by: str | None = None
@@ -225,7 +246,16 @@ class Suite(_Object):
             raise ValueError("scorer names must be unique within a suite")
         if unknown := sorted({policy.scorer for policy in self.policies} - set(names)):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
+        if unknown := sorted(set(self.repeats.checks) - set(names)):
+            raise ValueError(f"repeats name scorers the suite does not have: {', '.join(unknown)}")
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_default_repeats(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and self.repeats == Repeats():
+            written.pop("repeats", None)
+        return written
 
 
 def suite_digest(suite: Suite) -> str:
@@ -272,9 +302,37 @@ class Run(_Object):
     store: StoreRef = StoreRef()
 
 
+class CheckVerdict(_Object):
+    """One check's verdict on one attempt. ``passed`` is None when there is no verdict."""
+
+    passed: bool | None = None
+    rationale: str = ""
+    error: str = ""
+
+
+class Attempt(_Object):
+    """One attempt of a case that its suite runs more than once (``Suite.repeats``): its verdict,
+    each check's verdict, the reply, why the target call failed if it did, and the trace it was
+    recorded in, if any."""
+
+    number: int = Field(ge=1, le=MAX_ATTEMPTS)
+    status: CaseStatus
+    checks: dict[str, CheckVerdict] = Field(default_factory=dict)
+    output: Any = None
+    error: str = ""
+    latency_ms: float | None = Field(default=None, ge=0)
+    trace_id: str | None = None
+
+
 class CaseResult(_Object):
     """What one case produced in one run. ``fingerprint`` identifies everything that produced it,
-    so a resumed run reuses the result only while that is unchanged."""
+    so a resumed run reuses the result only while that is unchanged.
+
+    A case its suite runs more than once has every attempt in ``attempts``, in order; its
+    ``status`` and scores are the attempts combined by each check's rule, and its ``output``,
+    ``error`` and trace are those of the first attempt whose verdict is the case's, else of its
+    first attempt. ``attempts`` is left out when empty, so a result without repeats is written as
+    it was before the field existed."""
 
     run_id: Identifier
     case_id: Identifier
@@ -288,6 +346,14 @@ class CaseResult(_Object):
     fingerprint: Digest | None = None
     finished_at: datetime | None = None
     store: StoreRef = StoreRef()
+    attempts: list[Attempt] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _without_empty_attempts(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and not self.attempts:
+            written.pop("attempts", None)
+        return written
 
 
 class Score(_Object):
@@ -540,7 +606,35 @@ RESULTS_RECORD_FIELDS = {
     "output": "CaseResult.output",
     "error": "CaseResult.error",
     "fingerprint": "CaseResult.fingerprint",
+    "attempts": "CaseResult.attempts (only when the suite repeats its cases)",
 }
+
+# Every field of one entry of a results.jsonl record's ``attempts``, and where the model keeps it.
+ATTEMPT_RECORD_FIELDS = {
+    "number": "Attempt.number",
+    "passed": "Attempt.status",
+    "checks": "Attempt.checks (one CheckVerdict per check label)",
+    "output": "Attempt.output",
+    "error": "Attempt.error",
+}
+
+
+def _verdict(check: dict[str, Any]) -> CheckVerdict:
+    return CheckVerdict(
+        passed=check.get("passed"), rationale=check.get("rationale") or "", error=check.get("error") or ""
+    )
+
+
+def _attempt(entry: dict[str, Any]) -> Attempt:
+    if unknown := sorted(set(entry) - set(ATTEMPT_RECORD_FIELDS)):
+        raise ValueError(f"results record has attempt fields the model does not map: {', '.join(unknown)}")
+    return Attempt(
+        number=entry["number"],
+        status=case_status(entry["passed"]),
+        checks={label: _verdict(check) for label, check in (entry.get("checks") or {}).items()},
+        output=entry.get("output"),
+        error=entry.get("error") or "",
+    )
 
 
 def from_results_record(
@@ -549,7 +643,8 @@ def from_results_record(
     """One ``results.jsonl`` record as a case result and its scores.
 
     ``scorers`` maps a check label to the scorer that produced it, so each score names its
-    version and source; a label not in it is recorded as a check.
+    version and source; a label not in it is recorded as a check. A record's ``attempts`` become
+    the result's attempts; its scores are the record's own checks, the attempts combined.
     """
     if unknown := sorted(set(record) - set(RESULTS_RECORD_FIELDS)):
         raise ValueError(f"results record has fields the model does not map: {', '.join(unknown)}")
@@ -562,6 +657,7 @@ def from_results_record(
         output=record.get("output"),
         error=record.get("error") or "",
         fingerprint=record.get("fingerprint"),
+        attempts=[_attempt(entry) for entry in record.get("attempts") or []],
     )
     scores = []
     for label, check in (record.get("checks") or {}).items():
@@ -583,8 +679,14 @@ def from_results_record(
 
 
 __all__ = [
+    "ATTEMPT_RECORD_FIELDS",
+    "MAX_ATTEMPTS",
     "MODEL_VERSION",
     "SESSION_TRACE_LIMIT",
+    "Attempt",
+    "CheckVerdict",
+    "CombineRule",
+    "Repeats",
     "DatasetDraft",
     "Page",
     "QueueItem",

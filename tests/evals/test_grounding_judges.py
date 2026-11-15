@@ -414,10 +414,11 @@ def test_a_suite_runs_the_grounding_judges_on_the_case_documents(tmp_path, monke
 
     monkeypatch.setattr("martian.evals.grounding.invoke_response_judge", provider)
     summary = runner.run_suite(write(tmp_path))
-    assert summary["checks"] == {
-        "groundedness_judge": {"passed": 1, "failed": 0, "errors": 0},
-        "context_relevance_judge": {"passed": 1, "failed": 0, "errors": 0},
-        "enough": {"passed": 0, "failed": 1, "errors": 0},
+    counted = ("passed", "failed", "errors", "pass_rate")
+    assert {label: {key: found[key] for key in counted} for label, found in summary["checks"].items()} == {
+        "groundedness_judge": {"passed": 1, "failed": 0, "errors": 0, "pass_rate": 1.0},
+        "context_relevance_judge": {"passed": 1, "failed": 0, "errors": 0, "pass_rate": 1.0},
+        "enough": {"passed": 0, "failed": 1, "errors": 0, "pass_rate": 0.0},
     }
     record = json.loads((tmp_path / "results/results.jsonl").read_text().splitlines()[0])
     assert record["checks"]["enough"]["rationale"].startswith("Not sufficient.")
