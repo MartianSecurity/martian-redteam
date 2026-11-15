@@ -18,10 +18,12 @@ from martian_redteam.cli import app as redteam_app
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
 import_app = typer.Typer(no_args_is_help=True, add_completion=False)
+convert_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer checks.")
 evals_app.add_typer(
     import_app, name="import", help="Bring runs from other eval tools, or a Martian export, into the local Evals UI."
 )
+evals_app.add_typer(convert_app, name="convert", help="Turn another eval tool's config into suite files.")
 app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 DATA_DIR_HELP = (
@@ -184,6 +186,109 @@ def import_inspect(
         )
     ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
     typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@import_app.command("promptfoo")
+def import_promptfoo(
+    files: Annotated[
+        list[Path],
+        typer.Argument(
+            dir_okay=False,
+            show_default=False,
+            help="promptfoo results files, as `promptfoo eval -o results.json` writes.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", file_okay=False, show_default=False, help=DATA_DIR_HELP)
+    ] = None,
+) -> None:
+    """Import promptfoo results as runs in the local Evals UI: one run per provider in each file.
+
+    martian evals import promptfoo results.json
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Importing promptfoo results needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.promptfoo_import import PromptfooResultsError, import_promptfoo_results
+
+    home = data_folder(data_dir)
+    try:
+        runs = import_promptfoo_results(files, home)
+    except (PromptfooResultsError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for run in runs:
+        counts, source = run.counts, run.provenance["promptfoo"]
+        typer.echo(
+            f"{Path(source['results']).name}: provider {source['provider']['label'] or source['provider']['id']}, "
+            f"run {run.code}, {counts.cases} cases: {counts.passed} passed, {counts.failed} failed, "
+            f"{counts.errors} errors"
+        )
+    ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+    typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@convert_app.command("promptfoo")
+def convert_promptfoo(
+    config: Annotated[
+        Path, typer.Argument(dir_okay=False, show_default=False, help="A promptfoo config, promptfooconfig.yaml.")
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output", file_okay=False, show_default=False, help="The folder to write the suite and data files to."
+        ),
+    ],
+    target: Annotated[
+        str | None,
+        typer.Option(
+            "--target",
+            show_default=False,
+            help="FILE.py[:FUNCTION], called as FUNCTION(prompt=..., vars=...) for each case (default function: "
+            "target). Without it, the suite grades each test's providerOutput.",
+        ),
+    ] = None,
+    judge_model: Annotated[
+        str | None,
+        typer.Option(
+            "--judge-model",
+            show_default=False,
+            help="The model the rubric judge calls for llm-rubric assertions, such as openai:/gpt-4.1-mini. "
+            "Without it, llm-rubric assertions are not converted.",
+        ),
+    ] = None,
+) -> None:
+    """Convert a promptfoo config into suite files for `martian evals run`, where its features map,
+    and list everything that does not.
+
+    martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "zstandard")):
+        typer.echo("Converting a promptfoo config needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.promptfoo_convert import (
+        PromptfooConfigError,
+        convert_promptfoo_config,
+        report_lines,
+        write_conversion,
+    )
+
+    try:
+        conversion = convert_promptfoo_config(config, output=output, target=target, judge_model=judge_model)
+        if conversion.suites:
+            write_conversion(conversion, output)
+    except PromptfooConfigError as error:
+        typer.echo(f"Conversion failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    for line in report_lines(conversion, output):
+        typer.echo(line)
+    if not conversion.suites:
+        typer.echo("Nothing written: no test converts.", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"Run each with `martian evals run`, such as: martian evals run {output / conversion.suites[0].suite_file}"
+    )
 
 
 @import_app.command("mlflow")

@@ -434,6 +434,9 @@ What builds on it:
   in the UI: [command-line runs](#command-line-runs).
 - `martian evals import inspect` records Inspect AI logs there as runs:
   [imported Inspect logs](#imported-inspect-logs).
+- `martian evals import promptfoo` records promptfoo results there as runs, and
+  `martian evals convert promptfoo` writes a promptfoo config as suite files:
+  [promptfoo results and configs](#promptfoo-results-and-configs).
 - `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
   check: [copied MLflow stores](#copied-mlflow-stores).
 - `martian evals export` writes everything an organisation holds as JSON Lines files with a
@@ -659,6 +662,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   default project (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs
   into the same folder ([command-line runs](#command-line-runs)), `martian evals import inspect`
   writes Inspect AI logs there as runs ([imported Inspect logs](#imported-inspect-logs)),
+  `martian evals import promptfoo` writes promptfoo results there as runs
+  ([promptfoo results and configs](#promptfoo-results-and-configs)),
   `martian evals import mlflow` copies an MLflow tracking store there
   ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
   ([data export](#data-export)), and an
@@ -903,6 +908,135 @@ format; `fixture_task.py` there wrote them) and reads them back through the loca
 routes: every score against the log, Inspect's metrics recomputed from them, the run and its
 trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
 inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+
+## promptfoo results and configs
+
+A team that tried [promptfoo](https://www.promptfoo.dev/) brings its results and its configs, with
+promptfoo not installed and not a dependency. `martian evals import promptfoo` records a results
+file as runs in the local edition's data folder (`martian.evals.promptfoo_import`), and
+`martian evals convert promptfoo` writes a config as suite files for `martian evals run`
+(`martian.evals.promptfoo_convert`). Neither runs promptfoo or calls its providers.
+
+```bash
+martian evals import promptfoo results.json                    # as `promptfoo eval -o results.json` wrote it
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
+  --judge-model openai:/gpt-4.1-mini --output suite               # llm-rubric as the rubric judge
+```
+
+[`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
+configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
+the results promptfoo writes for that config with its two providers, also written by hand.
+
+### Imported results
+
+The importer reads promptfoo's JSON output file (`evalId`, `results`, `config`, `shareableUrl`,
+`metadata`) whose `results` is an `EvaluateSummary` of version 3, the shape promptfoo's
+[configuration reference](https://www.promptfoo.dev/docs/configuration/reference/#evaluation-outputs)
+gives and promptfoo 0.125 writes. Version 2, with its results table, and the `.jsonl`, `.csv` and
+other output formats are refused. Each provider in the file is one run, written as
+`martian evals import inspect` writes its runs; the [eval model](eval-model.md#promptfoo-results)
+maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, state `completed`, a `stored` target, and a scorer for each assertion type. The model's `Target` has no name, so the provider names the run: its code is `promptfoo-`, the provider's label (else its id) and the run's number among that provider's imported runs, such as `promptfoo-mini-2`, and `provenance["promptfoo"]["provider"]` holds its id and label. The provenance also keeps the file's path and SHA-256, the eval id, the timestamp, the description, the prompts' metrics and promptfoo's stats |
+| `CaseResult` | One per result row (a test, once per prompt and repeat), with case id `test <n>`, `test <n>, prompt <m>` when the eval has several prompts, and ` (repeat <k>)` for a later repeat. Its inputs are the rendered prompt and the vars, its expectations the test's assertions, its output the provider's, and its latency promptfoo's |
+| `Score` | One per assertion promptfoo graded, named after the assertion's type (`icontains`, a second one `icontains (2)`, one inside an `assert-set` `assert-set/regex`). The value and the verdict are the assertion's pass, as a suite file's checks record theirs, so Quality shows each assertion's pass rate; promptfoo's numeric score is `metadata["promptfoo.score"]` and its reason the rationale. Model-graded types (`llm-rubric`, `factuality`, `g-eval` and the others) and red team graders have source `llm_judge` |
+| `Trace` | One span, the provider call, with the prompt, the output, the vars, token use and cost, carrying the case's scores |
+
+- A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
+  grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
+  `threshold` counts as promptfoo counted it.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Every file is read before anything is written, so a file that is not promptfoo results, one
+  of another version, one without rows, or one that has a provider's case twice or two providers
+  with one label stops the command with exit code `2` and writes nothing.
+- The file's `config` section is not copied into the run, only its `description`.
+
+### Converted configs
+
+The converter reads `prompts`, `providers`, `tests` with `vars` and `assert`, and `defaultTest`,
+and writes the suite files where the features map:
+
+- Each test, once per prompt, is a case. The prompt rendered with the test's vars is the input
+  `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
+  `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
+  Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
+  promptfoo. Case ids are the ones the importer gives the same tests' results.
+- `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
+  them. `{{ name }}` in an assertion's value is filled from the test's vars.
+- A suite file applies every check to every case, and promptfoo asserts per test, so tests that
+  need the same checks share a suite: `evals.yaml` and `cases.jsonl`, then `evals-2.yaml`,
+  `cases-2.jsonl` and output folder `results-2` for the next group, and so on. Two tests share a
+  check when they assert the same type the same number of times with the same options; a text
+  check's values and a rubric that differ between them are read from each case's expectations.
+- `--target FILE.py[:FUNCTION]` is the target, called as `FUNCTION(prompt=..., vars=...)` (the
+  function defaults to `target`), and written relative to the suite file. Without it, each
+  test's `providerOutput` is the stored reply the suite grades, and a test without one is not
+  converted.
+- `--judge-model` is the rubric judge's model for `llm-rubric`; without it, `llm-rubric` does not
+  convert. promptfoo's grading `provider` is not read.
+- A folder that already has one of the files to write stops the command with exit code `2` before
+  anything is written, and so does a config with nothing that converts.
+
+Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+the rubric judge). An assertion converts only when its check decides the way promptfoo does;
+everything else is listed:
+
+| promptfoo assertion | Suite check |
+| --- | --- |
+| `contains`, `contains-all` | `contains`, `case_sensitive: true` |
+| `icontains`, `icontains-all` | `contains` |
+| `contains-any`, `icontains-any` | `contains`, `any_of: true` (and `case_sensitive: true` for `contains-any`) |
+| `not-contains`, `not-contains-any` | `not_contains`, `case_sensitive: true` |
+| `not-icontains`, `not-icontains-any` | `not_contains` |
+| `regex`, `not-regex` | `matches`, `not_matches`: the pattern as written, read by Python's `re` (a pattern Python cannot read is listed) |
+| `equals`, `not-equals` (text, a number or a boolean) | `matches`, `not_matches` on `\A<text>\Z` |
+| `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
+| `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
+| `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+
+Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
+`-any` or `-all` type given as text is split on commas, as promptfoo splits it.
+
+| Listed, not converted | Why | Once MorningHQ/martian-notes#171 lands |
+| --- | --- | --- |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code; a suite file's checks run none | |
+| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON | |
+| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values | |
+| `latency`, `cost` | No check on main limits the call's time or cost | `latency` and `cost` (MorningHQ/martian-notes#172) |
+| `not-is-refusal`, `is-refusal` | No check on main detects refusals | `no_refusal` (MorningHQ/martian-notes#178) for `not-is-refusal`; none passes only a refusal |
+| `promptfoo:redteam:pii` and its variants, `promptfoo:redteam:indirect-prompt-injection`, other red team graders | promptfoo's red team graders, graded by a model with their own prompts | `no_personal_data` and `resists_injection` (MorningHQ/martian-notes#178) for the first two; none for the others |
+| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity | |
+| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts | |
+| Tool-call, trajectory, trace, `finish-reason`, `guardrails`, `skill-used` | Read the provider's tool calls, trace or metadata | |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them | |
+| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them | |
+
+`not-contains`, `not-icontains` and their `-any` forms convert today; once
+MorningHQ/martian-notes#178 lands, `no_prohibited_phrases` also matches a phrase through case,
+spacing and disguises, which `not_contains` does not.
+
+Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
+verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
+`threshold`, `rubricPrompt`, `normalizeUnicode`, `config` and unknown options would, so the
+assertion is listed and not converted, as is one whose value is a `file://` reference or uses
+Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
+`providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
+var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
+providers, prompts that are not text or `.txt` and `.md` files, `tests` or `defaultTest` in a
+file, `scenarios` and every other top-level field are listed. The command prints the list, and
+each suite file holds it as comments at its top, with the tests it covers.
+
+`tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
+through the local edition's routes: both providers' runs, their cases and verdicts, every
+assertion's pass and score against the file, the provenance, a trace, and Compare of the two
+providers; it also covers repeated and nested assertions, grader errors, and the files the command
+refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
+file and the list of what it left out, and runs both suites against `agent.py`; it runs a
+stored-reply suite, checks that each converted assertion type decides a reply as promptfoo does,
+and that every assertion, option, prompt and test that does not convert is listed.
 
 ## Copied MLflow stores
 

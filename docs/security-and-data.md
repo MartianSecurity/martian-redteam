@@ -59,6 +59,14 @@ treat `results.jsonl`.
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
+`martian evals import promptfoo` records a promptfoo results file in the same folder: each row's
+prompt, vars, output and assertion reasons. It does not copy the file's `config` section, which
+promptfoo writes with best-effort redaction of provider settings; the run keeps only the config's
+`description` and the file's path and hash. An assertion's grading `provider` given as an
+object, with settings that may hold a key, is kept as its id only. `martian evals convert
+promptfoo` writes suite files and calls nothing: a converted suite calls only the `--target`
+function it names, never the config's providers.
+
 `martian evals import mlflow` copies an MLflow tracking store into the same folder. It opens the
 store so that it cannot write it (SQLite read-only, Postgres with read-only transactions) and never
 migrates it, and reads the trace files the store names on this machine only. A Postgres URL's
