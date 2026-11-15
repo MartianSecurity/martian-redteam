@@ -58,7 +58,8 @@ push and keeps one comment with the result, also without a Martian account. See
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
   twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
   personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
-  their order, turn by turn, and the call's latency and cost, pinned datasets, Backend-scored
+  their order, turn by turn, and the call's latency and cost, custom checks written as Python
+  functions (unsandboxed: they run with the caller's privileges), pinned datasets, Backend-scored
   regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.

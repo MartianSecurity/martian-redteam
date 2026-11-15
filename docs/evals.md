@@ -118,13 +118,15 @@ secret in the body.
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
 graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
-`inputs.context` and take no options; every other type is one of the twenty-eight
-[deterministic checks](#deterministic-checks), each with its options and an example, five of them
-the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
-instructions and refusals, and four the [tool-call checks](#tool-calls-and-trajectories) of the
-tools an agent called, with what arguments, in which order and in how many steps. Criteria
-written in the suite file apply to every case that does not carry its own in `expectations`. Use
-at most one check of each judge type, and give repeated check types a `name`.
+`inputs.context` and take no options; `python` names a Python function of your own, in a file
+beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
+the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
+example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
+secrets, planted instructions and refusals, and four the
+[tool-call checks](#tool-calls-and-trajectories) of the tools an agent called, with what
+arguments, in which order and in how many steps. Criteria written in the suite file apply to every
+case that does not carry its own in `expectations`. Use at most one check of each judge type, and
+give repeated check types a `name`.
 
 **Results.** The output folder receives:
 
@@ -157,13 +159,14 @@ comment on the pull request with the result, still with no Martian account. See
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
-contents of its file. When any of these changes, the case is graded again, and the run prints how
+combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target and a
+[`python` check](#custom-python-checks) count by the contents of their files. When any of these
+changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
 in the environment, or the MLflow location keeps earlier results. The SDK cannot see changes in
-modules the target file imports, or in the service behind a URL target: use `--fresh` after
-those.
+modules the target or scorer files import, or in the service behind a URL target: use `--fresh`
+after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -268,7 +271,9 @@ and every judge again, so five attempts cost five times as much.
   only when it names its own `combine`. `no_refusal` is not a security check: it fails a reply
   for refusing a benign request, which measures over-refusal rather than a leak, so it takes the
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
-  secret `combine: all` when the suite's rule is looser.
+  secret `combine: all` when the suite's rule is looser. A [`python` check](#custom-python-checks)
+  is one only when it says so, with `security: true`: the SDK cannot tell what a function guards,
+  and its author can.
 - **A case passes** when every check, combined, passes it, as with one attempt.
 - **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
   verdict, could have gone either way. A combined verdict stands when it is the same both ways;
@@ -759,7 +764,7 @@ scorer error for the same reason; give `evaluate` a `predict_fn`.
 These checks run in `martian evals run` and in tests. Scoring a saved run from the Evals UI
 uses the console's own built-in scorers by name
 ([write routes](evals-core.md#write-routes)), which take no options; the checks here are not
-among them.
+among them, and neither is a [`python` check](#custom-python-checks).
 
 ### Policy checks
 
@@ -1098,6 +1103,106 @@ the deciding check, and use these to explain a failure, or to hold the agent to 
 take, such as checking eligibility before a refund, and to the tools it must never call. The
 checks compare the calls, not what the tools returned, and no judge grades whether another route
 was as good.
+
+### Custom Python checks
+
+When no check states a team's rule, write it as a Python function. A suite file names it with
+`type: python`; in Python, `python_check` takes the function itself. A support team's refund
+rules, from [`examples/evals/custom-scorer`](../examples/evals/custom-scorer/evals.yaml):
+
+```yaml
+checks:
+  - type: python                 # never refund more than the customer paid
+    name: refund_within_order
+    file: scorers.py             # relative to this suite file
+    function: refund_share
+    max_score: 1
+    security: true               # with repeats, one over-refund in any attempt fails the case
+  - type: python                 # every refund names one of the reason codes
+    name: reason_code
+    file: scorers.py
+    function: cites_reason_code
+```
+
+```python
+# scorers.py
+import json
+
+
+def refund_share(outputs, expectations):
+    refund = json.loads(outputs)["refund"]
+    paid = expectations["order_total"]
+    return refund / paid, f"refund {refund:.2f} of an order of {paid:.2f}"
+
+
+def cites_reason_code(outputs):
+    reason = json.loads(outputs).get("reason")
+    return reason in ("DAMAGED", "LATE", "WRONG_ITEM"), f"reason {reason!r}"
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `file` | Yes | The Python file, relative to the suite file, loaded as a function target's file is |
+| `function` | Yes | The function's name in that file |
+| `min_score`, `max_score` | When the function returns a number | The number passes when it is at least `min_score` and at most `max_score`; give either or both |
+| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`. Default `false`: the suite's rule |
+
+Without a `name` the check's label is `python`, so give each python check a name.
+
+**What the function is given.** It names, as its parameters, the arguments it reads, and is called
+with those by name, as MLflow calls a scorer:
+
+| Argument | Value |
+| --- | --- |
+| `inputs` | The case's inputs, a dict: what a function target is called with |
+| `outputs` | The reply, as the target returned it, or the case's stored output |
+| `expectations` | The case's expectations, a dict (empty when it has none) |
+| `trace` | The MLflow trace of the target's call, as [`latency` and `cost`](#deterministic-checks) read it |
+
+Any other parameter needs a default, which it keeps. A function that reads none of the four, takes
+`*args` or `**kwargs`, takes one of them by position only, or is `async` is refused before any
+case runs, as is a file that cannot be read, fails to import or has no such function.
+
+**What it may return.**
+
+| Return | The check |
+| --- | --- |
+| `True` or `False` | Passes or fails. Its reason is `the scorer passed the reply` or `the scorer failed the reply` |
+| A number | Passes when it is within `min_score` and `max_score`, with a reason such as `score 10.0 is above max_score 1.0`. A number without either bound is a scorer error, so a score never passes by default |
+| `(value, reason)` | Either of the above, with the string `reason` after the SDK's words, or as the whole reason for a boolean |
+
+Anything else (`None`, text, a list, `nan`), a boolean from a check with bounds, and any exception
+the function raises are a scorer error for that case: the check gives no verdict, the reason names
+what happened, such as `the scorer raised KeyError: 'order'`, and the rest of the run carries on.
+As for every check, a case without a verdict is an error, so the gate fails closed and the run
+exits `2`.
+
+**When it runs.** The file is imported once per run of `martian evals run`, as the run starts,
+in the command's own process; loading or writing a suite file (`martian.evals.suite_file`) never
+imports it. A case's reused verdict depends on the file's contents, not on modules it imports
+([resume](#run-a-suite-file-locally)). The function runs with that process's full privileges, so
+review a suite file and its scorer files from someone else before you run them
+([security and data](security-and-data.md#custom-python-scorers)).
+
+In Python, with the same arguments and returns:
+
+```python
+from martian.evals import assert_checks, evaluate, python_check
+
+
+def mentions_order(inputs, outputs):
+    return inputs["order"] in outputs, "names the customer's order"
+
+
+result = evaluate(data=data, predict_fn=agent, scorers=[python_check(mentions_order, name="mentions_order")])
+assert_checks(result)
+```
+
+`python_check(function, name="python", min_score=None, max_score=None)` refuses a function it
+could not call, or bounds that are not numbers, when the check is made. Repeats belong to suite
+files, so it has no `security`. A worker of the
+[evals core](evals-core.md#custom-scorers-in-the-worker) runs scorers its setup installs, with the
+same rules but no `trace`; the Evals UI cannot choose one yet.
 
 ## Mistakes that raise instead of passing silently
 

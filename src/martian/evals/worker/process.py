@@ -27,6 +27,11 @@ reaches the process as JSON on its standard input (:func:`dump_work`), never on 
 with the worker's HTTP targets as written. Their credentials come from the setup's
 ``credentials``, in that process. A process that exits with an error leaves no work queued or
 running: the worker marks it ``failed``.
+
+Custom Python scorers are the setup's too (``WorkerServices.scorers``): the setup imports them in
+the work's process, so their code never runs in the process that serves the API. That process
+imports the setup's *module*, to check that a new process can import the setup, so the setup
+imports a scorer's module inside the function, not at the top of its own module.
 """
 
 from __future__ import annotations
@@ -48,7 +53,7 @@ from martian.evals.server.principal import Principal
 from martian.evals.store import EvalStore
 from martian.evals.store.mlflow_local import workspace_name
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
-from martian.evals.worker.execute import fail_unfinished
+from martian.evals.worker.execute import InstalledScorers, fail_unfinished
 from martian.evals.worker.inprocess import InProcessWorker
 from martian.evals.worker.targets import http_target, target_pin
 
@@ -71,7 +76,8 @@ WRONG_WORKSPACE = (
 class WorkerServices:
     """What a run's process runs its work with, built in that process by the worker's setup: the
     store and the record store, the targets it calls itself by id, the judge, if any, the
-    credentials of HTTP targets, and the executor of registered agents, if any."""
+    credentials of HTTP targets, the executor of registered agents, if any, and the custom Python
+    scorers it runs, by name, imported by the setup in this process."""
 
     store: EvalStore
     records: RecordStore
@@ -80,6 +86,7 @@ class WorkerServices:
     target_timeout_seconds: float = 120.0
     credentials: Credentials | None = None
     executor: AgentExecutor | None = None
+    scorers: InstalledScorers = field(default_factory=dict)
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -221,6 +228,7 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         target_timeout_seconds=services.target_timeout_seconds,
         credentials=services.credentials,
         executor=services.executor,
+        scorers=services.scorers,
     )
     await worker.submit(work)
     await worker.drain()

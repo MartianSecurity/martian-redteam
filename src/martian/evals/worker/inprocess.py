@@ -11,7 +11,9 @@ Work runs while the process does and is lost with it; a durable queue is Morning
 ``targets`` are the targets it calls itself, by id: a ``TargetCall``, or an HTTP target whose
 ``${NAME}`` values come from ``credentials``. ``executor`` calls the registered agents, through
 martian-agents, for any other id (:mod:`martian.evals.worker.targets`). The judge, if any, is one
-``Judge`` for every model scorer.
+``Judge`` for every model scorer. ``scorers`` are the custom Python scorers it runs, by name
+(:data:`~martian.evals.worker.execute.InstalledScorers`); each is checked when the worker is
+built, so one that reads an argument a worker does not give is refused before any work.
 """
 
 from __future__ import annotations
@@ -20,11 +22,12 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from martian.evals import _custom
 from martian.evals.model import Run, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
-from martian.evals.worker.execute import execute_run, execute_scoring
+from martian.evals.worker.execute import InstalledScorers, execute_run, execute_scoring
 from martian.evals.worker.targets import http_target, target_call, target_pin
 
 if TYPE_CHECKING:
@@ -45,6 +48,7 @@ class InProcessWorker:
         target_timeout_seconds: float = 120.0,
         credentials: Credentials | None = None,
         executor: AgentExecutor | None = None,
+        scorers: InstalledScorers | None = None,
     ) -> None:
         self._store = store
         self._records = records
@@ -57,6 +61,9 @@ class InProcessWorker:
         self._timeout = target_timeout_seconds
         self._credentials = credentials
         self._executor = executor
+        self._scorers = dict(scorers or {})
+        for function in self._scorers.values():
+            _custom.arguments(function, _custom.WORKER_ARGUMENTS)
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -103,4 +110,4 @@ class InProcessWorker:
                 timeout_seconds=self._timeout,
             )
         else:
-            await execute_scoring(self._store, self._records, work, judge=self._judge)
+            await execute_scoring(self._store, self._records, work, judge=self._judge, scorers=self._scorers)

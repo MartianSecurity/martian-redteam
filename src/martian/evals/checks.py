@@ -14,12 +14,14 @@ trace MLflow records for the row's call instead of the reply. :func:`no_prohibit
 are the policy checks (:mod:`martian.evals._policy`). :func:`tool_called`,
 :func:`tool_not_called`, :func:`tool_trajectory` and :func:`step_count` read the agent's tool
 calls, model turn by model turn, from the trace of its call or from its reply
-(:mod:`martian.evals._tool_calls`).
+(:mod:`martian.evals._tool_calls`). :func:`python_check` passes or fails by a team's own Python
+function (:mod:`martian.evals._custom`), which runs unsandboxed in this process.
 """
 
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import math
 import re
@@ -30,7 +32,7 @@ from typing import Any
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
 
-from martian.evals import _json_schema, _numeric, _policy, _tool_calls
+from martian.evals import _custom, _json_schema, _numeric, _policy, _tool_calls
 from martian.evals.scorers import output_text
 
 
@@ -972,6 +974,41 @@ def step_count(
     return _tool_scorer(name, options)
 
 
+# --- a team's own rule ------------------------------------------------------------------------
+
+
+def python_check(
+    function: Callable[..., Any],
+    *,
+    name: str = "python",
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> Scorer:
+    """Pass or fail by ``function``, a team's own rule (:mod:`martian.evals._custom`).
+
+    ``function`` names the arguments it reads, any of ``inputs``, ``outputs``, ``expectations``
+    and ``trace``, and is called with them by name. It returns ``True`` or ``False``; a number,
+    which passes when it is at least ``min_score`` and at most ``max_score`` (give one or both);
+    or ``(value, reason)``, the reason becoming the check's. An exception it raises, or anything
+    else it returns, is a scorer error for that row, so the gate fails closed. A function that
+    reads nothing it is given, takes ``*args`` or ``**kwargs``, or is ``async`` is refused here.
+    The function runs in this process with its full privileges: it is not sandboxed."""
+    _named(name)
+    _custom.bounds(min_score, max_score)
+    reads = _custom.arguments(function)
+
+    def check(**given: Any) -> Feedback:
+        value, reason = _custom.call(function, given)
+        passed, rationale = _custom.verdict(value, reason, min_score=min_score, max_score=max_score)
+        return Feedback(value=passed, rationale=rationale)
+
+    # MLflow passes a scorer the arguments its signature names, so this one names the function's.
+    check.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [inspect.Parameter(argument, inspect.Parameter.KEYWORD_ONLY) for argument in reads]
+    )
+    return scorer(name=name)(check)
+
+
 __all__ = [
     "contains",
     "contains_all",
@@ -991,6 +1028,7 @@ __all__ = [
     "not_contains",
     "not_matches",
     "number_equals",
+    "python_check",
     "reconciles",
     "resists_injection",
     "similarity",
