@@ -38,6 +38,7 @@ SUITE = (
     "tests/evals/test_response_guidelines.py",
     "tests/evals/test_response_conditions.py",
     "tests/evals/test_response_rubric.py",
+    "tests/evals/test_grounding_judges.py",
     "tests/evals/test_plugin.py",
     "tests/evals/test_runner.py",
 )
