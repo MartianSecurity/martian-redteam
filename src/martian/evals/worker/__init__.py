@@ -18,9 +18,14 @@ their own worker without changing the routes:
   and it runs the work inside each of ``ProcessWorker``'s processes.
 - A durable queue (MorningHQ/martian-notes#139) implements ``submit`` by enqueueing, and hands
   each ``Work`` to a process of its own.
-- Calling HTTP targets from the worker (#137) is a target given to the worker; the routes do not
-  change. The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
-  :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`).
+- The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
+  :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
+  routes do not change.
+
+A worker knows each target a run can name by its id: a function in its process, an HTTP target it
+calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
+HTTP target's credentials come from the worker's :class:`Credentials`, in the process that calls
+it (:mod:`martian.evals.worker.targets`).
 
 A worker learns that someone asked it to stop from the record itself
 (``Run.cancel_requested_at``, ``ScoringJob.cancel_requested_at``), which it reads before each case,
@@ -34,7 +39,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from martian.evals.model import Case, ScorerVersion, Target, Value
+from martian.evals.model import Case, Run, ScorerVersion, Target, Value
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -59,6 +64,43 @@ class Work:
 TargetCall = Callable[[Case], Awaitable[Any]]
 """Calls the thing under test with one case and returns its output. An exception or a timeout is
 the case's error; the worker never retries."""
+
+
+class Credentials(Protocol):
+    """Where an HTTP target's credentials come from: the value of ``${name}`` in the url or a header
+    of the target the worker knows as ``target_id``, for ``principal``, or None when it has none.
+
+    The worker asks in the process that calls the target, each time it calls it, so a credential
+    never travels with the request that started the run and is never written to a record; the
+    run keeps the target as written, with ``${name}`` unexpanded. The local edition answers with
+    the key it keeps for the target (``LocalTargets.key``); a per-organisation key store is
+    MorningHQ/martian-notes#135. A worker given none has no credentials, so a target that needs
+    one fails each case with the setting that names it."""
+
+    def __call__(self, principal: Principal, target_id: str, name: str, /) -> str | None: ...
+
+
+@runtime_checkable
+class AgentExecutor(Protocol):
+    """Registered agents that need leased credentials, called through martian-agents.
+
+    On the Martian server a registered agent's credential stays with its approved connection:
+    admitting a run pins the connection and its approval, and each case's call carries a
+    short-lived target lease that martian-agents exchanges for the credential, so neither the
+    worker nor a record ever holds it (``app/evals_targets.py`` in MorningHQ/MartianBackend). The
+    server implements this interface when it mounts the core (MorningHQ/martian-notes#102); a
+    worker without one calls no registered agent."""
+
+    async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
+        """Admit the agent for this principal and return what pins it, which the run keeps as
+        ``provenance["target"]``. Raises ``StoreError`` (``not_found`` for an agent it does not
+        know). Never calls the agent."""
+        ...
+
+    async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
+        """Call the run's agent once with one case, within ``timeout_seconds``, and return its
+        output. An exception is the case's error; the worker never retries."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -146,7 +188,9 @@ from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judg
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 
 __all__ = [
+    "AgentExecutor",
     "AgentsConnection",
+    "Credentials",
     "InProcessWorker",
     "Judge",
     "JudgeError",

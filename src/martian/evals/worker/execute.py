@@ -6,7 +6,9 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 - A run reads the active cases of its published dataset (the default project's dataset version it
   was admitted with) up to its case limit, calls the target once per case with no retry, and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped.
+  with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
+  call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
+  the setting to check, anything else with its type.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
   scorers: code scorers here, judge scorers through the worker's judge, one request per model the
   job's judges are pinned to. Each judge score records the model and version that produced it.
@@ -42,6 +44,7 @@ from martian.evals.model import (
     Trace,
 )
 from martian.evals.records import RecordStore
+from martian.evals.runner import TargetCallError
 from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_config, prompt_text, text_of
 from martian.evals.store import EvalStore, StoreError
 
@@ -255,6 +258,8 @@ async def _run_case(
         output = await asyncio.wait_for(call(case), timeout=timeout_seconds)
     except TimeoutError:
         error = "item timed out"
+    except TargetCallError as failure:  # the target's own words, which name the setting to check
+        error = str(failure)[:1800]
     except Exception as failure:  # noqa: BLE001 - any target failure is the case's error
         error = f"{type(failure).__name__}: {failure}"[:1800]
     latency = round((perf_counter() - clock) * 1000, 3)

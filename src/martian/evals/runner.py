@@ -273,16 +273,22 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     return cases
 
 
-def _from_environment(text: str, setting: str) -> str:
-    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
+def _expand(text: str, setting: str, value_of: Callable[[str], str | None], source: str) -> str:
+    """Replace each ${NAME} in ``text`` with ``value_of(NAME)``. A name without a value is a
+    ``ConfigError`` that names the setting and ``source``, never a value."""
 
     def value(match: re.Match[str]) -> str:
-        found = os.environ.get(match[1])
+        found = value_of(match[1])
         if not found:
-            raise ConfigError(f"{setting} needs the environment variable {match[1]}")
+            raise ConfigError(f"{setting} needs {source} {match[1]}")
         return found
 
     return _ENV_REFERENCE.sub(value, text)
+
+
+def _from_environment(text: str, setting: str) -> str:
+    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
+    return _expand(text, setting, os.environ.get, "the environment variable")
 
 
 def _status_reason(response: httpx.Response) -> str:
@@ -301,8 +307,9 @@ def _status_reason(response: httpx.Response) -> str:
     return reason
 
 
-def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
-    """One case's request body. Case text is inserted as data and never expanded itself."""
+def _case_values(inputs: dict[str, Any], input_key: str) -> Callable[[str], Any]:
+    """What each body placeholder of one case stands for: ``{{input}}`` is the input named
+    ``input_key``, ``{{inputs.NAME}}`` the input named NAME, and ``{{uuid}}`` a new UUID."""
 
     def lookup(name: str) -> Any:
         if name == "uuid":
@@ -312,10 +319,16 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
             raise TargetCallError(f"the case has no input named {key!r}")
         return inputs[key]
 
+    return lookup
+
+
+def _fill(template: Any, lookup: Callable[[str], Any]) -> Any:
+    """One case's request body, each placeholder replaced by ``lookup(name)``. Case text is
+    inserted as data and never expanded itself."""
     if isinstance(template, dict):
-        return {key: _fill(item, inputs, input_key) for key, item in template.items()}
+        return {key: _fill(item, lookup) for key, item in template.items()}
     if isinstance(template, list):
-        return [_fill(item, inputs, input_key) for item in template]
+        return [_fill(item, lookup) for item in template]
     if not isinstance(template, str):
         return template
     whole = _PLACEHOLDER.fullmatch(template)
@@ -326,12 +339,40 @@ def _fill(template: Any, inputs: dict[str, Any], input_key: str) -> Any:
     )
 
 
+def _unreachable(error: httpx.HTTPError) -> TargetCallError:
+    return TargetCallError(f"the target could not be reached: {type(error).__name__}; check target.url")
+
+
+def _reply(response: httpx.Response, steps: list[str]) -> Any:
+    """The output in a target's response: its text, or the value at ``response_path`` (``steps``).
+    An error status or a missing value is a ``TargetCallError`` naming the setting to check."""
+    if not response.is_success:
+        raise TargetCallError(_status_reason(response))
+    if not steps:
+        return response.text
+    try:
+        reply = response.json()
+    except ValueError:
+        raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
+    for step in steps:
+        if isinstance(reply, dict) and step in reply:
+            reply = reply[step]
+        elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
+            reply = reply[int(step)]
+        else:
+            raise TargetCallError("the target's response has no value at response_path")
+    if reply is None:
+        raise TargetCallError("the target's response has no value at response_path")
+    return reply
+
+
 def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
 
     Errors name what went wrong but never the address, the headers or the response body. The
     returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
-    a case's call failed.
+    a case's call failed. The evals core's worker calls an HTTP target with the same pieces
+    (:mod:`martian.evals.worker.targets`).
     """
     url = _from_environment(reference.url or "", "target.url")
     try:
@@ -342,34 +383,15 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
     def send(inputs: dict[str, Any]) -> Any:
-        body = _fill(reference.body, inputs, input_key)
+        body = _fill(reference.body, _case_values(inputs, input_key))
         try:
             with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body)
         except httpx.ReadTimeout:
             raise TargetCallError("the target did not answer within target.timeout_seconds") from None
         except httpx.HTTPError as error:
-            raise TargetCallError(
-                f"the target could not be reached: {type(error).__name__}; check target.url"
-            ) from None
-        if not response.is_success:
-            raise TargetCallError(_status_reason(response))
-        if not steps:
-            return response.text
-        try:
-            reply = response.json()
-        except ValueError:
-            raise TargetCallError("the target's response is not JSON, so response_path cannot be read") from None
-        for step in steps:
-            if isinstance(reply, dict) and step in reply:
-                reply = reply[step]
-            elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
-                reply = reply[int(step)]
-            else:
-                raise TargetCallError("the target's response has no value at response_path")
-        if reply is None:
-            raise TargetCallError("the target's response has no value at response_path")
-        return reply
+            raise _unreachable(error) from None
+        return _reply(response, steps)
 
     # Why each failed call failed, by the inputs it was given: the evaluator reports only that
     # a call failed. Two cases with identical inputs send identical requests, so sharing is safe.
