@@ -3233,7 +3233,7 @@ through the store and the record store as `SINGLE_USER`, in the default project;
 | `Run` | Source `local`, a `stored` target, the state of the log (`success` is `completed`), Inspect's times, and a scorer for each score name. The code is `inspect-`, the task's name and the run's number among that task's imported runs, such as `inspect-my_task-2`. `provenance["inspect"]` keeps the log's path, its SHA-256 and format, the eval id, task, model and status, and Inspect's results with each scorer's metrics |
 | `CaseResult` | One per sample and epoch: the input, the target as `expected_response`, the completion, the sample's error and time |
 | `Score` | One per Inspect score value, the value kept exactly; a dict or list value is one per entry, named `<scorer>/<key>`. Inspect's `C` and `true` pass and `I`, `P`, `N` and `false` fail; numbers have no verdict. Unscored (NaN) is a score with no value and an error. A scorer that called a model is an `llm_judge` with that model as its source |
-| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments |
+| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments. Each case score points at its own assessment by name and source, so a code score and a judge's of the same name (a dict entry `<scorer>/<key>` and a scorer of that name) stay apart |
 
 - A case's status follows its scores: `error` when the sample failed, `failed` when a score fails,
   else `error` when one is unscored, `passed` when one passes, and `skipped` when none gives a
@@ -3252,8 +3252,8 @@ through the store and the record store as `SINGLE_USER`, in the default project;
 (one on GLM 5 in the JSON format, one with two epochs on Inspect's mock model in the `.eval`
 format; `fixture_task.py` there wrote them) and reads them back through the local edition's
 routes: every score against the log, Inspect's metrics recomputed from them, the run and its
-trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
-inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+trace's spans, Compare of the two runs and a review. It also covers each kind of score value, a
+code score and a judge's of one name on one sample, chat inputs, an `.eval` log with Deflate entries, and the files the command refuses.
 
 ## promptfoo results and configs
 
@@ -3500,13 +3500,18 @@ prompts the core has no place for.
 - A copied assessment is a new assessment in the data folder's store, dated by the copy; its
   MLflow creation time is `metadata["mlflow_source.created_at"]`, and a run's scores in the
   record store keep it as `created_at`.
+- A trace may hold a code scorer's, a judge's and a person's feedback of one name. Each is its own
+  score, and a run's score in the record store points at its own copied assessment: the link is
+  the name, the source and MLflow's assessment id (`metadata["mlflow_source.assessment_id"]`).
+  The run lists a scorer per name and source.
 
 `tests/evals/test_mlflow_import.py` has mlflow-skinny write a real tracking store
 (`tests/fixtures/mlflow/write_store.py`: traces in two sessions, a person's feedback, an
 expectation, a judge's feedback, a corrected assessment, an evaluation dataset, two
-`mlflow.genai.evaluate` runs, a run without traces and a deleted experiment), copies it and reads
-it back through the local edition's routes: projects, traces, sessions, spans, annotations, the
-dataset, both runs with their cases and scores, their provenance and Compare. It checks the
+`mlflow.genai.evaluate` runs, a judge's and a person's feedback named like a code scorer's on one
+case, a run without traces and a deleted experiment), copies it and reads it back through the
+local edition's routes: projects, traces, sessions, spans, annotations, the dataset, both runs
+with their cases and scores, each score's own assessment, their provenance and Compare. It checks the
 source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
 artifact file are read from there, that an older, unknown or missing schema revision, a missing
 table, workspaces and files that are not stores are refused with nothing written, the project
