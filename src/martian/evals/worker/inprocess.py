@@ -21,13 +21,15 @@ any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds 
 ``limits`` are the installation's limits for a run that has none of its own
 (:class:`~martian.evals.model.RunLimits`). ``scorers`` are the custom Python scorers it runs, by name
 (:data:`~martian.evals.worker.execute.InstalledScorers`); each is checked when the worker is
-built, so one that reads an argument a worker does not give is refused before any work.
+built, so one that reads an argument a worker does not give is refused before any work. ``hooks``
+run around each case of a run, and ``checks`` are the checks it grades with by name, checked the
+same way (:mod:`martian.evals.worker.hooks`).
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +38,8 @@ from martian.evals.model import Run, RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
-from martian.evals.worker.execute import InstalledScorers, execute_run, execute_scoring
+from martian.evals.worker.execute import InstalledChecks, InstalledScorers, execute_run, execute_scoring
+from martian.evals.worker.hooks import CaseHooks
 from martian.evals.worker.targets import own_target, target_call, target_pin
 
 if TYPE_CHECKING:
@@ -60,6 +63,8 @@ class InProcessWorker:
         scorers: InstalledScorers | None = None,
         limits: RunLimits | None = None,
         private_paths: Iterable[str | Path] = (),
+        hooks: Sequence[CaseHooks] = (),
+        checks: InstalledChecks | None = None,
     ) -> None:
         self._store = store
         self._records = records
@@ -76,6 +81,13 @@ class InProcessWorker:
         self._scorers = dict(scorers or {})
         for function in self._scorers.values():
             _custom.arguments(function, _custom.WORKER_ARGUMENTS)
+        self._hooks = tuple(hooks)
+        for hook in self._hooks:
+            if not isinstance(hook, CaseHooks):
+                raise TypeError("a case hook has async setup(context) and teardown(context, error) methods")
+        self._checks = dict(checks or {})
+        for function in self._checks.values():
+            _custom.arguments(function, _custom.CHECK_ARGUMENTS)
         self._limits = limits
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -134,8 +146,16 @@ class InProcessWorker:
                 pin_for=lambda run: self._pin(work.principal, run.target),
                 timeout_seconds=self._timeout,
                 limits=self._limits,
+                hooks=self._hooks,
+                checks=self._checks,
             )
         else:
             await execute_scoring(
-                self._store, self._records, work, judge=self._judge, scorers=self._scorers, limits=self._limits
+                self._store,
+                self._records,
+                work,
+                judge=self._judge,
+                scorers=self._scorers,
+                limits=self._limits,
+                checks=self._checks,
             )

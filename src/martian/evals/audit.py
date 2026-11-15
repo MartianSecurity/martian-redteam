@@ -18,8 +18,8 @@ its ``no_refusal`` check's expectation) is the answer the case wants.
 
 Checks that cannot be audited this way are listed with the reason: an LLM judge unless its model
 is called (:func:`audit_suite` with ``run_judges``), checks of the target's call (latency, cost,
-tool calls read from its trace), and the evals core's judges and worker scorers
-(:func:`audit_saved_suite`).
+tool calls read from its trace), installed checks, which only a worker that installs them runs, and
+the evals core's judges and worker scorers (:func:`audit_saved_suite`).
 """
 
 from __future__ import annotations
@@ -573,6 +573,7 @@ NOT_A_CALL = "it measures the target's call, which the audit's replies do not ma
 TRACED = "it reads the tool calls the trace of the target's call records, which a reply cannot claim"
 JUDGE_COST = "an LLM judge: auditing it calls its model once per case and reply; run the audit with --run-judges to"
 JUDGE_COST += " do so at your provider's cost"
+INSTALLED = "an installed check: only a worker that installs a check under its name runs it"
 
 
 def _question(inputs: Mapping[str, Any], input_key: str) -> str:
@@ -601,11 +602,13 @@ def _file_check(
 ) -> AuditCheck:
     """An audit check of one check of a suite file, built with the scorer a run would use."""
     from martian.evals import _policy
-    from martian.evals.runner import CALL_CHECKS, JUDGES, NUMERIC_CHECKS, TEXT_CHECKS, TOOL_CHECKS
+    from martian.evals.runner import CALL_CHECKS, INSTALLED_CHECKS, JUDGES, NUMERIC_CHECKS, TEXT_CHECKS, TOOL_CHECKS
 
     label, kind = spec.label, spec.type
     if spec.type in CALL_CHECKS:
         return AuditCheck(label, kind, not_audited=NOT_A_CALL, asks=False)
+    if spec.type in INSTALLED_CHECKS:
+        return AuditCheck(label, kind, not_audited=INSTALLED)
     tools = spec.type in TOOL_CHECKS
     if tools and (spec.source or ("trace" if suite.target is not None else "reply")) == "trace":
         return AuditCheck(label, kind, not_audited=TRACED)
@@ -695,7 +698,8 @@ def audit_suite(
     if limit is not None:
         model_cases = model_cases[:limit]
     if run_judges:
-        built = dict(zip([spec.label for spec in suite.checks], runner._build_scorers(suite, base), strict=True))
+        runs = suite.model_copy(update={"checks": [c for c in suite.checks if c.type not in runner.INSTALLED_CHECKS]})
+        built = dict(zip([spec.label for spec in runs.checks], runner._build_scorers(runs, base), strict=True))
     else:
         modules: dict[Path, Any] = {}
         built = {
@@ -703,7 +707,7 @@ def audit_suite(
             if spec.type in runner.CODE_CHECKS
             else runner._build_check(spec)
             for spec in suite.checks
-            if spec.type not in runner.JUDGES
+            if spec.type not in runner.JUDGES + runner.INSTALLED_CHECKS
         }
 
     def expectations(case: AuditCase) -> dict[str, Any]:
@@ -741,11 +745,14 @@ NO_THRESHOLD = "it gives a number, and the suite's policy sets no threshold for 
 
 def _builtin_check(name: str, scorer: Any, suite: Suite) -> AuditCheck:
     from martian.evals.server.projection import expected_text
+    from martian.evals.worker.hooks import is_installed
     from martian.evals.worker.scorers import CODE_SCORERS, code_score, is_builtin
 
     label, kind = name, scorer.type
     if scorer.kind == "llm_judge":
         return AuditCheck(label, kind, not_audited=CORE_JUDGE)
+    if is_installed(scorer):
+        return AuditCheck(label, kind, not_audited=INSTALLED)
     if not is_builtin(scorer) or name not in CODE_SCORERS:
         return AuditCheck(label, kind, not_audited=WORKER_SCORER)
     policy = next((p for p in suite.policies if p.scorer == name), None)

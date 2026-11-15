@@ -37,6 +37,11 @@ any more also implements :class:`InterruptedRuns`, so that cancelling such a run
 instead of waiting for a next case that never comes. :func:`execute_run` and
 :func:`execute_scoring` are the work itself, for any worker to call.
 
+An edition installs, beside its targets, hooks that run around each case of a run and checks it
+grades with by name (:class:`CaseHooks`, :mod:`martian.evals.worker.hooks`): each case's setup
+fills in a :class:`CaseState` that reaches the target call and the checks, and its teardown runs
+after the case is graded, also when it failed or timed out. The open edition installs none.
+
 Every target call has the worker's time limit (``target_timeout_seconds``), whatever the target.
 Each piece of work also runs under limits (:class:`~martian.evals.model.RunLimits`): the run's own,
 kept in ``Run.provenance["limits"]`` (a scoring job has its run's), else the worker's. Work that
@@ -242,6 +247,7 @@ class InterruptedRuns(Protocol):
 
 
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
+from martian.evals.worker.hooks import CaseContext, CaseHooks, CaseState  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
@@ -250,6 +256,9 @@ from martian.evals.worker.queue import QueueWorker  # noqa: E402
 __all__ = [
     "AgentExecutor",
     "AgentsConnection",
+    "CaseContext",
+    "CaseHooks",
+    "CaseState",
     "Credentials",
     "InProcessWorker",
     "InterruptedRuns",

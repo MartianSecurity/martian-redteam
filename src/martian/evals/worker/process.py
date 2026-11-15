@@ -31,7 +31,9 @@ running: the worker marks it ``failed``.
 Custom Python scorers are the setup's too (``WorkerServices.scorers``): the setup imports them in
 the work's process, so their code never runs in the process that serves the API. That process
 imports the setup's *module*, to check that a new process can import the setup, so the setup
-imports a scorer's module inside the function, not at the top of its own module.
+imports a scorer's module inside the function, not at the top of its own module. So are the hooks
+an edition runs around each case and the checks it installs by name (``WorkerServices.hooks`` and
+``WorkerServices.checks``, :mod:`martian.evals.worker.hooks`).
 
 Under a :class:`~martian.evals.worker.queue.QueueWorker`, which calls :meth:`ProcessWorker.run`,
 the run's process ends with the process that started it, the one holding the work's claim in the
@@ -52,7 +54,7 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -62,7 +64,8 @@ from martian.evals.server.principal import Principal
 from martian.evals.store import EvalStore
 from martian.evals.store.mlflow_local import workspace_name
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
-from martian.evals.worker.execute import InstalledScorers, fail_unfinished
+from martian.evals.worker.execute import InstalledChecks, InstalledScorers, fail_unfinished
+from martian.evals.worker.hooks import CaseHooks
 from martian.evals.worker.inprocess import InProcessWorker
 from martian.evals.worker.targets import own_target, target_pin
 
@@ -90,9 +93,10 @@ class WorkerServices:
     store and the record store, the targets it calls itself by id, the judge, if any, the time
     limit of each target call, the credentials of HTTP targets, the executor of registered agents,
     if any, the custom Python scorers it runs, by name, imported by the setup in this process, the
-    limits of a run that has none of its own, and the private paths a function target's process
+    limits of a run that has none of its own, the private paths a function target's process
     cannot reach on Linux: the files and folders of the stores, which hold every case's
-    expectations and every result (:mod:`martian.evals.isolation`)."""
+    expectations and every result (:mod:`martian.evals.isolation`), the hooks it runs around each
+    case of a run, in order, and the checks it grades with by name (:mod:`martian.evals.worker.hooks`)."""
 
     store: EvalStore
     records: RecordStore
@@ -104,6 +108,8 @@ class WorkerServices:
     scorers: InstalledScorers = field(default_factory=dict)
     limits: RunLimits | None = None
     private_paths: tuple[str, ...] = ()
+    hooks: Sequence[CaseHooks] = ()
+    checks: InstalledChecks = field(default_factory=dict)
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -297,6 +303,8 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         scorers=services.scorers,
         limits=services.limits,
         private_paths=services.private_paths,
+        hooks=services.hooks,
+        checks=services.checks,
     )
     await worker.submit(work)
     await worker.drain()

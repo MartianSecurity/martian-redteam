@@ -115,6 +115,12 @@ POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
 TOOL_CHECKS = _tool_calls.TOOL_CHECKS
 # A team's own rule: a Python function the suite file names (martian.evals._custom).
 CODE_CHECKS = _custom.CODE_TYPES
+# A check a worker installs by name (martian.evals.worker.hooks); this runner installs none.
+INSTALLED_CHECKS = _custom.INSTALLED_TYPES
+NOT_INSTALLED_HERE = (
+    "check {label}: an installed check runs in a worker that installs a check under that name, "
+    "and this command installs none"
+)
 SECURITY_CHECKS = ("not_contains", "not_matches", *REFUSAL_PASSING, "tool_not_called")
 """Check types that fail a reply for holding something it must never hold, such as a leaked secret,
 personal data, a prohibited phrase or an injected instruction's marker, or an agent for a tool call
@@ -283,6 +289,7 @@ class CheckSpec(_Model):
         "tool_trajectory",
         "step_count",
         "python",
+        "installed",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
@@ -339,6 +346,8 @@ class CheckSpec(_Model):
     min_score: float | None = Field(default=None, allow_inf_nan=False)
     max_score: float | None = Field(default=None, allow_inf_nan=False)
     security: bool = False
+    # An installed check: the options the worker's check is given, as written. Its name is `name`.
+    options: dict[str, Any] | None = None
     # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
     combine: CombineRule | None = None
 
@@ -381,6 +390,8 @@ class CheckSpec(_Model):
             if not self.function.isidentifier():
                 raise ValueError("function must be the name of a function in the file")
             _custom.bounds(self.min_score, self.max_score)
+        if self.type in INSTALLED_CHECKS and not self.name:
+            raise ValueError("an installed check needs a name: the name a worker installs the check under")
         return self
 
     def tool_options(self) -> _tool_calls.ToolOptions:
@@ -958,9 +969,12 @@ def _build_scorers(suite: Suite, base: Path) -> list[Any]:
 
 def _build_check(check: CheckSpec) -> Any:
     """The deterministic check a suite file's entry names. ``CheckSpec.complete`` has made sure the
-    options each type needs are there."""
+    options each type needs are there. An installed check is refused: only a worker that installs
+    one can run it."""
     from martian.evals import checks as deterministic
 
+    if check.type in INSTALLED_CHECKS:
+        raise ConfigError(NOT_INSTALLED_HERE.format(label=check.label))
     name = check.label
     text: dict[str, Any] = {"expectation": check.expectation, "name": name, "case_sensitive": check.case_sensitive}
     match check.type:
