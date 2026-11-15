@@ -350,11 +350,15 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   start of its request and response ([free text](#the-in-process-binding)). A page of results is
   the store's page of the whole project, whatever its size, so it may hold fewer traces than its
   limit, or none, and still have a `next_cursor`, when the store filtered in its own process (the
-  MLflow binding does for free text and the assessment filter). A cursor names the store's page
-  and belongs to its query: reused with another, it is `409`. One whose store page is not a
+  MLflow binding does for free text and the assessment filter). Only a `next_cursor` of `null` ends
+  a search, so a client reads on to fill a page (the Evals UI's bound is in
+  `docs/evals-workbench.md` in MartianSecurity/MartianFrontend). A cursor names the store's page and
+  belongs to its query: reused with another, it is `409`. One whose store page is not a
   `next_cursor` that store returned, such as `²` or `١`, is `422` ("cursor is not a next_cursor
   this store returned"). A session search is the store's `search_sessions` with the same filters
-  and order. A session search with a cursor is `422`, as on the server.
+  and order. One that stopped before it read `limit` matching traces, such as one with free text on
+  `MlflowStore`, has `has_more` and a `traces_examined` below its `limit`. A session search with a
+  cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).

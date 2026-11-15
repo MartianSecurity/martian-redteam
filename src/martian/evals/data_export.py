@@ -750,6 +750,19 @@ def _score_key(score: Score) -> str:
     return json.dumps(score.model_dump(mode="json", exclude={"store", "created_at"}), sort_keys=True)
 
 
+async def _holds_traces(store: EvalStore, principal: Principal, project_id: str) -> bool:
+    """Whether the project holds a trace. A page of a trace search may hold none and still have a
+    ``next_cursor``, so the search reads on until it finds one or ends."""
+    query = TraceQuery(project_id=project_id, limit=1)
+    while True:
+        page = await store.search_traces(principal, query)
+        if page.items:
+            return True
+        if page.next_cursor is None:
+            return False
+        query = query.model_copy(update={"cursor": page.next_cursor})
+
+
 async def _refuse_data(store: EvalStore, records: RecordStore, principal: Principal, exported: list[Project]) -> None:
     """Refuse an install that holds data for the principal: an import goes into a fresh one."""
     present = {project.id: project for project in await store.list_projects(principal)}
@@ -779,7 +792,7 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
         if project_id in present:
             if await store.list_datasets(principal, project_id):
                 found.append("datasets")
-            if (await store.search_traces(principal, TraceQuery(project_id=project_id, limit=1))).items:
+            if await _holds_traces(store, principal, project_id):
                 found.append("traces")
             if await store.list_scorers(principal, project_id):
                 found.append("scorers")

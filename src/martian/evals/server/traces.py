@@ -1,11 +1,13 @@
 """Trace search, sessions and trace detail: a port of the trace routes of the server's
 ``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store.
 
-Every filter and order of the contract's ``TraceQuery`` is the store's (``martian.evals.model.TraceQuery``):
-content, state, session, user and time, minimum latency, a boolean assessment, and newest, oldest,
-slowest or fastest first. So a page of results and a session search are the store's answer for the
-whole project, however many traces it holds. A cursor names the store's page and belongs to its
-query and project: another query gets ``409``.
+Every filter and order of the contract's ``TraceQuery`` is the store's
+(``martian.evals.model.TraceQuery``): content, state, session, user and time, minimum latency, a
+boolean assessment, and newest, oldest, slowest or fastest first. So a page of results and a
+session search are the store's answer for the whole project, however many traces it holds. A store
+that filters in its own process may answer a page with fewer traces than its limit, or none, and a
+cursor that reads on: only a ``next_cursor`` of ``None`` ends a search. A cursor names the store's
+page and belongs to its query and project: another query gets ``409``.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
