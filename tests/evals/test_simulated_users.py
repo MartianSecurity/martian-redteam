@@ -410,8 +410,9 @@ def test_the_worker_skips_a_simulated_case_with_its_reason():
 
     run = Run(id="r", project_id="default", source="console", state="running")
     case = Case(id="c", simulated_user=SimulatedUser(**SIMULATED))
-    result, score, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
-    assert (result.status, result.error, score, model) == ("skipped", execute.CONVERSATION, None, None)
+    grading = execute._Grading()
+    result, scores, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5, grading))  # type: ignore[arg-type]
+    assert (result.status, result.error, scores, model) == ("skipped", execute.CONVERSATION, [], None)
 
 
 # ---------- personas from real transcripts ----------
