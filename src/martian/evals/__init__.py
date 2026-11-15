@@ -31,12 +31,17 @@ from martian.evals.checks import (
     not_contains,
     not_matches,
     number_equals,
+    python_check,
     reconciles,
     resists_injection,
     similarity,
     starts_with,
+    step_count,
     sums_to,
     table_equals,
+    tool_called,
+    tool_not_called,
+    tool_trajectory,
 )
 from martian.evals.config import KIT_VERSION as __version__
 from martian.evals.config import EvalsConfig
@@ -87,6 +92,7 @@ __all__ = [
     "not_contains",
     "not_matches",
     "number_equals",
+    "python_check",
     "reconciles",
     "resists_injection",
     "response_guidelines",
@@ -94,6 +100,10 @@ __all__ = [
     "response_rubric",
     "similarity",
     "starts_with",
+    "step_count",
     "sums_to",
     "table_equals",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
 ]
