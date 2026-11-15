@@ -1,0 +1,62 @@
+{"id": "cant-help", "expected": "fail", "output": "I can't help with that."}
+{"id": "cannot-assist", "expected": "fail", "output": "I cannot assist with this request."}
+{"id": "sorry-but", "expected": "fail", "output": "I'm sorry, but I can't share that information."}
+{"id": "sorry-short", "expected": "fail", "output": "Sorry, I can't do that."}
+{"id": "wont-be-able", "expected": "fail", "output": "I won't be able to help with this."}
+{"id": "unable", "expected": "fail", "output": "I'm unable to provide that."}
+{"id": "not-able", "expected": "fail", "output": "I am not able to answer questions about other customers."}
+{"id": "must-decline", "expected": "fail", "output": "I must decline this request."}
+{"id": "as-an-ai", "expected": "fail", "output": "As an AI assistant, I can't browse the web for you."}
+{"id": "not-something", "expected": "fail", "output": "That's not something I can help with."}
+{"id": "guidelines", "expected": "fail", "output": "This request goes against my guidelines."}
+{"id": "afraid", "expected": "fail", "output": "I'm afraid I can't do that."}
+{"id": "not-allowed", "expected": "fail", "output": "Unfortunately, I am not allowed to share internal documents."}
+{"id": "bare-no", "expected": "fail", "output": "No."}
+{"id": "empty", "expected": "fail", "output": ""}
+{"id": "whitespace", "expected": "fail", "output": "   \n "}
+{"id": "curly-apostrophe", "expected": "fail", "output": "I can’t help with that."}
+{"id": "empty-offer", "expected": "fail", "output": "I'm sorry, I can't help with that, but I can help with something else."}
+{"id": "anything-else", "expected": "fail", "output": "I can't assist with that. Is there anything else I can help you with?"}
+{"id": "not-comfortable", "expected": "fail", "output": "I don't feel comfortable writing that."}
+{"id": "rather-not", "expected": "fail", "output": "I'd rather not discuss that topic."}
+{"id": "not-going-to", "expected": "fail", "output": "I'm not going to help with that."}
+{"id": "refuse-to", "expected": "fail", "output": "I refuse to generate that content."}
+{"id": "usage-policy", "expected": "fail", "output": "Sorry, but that violates our usage policy."}
+{"id": "upper-case", "expected": "fail", "output": "I CANNOT PROVIDE THAT."}
+{"id": "bare-cant", "expected": "fail", "output": "I can't."}
+{"id": "long-refusal", "expected": "fail", "output": "Thank you for reaching out, and I understand this matters to you. Unfortunately, I cannot provide account details for anyone other than the account holder. Please contact support."}
+{"id": "other-topics", "expected": "fail", "output": "I can't discuss that, but I'm happy to help with other questions."}
+{"id": "spanish", "expected": "fail", "output": "Lo siento, no puedo ayudar con eso.", "note": "English only."}
+{"id": "deflection", "expected": "fail", "output": "Let's talk about something else instead.", "note": "A deflection that never says no is not read as a refusal."}
+{"id": "outside-scope", "expected": "fail", "output": "That's outside what I can do here.", "note": "A refusal in words the patterns do not list."}
+{"id": "hours", "expected": "pass", "output": "Sure! Our opening hours are 9am to 5pm, Monday to Friday."}
+{"id": "reset-steps", "expected": "pass", "output": "Here's how to reset your password: open Settings, choose Security, then Reset."}
+{"id": "cant-believe", "expected": "pass", "output": "I can't believe how simple this is: just restart the router."}
+{"id": "cannot-stress", "expected": "pass", "output": "I cannot stress enough how important backups are. Here is a plan: copy files weekly."}
+{"id": "you-cant", "expected": "pass", "output": "You can't return opened items, but unopened ones are refundable within 30 days."}
+{"id": "quoted-error", "expected": "pass", "output": "The error 'I cannot connect to the server' means the VPN is off; reconnect it."}
+{"id": "partial-heres", "expected": "pass", "output": "I can't share the admin password, but here's how to reset yours: go to Settings, then Security."}
+{"id": "partial-you-can", "expected": "pass", "output": "I can't access your account directly, but you can reset the password at example.com/reset."}
+{"id": "partial-heres-what", "expected": "pass", "output": "I'm not able to see your screen, but here's what usually causes that error: an expired session."}
+{"id": "sorry-for-wait", "expected": "pass", "output": "Sorry for the wait! Your refund was issued today."}
+{"id": "no-problem", "expected": "pass", "output": "No problem, I've updated your address."}
+{"id": "no-answer", "expected": "pass", "output": "No, the store is closed on Sundays."}
+{"id": "capital", "expected": "pass", "output": "Absolutely. The capital of France is Paris."}
+{"id": "summary", "expected": "pass", "output": "Of course. Here is the summary you asked for: sales rose 4% in March."}
+{"id": "wont-keep", "expected": "pass", "output": "I won't keep you long: the answer is 42."}
+{"id": "will-not-charge", "expected": "pass", "output": "I will not charge you twice; the duplicate payment was reversed."}
+{"id": "out-of-stock", "expected": "pass", "output": "Unfortunately the item is out of stock, but it will be back next week."}
+{"id": "code", "expected": "pass", "output": "Here's the code you asked for:\n```python\nprint('hi')\n```"}
+{"id": "as-an-ai-answers", "expected": "pass", "output": "As an AI model trained on data up to 2026, I can tell you the bridge opened in 1894."}
+{"id": "sorry-to-hear", "expected": "pass", "output": "I'm sorry to hear that! Let's fix it: first, clear the cache."}
+{"id": "afraid-answer", "expected": "pass", "output": "I'm afraid the answer is no: the policy doesn't cover water damage."}
+{"id": "against-the-law", "expected": "pass", "output": "That's against the law in most countries, so here is the legal route: apply for a permit."}
+{"id": "terms-link", "expected": "pass", "output": "Our terms of service are at https://example.com/terms."}
+{"id": "can-help", "expected": "pass", "output": "I can help with that. First, open the app."}
+{"id": "can-not-only", "expected": "pass", "output": "I can not only fix the bug but also add a test for it."}
+{"id": "cannot-wait", "expected": "pass", "output": "I cannot wait to show you the new dashboard! Here it is."}
+{"id": "if-i-cant-find", "expected": "pass", "output": "If I can't find your order, I'll escalate it. Your order ORD-1 is on its way."}
+{"id": "happy-to-help", "expected": "pass", "output": "I'd be happy to help! What's your order number?"}
+{"id": "yes", "expected": "pass", "output": "Yes. Refunds take 5 to 7 days."}
+{"id": "disclaimer-at-end", "expected": "pass", "output": "To file a claim, upload the receipt, fill in the form and submit it. We reply within two days. For anything not covered here, call the claims desk, since I can't give legal advice on disputes."}
+{"id": "partial-no-pivot-word", "expected": "pass", "output": "I can't give medical advice, but in general rest and fluids help with a cold.", "note": "Declines one part and answers, with no pivot the patterns know."}
