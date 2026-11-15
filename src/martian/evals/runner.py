@@ -37,19 +37,72 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals import _numeric, _policy
 from martian.evals._endpoint_errors import names_unknown_model
+from martian.evals._json_schema import check_schema
 from martian.evals.model import MAX_ATTEMPTS, CombineRule
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability
 from martian.evals.stats import proportion_interval
 
-JUDGES = ("rubric", "guidelines", "conditions")
 GROUP_TAG = "martian.group"
 """The case tag that holds a data file case's ``group``."""
-CHECKS = ("contains", "not_contains", "matches", "not_matches", "is_json")
-SECURITY_CHECKS = ("not_contains", "not_matches")
-"""Check types that fail a reply for holding something it must never hold, such as a leaked secret
-or a key. A case's attempts combine by ``all`` for these unless the check names its own rule, so a
-leak in one attempt of five is never outvoted. A new check type of that kind belongs here."""
+# LLM judges graded by criteria the suite or the case gives, under the judge's own type name.
+CRITERIA_JUDGES = ("rubric", "guidelines", "conditions")
+# LLM judges of the case's documents (inputs.context) that take no criteria.
+GROUNDING_JUDGES = ("groundedness", "context_relevance", "context_sufficiency")
+JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES
+CHECKS = (
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+    "matches",
+    "not_matches",
+    "is_json",
+    "json_schema",
+    "length",
+    "latency",
+    "cost",
+    "number_equals",
+    "sums_to",
+    "reconciles",
+    "table_equals",
+    "no_prohibited_phrases",
+    "no_personal_data",
+    "no_secrets",
+    "resists_injection",
+    "no_refusal",
+)
+# Checks that look for given text, from `values` or from each case's `expectation` key.
+TEXT_CHECKS = (
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+)
+# Checks that measure the target's call rather than its reply.
+CALL_CHECKS = ("latency", "cost")
+# Checks that read the reply's numbers and tables as exact decimals, within a tolerance.
+NUMERIC_CHECKS = ("number_equals", "sums_to", "reconciles", "table_equals")
+# The policy checks. A reply that refuses passes the first four, so a suite with any of them, or
+# with a no_refusal check, reports how many of its benign cases were refused (false_refusals).
+REFUSAL_PASSING = ("no_prohibited_phrases", "no_personal_data", "no_secrets", "resists_injection")
+POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
+SECURITY_CHECKS = ("not_contains", "not_matches", *REFUSAL_PASSING)
+"""Check types that fail a reply for holding something it must never hold, such as a leaked secret,
+personal data, a prohibited phrase or an injected instruction's marker. A case's attempts combine by
+``all`` for these unless the check names its own rule, so a leak in one attempt of five is never
+outvoted. ``no_refusal`` is not one: it fails a reply for refusing a benign request, which measures
+over-refusal rather than a leak, so its attempts combine by the suite's rule. A new check type that
+fails a reply for a leak belongs here."""
 
 
 class _Model(BaseModel):
@@ -140,7 +193,38 @@ class JudgeConfig(_Model):
 
 
 class CheckSpec(_Model):
-    type: Literal["rubric", "guidelines", "conditions", "contains", "not_contains", "matches", "not_matches", "is_json"]
+    type: Literal[
+        "rubric",
+        "guidelines",
+        "conditions",
+        "groundedness",
+        "context_relevance",
+        "context_sufficiency",
+        "contains",
+        "not_contains",
+        "contains_any",
+        "contains_all",
+        "equals",
+        "starts_with",
+        "ends_with",
+        "similarity",
+        "matches",
+        "not_matches",
+        "is_json",
+        "json_schema",
+        "length",
+        "latency",
+        "cost",
+        "number_equals",
+        "sums_to",
+        "reconciles",
+        "table_equals",
+        "no_prohibited_phrases",
+        "no_personal_data",
+        "no_secrets",
+        "resists_injection",
+        "no_refusal",
+    ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
     rubric: str | None = None
@@ -151,8 +235,33 @@ class CheckSpec(_Model):
     expectation: str | None = None
     any_of: bool = False
     case_sensitive: bool = False
+    min_similarity: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     pattern: str | None = None
     required_keys: list[str] = Field(default_factory=list)
+    # `schema` in the file; a field of that name would hide BaseModel.schema.
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    min_length: int | None = Field(default=None, ge=0)
+    max_length: int | None = Field(default=None, ge=0)
+    max_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_tokens: int | None = Field(default=None, ge=1)
+    # Numeric and table checks. A figure stays as written, a number or text such as "1,234.56",
+    # so the file says the same when written again; CheckSpec.complete checks that it is one.
+    value: Any = None
+    path: str | None = None
+    abs_tolerance: Any = 0
+    rel_tolerance: Any = 0
+    parts: list[str] = Field(default_factory=list)
+    add: list[str] = Field(default_factory=list)
+    subtract: list[str] = Field(default_factory=list)
+    total: str | None = None
+    key: str | list[str] | None = None
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] | None = None
+    # Policy checks: the kinds of personal data or secret to look for (every kind when left out),
+    # and values that may appear.
+    kinds: list[str] | None = None
+    allow: list[str] = Field(default_factory=list)
     # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
     combine: CombineRule | None = None
 
@@ -160,9 +269,61 @@ class CheckSpec(_Model):
     def complete(self) -> CheckSpec:
         if self.type in ("matches", "not_matches") and not self.pattern:
             raise ValueError(f"a {self.type} check needs a pattern")
-        if self.type in ("contains", "not_contains") and not self.values and not self.expectation:
+        if self.type in TEXT_CHECKS and not self.values and not self.expectation:
             raise ValueError(f"a {self.type} check needs values or an expectation key")
+        if self.type == "similarity" and self.min_similarity is None:
+            raise ValueError("a similarity check needs min_similarity, from 0 to 1")
+        if self.type == "json_schema":
+            if self.json_schema is None:
+                raise ValueError("a json_schema check needs a schema")
+            check_schema(self.json_schema)
+        if self.type == "length":
+            if self.min_length is None and self.max_length is None:
+                raise ValueError("a length check needs min_length, max_length or both")
+            if self.min_length is not None and self.max_length is not None and self.min_length > self.max_length:
+                raise ValueError("min_length is more than max_length")
+        if self.type == "latency" and self.max_ms is None:
+            raise ValueError("a latency check needs max_ms")
+        if self.type == "cost" and self.max_usd is None and self.max_tokens is None:
+            raise ValueError("a cost check needs max_usd, max_tokens or both")
+        if self.type in NUMERIC_CHECKS:
+            self._numeric_options()
+        if self.type in ("no_prohibited_phrases", "resists_injection"):
+            if not self.values and not self.expectation:
+                what = "phrases" if self.type == "no_prohibited_phrases" else "markers"
+                raise ValueError(f"a {self.type} check needs values (its {what}) or an expectation key")
+            _policy.check_values(self.type, self.values)
+        if self.type in ("no_personal_data", "no_secrets"):
+            _policy.data_options(check=self.type, kinds=self.kinds, allow=self.allow)
         return self
+
+    def _numeric_options(self) -> Any:
+        """The options of a numeric or table check, read as the check reads them, so a bad one
+        is refused when the suite loads."""
+        tolerance = {"abs_tolerance": self.abs_tolerance, "rel_tolerance": self.rel_tolerance}
+        if self.type == "number_equals":
+            return _numeric.number_options(
+                value=self.value, expectation=self.expectation, path=self.path, pattern=self.pattern, **tolerance
+            )
+        if self.type == "table_equals":
+            return _numeric.table_options(
+                rows=self.rows,
+                expectation=self.expectation,
+                key=self.key,
+                columns=self.columns,
+                path=self.path,
+                case_sensitive=self.case_sensitive,
+                **tolerance,
+            )
+        sums = self.type == "sums_to"
+        return _numeric.balance_options(
+            check=self.type,
+            add_option="parts" if sums else "add",
+            add=self.parts if sums else self.add,
+            subtract=() if sums else self.subtract,
+            total=self.total,
+            **tolerance,
+        )
 
     @property
     def label(self) -> str:
@@ -203,9 +364,21 @@ class Suite(_Model):
             raise ValueError("check names must be unique; give repeated check types a name")
         kinds = [check.type for check in self.checks if check.type in JUDGES]
         if len(set(kinds)) != len(kinds):
-            raise ValueError("use at most one check of each judge type (rubric, guidelines, conditions)")
+            raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
+        calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
+        if calls and self.target is None:
+            raise ValueError(
+                f"{', '.join(calls)} measures the target's call, and a suite without a target grades stored "
+                "outputs, which no call produced; name a target or remove the check"
+            )
+        costs = [check.label for check in self.checks if check.type == "cost"]
+        if costs and self.target is not None and self.target.url is not None:
+            raise ValueError(
+                f"{', '.join(costs)} reads the token usage and cost the target's MLflow tracing records, and a "
+                "URL target's call records neither; use a function target or remove the check"
+            )
         return self
 
     def repeat_plan(self) -> dict[str, Any]:
@@ -470,22 +643,25 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
-    from martian.evals import checks as deterministic
-    from martian.evals import judges
+    from martian.evals import grounding, judges
 
     built = []
     judge_headers = {
         name: _from_environment(value, f"judge.headers.{name}")
         for name, value in (suite.judge.headers if suite.judge else {}).items()
     }
+    factories: dict[str, Callable[..., Any]] = {
+        "rubric": judges.response_rubric,
+        "guidelines": judges.response_guidelines,
+        "conditions": judges.response_conditions,
+        "groundedness": grounding.groundedness,
+        "context_relevance": grounding.context_relevance,
+        "context_sufficiency": grounding.context_sufficiency,
+    }
     for check in suite.checks:
         if check.type in JUDGES:
             assert suite.judge is not None
-            factory = {
-                "rubric": judges.response_rubric,
-                "guidelines": judges.response_guidelines,
-                "conditions": judges.response_conditions,
-            }[check.type]
+            factory = factories[check.type]
             built.append(
                 factory(
                     model=suite.judge.model,
@@ -497,29 +673,87 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     headers=judge_headers,
                 )
             )
-        elif check.type == "contains":
-            built.append(
-                deterministic.contains(
-                    *check.values,
-                    expectation=check.expectation,
-                    name=check.label,
-                    any_of=check.any_of,
-                    case_sensitive=check.case_sensitive,
-                )
-            )
-        elif check.type == "not_contains":
-            built.append(
-                deterministic.not_contains(
-                    *check.values, expectation=check.expectation, name=check.label, case_sensitive=check.case_sensitive
-                )
-            )
-        elif check.type == "matches":
-            built.append(deterministic.matches(check.pattern or "", name=check.label))
-        elif check.type == "not_matches":
-            built.append(deterministic.not_matches(check.pattern or "", name=check.label))
         else:
-            built.append(deterministic.is_json(required_keys=check.required_keys, name=check.label))
+            built.append(_build_check(check))
     return built
+
+
+def _build_check(check: CheckSpec) -> Any:
+    """The deterministic check a suite file's entry names. ``CheckSpec.complete`` has made sure the
+    options each type needs are there."""
+    from martian.evals import checks as deterministic
+
+    name = check.label
+    text: dict[str, Any] = {"expectation": check.expectation, "name": name, "case_sensitive": check.case_sensitive}
+    match check.type:
+        case "contains":
+            return deterministic.contains(*check.values, any_of=check.any_of, **text)
+        case "not_contains":
+            return deterministic.not_contains(*check.values, **text)
+        case "contains_any":
+            return deterministic.contains_any(*check.values, **text)
+        case "contains_all":
+            return deterministic.contains_all(*check.values, **text)
+        case "equals":
+            return deterministic.equals(*check.values, **text)
+        case "starts_with":
+            return deterministic.starts_with(*check.values, **text)
+        case "ends_with":
+            return deterministic.ends_with(*check.values, **text)
+        case "similarity":
+            assert check.min_similarity is not None
+            return deterministic.similarity(*check.values, min_similarity=check.min_similarity, **text)
+        case "matches":
+            return deterministic.matches(check.pattern or "", name=name)
+        case "not_matches":
+            return deterministic.not_matches(check.pattern or "", name=name)
+        case "is_json":
+            return deterministic.is_json(required_keys=check.required_keys, name=name)
+        case "json_schema":
+            assert check.json_schema is not None
+            return deterministic.json_schema(check.json_schema, name=name)
+        case "length":
+            return deterministic.length(min_length=check.min_length, max_length=check.max_length, name=name)
+        case "latency":
+            assert check.max_ms is not None
+            return deterministic.latency(max_ms=check.max_ms, name=name)
+        case "cost":
+            return deterministic.cost(max_usd=check.max_usd, max_tokens=check.max_tokens, name=name)
+    numbers: dict[str, Any] = {"abs_tolerance": check.abs_tolerance, "rel_tolerance": check.rel_tolerance, "name": name}
+    match check.type:
+        case "number_equals":
+            return deterministic.number_equals(
+                check.value, expectation=check.expectation, path=check.path, pattern=check.pattern, **numbers
+            )
+        case "sums_to":
+            assert check.total is not None
+            return deterministic.sums_to(parts=check.parts, total=check.total, **numbers)
+        case "reconciles":
+            assert check.total is not None
+            return deterministic.reconciles(add=check.add, subtract=check.subtract, total=check.total, **numbers)
+        case "table_equals":
+            assert check.key is not None
+            return deterministic.table_equals(
+                check.rows,
+                key=check.key,
+                expectation=check.expectation,
+                columns=check.columns,
+                path=check.path,
+                case_sensitive=check.case_sensitive,
+                **numbers,
+            )
+    match check.type:
+        case "no_prohibited_phrases":
+            return deterministic.no_prohibited_phrases(*check.values, expectation=check.expectation, name=name)
+        case "no_personal_data":
+            return deterministic.no_personal_data(kinds=check.kinds, allow=check.allow, name=name)
+        case "no_secrets":
+            return deterministic.no_secrets(kinds=check.kinds, allow=check.allow, name=name)
+        case "resists_injection":
+            return deterministic.resists_injection(*check.values, expectation=check.expectation, name=name)
+        case "no_refusal":
+            return deterministic.no_refusal(expectation=check.expectation, name=name)
+    raise AssertionError(f"{check.type} is not a deterministic check")
 
 
 def _with_suite_criteria(case: dict[str, Any], suite: Suite) -> dict[str, Any]:
@@ -639,6 +873,60 @@ def _counts(verdicts: list[bool | None]) -> dict[str, int]:
     }
 
 
+def _false_refusals(
+    checks: list[CheckSpec], records: list[dict[str, Any]], expectations: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """How many benign cases the suite's no_refusal checks found refused, for a suite whose checks
+    a refusal passes. A case is benign for a check without an expectation key, or when its key is
+    true; one with no verdict from an applicable check counts under errors, not in the rate."""
+    refusal = [check for check in checks if check.type == "no_refusal"]
+    if not refusal and not any(check.type in REFUSAL_PASSING for check in checks):
+        return None
+    benign = refused = errors = 0
+    for record in records:
+        verdicts: list[bool | None] = []
+        for check in refusal:
+            if check.expectation is not None:
+                try:
+                    flag = expectations[record["id"]].get(check.expectation)
+                    if not _policy.benign_flag(flag, check.expectation):
+                        continue
+                except ValueError:  # the check could not tell, and has no verdict either
+                    verdicts.append(None)
+                    continue
+            verdicts.append(record["checks"].get(check.label, {}).get("passed"))
+        if None in verdicts:
+            errors += 1
+        elif verdicts:
+            benign += 1
+            refused += False in verdicts
+    return {
+        "checks": [check.label for check in refusal],
+        "benign": benign,
+        "refused": refused,
+        "errors": errors,
+        "rate": round(refused / benign, 4) if benign else None,
+    }
+
+
+def false_refusal_line(found: dict[str, Any]) -> str:
+    """The false-refusal rate as one line, printed under the results table."""
+    if not found["checks"]:
+        return (
+            "False refusals: not measured. A reply that refuses everything passes these checks; "
+            "add a no_refusal check and mark the benign cases."
+        )
+    if not found["benign"] and not found["errors"]:
+        return "False refusals: not measured. No case is marked benign."
+    line = "False refusals: not measured"
+    if found["benign"]:
+        case = "case" if found["benign"] == 1 else "cases"
+        line = f"False refusals: {found['refused']} of {found['benign']} benign {case} refused ({found['rate']:.1%})"
+    if found["errors"]:
+        line += f"; {found['errors']} benign {'case' if found['errors'] == 1 else 'cases'} without a verdict"
+    return line + "."
+
+
 def _summary(
     records: list[dict[str, Any]],
     labels: list[str],
@@ -646,13 +934,16 @@ def _summary(
     invalidated: int,
     groups: dict[str, str],
     repeats: dict[str, Any] | None = None,
+    false_refusals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The run's counts and pass rates. A record is one case: with repeats its verdicts are its
     attempts combined, so the pass rates and their intervals count cases, never attempts. With
     ``repeats`` (the suite's :meth:`Suite.repeat_plan`, when it runs each case more than once) the
     summary also states the plan and counts the attempts, the target and check errors are counted
     over attempts, where they happened, and ``reliability`` is the share of cases that passed every
-    attempt, with its interval and the flaky cases (:func:`martian.evals.repeats.reliability`)."""
+    attempt, with its interval and the flaky cases (:func:`martian.evals.repeats.reliability`).
+    ``false_refusals`` (:func:`_false_refusals`, for a suite with policy checks) counts cases by
+    their combined verdicts too."""
     repeated = repeats is not None
     per_check = {}
     for label in labels:
@@ -692,6 +983,7 @@ def _summary(
         }
     return summary | {
         "checks": per_check,
+        **({} if false_refusals is None else {"false_refusals": false_refusals}),
         "target_errors": target_errors,
         "check_errors": check_errors,
         "invalidated": invalidated,
@@ -975,8 +1267,15 @@ def run_suite(
         final = results.records()
         ordered = [final[case["id"]] for case in cases if case["id"] in final]
         groups = {case.id: case.tags[GROUP_TAG] for case in model_cases if GROUP_TAG in case.tags}
+        refusals = _false_refusals(suite.checks, ordered, {case["id"]: case["expectations"] for case in cases})
         summary = _summary(
-            ordered, labels, time.monotonic() - started, invalidated, groups, repeat_plan if repeated else None
+            ordered,
+            labels,
+            time.monotonic() - started,
+            invalidated,
+            groups,
+            repeat_plan if repeated else None,
+            refusals,
         )
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

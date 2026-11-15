@@ -122,7 +122,7 @@ def _run_suite(
     from martian.config import ConfigError
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
-    from martian.evals.runner import run_suite
+    from martian.evals.runner import false_refusal_line, run_suite
     from martian.evals.stats import rate_text
 
     console = Console()
@@ -186,6 +186,8 @@ def _run_suite(
             markup=False,
             highlight=False,
         )
+    if (refusals := summary.get("false_refusals")) is not None:
+        console.print(false_refusal_line(refusals), markup=False, highlight=False, soft_wrap=True)
     unit = "attempt(s)" if plan else "case(s)"
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} {unit}: {reason}", markup=False, highlight=False)
