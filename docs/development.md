@@ -135,13 +135,13 @@ For debugging (`--pdb`, `-s`) or a failure that appears only in parallel, run se
 out `-n auto` or passing `-n 0`. Each worker imports MLflow, and some tests start further pytest
 processes, so on a machine short of memory give a fixed count such as `-n 4`.
 
-Wall-clock time of the full suite (706 tests) with Postgres on a 12-CPU workstation that was also
+Wall-clock time of the full suite (791 tests) with Postgres on a 12-CPU workstation that was also
 running other test suites:
 
 | Command | Workers | Time |
 | --- | --- | --- |
-| `pytest -q` | 1 | about 13 minutes (787 s) |
-| `pytest -q -n auto` | 12 | about 4 minutes (245 to 266 s over three runs) |
+| `pytest -q` | 1 | about 12.5 minutes (755 s) |
+| `pytest -q -n auto` | 12 | about 4 minutes (240 to 249 s over three runs) |
 
 The longest single tests start pytest in a subprocess and take 20 to 40 seconds each in a parallel
 run. On GitHub's runners `-n auto` starts one worker per runner CPU.
