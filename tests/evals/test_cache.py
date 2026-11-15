@@ -519,6 +519,79 @@ def test_a_check_of_the_targets_call_is_refused_when_its_calls_are_cached(tmp_pa
         run_suite(write(tmp_path / "fn", {**function, "cache": {"functions": True}}))
 
 
+TRACED_AGENT = """\
+from pathlib import Path
+
+import mlflow
+from mlflow.entities import SpanType
+
+
+def answer(message):
+    with Path(__file__).with_name("calls.txt").open("a") as handle:
+        handle.write("called\\n")
+    for calls in (["lookup_order"], []):
+        with mlflow.start_span(name="chat", span_type=SpanType.CHAT_MODEL) as model:
+            model.set_outputs({"role": "assistant", "content": "ok"})
+        for name in calls:
+            with mlflow.start_span(name=name, span_type=SpanType.TOOL) as tool:
+                tool.set_inputs({"order_id": "A-1001"})
+    return '{"role": "assistant", "content": "Done.", "tool_calls": [{"name": "lookup_order"}]}'
+"""
+
+SCORERS = """\
+from pathlib import Path
+
+
+def counted(outputs):
+    with Path(__file__).with_name("scored.txt").open("a") as handle:
+        handle.write("scored\\n")
+    return "Done." in outputs
+
+
+def traced(trace):
+    return True
+"""
+
+
+def test_a_python_check_is_never_cached_and_trace_reading_checks_are_refused_on_a_replayed_target(tmp_path):
+    folder = tmp_path / "fn"
+    folder.mkdir()
+    (folder / "agent.py").write_text(TRACED_AGENT, encoding="utf-8")
+    (folder / "scorers.py").write_text(SCORERS, encoding="utf-8")
+    counted = {"type": "python", "name": "counted", "file": "scorers.py", "function": "counted"}
+    from_reply = {"type": "tool_called", "calls": ["lookup_order"], "source": "reply"}
+    suite = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent.py", "function": "answer"},
+        "checks": [counted, from_reply],
+        "cache": {"folder": "model-cache", "functions": True},
+    }
+    path = write(folder, suite)
+    assert run_suite(path)["passed"] == 3
+    replayed = run_suite(path, resume=False)
+    # The target's replies came from the cache; the python check ran again on each, as a scorer is
+    # not a model call, and the tool-call check read the replayed reply.
+    assert (replayed["passed"], replayed["cache"]["target"]) == (3, {"hits": 3, "calls": 0, "stored": 0})
+    assert len((folder / "calls.txt").read_text().splitlines()) == 3
+    assert len((folder / "scored.txt").read_text().splitlines()) == 6
+    assert entries(folder / "model-cache") and all(
+        json.loads(entry.read_text())["kind"] == "target" for entry in entries(folder / "model-cache")
+    )
+
+    # A replayed call's trace records none of the function's spans, so a check that reads the
+    # trace is refused while the function's calls are cached, before any case.
+    from_trace = {"type": "tool_called", "calls": ["lookup_order"]}
+    with pytest.raises(ConfigError, match=r"tool_called reads the tool calls in the trace.*cache.functions"):
+        run_suite(write(folder, {**suite, "checks": [counted, from_trace]}))
+    traced = {"type": "python", "name": "traced", "file": "scorers.py", "function": "traced"}
+    with pytest.raises(ConfigError, match=r"check traced: it reads the trace of the target's call.*--no-cache"):
+        run_suite(write(folder, {**suite, "checks": [counted, traced]}))
+    assert len((folder / "calls.txt").read_text().splitlines()) == 3
+    # Without the cache, or with the function's calls left out of it, both read the call's trace.
+    assert run_suite(write(folder, {**suite, "checks": [from_trace, traced]}), cache=False)["passed"] == 3
+    assert run_suite(write(folder, {**suite, "checks": [from_trace, traced], "cache": {}}))["passed"] == 3
+
+
 def test_cache_functions_applies_only_to_a_function_target(tmp_path, endpoint):
     path = write(tmp_path / "suite", suite_file(endpoint, cache={"functions": False}))
     with pytest.raises(ConfigError, match="cache.functions only applies to a function target"):

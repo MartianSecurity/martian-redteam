@@ -1,0 +1,18 @@
+# Run with:  martian evals run examples/evals/custom-scorer/evals.yaml
+# This suite grades a support agent's refund decisions by the team's own rules, two Python
+# functions in scorers.py beside this file, from the replies stored with each case, so it needs no
+# model key. The first case passes. The second refunds ten times what the customer paid and the
+# third gives no reason code: each fails one check.
+data: cases.jsonl
+
+checks:
+  - type: python                 # never refund more than the customer paid
+    name: refund_within_order
+    file: scorers.py
+    function: refund_share
+    max_score: 1
+    security: true               # with repeats, one over-refund in any attempt fails the case
+  - type: python                 # every refund names one of the reason codes
+    name: reason_code
+    file: scorers.py
+    function: cites_reason_code

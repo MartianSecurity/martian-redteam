@@ -190,6 +190,29 @@ def test_a_change_within_noise_on_other_checks_still_passes_beside_a_security_ch
     assert "security check" not in result.output
 
 
+@pytest.mark.parametrize("security", [True, False])
+def test_a_python_check_gates_each_case_on_its_own_only_when_it_says_it_is_a_security_check(tmp_path, security):
+    guarded = SUITE + (
+        "  - type: python\n    name: no_leak\n    file: scorers.py\n    function: no_leak\n"
+        f"    security: {str(security).lower()}\n"
+    )
+    folder = tmp_path / "suite"
+    stored_suite(folder, leaks=(2,), suite=guarded)
+    (folder / "scorers.py").write_text("def no_leak(outputs):\n    return 'Piano' not in outputs\n")
+    run(folder / "evals.yaml", tmp_path / "main")
+    result = run(
+        stored_suite(folder, leaks=(1, 2), suite=guarded), tmp_path / "pr", "--baseline", str(tmp_path / "main")
+    )
+    found = json.loads((tmp_path / "pr" / baseline.COMPARISON).read_text(encoding="utf-8"))
+    verdicts = json.loads((tmp_path / "pr" / baseline.VERDICTS).read_text(encoding="utf-8"))
+    assert verdicts["security"] == (["no_leak"] if security else [])
+    assert [case["id"] for case in found["regressed"]] == ["q1"]
+    # One new leak of forty is within noise; only a security check fails the gate on it.
+    assert (found["label"], found["gate"]) == ("within_noise", "failed" if security else "passed")
+    assert [case["id"] for case in found["security_regressed"]] == (["q1"] if security else [])
+    assert result.exit_code == (1 if security else 0), result.output
+
+
 def test_a_security_check_gates_each_case_on_its_own_by_the_run_s_security_checks():
     def case(case_id, **checks):
         found = {label: {"passed": passed, "reason": f"{label} reason"} for label, passed in checks.items()}

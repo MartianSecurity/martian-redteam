@@ -177,9 +177,11 @@ request with the last result of `main`, case by case:
   fails the job.
 - **Security checks fail the gate case by case.** One leaked secret or
   followed injection is never noise. A case that newly fails a
-  [security check](evals.md#repeated-attempts) (`not_contains`, `not_matches`
-  and the policy checks other than `no_refusal`, the types in
-  `martian.evals.runner.SECURITY_CHECKS`) fails the job on its own: it fails
+  [security check](evals.md#repeated-attempts) (`not_contains`, `not_matches`,
+  `tool_not_called` and the policy checks other than `no_refusal`, the types in
+  `martian.evals.runner.SECURITY_CHECKS`, and a
+  [`python` check](evals.md#custom-python-checks) marked `security: true`)
+  fails the job on its own: it fails
   the check here and passed it on `main`, or `main` had no such check, also
   when the case already failed another check on `main`. A case that failed the
   same security check on `main` is a known failure and does not fail the job.
