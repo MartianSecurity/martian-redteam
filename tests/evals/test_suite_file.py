@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Policy, Repeats, ScorerVersion, Suite, Target
+from martian.evals.model import Policy, Repeats, RunLimits, ScorerVersion, Suite, Target
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.suite_file import (
@@ -124,6 +124,7 @@ EVERY_FIELD_URL = {
     "output": "results-all",
     "input_key": "prompt",
     "mlflow": {"tracking_uri": "http://127.0.0.1:5000", "experiment": "every-field"},
+    "limits": {"max_seconds": 1800.0, "max_judge_tokens": 200000},
     "cache": {"folder": "model-cache", "ttl_seconds": 3600.0},
 }
 EVERY_FIELD_FUNCTION = {
@@ -306,6 +307,7 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "output": "results-all",
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
+        "limits": {"max_seconds": 1800.0, "max_judge_tokens": 200000},
         "cache": {"folder": "model-cache", "ttl_seconds": 3600.0, "functions": None},
     }
     assert suite.repeats == Repeats(attempts=3, combine="majority", checks={"no_leak": "any"})
@@ -346,10 +348,22 @@ def test_header_values_are_kept_as_written_and_never_expanded(tmp_path, monkeypa
     assert "value-from-the-environment" not in suite_to_yaml(suite)
 
 
+def test_a_function_target_keeps_its_time_limit_and_a_stored_one_has_none(tmp_path):
+    timed = {**EVERY_FIELD_FUNCTION, "target": {**EVERY_FIELD_FUNCTION["target"], "timeout_seconds": 45.0}}
+    suite, _ = load_suite_file(write(tmp_path, timed))
+    assert suite.settings.target_timeout_seconds == 45.0
+    assert yaml.safe_load(round_trip(write(tmp_path, timed)))["target"]["timeout_seconds"] == 45.0
+    stored = suite.model_copy(update={"target": Target(kind="stored")})
+    with pytest.raises(ConfigError, match="target_timeout_seconds applies only to a function or http target"):
+        suite_to_yaml(stored)
+
+
 def test_settings_the_file_leaves_out_stay_the_runners_defaults(tmp_path):
     without_cache = {name: value for name, value in EVERY_FIELD_FUNCTION.items() if name != "cache"}
     suite, _ = load_suite_file(write(tmp_path, without_cache))
     assert set(suite.settings.model_dump().values()) == {None}
+    # Unset limits are left out, so a suite without them keeps the digest it had before them.
+    assert "limits" not in suite.settings.model_dump()
     # No cache block, no cache in the settings, so a suite without one keeps its digest.
     assert suite.settings.cache is None and "cache" not in suite.model_dump()["settings"]
     assert "concurrency" not in yaml.safe_load(suite_to_yaml(suite))
@@ -588,7 +602,7 @@ def test_a_suite_field_the_writer_does_not_know_is_refused_on_export(tmp_path):
 @pytest.mark.parametrize(
     ("settings", "problem"),
     [
-        ({"target_timeout_seconds": 10}, "target_timeout_seconds applies only to an http target"),
+        ({"limits": RunLimits(max_judge_tokens=100)}, "max_judge_tokens counts the tokens of LLM judge checks"),
         ({"judge_max_retries": 1}, "need an llm_judge scorer"),
         ({"concurrency": 500}, "invalid suite file: concurrency"),
     ],

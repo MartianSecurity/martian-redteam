@@ -10,6 +10,7 @@ import mlflow.genai
 from mlflow.genai.scorers import Scorer
 
 from martian.evals._mlflow import EvaluationResult
+from martian.evals.runner import DEFAULT_TARGET_TIMEOUT_SECONDS, _function_target
 from martian.evals.state import STATE
 
 if TYPE_CHECKING:
@@ -59,9 +60,15 @@ def _run(
     scorers: Sequence[Scorer],
     predict_fn: Callable[..., Any] | None,
     model_id: str | None,
+    target_timeout_seconds: float | None = None,
 ) -> EvaluationResult:
     check_scorer_names(data, scorers)
-    if predict_fn is not None and not getattr(predict_fn, "__mlflow_traced__", False):
+    if predict_fn is not None and target_timeout_seconds is not None:
+        # The call runs on a thread the evaluation stops waiting for at the limit, and the timeout
+        # is raised in the traced wrapper, so the case is an error row. A function that is already
+        # traced is traced again around the wrapper, since its own trace never ends if it hangs.
+        predict_fn = mlflow.trace(_function_target(predict_fn, target_timeout_seconds))
+    elif predict_fn is not None and not getattr(predict_fn, "__mlflow_traced__", False):
         predict_fn = mlflow.trace(predict_fn)
     result = mlflow.genai.evaluate(data=data, scorers=list(scorers), predict_fn=predict_fn, model_id=model_id)
     if getattr(result, "result_df", None) is None:
@@ -86,6 +93,7 @@ def evaluate(
     scorers: Sequence[Scorer],
     predict_fn: Callable[..., Any] | None = None,
     model_id: str | None = None,
+    target_timeout_seconds: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
 ) -> EvaluationResult:
     """Run the local prediction callable and scorers once; return MLflow's typed result.
 
@@ -97,8 +105,21 @@ def evaluate(
     like an expectation key (ValueError), and an evaluation that did not record a result for
     every row (EvaluationError). A prediction function that is not already traced is traced
     here, because MLflow records per-row results only for traced calls.
+
+    Each call of ``predict_fn`` gets ``target_timeout_seconds`` (default 120, the suite file's
+    ``target.timeout_seconds`` default). The function runs on a thread of its own; one that has not
+    returned by then is that case's error (``the target did not answer within
+    target.timeout_seconds``), the evaluation goes on, and the gate fails closed on the case. Python
+    cannot stop a thread, so the hung function keeps running in the background until it returns or
+    the process ends.
     """
-    result = _run(data=data, scorers=scorers, predict_fn=predict_fn, model_id=model_id)
+    result = _run(
+        data=data,
+        scorers=scorers,
+        predict_fn=predict_fn,
+        model_id=model_id,
+        target_timeout_seconds=target_timeout_seconds,
+    )
     frame = result.result_df
     expected = len(data) if isinstance(data, list) else None
     if frame is not None and expected is not None and len(frame) != expected:

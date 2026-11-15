@@ -35,6 +35,8 @@ from typing import Any
 MARKER = "<!-- martian-evals-comment: {key} -->"
 DEFAULT_AUTHOR = "github-actions[bot]"
 MAX_ROWS = 25
+NOT_RUN = "not run: "
+"""How junit.xml's error for a case the run stopped before starts (``martian.evals.runner.write_junit``)."""
 # Combinations of a matrix whose cases the comment names, each with up to five per list.
 MAX_DETAILED = 10
 PER_PAGE = 100
@@ -86,8 +88,11 @@ def load_outcome(folder: Path, exit_code: int) -> Outcome:
     each combination's folder.
 
     junit.xml lists exactly this run's cases in data order; results.jsonl can also hold records
-    of cases that an earlier run in the same folder graded. A run without a baseline removes an
-    earlier run's comparison.json, and a run without a matrix an earlier run's matrix.json.
+    of cases that an earlier run in the same folder graded. A case a stopped run did not reach is
+    in junit.xml as an error that starts ``not run:``, and its record in results.jsonl, if any, is
+    an earlier run's, so it is left out: the summary counts it under ``not_run``. A run without a
+    baseline removes an earlier run's comparison.json, and a run without a matrix an earlier run's
+    matrix.json.
     """
     matrix_path = folder / "matrix.json"
     if matrix_path.is_file():
@@ -119,8 +124,14 @@ def _cases_of(folder: Path) -> list[dict[str, Any]]:
         if line.strip():
             record = json.loads(line)
             latest[str(record["id"])] = record
-    order = [str(case.get("name")) for case in ET.parse(folder / "junit.xml").getroot().iter("testcase")]
+    order = [str(case.get("name")) for case in ET.parse(folder / "junit.xml").getroot().iter("testcase") if _ran(case)]
     return [latest[name] for name in order if name in latest]
+
+
+def _ran(case: ET.Element) -> bool:
+    """Whether the run reached this junit.xml testcase, which a stopped run's error says it did not."""
+    error = case.find("error")
+    return error is None or not error.get("message", "").startswith(NOT_RUN)
 
 
 def marker(key: str) -> str:
@@ -195,6 +206,10 @@ def render(
         # for a fresh one.
         if (used := summary.get("cache")) is not None:
             lines += [cache_used(used), ""]
+        # A run stopped at a limit, or cancelled, counts only the cases it finished.
+        if not_run := summary.get("not_run"):
+            why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+            lines += [f"{why}: {not_run} cases not run. Run the suite again to resume after the cases it finished.", ""]
         # A suite whose checks a refusal passes says how many benign cases were refused, next to
         # the pass count, so a model that refuses everything cannot look as if it passed.
         if (refusals := summary.get("false_refusals")) is not None:

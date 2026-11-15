@@ -542,3 +542,35 @@ def test_an_empty_cache_block_turns_the_cache_on_with_its_defaults(tmp_path, end
 def test_the_cache_applies_to_a_suite_file_only(tmp_path, flag):
     result = CliRunner().invoke(app, ["evals", "run", str(tmp_path), flag])
     assert result.exit_code == 2 and "--cache, --baseline and --data-dir apply to a suite file" in result.output
+
+
+def test_a_replayed_judgment_spends_none_of_the_judge_token_limit(tmp_path, endpoint):
+    # One case per batch, so a run with a token limit checks it between cases.
+    path = write(tmp_path / "suite", suite_file(endpoint, batch=1))
+    run_suite(path)
+    endpoint.reset()
+    # Each judgment the loopback gives reports 15 tokens; a replayed one made no call and counts 0.
+    replayed = run_suite(path, resume=False, max_judge_tokens=1)
+    assert endpoint.counts() == {"target": 0, "judge": 0}
+    assert (replayed["passed"], replayed["not_run"], replayed["stopped"]) == (3, 0, None)
+    assert replayed["cache"]["judge"] == {"hits": 3, "calls": 0, "stored": 0}
+    # Without the cache every judgment spends its tokens, and the same limit stops the run.
+    endpoint.reset()
+    fresh = run_suite(path, resume=False, max_judge_tokens=1, cache=False)
+    assert endpoint.counts() == {"target": 1, "judge": 1}
+    assert (fresh["not_run"], fresh["stopped"]["limit"]) == (2, "max_judge_tokens")
+
+
+def test_a_stopped_run_records_how_much_of_the_cache_it_used(tmp_path, endpoint):
+    path = write(tmp_path / "suite", suite_file(endpoint, batch=1))
+    stopped = run_suite(path, max_judge_tokens=1)
+    assert (stopped["not_run"], stopped["cache"]["target"]) == (2, {"hits": 0, "calls": 1, "stored": 1})
+    client = local_ui(tmp_path)
+    (run,) = client.get("/v1/evals").json()
+    provenance = client.get(f"/v1/evals/{run['id']}").json()["provenance"]
+    assert provenance["stopped"]["limit"] == "max_judge_tokens"
+    assert provenance["cache"]["judge"] == {"hits": 0, "calls": 1, "stored": 1}
+    # The next run resumes after the finished case and calls for the two it did not run.
+    endpoint.reset()
+    resumed = run_suite(path)
+    assert endpoint.counts() == {"target": 2, "judge": 2} and resumed["not_run"] == 0

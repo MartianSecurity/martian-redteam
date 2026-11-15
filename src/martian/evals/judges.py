@@ -20,6 +20,7 @@ from martian.evals._judge_transport import (
     PROVIDER_RETRIES_KEY,
     invoke_response_judge,
 )
+from martian.evals.cache import HIT_KEY
 
 if TYPE_CHECKING:
     from martian.evals.cache import ModelCallCache
@@ -797,10 +798,18 @@ def _response_judge(
         if verify:
             metadata["martian.judge.draft"] = _json(draft)
             metadata["martian.judge.review_metadata"] = _json(dict(feedback.metadata or {}))
+            # A stage replayed from the cache made no call and used no tokens. The judgment is
+            # replayed only when both stages were.
+            stages = (draft["metadata"], metadata)
+            replayed = [stage.get(HIT_KEY) == "hit" for stage in stages]
             for token_key in ("mlflow.assessment.judgeInputTokens", "mlflow.assessment.judgeOutputTokens"):
-                first, second = draft["metadata"].get(token_key), metadata.get(token_key)
+                first, second = (
+                    0 if hit else stage.get(token_key) for hit, stage in zip(replayed, stages, strict=True)
+                )
                 if first is not None and second is not None:
                     metadata[token_key] = str(int(first) + int(second))
+            if not all(replayed):
+                metadata.pop(HIT_KEY, None)
             review_rendered = _json([{"role": m.role, "content": m.content} for m in review_messages])
             metadata["martian.judge.review_prompt_sha256"] = _digest(review_rendered)
             if include_judge_prompt:

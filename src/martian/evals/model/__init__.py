@@ -28,7 +28,10 @@ TargetKind = Literal["function", "http", "agent", "stored"]
 ScorerKind = Literal["llm_judge", "check", "code", "human"]
 DatasetSource = Literal["file", "draft", "global", "upload", "traces"]
 RunSource = Literal["local", "console", "ci"]
-RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled"]
+RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled", "stopped"]
+"""``stopped``: a run or scoring job that ended before its last case at one of its limits
+(:class:`RunLimits`). It keeps its finished cases and can be resumed."""
+LimitName = Literal["max_seconds", "max_judge_tokens"]
 CaseStatus = Literal["pending", "passed", "failed", "error", "skipped"]
 ScoreSource = Literal["code", "llm_judge", "human"]
 QuestionKind = Literal["boolean", "numeric", "categorical", "text"]
@@ -197,11 +200,35 @@ class CacheSettings(_Object):
     functions: bool | None = None
 
 
+class RunLimits(_Object):
+    """When a run stops before its last case: once it has run for ``max_seconds`` of wall time, or
+    once its judges have used ``max_judge_tokens`` tokens, input and output together, as the judge's
+    provider reported them. ``None`` is no limit. Each start or resume of a run has its limits
+    afresh. A run that reaches one is ``stopped``, keeps its finished cases and can be resumed."""
+
+    max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_judge_tokens: int | None = Field(default=None, ge=1)
+
+    def stop(self, limit: LimitName, used: float | None) -> dict[str, Any]:
+        """What a run that stopped at ``limit`` records of it (``Run.provenance["stopped"]``): the
+        limit, its value, what had been used (None for judge tokens a judge did not report), and
+        a message that names the setting to raise."""
+        value = getattr(self, limit)
+        if limit == "max_seconds":
+            message = f"Stopped at its time limit (max_seconds {value:g}) after {used or 0:.0f} seconds"
+        elif used is None:
+            message = "Stopped: the judge reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+        else:
+            message = f"Stopped at its judge token limit (max_judge_tokens {value}) after {used:.0f} tokens"
+        return {"limit": limit, "value": value, "used": used, "message": message}
+
+
 class RunSettings(_Object):
     """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
     default. A case result's fingerprint leaves these out, so changing one keeps earlier results.
-    ``cache`` is set when the suite file turns the cache of model calls on; it is left out when
-    unset, so a suite without one keeps its digest."""
+    Unset ``limits`` are left out when the settings are written, so a suite without them keeps the
+    digest it had before the field existed. ``cache`` is set when the suite file turns the cache of
+    model calls on, and left out when unset in the same way."""
 
     concurrency: int | None = Field(default=None, ge=1)
     batch: int | None = Field(default=None, ge=1)
@@ -213,13 +240,16 @@ class RunSettings(_Object):
     output: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
+    limits: RunLimits | None = None
     cache: CacheSettings | None = None
 
     @model_serializer(mode="wrap")
-    def _without_unset_cache(self, handler: SerializerFunctionWrapHandler) -> Any:
+    def _without_unset_limits_or_cache(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
-        if isinstance(written, dict) and self.cache is None:
-            written.pop("cache", None)
+        if isinstance(written, dict):
+            for name in ("limits", "cache"):
+                if name in written and written[name] is None:
+                    del written[name]
         return written
 
 
@@ -742,8 +772,11 @@ __all__ = [
     "Review",
     "ReviewQuestion",
     "ReviewQueue",
+    "LimitName",
     "Run",
+    "RunLimits",
     "RunSettings",
+    "RunState",
     "Score",
     "ScorerVersion",
     "ScoringJob",

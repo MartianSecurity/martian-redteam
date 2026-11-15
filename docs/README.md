@@ -14,7 +14,8 @@ Hosted features also need the SDK APIs enabled for the organisation.
 2. [Setup](setup.md) — install, environment, first local run
 3. [Evals](evals.md) — running a suite file locally, repeated attempts with reliability and flaky cases, a matrix of prompts and models, a cache of model calls, pass rates and their confidence intervals, comparing two runs, the judges and deterministic checks, and the dataset regression gate
    - [Shared eval data model](eval-model.md) — the objects the SDK, the local edition and the server have in common, and how each format maps onto them
-   - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, and the worker interface
+   - [Evals core](evals-core.md) — the `/v1/evals` API that runs on its own, with the principal, store, record store, entitlements and worker an edition injects, its read and write routes, its OpenTelemetry traces endpoint, and the worker interface
+   - [Data export](data-export.md) — an organisation's data as JSON Lines files with a manifest, `martian evals export` resuming an interrupted export, and `martian evals import martian` loading it into a fresh install
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency

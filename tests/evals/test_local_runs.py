@@ -6,6 +6,7 @@ OpenAI-compatible endpoint; nothing calls a real model."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -25,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION
 from martian.evals.local import create_local_app, open_stores
-from martian.evals.local_runs import INTERRUPTED, NOT_COMPLETED, LocalWorker, held
+from martian.evals.local_runs import INTERRUPTED, LocalWorker, held, open_queue
 from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Case, Run, Suite, Target, digest
 from martian.evals.run_record import RunRecorder
@@ -34,6 +35,7 @@ from martian.evals.worker.scorers import builtin_scorer
 from tests.evals.local_fixture import DATASET, SUITE_SCORERS, FakeTarget, publish, save_suite
 from tests.evals.test_worker_judges import KEY as JUDGE_KEY
 from tests.evals.test_worker_judges import REPORTED, Loopback, model_answer
+from tests.evals.write_fixture import CASES
 
 LOCAL = "http://127.0.0.1:7600"
 RUNS = "/v1/local/runs"
@@ -168,6 +170,80 @@ def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_resu
         {"message": "Can I change my username?"},
     ]
     assert {request["headers"]["Authorization"] for request in target.requests} == {f"Bearer {KEY}"}
+
+
+def _stopped_after_its_first_case(client: TestClient, target: FakeTarget) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A local target and a run of it with a suite, stopped at its time limit after its first case;
+    the target and the run."""
+    defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
+    suite = save_suite(client, str(uuid.uuid4()))
+    # The target answers the first case 4 seconds after it is asked, past the run's limit of 3.
+    target.gate, target.held = threading.Event(), {"How do I reset my password?"}
+
+    def answer_late() -> None:
+        deadline = time.monotonic() + 120
+        while not target.requests and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(4)
+        assert target.gate is not None
+        target.gate.set()
+
+    threading.Thread(target=answer_late, daemon=True).start()
+    queued = launch(client, defined["id"], suite, limits={"max_seconds": 3})
+    assert queued["provenance"]["limits"] == {"max_seconds": 3.0, "max_judge_tokens": None}
+    drain(client)
+    return defined, queued
+
+
+def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_scores_it(client, home, target):
+    _, queued = _stopped_after_its_first_case(client, target)
+
+    run, work = results(client, queued["id"])
+    assert run["state"] == "stopped" and run["error"].startswith("Stopped at its time limit (max_seconds 3) after ")
+    assert {item["dataset_item_id"]: item["status"] for item in run["items"]} == {"faq-1": "passed"}
+    # The suite's scoring job waits for the run to resume and complete.
+    assert [job["state"] for job in work["jobs"]] == ["queued"]
+
+    resumed = call(client, "POST", f"{RUNS}/{queued['id']}/resume", 202, json={"limits": {"max_seconds": 120}})
+    assert (resumed["state"], resumed["provenance"]["limits"]["max_seconds"]) == ("queued", 120)
+    drain(client)
+    run, work = results(client, queued["id"])
+    assert (run["state"], run["passed"], run["failed"], run["skipped"]) == ("completed", 1, 1, 1)
+    assert [job["state"] for job in work["jobs"]] == ["partial"]
+    # Resumed in a process of its own, the run called only the case it had not finished.
+    assert [request["body"]["message"] for request in target.requests] == [
+        "How do I reset my password?",
+        "Can I change my username?",
+    ]
+    assert call(client, "POST", f"{RUNS}/{queued['id']}/resume", 409, json={})["detail"] == (
+        "Only a run, or its suite's scoring, stopped at one of its limits can be resumed"
+    )
+
+
+def test_a_stopped_run_whose_target_changed_under_its_id_fails_when_resumed_without_calling_it(client, home, target):
+    """The UI cannot edit a local target, but ``targets.json`` can be edited by hand, keeping the
+    target's id. Resumed after that, the run fails, naming the target, in its own process, before
+    any call, and its suite does not score it."""
+    defined, queued = _stopped_after_its_first_case(client, target)
+    definitions = home / "targets.json"
+    written = json.loads(definitions.read_text(encoding="utf-8"))
+    (edited,) = written["targets"]
+    edited["body"] = {"message": "{{input}}", "channel": "support"}
+    definitions.write_text(json.dumps(written), encoding="utf-8")
+
+    call(client, "POST", f"{RUNS}/{queued['id']}/resume", 202, json={"limits": {"max_seconds": 120}})
+    drain(client)
+    run, work = results(client, queued["id"])
+    assert (run["state"], run["error"]) == (
+        "failed",
+        f'The target "Support agent" ({defined["id"]}) changed since this run started; the run did not call the '
+        "changed target. Start a new run to evaluate it as it is now",
+    )
+    assert {item["dataset_item_id"]: item["status"] for item in run["items"]} == {"faq-1": "passed"}
+    assert [(job["state"], job["error"]) for job in work["jobs"]] == [
+        ("cancelled", "The run did not complete, so its suite did not score it")
+    ]
+    assert [request["body"] for request in target.requests] == [{"message": "How do I reset my password?"}]
 
 
 def test_run_again_repeats_a_finished_run_with_its_saved_settings(client, home, target):
@@ -373,11 +449,11 @@ def test_a_suite_with_a_model_judge_runs_on_the_sdk_judge_and_again(client, targ
     assert len(judge_model.requests) == 4
 
 
-# --- runs whose process stopped (MorningHQ/martian-notes#333) ---------------------------------
+# --- runs whose process stopped (MorningHQ/martian-notes#333, #139) --------------------------
 
 HOLD = (
-    "import sys; from pathlib import Path; from martian.evals.local_runs import PROCESS, RunLock; "
-    "RunLock(Path(sys.argv[1]), sys.argv[2], PROCESS); print('held', flush=True); sys.stdin.read()"
+    "import asyncio, sys; from pathlib import Path; from martian.evals.local_runs import RunHold; "
+    "hold = asyncio.run(RunHold.take(Path(sys.argv[1]), sys.argv[2])); print('held', flush=True); sys.stdin.read()"
 )
 """A process that holds a run of a data folder, as `martian evals run` does while it records one."""
 
@@ -408,18 +484,21 @@ def _stored(home: Path, run_id: str) -> Run:
     return found
 
 
-def test_a_run_whose_martian_ui_was_stopped_is_interrupted_when_it_starts_again(home, ui, target, tmp_path):
-    """`martian ui` and the run's process are killed, as a crash or a power cut would, while the run
-    waits on its target. Started again, `martian ui` shows the run interrupted and admits another."""
+def test_a_run_whose_martian_ui_was_stopped_is_taken_again_when_it_starts_again(home, ui, target, tmp_path):
+    """`martian ui` is killed, as a crash or a power cut would, while the run waits on its target
+    for its second case, and its run's process ends with it. Started again, `martian ui` takes the
+    run again once its lease runs out and resumes it in a new process, on the dataset and suite
+    versions it was admitted with: the finished case is not called again, the one in flight is.
+    Then it scores the run with its suite."""
     publish(home)
-    target.gate = threading.Event()
+    target.gate, target.held = threading.Event(), {"Can I change my username?"}
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     environment = {name: value for name, value in os.environ.items() if name != "MLFLOW_WORKSPACE"}
     command = [sys.executable, "-m", "martian", "ui", "--port", str(port), "--data-dir", str(home)]
     with (tmp_path / "ui.log").open("w") as output:
-        # A process group of its own, which the run's process joins, so both can be killed together.
+        # A process group of its own, to kill it with; the run's process has a session of its own.
         server = subprocess.Popen(
             [*command, "--ui-dir", str(ui), "--no-open"],
             env={**environment, "MLFLOW_DISABLE_TELEMETRY": "true"},
@@ -433,26 +512,43 @@ def test_a_run_whose_martian_ui_was_stopped_is_interrupted_when_it_starts_again(
                 defined = call(http, "POST", "/v1/local/targets", 201, json=target.definition())
                 suite = save_suite(http, str(uuid.uuid4()))
                 queued = launch(http, defined["id"], suite)
-                _until(lambda: target.requests, "the run's process to call the target")
-            assert _stored(home, queued["id"]).state == "running"
+                _until(lambda: len(target.requests) == 2, "the run's process to call the target for its second case")
+                # Newer versions of the dataset, under which the second case would pass, and of the
+                # suite are saved while the run is in flight.
+                newer = [
+                    Case(id=case.id, inputs=case.inputs, expectations={"expected_response": "I am not sure."})
+                    for case in CASES
+                ]
+                publish(home, newer)
+                save_suite(http, str(uuid.uuid4()), ["valid_json"], suite_id=suite["suite_id"], expected_version=1)
+            running = _stored(home, queued["id"])
+            assert (running.state, running.counts.passed) == ("running", 1)
             assert held(home, queued["id"])
         finally:
             os.killpg(server.pid, signal.SIGKILL)
             server.wait(30)
-    # The kernel released the locks of both processes; the record still says the run is running.
-    _until(lambda: not held(home, queued["id"]), "the run's locks to be released", timeout=30)
+    # Nothing renews the run's claim any more; the record still says the run is running.
+    _until(lambda: not held(home, queued["id"]), "the run's lease to run out", timeout=30)
     assert _stored(home, queued["id"]).state == "running"
     target.gate.set()
 
     with TestClient(create_local_app(home, ui), base_url=LOCAL) as client:
-        run, work = results(client, queued["id"])
-        assert (run["state"], run["error"], run["finished_at"] is not None) == ("failed", INTERRUPTED, True)
-        [job] = work["jobs"]
-        assert (job["state"], job["error"]) == ("cancelled", NOT_COMPLETED)
-        # A new run is admitted, and runs.
-        again_run = launch(client, defined["id"])
         drain(client)
-        assert results(client, again_run["id"])[0]["state"] == "completed"
+        run, work = results(client, queued["id"])
+        assert (run["state"], run["error"], run["passed"], run["failed"]) == ("completed", "", 1, 1)
+        assert settings(run) == settings(queued)
+        [job] = work["jobs"]
+        assert (job["state"], job["succeeded"], job["errors"]) == ("partial", 4, 2)
+        # The suite version the run was admitted with scored it, not the newer one.
+        assert (job["config"]["suite_version_id"], job["config"]["scorers"]) == (suite["id"], SUITE_SCORERS)
+        assert "valid_json" not in {row["name"] for row in work["assessments"]}
+    # The first process asked for both cases and ended with the killed server, the second case in
+    # flight; the new one asked again only for the case that had no result.
+    assert [request["body"]["message"] for request in target.requests] == [
+        "How do I reset my password?",
+        "Can I change my username?",
+        "Can I change my username?",
+    ]
 
 
 def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_is_gone(home, ui, target):
@@ -477,9 +573,11 @@ def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_
             asked = call(client, "POST", f"/v1/evals/{recorded.id}/cancel", 202, json={})
             assert (asked["state"], asked["error"], asked["cancel_requested_at"] is not None) == ("running", "", True)
 
-            # Once that process is gone, cancelling the run again finishes it, and a new run is admitted.
+            # Once that process is gone and its lease ran out, cancelling the run again finishes it,
+            # if the UI's worker has not finished it first, and a new run is admitted.
             holder.kill()
             holder.wait(30)
+            _until(lambda: not held(home, recorded.id), "the recording's lease to run out", timeout=30)
             stopped = call(client, "POST", f"/v1/evals/{recorded.id}/cancel", 202, json={})
             assert (stopped["state"], stopped["error"]) == ("cancelled", INTERRUPTED)
             assert stopped["finished_at"] is not None
@@ -492,7 +590,7 @@ def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_
 
 
 def test_runs_no_process_holds_are_finished_as_interrupted_when_martian_ui_starts(home, ui):
-    """Runs an earlier release left queued or running have no lock at all: nothing holds them."""
+    """Runs an earlier release left queued or running are not in the queue at all: nothing holds them."""
     publish(home)
     agent = {"kind": "agent", "agent_id": str(uuid.uuid4())}
     queued, running = _run(**agent, state="queued"), _run(**agent, state="running")
@@ -515,4 +613,6 @@ def test_martian_evals_run_holds_its_run_while_it_records_it(home):
         assert held(home, run.id)
         recorder.finish()
     assert not held(home, run.id)
-    assert list((home / "locks").iterdir()) == []
+    queue = open_queue(home)
+    assert asyncio.run(queue.pending()) == 0
+    queue.close()
