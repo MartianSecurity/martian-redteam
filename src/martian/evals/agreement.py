@@ -82,6 +82,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Literal
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import Review, ReviewQueue, Score, Value, from_results_record
 from martian.evals.panel import is_panel, member_sources
 from martian.evals.stats import Interval, mean_interval, wilson
@@ -418,7 +419,8 @@ def _newest[T: Score | Review](entries: Iterable[tuple[tuple[Any, ...], T]]) -> 
 
 def _version_order(key: tuple[str, str]) -> tuple[str, bool, int, str]:
     name, version = key
-    return (name, not version.isdigit(), int(version) if version.isdigit() else 0, version)
+    numbered = ascii_digits(version)
+    return (name, not numbered, int(version) if numbered else 0, version)
 
 
 def judge_agreement(

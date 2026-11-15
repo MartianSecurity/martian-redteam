@@ -1,4 +1,4 @@
-"""Re-checks of judge calibrations.
+"""The outbox: store writes kept until they are delivered (martian.evals.outbox).
 
 Revision ID: 0009
 Revises: 0008
@@ -14,7 +14,7 @@ down_revision = "0008"
 branch_labels = None
 depends_on = None
 
-TABLE = "martian_calibration_rechecks"
+TABLE = "martian_deliveries"
 
 
 def upgrade() -> None:
@@ -23,14 +23,14 @@ def upgrade() -> None:
         sa.Column("space", sa.String(80), nullable=False),
         sa.Column("project_id", sa.String(200), nullable=False),
         sa.Column("id", sa.String(200), nullable=False),
-        sa.Column("judge", sa.String(200), nullable=False),
-        sa.Column("version", sa.String(40), nullable=False),
-        sa.Column("state", sa.String(20), nullable=False),
+        sa.Column("kind", sa.String(16), nullable=False),
+        sa.Column("state", sa.String(16), nullable=False),
+        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("record", sa.JSON, nullable=False),
-        sa.PrimaryKeyConstraint("space", "project_id", "id", name="pk_martian_calibration_rechecks"),
+        sa.PrimaryKeyConstraint("space", "project_id", "id", name="pk_martian_deliveries"),
     )
-    op.create_index("ix_martian_calibration_rechecks_judge", TABLE, ["space", "project_id", "judge", "created_at"])
+    op.create_index("ix_martian_deliveries_due", TABLE, ["space", "state", "next_attempt_at"])
     if op.get_bind().dialect.name == "postgresql":
         # As for the tables of 0001: row-level security filters on the transaction's space again.
         op.execute(f"ALTER TABLE {TABLE} ENABLE ROW LEVEL SECURITY")
@@ -43,4 +43,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_martian_deliveries_due", TABLE)
     op.drop_table(TABLE)

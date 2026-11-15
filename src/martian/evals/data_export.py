@@ -69,6 +69,7 @@ from martian.evals.model import (
 from martian.evals.records import (
     Alert,
     CalibrationRecheck,
+    DatasetManifest,
     JudgeCalibration,
     Monitor,
     MonitoredTrace,
@@ -91,10 +92,11 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 3
+VERSION = 4
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
-alerts; version 3 the judge calibrations and their re-checks."""
+alerts. Version 3 added the dataset publications (``manifests.jsonl``), and version 4 the judge
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -107,6 +109,7 @@ FILES = (
     "questions.jsonl",
     "datasets.jsonl",
     "cases.jsonl",
+    "manifests.jsonl",
     "suites.jsonl",
     "drafts.jsonl",
     "draft_cases.jsonl",
@@ -140,6 +143,7 @@ EXPORTED_TABLES = {
     "martian_dataset_drafts": "drafts.jsonl",
     "martian_dataset_draft_cases": "draft_cases.jsonl",
     "martian_saved_views": "views.jsonl",
+    "martian_dataset_manifests": "manifests.jsonl",
     "martian_monitors": "monitors.jsonl",
     "martian_monitored_traces": "monitored_traces.jsonl",
     "martian_schedules": "schedules.jsonl",
@@ -159,6 +163,12 @@ LEFT_OUT_TABLES = {
         "interrupted when the local edition opens the data folder it was imported into; a monitor "
         "or a schedule is imported paused, and resuming it puts its turn back in the queue"
     ),
+    "martian_deliveries": (
+        "the outbox, store writes on their way from the record store to the store: transient. A "
+        "delivered write is in the store and exported from there. A pending one is not carried: its "
+        "score is exported with the record store's scores, but its trace or review queue item is "
+        "exported as the store holds it, so let the outbox deliver before exporting"
+    ),
 }
 """Each table of the record store that an export leaves out, and why."""
 
@@ -171,6 +181,7 @@ EXPORTED_KINDS = {
     "Suite": ("suites.jsonl",),
     "DatasetDraft": ("drafts.jsonl",),
     "SavedView": ("views.jsonl",),
+    "DatasetManifest": ("manifests.jsonl",),
     "Run": ("runs.jsonl",),
     "CaseResult": ("case_results.jsonl",),
     "Score": ("scores.jsonl", "traces.jsonl", "monitored_traces.jsonl"),
@@ -202,6 +213,7 @@ LEFT_OUT_KINDS = {
     "TraceQuery": "a trace search, not data",
     "SessionSearch": "sessions grouped from a search's traces; the export writes the traces",
     "Counts": "a run's counts, written with its run",
+    "Delivery": "a store write on its way from the record store to the store (the outbox, left out)",
 }
 """Each model class the two interfaces take or return that is not a kind of object an export
 carries, and why."""
@@ -449,8 +461,8 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
 async def _project(
     store: EvalStore, records: RecordStore, principal: Principal, files: _Files, project_id: str
 ) -> None:
-    """The project and what is defined in it: scorers, questions, suites, drafts and views, and its
-    judges' calibrations and their re-checks, newest first."""
+    """The project and what is defined in it: scorers, questions, suites, drafts, dataset
+    publications and views, and its judges' calibrations and their re-checks, newest first."""
     project = await store.get_project(principal, project_id)
     if project is None:
         raise ExportError(f"project {project_id} is no longer in the store")
@@ -475,6 +487,8 @@ async def _project(
             if page.next_cursor is None:
                 break
             offset += PAGE
+    for manifest in await records.list_publications(principal, project_id):
+        files.write("manifests.jsonl", _line(project_id, manifest=manifest))
     for view in await records.list_views(principal, project_id):
         files.write("views.jsonl", _line(project_id, view=view))
     for calibration in await records.list_calibrations(principal, project_id):
@@ -774,6 +788,8 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("suites")
         if await records.list_drafts(principal, project_id):
             found.append("dataset drafts")
+        if await records.list_publications(principal, project_id):
+            found.append("dataset publications")
         if await records.list_views(principal, project_id):
             found.append("saved views")
         if await records.list_monitors(principal, project_id):
@@ -881,6 +897,7 @@ async def _import(
     for project_id, question in _objects(folder, "questions.jsonl", "question", ReviewQuestion):
         await store.save_question(principal, project_id, question)
     await _import_datasets(store, principal, folder, refs)
+    await _import_manifests(records, principal, folder, refs)
     for project_id, suite in _objects(folder, "suites.jsonl", "suite", Suite):
         saved = await records.save_suite(principal, project_id, suite)
         if saved.version != suite.version:
@@ -931,6 +948,16 @@ async def _import_datasets(store: EvalStore, principal: Principal, folder: Path,
         refs.add("experiment_id", dataset.store.experiment_id, created.store.experiment_id)
     if not cases.done():
         raise ExportError("cases.jsonl holds cases of a dataset version datasets.jsonl does not list")
+
+
+async def _import_manifests(records: RecordStore, principal: Principal, folder: Path, refs: _References) -> None:
+    """Each dataset publication, with its start time; a published one is finished again as the
+    receiving store's dataset version, so a run of that version is still checked against it."""
+    for project_id, manifest in _objects(folder, "manifests.jsonl", "manifest", DatasetManifest):
+        await records.begin_publication(principal, project_id, manifest)
+        if manifest.state == "published" and manifest.dataset_id is not None:
+            dataset_id = refs.get("dataset_id", manifest.dataset_id)
+            await records.finish_publication(principal, project_id, manifest.id, str(dataset_id))
 
 
 async def _import_runs(

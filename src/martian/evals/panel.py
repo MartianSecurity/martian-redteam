@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from martian.evals._digits import ascii_digits
 from martian.evals.limits import INPUT_TOKENS, OUTPUT_TOKENS
 from martian.evals.model import MAX_PANEL, MIN_PANEL, digest
 
@@ -199,11 +200,15 @@ def is_panel(metadata: Mapping[str, Any]) -> bool:
 def member_sources(metadata: Mapping[str, Any]) -> list[str]:
     """The members of a panel's score, each as a single judge's score names its model:
     ``model@model_version``, or the model alone when its provider reported no version. Empty for a
-    score that is not a panel's."""
+    score that is not a panel's, and for one whose size is not written in the digits 0-9: an
+    application writes a live trace's score metadata, so it is read as outside input."""
     if not is_panel(metadata):
         return []
+    size = str(metadata[f"{PREFIX}size"])
+    if not ascii_digits(size):
+        return []
     found = []
-    for number in range(1, int(metadata[f"{PREFIX}size"]) + 1):
+    for number in range(1, int(size) + 1):
         model = str(metadata.get(f"{PREFIX}{number}.model", ""))
         version = str(metadata.get(f"{PREFIX}{number}.model_version", ""))
         if model:
@@ -273,8 +278,9 @@ def judge_panel(
     grading every case on its own, decided by :data:`RULE`.
 
     ``judge`` is one of the SDK's pass/fail judges (``response_guidelines``,
-    ``response_conditions``, ``response_rubric``, ``groundedness``, ``context_relevance`` or
-    ``context_sufficiency``), or any function that takes ``model=`` and ``name=`` and returns a
+    ``response_conditions``, ``response_rubric``, ``groundedness``, ``context_relevance``,
+    ``context_sufficiency``, ``task_completion``, ``policy_adherence`` or ``knowledge_retention``),
+    or any function that takes ``model=`` and ``name=`` and returns a
     scorer whose value is a boolean. ``models`` are from 2 to 9 different MLflow model URIs.
     ``name`` is the panel's scorer name, by default the judge's own default name. ``options`` are
     the judge's other arguments, the same for every member, and are checked now, as the judge

@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
@@ -330,24 +330,34 @@ class Policy(_Object):
 
 class RunLimits(_Object):
     """When a run stops before its last case: once it has run for ``max_seconds`` of wall time, or
-    once its judges have used ``max_judge_tokens`` tokens, input and output together, as the judge's
-    provider reported them. ``None`` is no limit. Each start or resume of a run has its limits
-    afresh. A run that reaches one is ``stopped``, keeps its finished cases and can be resumed."""
+    once its model calls on the judges' provider path have used ``max_judge_tokens`` tokens, input
+    and output together, as the provider reported them: its LLM judges' and, in ``martian evals
+    run``, its simulated users' (:mod:`martian.evals.simulation`). ``None`` is no limit. Each start
+    or resume of a run has its limits afresh. A run that reaches one is ``stopped``, keeps its
+    finished cases and can be resumed."""
 
     max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_judge_tokens: int | None = Field(default=None, ge=1)
 
-    def stop(self, limit: LimitName, used: float | None) -> dict[str, Any]:
+    def stop(
+        self, limit: LimitName, used: float | None, *, simulated: int = 0, unreported: str = "the judge"
+    ) -> dict[str, Any]:
         """What a run that stopped at ``limit`` records of it (``Run.provenance["stopped"]``): the
-        limit, its value, what had been used (None for judge tokens a judge did not report), and
-        a message that names the setting to raise."""
+        limit, its value, what had been used (None for tokens a model call did not report), and a
+        message that names the setting to raise. ``simulated`` is how many of the tokens used were
+        the simulated users', which the message then counts apart from the judges'; ``unreported``
+        names the model call that reported no usage."""
         value = getattr(self, limit)
         if limit == "max_seconds":
             message = f"Stopped at its time limit (max_seconds {value:g}) after {used or 0:.0f} seconds"
         elif used is None:
-            message = "Stopped: the judge reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+            message = (
+                f"Stopped: {unreported} reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+            )
         else:
             message = f"Stopped at its judge token limit (max_judge_tokens {value}) after {used:.0f} tokens"
+            if simulated:
+                message += f" ({used - simulated:.0f} by its judges, {simulated} by its simulated users)"
         return {"limit": limit, "value": value, "used": used, "message": message}
 
 
@@ -756,8 +766,16 @@ class Trace(_Object):
 
 
 class TraceQuery(_Object):
-    """Which traces of a project to return, newest first unless ``oldest_first``. ``model`` keeps
-    the traces whose model is exactly that name."""
+    """Which traces of a project to return, newest first unless ``oldest_first``.
+
+    ``model`` keeps the traces whose model is exactly that name. ``text`` matches, ignoring case, a
+    trace's name and its request and response up to 1,000 characters, or the first 997 of a longer
+    one (``martian.evals.store.text_matches``). ``min_latency_ms`` keeps traces whose latency is at
+    least that (a trace with no latency is left out), and ``verdicts`` keeps traces with a verdict
+    of each named scorer equal to its boolean: a feedback score, never an expectation
+    (:func:`is_expectation`). ``slowest_first`` orders by latency instead of time, slowest first or,
+    when ``False``, fastest first, with the traces that have no latency last. A store applies every
+    filter and the order before it pages, so a page is the query's, whatever the project's size."""
 
     project_id: Identifier
     run_id: str | None = None
@@ -770,9 +788,41 @@ class TraceQuery(_Object):
     tags: dict[str, str] = Field(default_factory=dict)
     since: datetime | None = None
     until: datetime | None = None
+    min_latency_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    verdicts: dict[str, bool] = Field(default_factory=dict)
     oldest_first: bool = False
+    slowest_first: bool | None = None
     limit: int = Field(default=50, ge=1, le=500)
     cursor: str | None = None
+
+
+def is_expectation(score: Score) -> bool:
+    """Whether a score is a person's expectation on a trace rather than a verdict. The core records
+    an expectation annotation as a score whose metadata has ``martian.annotation: expectation``, and
+    a store binding reads MLflow's expectation assessments the same way."""
+    return score.metadata.get("martian.annotation") == "expectation"
+
+
+def query_keeps(trace: Trace, query: TraceQuery) -> bool:
+    """Whether a trace, with its scores, passes the query's latency and verdict filters."""
+    if query.min_latency_ms is not None and (trace.latency_ms is None or trace.latency_ms < query.min_latency_ms):
+        return False
+    return all(
+        any(s.scorer == name and not is_expectation(s) and s.value is wanted for s in trace.scores)
+        for name, wanted in query.verdicts.items()
+    )
+
+
+def query_order(traces: list[Trace], query: TraceQuery) -> list[Trace]:
+    """Traces in the query's order: by request time, then by latency when ``slowest_first`` is set."""
+    epoch = datetime.min.replace(tzinfo=UTC)
+    found = sorted(traces, key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
+    if query.slowest_first is None:
+        return found
+    timed = sorted(
+        (t for t in found if t.latency_ms is not None), key=lambda t: t.latency_ms or 0.0, reverse=query.slowest_first
+    )
+    return timed + [t for t in found if t.latency_ms is None]
 
 
 class Page[T](BaseModel):
@@ -1033,6 +1083,9 @@ __all__ = [
     "case_status",
     "digest",
     "from_results_record",
+    "is_expectation",
+    "query_keeps",
+    "query_order",
     "sessions_from_traces",
     "suite_digest",
 ]

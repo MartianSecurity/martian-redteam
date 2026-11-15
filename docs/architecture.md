@@ -111,6 +111,10 @@ The grounding judges (`groundedness`, `context_relevance`, `context_sufficiency`
 flat verdict of strings. Their quotes are copied by the model and must be passages of a named
 text (the documents, the response, the request or the expected response) up to whitespace;
 a quote that is not, a missing quote or `uncertain` is a scorer error, never repaired.
+The conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`,
+`martian.evals.conversation_judges`) read a whole conversation, at `scope: conversation`, with the
+same transport, one call each and a flat verdict of strings and turn numbers. The SDK checks each
+turn number against the conversation and each quote against the message of the turn it names.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.

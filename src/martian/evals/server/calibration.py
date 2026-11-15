@@ -40,6 +40,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from martian.evals._digits import ascii_digits
 from martian.evals.agreement import MINIMUM_LABELLED, JudgeAgreement
 from martian.evals.calibration import (
     NOT_CALIBRATED,
@@ -166,7 +167,8 @@ def labelled_items(report: JudgeAgreement) -> list[LabelledItem]:
 
 def _version_order(scorer: ScorerVersion) -> tuple[str, bool, int, str]:
     version = scorer.version
-    return (scorer.name, not version.isdigit(), int(version) if version.isdigit() else 0, version)
+    numbered = ascii_digits(version)
+    return (scorer.name, not numbered, int(version) if numbered else 0, version)
 
 
 async def judge_versions(store: EvalStore, principal: Principal, key: str, name: str | None) -> list[ScorerVersion]:
