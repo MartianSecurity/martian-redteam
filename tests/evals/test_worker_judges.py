@@ -194,6 +194,21 @@ def test_server_scoring_grades_with_the_sdk_judge_on_the_judges_endpoint(records
     assert len(judged(found["exact_match"])) == 2
 
 
+def test_the_sdk_judge_reports_the_tokens_its_provider_reported(endpoint):
+    judge = sdk_judge(model="openai:/your-model", max_retries=0)
+    request = JudgeRequest(
+        principal=SINGLE_USER,
+        prompt="How do I reset my password?",
+        expected="Use the reset link.",
+        output="Use the reset link.",
+        scorers=(builtin_scorer("correctness"),),
+        endpoint=endpoint.origin + "/v1",
+    )
+    answer = asyncio.run(judge(request))
+    # The loopback model reports 10 prompt and 5 completion tokens; a token limit counts both.
+    assert (answer.verdicts["correctness"].value, answer.tokens) == (True, 15)
+
+
 def test_a_provider_failure_names_the_setting_on_each_score(records, endpoint, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "a-wrong-key")
     client, served = core(records, sdk_judge(model="openai:/your-model", max_retries=0))
@@ -258,15 +273,24 @@ def test_a_judge_that_needs_the_expected_response_fails_without_one(endpoint):
 # --- martian-agents --------------------------------------------------------------------------
 
 
+AGENTS_DEFAULT = "bedrock/zai.glm-5"
+AGENTS_ALLOWED = {AGENTS_DEFAULT, "bedrock/allowed.one", "bedrock/allowed.two"}
+
+
 def agents_answer(path, headers, body):
-    """Agents' judge route, answering as it does on main."""
+    """Agents' judge route, answering as it does: on the model the request names when its
+    operator allows it, on its own model when the request names none."""
     if headers.get("x-api-key") != AGENTS_KEY:
         return 403, {"detail": "Target judge access denied"}
+    model = body.get("model", AGENTS_DEFAULT)
+    if model not in AGENTS_ALLOWED:
+        refusal = f"Judge model {model} is not allowed here ({SERVER_TEXT})"
+        return 422, {"detail": {"code": "judge_model_not_allowed", "message": refusal}}
     definitions = body.get("definitions", [])
     scores = {name: {"value": name != "safety", "rationale": f"Judged {name}."} for name in body["scorers"]}
     scores |= {d["name"]: {"value": True, "rationale": f"Judged {d['name']}."} for d in definitions}
     revision = "martian-eval-judge-v2" if definitions else "martian-eval-judge-v1"
-    return 200, {"scores": scores, "model": "bedrock/zai.glm-5", "revision": revision}
+    return 200, {"scores": scores, "model": model, "revision": revision}
 
 
 @pytest.fixture
@@ -325,10 +349,43 @@ def test_agents_judge_sends_the_servers_request_and_checks_its_reply(records, ag
         "minimum": 0,
         "maximum": 1,
     }
+    # A judge with no model runs on Agents' own, recorded as the MLflow model URI it reported.
     for name, value in {"safety": False, "policy": True, "tone": True}.items():
         for assessment in judged(found[name]):
-            assert (assessment["value"], assessment["source_id"]) == (value, "bedrock/zai.glm-5")
+            assert (assessment["value"], assessment["source_id"]) == (value, "bedrock:/zai.glm-5")
+            assert assessment["provenance"]["martian.judge.model"] == "bedrock:/zai.glm-5"
             assert assessment["provenance"]["martian.judge.version"] == "martian-eval-judge-v2"
+
+
+def test_agents_judge_grades_on_each_judges_allowed_model_and_records_it(records, agents):
+    client, served = core(records, agents_judge(agents.origin, connection))
+    with client:
+        served.call("PUT", "/v1/evals/judge-model", 200, json={"model": "bedrock:/allowed.one"})
+        register(served, "tone", model="bedrock:/allowed.two")
+        register(served, "detail", model="bedrock:/not.allowed")
+        found = scored(
+            served, scorers=["safety"], judges=[{"name": "tone", "version": 1}, {"name": "detail", "version": 1}]
+        )
+
+    # One Agents call per case with an output for each model, each naming its model as Agents does.
+    assert len(agents.requests) == 6
+    assert {sent["body"]["model"] for sent in agents.requests} == {
+        "bedrock/allowed.one",
+        "bedrock/allowed.two",
+        "bedrock/not.allowed",
+    }
+    for name, model in {"safety": "bedrock:/allowed.one", "tone": "bedrock:/allowed.two"}.items():
+        for assessment in judged(found[name]):
+            assert (assessment["error"], assessment["source_id"]) == ("", model)
+            assert assessment["provenance"]["martian.judge.model"] == model
+    # A model Agents' operator has not allowed: Agents refuses it before any model call, and each
+    # of its scores says so, without Agents' own text.
+    errors = {assessment["error"] for assessment in judged(found["detail"])}
+    assert errors == {
+        "Agents does not allow the judge model bedrock:/not.allowed; "
+        "its operator lists the models it allows in EVALS_JUDGE_MODELS"
+    }
+    assert all(assessment["value"] is None for assessment in judged(found["detail"]))
 
 
 def judge_request(**changes: Any) -> JudgeRequest:
@@ -389,10 +446,10 @@ def test_agents_judge_asks_the_connection_for_each_request_and_sends_its_admitte
     assert "action_id" not in agents.requests[-1]["body"]
 
 
-def test_agents_judge_refuses_a_judge_pinned_to_a_model_without_calling_agents(agents):
+def test_agents_judge_refuses_a_judge_at_an_endpoint_without_calling_agents(agents):
     judge = agents_judge(agents.origin, connection)
-    with pytest.raises(Exception, match="runs on its operator's model; this judge is pinned to openai:/alpha"):
-        asyncio.run(judge(judge_request(model="openai:/alpha")))
+    with pytest.raises(Exception, match="not at an endpoint; this judge is served at http://localhost:4000/v1"):
+        asyncio.run(judge(judge_request(model="openai:/alpha", endpoint="http://localhost:4000/v1")))
     assert agents.requests == []
 
 
@@ -417,6 +474,15 @@ def test_agents_judge_refuses_a_judge_pinned_to_a_model_without_calling_agents(a
         (
             200,
             {"scores": {"safety": {"value": True, "rationale": "x"}}, "model": "m", "revision": "other"},
+            "invalid typed scores",
+        ),
+        (
+            200,
+            {
+                "scores": {"safety": {"value": True, "rationale": "x"}},
+                "model": "m",
+                "revision": "martian-eval-judge-v1",
+            },
             "invalid typed scores",
         ),
     ],

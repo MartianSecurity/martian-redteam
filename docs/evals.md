@@ -76,8 +76,8 @@ target:
 | `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case, or per attempt with [repeats](#repeated-attempts) |
 | `body` | Yes | The JSON body, with placeholders in its string values |
 | `headers` | No | Request headers |
-| `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
-| `timeout_seconds` | No | Per-request limit, 1 to 600; default 120 |
+| `response_path` | No | Dotted path to the reply in a JSON response; a step of the digits 0-9 indexes a list, and a step of other digits, such as `²`, is refused when the suite loads. Without it, the response text is the reply |
+| `timeout_seconds` | No | Per-request limit, 1 to 600; default 120. A function target takes it too (**Time limits and budgets** below) |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
@@ -98,7 +98,7 @@ target:
   `results.jsonl` holds the reason, and the command prints how many cases failed for each
   reason. The reason is the SDK's own wording: it never includes the address, a header or the
   response body. A function target reports only `the target call failed`, because its
-  exception comes from your code.
+  exception comes from your code, or `the target did not answer within target.timeout_seconds`.
 
   | Reason | Usual cause |
   | --- | --- |
@@ -130,24 +130,62 @@ types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
-| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
 interval, such as `67% (20–94%)`, with repeats the rule each check's attempts combined by and
-the [reliability](#reliability-and-flaky-cases) and flaky cases; under it, the false-refusal
-rate for a suite with a policy check and the reasons cases had no verdict. It exits `0` when
-every case passed, `1` when a case failed, and `2` when a case has no verdict or the suite file
-is invalid.
+the [reliability](#reliability-and-flaky-cases) and flaky cases, and for a run that stopped the
+cases it did not run in the table's title; under it, the false-refusal rate for a suite with a
+policy check, the reasons cases had no verdict, and the limit a stopped run reached. It exits `0`
+when every case passed, `1` when a case failed, and `2` when a case has no verdict, the run
+stopped before a case, or the suite file is invalid.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh` and
-`--data-dir DIR`. A run that is stopped can be started again: finished cases are skipped, and
-cases that errored are tried again. `--repeats` runs each case N times, 1 to 100, in place of the
-suite file's `repeats` ([repeated attempts](#repeated-attempts)). `--fresh` discards earlier
-results. `--data-dir` names the local Evals UI's data folder the run is recorded in, as for
-`martian ui`; without it, `MARTIAN_EVALS_HOME`, else `~/.martian/evals`.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
+`--data-dir DIR`, `--max-seconds N` and `--max-judge-tokens N`. A run that is stopped can be
+started again: finished cases are skipped, and cases that errored are tried again. `--repeats`
+runs each case N times, 1 to 100, in place of the suite file's `repeats`
+([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--data-dir` names
+the local Evals UI's data folder the run is recorded in, as for `martian ui`; without it,
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`. `--max-seconds` and `--max-judge-tokens` replace
+the suite file's `limits`, below.
+
+**Time limits and budgets.** Every target call has a time limit, and so does the run:
+
+```yaml
+target:
+  file: agent.py
+  timeout_seconds: 60        # each call, function or URL target; default 120
+limits:
+  max_seconds: 1800          # the run's wall time
+  max_judge_tokens: 200000   # the tokens its LLM judges may use, input and output together
+```
+
+- **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
+  within target.timeout_seconds`, and the run goes on. A function target runs on a thread of its
+  own, so a function that hangs cannot hold up the run; Python cannot stop a thread, so the
+  function keeps running in the background until it returns or the command ends. A URL target's
+  call ends there too, even when the server sends its reply a little at a time.
+- **A run that reaches a limit stops.** It calls no more targets, the cases in flight finish, and
+  the cases it finished are kept in `results.jsonl` and the local Evals UI. The others have no
+  result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
+  prints the limit and exits `2`, and the run shows as **stopped** in the UI with the limit as its
+  error. Limits are checked before each batch and before each target call. A batch's judges finish
+  once it has started, so a run can go past `max_judge_tokens` by up to one batch; lower `batch`
+  for a closer bound.
+- **To resume**, run the same command again, with a higher limit or none: the cases it finished are
+  skipped, as for any stopped run. Each run has its limits afresh.
+- **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
+  reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
+  batch, and says so. A judge call that fails reports nothing and counts nothing.
+  `max_judge_tokens` needs an LLM judge check.
+- **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
+  next case, as **cancelled**; the command checks for it every second.
+- **With [repeats](#repeated-attempts)**, each attempt's call has the target's time limit, and a
+  run that stops in the middle of a case's attempts leaves that case not run
+  ([limits and repeats](#limits-and-repeats)).
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
 comment on the pull request with the result, still with no Martian account. See
@@ -159,10 +197,10 @@ inputs, expectations and stored output, the number of attempts and the rule each
 combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
-`judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
-in the environment, or the MLflow location keeps earlier results. The SDK cannot see changes in
-modules the target file imports, or in the service behind a URL target: use `--fresh` after
-those.
+`judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
+address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
+changes in modules the target file imports, or in the service behind a URL target: use `--fresh`
+after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -180,15 +218,21 @@ reasons, and each case's trace with your target's own spans. **Compare** pairs t
 same data case by case and labels the change better, worse or within noise
 ([comparing two runs](#comparing-two-runs)), and **Traces** lists every case's trace. A case reused from an earlier
 run keeps its verdict but not its trace, which stays with the run that graded it. A run that
-stops early shows as failed, or cancelled when interrupted. A run whose process was killed shows
-as running until `martian ui` next starts, or until you cancel it there, and then as interrupted
-([runs whose process stopped](evals-core.md#runs-whose-process-stopped)). How a run maps onto the
+stops early shows as failed, cancelled when interrupted or cancelled in the UI, and stopped when it
+reached one of its limits. A run whose process was killed shows
+as running for about ten seconds while `martian ui` serves the folder, or until it next starts,
+and then as interrupted ([runs whose process stopped](evals-core.md#runs-whose-process-stopped)). How a run maps onto the
 Evals objects is in [command-line runs](evals-core.md#command-line-runs).
 
 **Traces from your application.** An application instrumented with MLflow tracing can record into
 the same data folder, so its traces show in **Traces** and its conversations in **Sessions**. Set
 `MLFLOW_TRACKING_URI` to the data folder's `mlflow.db` and three MLflow settings beside it, as in
-[traces from an application](evals-core.md#traces-from-an-application).
+[traces from an application](evals-core.md#traces-from-an-application). An application
+instrumented with OpenTelemetry instead sends its traces to the running `martian ui`: point its
+OTLP/HTTP exporter at `http://127.0.0.1:7600/v1/traces`
+([over OpenTelemetry](evals-core.md#over-opentelemetry)). Spans that carry OpenTelemetry GenAI or
+OpenInference attributes show their model, tokens, inputs and tool calls too
+([trace conventions](evals-core.md#trace-conventions)).
 
 **Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
 to the suite file to have MLflow's evaluation harness log there instead of the local store, then
@@ -329,6 +373,30 @@ another failed. `martian.evals.repeats` computes both from the attempts' own ver
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
 | [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
 | The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
+
+### Limits and repeats
+
+A run's [limits](#run-a-suite-file-locally) (`limits`, `--max-seconds`, `--max-judge-tokens`, or a
+cancel in `martian ui`) are checked before each target call, and each attempt of a case is a call
+of its own, so a run can reach a limit in the middle of a case's attempts. The case is the unit a
+run stops at and resumes from:
+
+- **A case the run stopped in the middle of is not run.** Its verdict would combine fewer attempts
+  than the suite asks for, and a security check's `all` over two attempts of five is a weaker
+  check. So the attempts that ran are dropped: the case has no result in `results.jsonl` or the
+  local Evals UI, `summary.json` counts it in `not_run`, and running again runs all of its
+  attempts.
+- **Their judge tokens count.** The judges of the dropped attempts were asked, so what they used
+  counts towards `max_judge_tokens`.
+- **An attempt that outlasts `timeout_seconds`** is an attempt whose target call failed, an attempt
+  without a verdict, as above; it does not stop the run.
+- **What a stopped run counts.** `cases`, the counts and pass rates, `attempts`, `reliability`, the
+  flaky cases and `false_refusals` are of the cases the run finished; `not_run` and `stopped` (or
+  `cancelled`) sit beside them in `summary.json`. A stopped run's reliability and false-refusal
+  rate are of fewer cases than the suite holds, so its exit code is `2` whatever they say.
+- **The printed table** names the cases not run in its title, after the attempts of each case. The
+  Reliability row is in the table, and under it come the flaky cases, the false-refusal line, the
+  reasons attempts had no verdict, and last the limit the run reached and how to resume.
 
 ## Pass rates and confidence intervals
 
@@ -953,7 +1021,7 @@ its set and fails unless this table gives the same numbers.
 ## Mistakes that raise instead of passing silently
 
 `martian.evals.evaluate` refuses three situations that would otherwise produce a wrong
-result without any warning:
+result without any warning, and stops a prediction function that hangs:
 
 - **A scorer named like an expectation key** (for example a scorer called `rubric` with
   `expectations.rubric`) raises `ValueError` before anything runs. MLflow writes both to a
@@ -962,6 +1030,14 @@ result without any warning:
 - **A prediction function that is not traced** is traced for you. MLflow records per-row
   results only for traced calls, and the plugin skips MLflow's own probing call so that the
   first case is not run twice.
+- **A prediction function that does not return** is stopped by a time limit on each call,
+  `target_timeout_seconds` (default 120 seconds, the same default as a suite file's
+  `target.timeout_seconds`). The function runs on a thread of its own; one that has not returned by
+  then is that case's error, `the target did not answer within target.timeout_seconds`, and the
+  evaluation goes on, so a hung agent cannot hang the test session. The gate then fails closed on
+  that case, as it does for any error. Python cannot stop a thread: the hung function keeps running
+  in the background until it returns or the process ends. Pass `target_timeout_seconds=` to
+  `evaluate(...)` to change the limit.
 - **An evaluation with no per-row results**, or fewer rows than cases, raises
   `EvaluationError`. MLflow leaves a row out when it cannot read back that row's trace, which
   can happen when many workers write to a local store at once. `martian evals run` does not
