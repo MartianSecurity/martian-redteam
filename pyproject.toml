@@ -75,7 +75,7 @@ digest = "sha256:1dfd87c419d0a93200f07b91aa434a8f950336af4ee280b4cd650b8cdb62989
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
