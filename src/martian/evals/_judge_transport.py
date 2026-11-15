@@ -9,7 +9,7 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import requests
 from mlflow.entities import AssessmentSource, AssessmentSourceType, Feedback
@@ -37,6 +37,10 @@ from martian.evals._mlflow import (
     parse_model_uri,
     provider_instance,
 )
+from martian.evals.cache import HIT_KEY, key_address, key_headers
+
+if TYPE_CHECKING:
+    from martian.evals.cache import ModelCallCache
 
 # A provider reply with one of these statuses carries no judgment, so sending the same request
 # again cannot change a verdict that was already given.
@@ -285,10 +289,18 @@ def invoke_response_judge(
     rate_limit_wait_seconds: float = 0.0,
     headers: Mapping[str, str] | None = None,
     endpoint: str | None = None,
+    cache: ModelCallCache | None = None,
+    judge_version: str = "",
 ) -> Feedback:
     """One judge stage's request and its validated judgment. ``endpoint`` is the base address of
     the OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``."""
+    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``.
+
+    With ``cache`` (:class:`martian.evals.cache.ModelCallCache`), a validated judgment is stored
+    under the full request (:func:`_cache_request`, with ``judge_version``, the version of the
+    judge that built the prompt) and replayed for the same request in a later run. A failure is
+    raised as without the cache and never stored. A replayed judgment's metadata says so
+    (``martian.cache: hit``), with no provider retries, token counts or cost, since no call was made."""
     # Reuse routing, credentials and wire transforms from the pinned MLflow.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
     try:
@@ -313,6 +325,124 @@ def invoke_response_judge(
         raise ValueError(f"Judge {stage} failed [judge_provider_key]. Set OPENAI_API_KEY.")
     extra_headers = dict(headers or {})
 
+    def fresh() -> Feedback:
+        return _judged(
+            provider=provider,
+            model=model,
+            model_uri=model_uri,
+            adapter=adapter,
+            prompt=prompt,
+            assessment_name=assessment_name,
+            response_format=response_format,
+            inference_params=inference_params,
+            stage=stage,
+            max_retries=max_retries,
+            rate_limit_wait_seconds=rate_limit_wait_seconds,
+            extra_headers=extra_headers,
+            endpoint=endpoint,
+        )
+
+    if cache is None:
+        return fresh()
+    request = _cache_request(
+        model_uri=model_uri,
+        provider=provider,
+        endpoint=endpoint,
+        prompt=prompt,
+        response_format=response_format,
+        inference_params=inference_params,
+        headers=extra_headers,
+        stage=stage,
+        judge_version=judge_version,
+    )
+
+    def replay(stored: Any) -> Feedback:
+        metadata = {**stored["metadata"], PROVIDER_RETRIES_KEY: 0, HIT_KEY: "hit"}
+        return Feedback(
+            name=assessment_name,
+            value=stored["value"],
+            source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
+            metadata=metadata,
+        )
+
+    return cache.call("judge", request, fresh, store=_stored_judgment, replay=replay)
+
+
+# Feedback metadata a replayed judgment leaves out: they describe the call that produced it.
+_PER_CALL_METADATA = frozenset(
+    {
+        PROVIDER_RETRIES_KEY,
+        AssessmentMetadataKey.JUDGE_INPUT_TOKENS,
+        AssessmentMetadataKey.JUDGE_OUTPUT_TOKENS,
+        AssessmentMetadataKey.JUDGE_COST,
+    }
+)
+
+
+def _stored_judgment(feedback: Feedback) -> dict[str, Any]:
+    """What the cache keeps of a judgment: its value and the metadata that describes the reply."""
+    metadata = {key: value for key, value in (feedback.metadata or {}).items() if key not in _PER_CALL_METADATA}
+    return {"value": feedback.value, "metadata": metadata}
+
+
+def _judge_address(provider: str, endpoint: str | None) -> str | None:
+    """The address that serves the judge, as a cache key holds it: ``endpoint``, else for the
+    openai provider the base address in the environment as MLflow reads it, else None (the
+    provider's own address, which its name and the model URI fix)."""
+    if endpoint is not None:
+        return key_address(endpoint)
+    if provider == "openai":
+        base = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+        return key_address(base) if base else None
+    return None
+
+
+def _cache_request(
+    *,
+    model_uri: str,
+    provider: str,
+    endpoint: str | None,
+    prompt: list[ChatMessage],
+    response_format: type[BaseModel],
+    inference_params: dict[str, Any] | None,
+    headers: Mapping[str, str],
+    stage: str,
+    judge_version: str,
+) -> dict[str, Any]:
+    """Everything that decides a judge stage's reply, as its cache key: the model, the address
+    serving it, the messages (the judge's prompt with its criteria, the request and the reply
+    under test), the reply schema, the inference parameters, the headers that are not
+    credentials, the stage and the judge's version. No key and no credential header."""
+    return {
+        "model": model_uri,
+        "address": _judge_address(provider, endpoint),
+        "messages": [{"role": message.role, "content": message.content} for message in prompt],
+        "schema": response_format.model_json_schema(),
+        "inference_params": dict(inference_params or {}),
+        "headers": key_headers(headers),
+        "stage": stage,
+        "judge": judge_version,
+    }
+
+
+def _judged(
+    *,
+    provider: str,
+    model: str,
+    model_uri: str,
+    adapter: Any,
+    prompt: list[ChatMessage],
+    assessment_name: str,
+    response_format: type[BaseModel],
+    inference_params: dict[str, Any] | None,
+    stage: Literal["draft", "review"],
+    max_retries: int,
+    rate_limit_wait_seconds: float,
+    extra_headers: dict[str, str],
+    endpoint: str | None,
+) -> Feedback:
+    """The judge stage's request sent to the provider, retried as :func:`invoke_response_judge`
+    says, and its reply validated."""
     retries = 0  # every retry, recorded in the feedback metadata
     failures = 0  # retries after a server error or connection failure, limited by max_retries
     started = _clock()

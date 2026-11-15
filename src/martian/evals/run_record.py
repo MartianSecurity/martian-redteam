@@ -22,6 +22,10 @@
   ``provenance`` holds the combination under ``matrix`` (:func:`martian.evals.matrix.provenance`),
   and its code is the suite's name with the combination's id in brackets and its number among
   that combination's runs, such as ``evals[model=large,prompt=terse]-2``.
+- A run with the cache of model calls on (:mod:`martian.evals.cache`) has it in ``provenance``
+  under ``cache``: its folder, time to live and whether function targets are cached from the
+  start, and once the run finishes how many target and judge replies came from the cache, so a
+  replayed result is never taken for a fresh one.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -90,9 +94,12 @@ class RunRecorder:
     changes anything in its output folder, so a data folder that cannot be opened stops the run
     first."""
 
-    def __init__(self, home: Path, suite: Suite, *, matrix: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, home: Path, suite: Suite, *, matrix: dict[str, Any] | None = None, cache: dict[str, Any] | None = None
+    ) -> None:
         """``matrix`` is the run's combination of the suite's matrix, as ``provenance.matrix``
-        holds it, for a suite with a matrix."""
+        holds it, for a suite with a matrix. ``cache`` is the cache of model calls the run uses,
+        as ``provenance.cache`` holds it from the start (:meth:`finish` adds its counts)."""
         from martian.evals.local import LocalEditionError, open_stores
 
         self._lock: RunLock | None = None
@@ -105,6 +112,7 @@ class RunRecorder:
         self.home = home
         self.suite = suite
         self.matrix = matrix
+        self.cache = cache
         self.run: Run | None = None
         self._ended = False
         self._scorers = {scorer.name: scorer for scorer in suite.scorers}
@@ -142,6 +150,8 @@ class RunRecorder:
             provenance["repeats"] = repeats
         if self.matrix is not None:
             provenance["matrix"] = self.matrix
+        if self.cache is not None:
+            provenance["cache"] = self.cache
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,
@@ -189,9 +199,10 @@ class RunRecorder:
         """Record a batch of graded cases, with their traces, and the run's counts so far."""
         _wait(self._write(cases, traces=True))
 
-    def finish(self) -> Run:
-        """Record that every case has a result."""
-        return _wait(self._end("completed", ""))
+    def finish(self, *, cache: dict[str, Any] | None = None) -> Run:
+        """Record that every case has a result, and with ``cache`` the run's use of the cache of
+        model calls in ``provenance.cache``."""
+        return _wait(self._end("completed", "", cache=cache))
 
     def __enter__(self) -> RunRecorder:
         return self
@@ -210,13 +221,14 @@ class RunRecorder:
                 self._lock.release()
             self.records.close()
 
-    async def _end(self, state: RunState, error: str) -> Run:
+    async def _end(self, state: RunState, error: str, *, cache: dict[str, Any] | None = None) -> Run:
         assert self.run is not None
         self._ended = True
         counts = self._counts()
-        finished = self.run.model_copy(
-            update={"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
-        )
+        update: dict[str, Any] = {"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
+        if cache is not None:
+            update["provenance"] = {**self.run.provenance, "cache": cache}
+        finished = self.run.model_copy(update=update)
         self.run = await self.records.update_run(SINGLE_USER, finished, expected_state="running")
         await self.store.finish_run(SINGLE_USER, DEFAULT_PROJECT, finished.id, state=state, counts=counts)
         return self.run

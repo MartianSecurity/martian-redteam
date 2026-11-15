@@ -124,11 +124,13 @@ EVERY_FIELD_URL = {
     "output": "results-all",
     "input_key": "prompt",
     "mlflow": {"tracking_uri": "http://127.0.0.1:5000", "experiment": "every-field"},
+    "cache": {"folder": "model-cache", "ttl_seconds": 3600.0},
 }
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
     "target": {"file": "agent.py", "function": "answer"},
     "checks": [{"type": "contains", "values": ["hello"]}, {"type": "cost", "max_usd": 0.02, "max_tokens": 4000}],
+    "cache": {"functions": True},
 }
 
 
@@ -304,6 +306,7 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "output": "results-all",
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
+        "cache": {"folder": "model-cache", "ttl_seconds": 3600.0, "functions": None},
     }
     assert suite.repeats == Repeats(attempts=3, combine="majority", checks={"no_leak": "any"})
     assert [case.id for case in cases] == ["safe", "json"]
@@ -344,8 +347,11 @@ def test_header_values_are_kept_as_written_and_never_expanded(tmp_path, monkeypa
 
 
 def test_settings_the_file_leaves_out_stay_the_runners_defaults(tmp_path):
-    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    without_cache = {name: value for name, value in EVERY_FIELD_FUNCTION.items() if name != "cache"}
+    suite, _ = load_suite_file(write(tmp_path, without_cache))
     assert set(suite.settings.model_dump().values()) == {None}
+    # No cache block, no cache in the settings, so a suite without one keeps its digest.
+    assert suite.settings.cache is None and "cache" not in suite.model_dump()["settings"]
     assert "concurrency" not in yaml.safe_load(suite_to_yaml(suite))
 
 

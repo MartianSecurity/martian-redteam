@@ -25,7 +25,17 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Case, Repeats, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
+from martian.evals.model import (
+    CacheSettings,
+    Case,
+    Repeats,
+    RunSettings,
+    ScorerVersion,
+    Suite,
+    Target,
+    digest,
+    suite_digest,
+)
 
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
@@ -87,6 +97,10 @@ SUITE_FILE_FIELDS = {
     "mlflow": "RunSettings.mlflow_tracking_uri and mlflow_experiment",
     "mlflow.tracking_uri": "RunSettings.mlflow_tracking_uri",
     "mlflow.experiment": "RunSettings.mlflow_experiment",
+    "cache": "RunSettings.cache; a cache block, even an empty one, turns the cache of model calls on",
+    "cache.folder": "RunSettings.cache.folder, as written",
+    "cache.ttl_seconds": "RunSettings.cache.ttl_seconds",
+    "cache.functions": "RunSettings.cache.functions (function target only)",
 }
 
 # The fields every check type takes: its type, its label and the rule its attempts combine by.
@@ -296,6 +310,8 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
     for name in ("tracking_uri", "experiment"):
         if name in mlflow.model_fields_set:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
+    if (cache := file_suite.cache) is not None:
+        values["cache"] = CacheSettings(**{name: getattr(cache, name) for name in cache.model_fields_set})
     return RunSettings(**values)
 
 
@@ -384,6 +400,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     }
     if mlflow:
         file["mlflow"] = mlflow
+    if settings.cache is not None:
+        file["cache"] = {name: value for name, value in settings.cache.model_dump().items() if value is not None}
     return file
 
 

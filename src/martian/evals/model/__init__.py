@@ -187,9 +187,21 @@ class Policy(_Object):
     minimum_coverage: float = Field(default=1, ge=0, le=1)
 
 
+class CacheSettings(_Object):
+    """The cache of model calls a run replays replies from (:mod:`martian.evals.cache`): its
+    ``folder`` as the suite file writes it, the ``ttl_seconds`` of an entry, and whether a function
+    target's calls are cached (``functions``). ``None`` leaves the runner's default."""
+
+    folder: str | None = None
+    ttl_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    functions: bool | None = None
+
+
 class RunSettings(_Object):
     """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
-    default. A case result's fingerprint leaves these out, so changing one keeps earlier results."""
+    default. A case result's fingerprint leaves these out, so changing one keeps earlier results.
+    ``cache`` is set when the suite file turns the cache of model calls on; it is left out when
+    unset, so a suite without one keeps its digest."""
 
     concurrency: int | None = Field(default=None, ge=1)
     batch: int | None = Field(default=None, ge=1)
@@ -201,6 +213,14 @@ class RunSettings(_Object):
     output: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
+    cache: CacheSettings | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_unset_cache(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and self.cache is None:
+            written.pop("cache", None)
+        return written
 
 
 class Repeats(_Object):
@@ -711,6 +731,7 @@ __all__ = [
     "TraceQuery",
     "TraceState",
     "RESULTS_RECORD_FIELDS",
+    "CacheSettings",
     "Case",
     "CaseResult",
     "CaseStatus",

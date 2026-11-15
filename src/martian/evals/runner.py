@@ -12,7 +12,9 @@ a finished case is skipped while nothing that produced its verdict has changed. 
 case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`),
 and a suite with a ``matrix`` runs once per combination of its prompts, models or other values
 (:mod:`martian.evals.matrix`), each combination in its own folder and recorded as its own run.
-Use ``martian ci`` when a result must be recorded on the platform.
+With the cache on (``cache`` in the suite file, or ``--cache``), the target's and the judges'
+replies are stored by their full request and replayed when a later run sends the same one
+(:mod:`martian.evals.cache`). Use ``martian ci`` when a result must be recorded on the platform.
 """
 
 from __future__ import annotations
@@ -37,13 +39,22 @@ from xml.sax.saxutils import quoteattr
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals import _numeric, _policy
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
+from martian.evals.cache import (
+    DEFAULT_TTL_SECONDS,
+    MAX_TTL_SECONDS,
+    CacheError,
+    ModelCallCache,
+    exact_json,
+    key_address,
+    key_headers,
+)
 from martian.evals.matrix import Combination, MatrixAxis, combinations
 from martian.evals.model import MAX_ATTEMPTS, CombineRule
 from martian.evals.repeats import combine_attempts, passed_every_attempt, plan, reliability
@@ -354,6 +365,17 @@ class MlflowConfig(_Model):
     experiment: str | None = None
 
 
+class CacheConfig(_Model):
+    """The cache of model calls (:mod:`martian.evals.cache`). ``folder`` is relative to the suite
+    file, and without one the cache is the local data folder's ``cache`` folder. A function
+    target's calls are cached only with ``functions``: a function is your code, and it may do
+    more than answer."""
+
+    folder: str | None = Field(default=None, min_length=1)
+    ttl_seconds: float = Field(default=DEFAULT_TTL_SECONDS, gt=0, le=MAX_TTL_SECONDS, allow_inf_nan=False)
+    functions: bool = False
+
+
 class Suite(_Model):
     """The YAML file. Paths are relative to the file itself."""
 
@@ -372,6 +394,14 @@ class Suite(_Model):
     combine: CombineRule = "all"
     # Axes of values the suite runs every combination of (martian.evals.matrix).
     matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
+    # The cache of model calls; a `cache:` block, even an empty one, turns it on.
+    cache: CacheConfig | None = None
+
+    @field_validator("cache", mode="before")
+    @classmethod
+    def _empty_cache_block(cls, value: Any) -> Any:
+        """``cache:`` with nothing under it turns the cache on with its defaults."""
+        return {} if value is None else value
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -399,6 +429,9 @@ class Suite(_Model):
             raise ValueError("a matrix needs at least one axis; name its axes or remove it")
         if self.matrix:
             self._matrix_fits()
+        functions = self.cache is not None and "functions" in self.cache.model_fields_set
+        if functions and (self.target is None or self.target.file is None):
+            raise ValueError("cache.functions only applies to a function target")
         return self
 
     def _matrix_fits(self) -> None:
@@ -623,10 +656,20 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
     return reply
 
 
-def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any] | None = None) -> Callable[..., Any]:
+def _http_target(
+    reference: TargetRef,
+    input_key: str,
+    matrix: Mapping[str, Any] | None = None,
+    cache: ModelCallCache | None = None,
+) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
     ``matrix``, one combination's values, fills the body's ``{{matrix.NAME}}``, as case text is
     filled: inserted as data and never expanded itself.
+
+    With ``cache``, a reply is stored by its full request and a later identical request is
+    answered from the cache: the address, the headers but credential ones
+    (:func:`martian.evals.cache.key_headers`), the body with ``{{uuid}}`` as written, since each
+    call sends a new one, and ``response_path``. A failed call is never stored.
 
     Errors name what went wrong but never the address, the headers or the response body. The
     returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
@@ -642,15 +685,31 @@ def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any]
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
     def send(inputs: dict[str, Any]) -> Any:
-        body = _fill(reference.body, _case_values(inputs, input_key, matrix))
+        values = _case_values(inputs, input_key, matrix)
+        body = _fill(reference.body, values)
+
+        def post() -> Any:
+            try:
+                with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
+                    response = client.post(url, headers=headers, json=body)
+            except httpx.ReadTimeout:
+                raise TargetCallError("the target did not answer within target.timeout_seconds") from None
+            except httpx.HTTPError as error:
+                raise _unreachable(error) from None
+            return _reply(response, steps)
+
+        if cache is None:
+            return post()
+        request = {
+            "url": key_address(url),
+            "headers": key_headers(headers),
+            "body": _fill(reference.body, lambda name: "{{uuid}}" if name == "uuid" else values(name)),
+            "response_path": steps,
+        }
         try:
-            with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
-                response = client.post(url, headers=headers, json=body)
-        except httpx.ReadTimeout:
-            raise TargetCallError("the target did not answer within target.timeout_seconds") from None
-        except httpx.HTTPError as error:
-            raise _unreachable(error) from None
-        return _reply(response, steps)
+            return cache.call("target", request, post)
+        except CacheError as error:
+            raise TargetCallError(str(error)) from None
 
     # Why each failed call failed, by the inputs it was given: the evaluator reports only that
     # a call failed. Two cases with identical inputs send identical requests, so sharing is safe.
@@ -677,10 +736,15 @@ def _http_target(reference: TargetRef, input_key: str, matrix: Mapping[str, Any]
     return call
 
 
+def _target_file(reference: TargetRef, base: Path) -> Path:
+    """A function target's file, relative to the suite file unless it is absolute."""
+    file = Path(reference.file or "")
+    return file if file.is_absolute() else (base / file)
+
+
 def _load_function(reference: TargetRef, base: Path) -> Callable[..., Any]:
     """A function target's function, its file imported once."""
-    file = Path(reference.file or "")
-    file = file if file.is_absolute() else (base / file)
+    file = _target_file(reference, base)
     spec = importlib.util.spec_from_file_location("martian_evals_target", file)
     if spec is None or spec.loader is None or not file.is_file():
         raise ConfigError("could not load the target file")
@@ -718,24 +782,65 @@ def _with_arguments(function: Callable[..., Any], values: Mapping[str, Any]) -> 
     return call
 
 
-def _targets(suite: Suite, base: Path, matrix: list[Combination]) -> list[Callable[..., Any] | None]:
+def _cached_function(function: Callable[..., Any], reference: TargetRef, base: Path, cache: ModelCallCache) -> Any:
+    """``function`` with its replies stored in ``cache`` by its file's SHA-256, its name and its
+    arguments, which with a matrix include the combination's values. A reply JSON cannot hold
+    exactly, or None, is not stored; an exception is raised and never stored.
+
+    The wrapper keeps the function's name, so its trace is named as before. It is never marked as
+    traced, so MLflow always records a trace of the call, also when a reply comes from the cache;
+    a function that traces itself has its own span under that trace when it runs."""
+    file_sha256 = hashlib.sha256(_target_file(reference, base).read_bytes()).hexdigest()
+    request = {"file_sha256": file_sha256, "function": reference.function}
+
+    def stored(reply: Any) -> Any:
+        return reply if reply is not None and exact_json(reply) else None
+
+    if inspect.iscoroutinefunction(function):
+
+        async def waited(**inputs: Any) -> Any:
+            path, found = cache.lookup("target", request | {"arguments": inputs})
+            if found is not None:
+                return found
+            reply = await function(**inputs)
+            cache.keep("target", path, stored(reply))
+            return reply
+
+        call: Callable[..., Any] = waited
+    else:
+
+        def call(**inputs: Any) -> Any:
+            return cache.call("target", request | {"arguments": inputs}, lambda: function(**inputs), store=stored)
+
+    call.__name__ = getattr(function, "__name__", "target")
+    call.__qualname__ = getattr(function, "__qualname__", call.__name__)
+    return call
+
+
+def _targets(
+    suite: Suite, base: Path, matrix: list[Combination], cache: ModelCallCache | None = None
+) -> list[Callable[..., Any] | None]:
     """The target of each combination, in order, or of the suite once when it has no matrix. A
     function target's file is imported once; a URL target's settings are read from the
-    environment for each, so a missing variable stops the run before any case."""
+    environment for each, so a missing variable stops the run before any case. With ``cache``,
+    a URL target's calls are cached, and a function target's when the cache's ``functions`` is on."""
     reference = suite.target
     if reference is None:
         return [None] * max(len(matrix), 1)
     if reference.url is not None:
         if not matrix:
-            return [_http_target(reference, suite.input_key)]
-        return [_http_target(reference, suite.input_key, combination.values) for combination in matrix]
+            return [_http_target(reference, suite.input_key, cache=cache)]
+        return [_http_target(reference, suite.input_key, combination.values, cache) for combination in matrix]
     function = _load_function(reference, base)
+    if cache is not None and cache.functions:
+        function = _cached_function(function, reference, base, cache)
     if not matrix:
         return [function]
     return [_with_arguments(function, combination.values) for combination in matrix]
 
 
-def _build_scorers(suite: Suite) -> list[Any]:
+def _build_scorers(suite: Suite, cache: ModelCallCache | None = None) -> list[Any]:
+    """The suite's checks, its LLM judges with ``cache`` when the cache is on."""
     from martian.evals import grounding, judges
 
     built = []
@@ -764,6 +869,7 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     max_retries=suite.judge.max_retries,
                     rate_limit_wait_seconds=suite.judge.rate_limit_wait_seconds,
                     headers=judge_headers,
+                    cache=cache,
                 )
             )
         else:
@@ -1154,6 +1260,7 @@ def run_suite(
     home: str | Path | None = None,
     repeats: int | None = None,
     baseline: str | Path | None = None,
+    cache: bool | None = None,
 ) -> dict[str, Any]:
     """Run the suite and return its summary. Writes results.jsonl, summary.json, junit.xml and
     verdicts.json, and records the run, its case results, scores and traces in the local edition's
@@ -1178,6 +1285,11 @@ def run_suite(
     that holds every combination's verdicts, for a later run's baseline, and returns the matrix
     summary with each combination's run under ``run``. A suite without a matrix removes a
     matrix.json an earlier run left in the output folder.
+
+    ``cache`` turns the cache of model calls on (True) or off (False) for this run; None leaves it
+    to the suite file, on when it has a ``cache`` block (:func:`_open_cache`). A run with the
+    cache on says so in its summary's ``cache`` (:func:`_cache_report`), with how many replies
+    came from it, and in its recorded run's ``provenance.cache``.
     """
     from martian.evals import baseline as baselines
     from martian.evals.model import suite_digest
@@ -1217,7 +1329,8 @@ def run_suite(
                     f"case {case['id']} has an input named {clash[0]}, and the function target also takes the "
                     f"matrix's axis {clash[0]} as a keyword argument; rename the axis or the input"
                 )
-    targets = _targets(suite, base, matrix)
+    calls = _open_cache(suite, base, home) if (suite.cache is not None if cache is None else cache) else None
+    targets = _targets(suite, base, matrix, calls)
     plan = _Plan(
         path=Path(path),
         base=base,
@@ -1227,11 +1340,12 @@ def run_suite(
         cases=cases,
         total=total,
         limit=limit,
-        scorers=_build_scorers(suite),
+        scorers=_build_scorers(suite, calls),
         concurrency=concurrency,
         resume=resume,
         home=home,
         source=None if baseline is None else str(baseline),
+        cache=calls,
     )
     folder = Path(output) if output is not None else base / suite.output
     say = progress or (lambda message: None)
@@ -1343,6 +1457,73 @@ class _Plan:
     resume: bool
     home: str | Path | None
     source: str | None
+    cache: ModelCallCache | None = None
+
+
+def _target_cached(suite: Suite, functions: bool) -> bool:
+    """Whether the cache holds the target's calls: a URL target's always, a function target's
+    with ``functions``. A suite without a target calls none."""
+    return suite.target is not None and (suite.target.url is not None or functions)
+
+
+def _open_cache(suite: Suite, base: Path, home: str | Path | None) -> ModelCallCache:
+    """The cache of model calls, as the suite file's ``cache`` sets it, or with its defaults: the
+    folder ``cache`` in the local data folder, entries that live seven days, function targets left
+    out. A check that measures the target's call is refused when the target's calls are cached,
+    since a reply from the cache took no time and spent no tokens."""
+    from martian.evals.cache import FOLDER
+    from martian.evals.local import data_folder
+
+    settings = suite.cache or CacheConfig()
+    measured = [check.label for check in suite.checks if check.type in CALL_CHECKS]
+    if measured and suite.target is not None and _target_cached(suite, settings.functions):
+        url = suite.target.url is not None
+        fix = "run it without the cache (--no-cache)" if url else "set cache.functions to false"
+        raise ConfigError(
+            f"{', '.join(measured)} measures the target's call, and with the cache a call can be a reply an "
+            f"earlier run stored; {fix}"
+        )
+    if settings.folder is None:
+        folder = data_folder(home) / FOLDER
+    else:
+        folder = Path(settings.folder) if Path(settings.folder).is_absolute() else base / settings.folder
+    return ModelCallCache(folder.resolve(), ttl_seconds=settings.ttl_seconds, functions=settings.functions)
+
+
+def _cache_report(suite: Suite, cache: ModelCallCache) -> dict[str, Any]:
+    """summary.json's ``cache``, and the recorded run's ``provenance.cache``: the cache's
+    ``folder``, ``ttl_seconds`` and ``functions``, and this run's ``hits``, ``calls`` and
+    ``stored`` for the ``target`` and the ``judge`` calls, each None when the suite makes no such
+    call that the cache holds (no target or a function target it leaves out; no LLM judge)."""
+    counts = cache.counts()
+    judged = any(check.type in JUDGES for check in suite.checks)
+    return cache.settings() | {
+        "target": counts["target"] if _target_cached(suite, cache.functions) else None,
+        "judge": counts["judge"] if judged else None,
+    }
+
+
+def combined_cache(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Several runs' cache reports as one, each kind's counts added up: a matrix's combinations."""
+    combined = dict(reports[0])
+    for kind in ("target", "judge"):
+        if combined[kind] is not None:
+            combined[kind] = {name: sum(report[kind][name] for report in reports) for name in combined[kind]}
+    return combined
+
+
+def cache_line(found: dict[str, Any]) -> str:
+    """A run's use of the cache as one line, printed under the results table: of each kind of call,
+    how many were replayed from the cache, and how many calls went to a model."""
+    kinds = [kind for kind in ("target", "judge") if found[kind] is not None]
+    if not kinds:
+        return "Cache: on, but this suite makes no model call that the cache holds."
+    shown = " and ".join(
+        f"{found[kind]['hits']} of {found[kind]['hits'] + found[kind]['calls']} {kind} calls" for kind in kinds
+    )
+    sent = sum(found[kind]["calls"] for kind in kinds)
+    made = f"{sent} model {'call' if sent == 1 else 'calls'} made"
+    return f"Cache: {shown} replayed replies stored by an earlier run; {made}."
 
 
 def _run_one(
@@ -1372,7 +1553,12 @@ def _run_one(
     labels = [check.label for check in suite.checks]
 
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
-    with RunRecorder(data_folder(plan.home), plan.model, matrix=provenance) as recorder:
+    cache = plan.cache
+    with RunRecorder(
+        data_folder(plan.home), plan.model, matrix=provenance, cache=None if cache is None else cache.settings()
+    ) as recorder:
+        if cache is not None:
+            cache.begin()
         results = Results(folder, resume=plan.resume)
         suite_print = _suite_fingerprint(suite, base, None if combination is None else combination.values)
         prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
@@ -1542,6 +1728,9 @@ def _run_one(
             repeat_plan if repeated else None,
             refusals,
         )
+        used = None if cache is None else _cache_report(suite, cache)
+        if used is not None:
+            summary["cache"] = used
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         # Each combination is its own testsuite, named after the suite and the combination.
@@ -1556,7 +1745,7 @@ def _run_one(
             (folder / baselines.COMPARISON).write_text(text, encoding="utf-8")
         else:
             (folder / baselines.COMPARISON).unlink(missing_ok=True)
-        recorder.finish()
+        recorder.finish(cache=used)
     return {**summary, "run": recorder.reference(), **({"comparison": comparison} if comparison else {})}, found
 
 

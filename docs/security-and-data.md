@@ -52,6 +52,9 @@ Martian. Its outbound calls are the ones the suite file names:
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
 
+With the [cache of model calls](#the-cache-of-model-calls) on, a call whose reply the cache
+holds is not sent at all.
+
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
 verdicts and reasons as `results.jsonl` holds them (every attempt's, when the suite repeats
@@ -68,6 +71,41 @@ copy in the repository's Actions cache, which pull requests, including those fro
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
+
+### The cache of model calls
+
+The [cache](evals.md#a-cache-of-model-calls) is off unless the suite file has a `cache` block or
+the run is given `--cache`. With it on, `martian evals run` stores model replies on disk:
+
+- **Where.** The suite file's `cache.folder`, else `cache` in the local Evals UI's data folder
+  (`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`). The folder and its subfolders are
+  created readable by their owner only (`0700`) and each entry likewise (`0600`). Nothing in it
+  leaves the machine, and nothing outside the run reads it.
+- **What an entry holds.** One JSON file per reply, named by the SHA-256 digest of its key: the
+  format, the kind (`target` or `judge`), when it was stored, and the reply. A target's reply is
+  the text or value at `response_path` the endpoint returned, or a function target's return
+  value. A judge's is its judgment, the per-criterion verdicts with their reasons, and the
+  reply's metadata, such as the response format and the model version the provider named. An
+  entry holds no request, no header and no key, so the case's input appears in it only where the
+  reply quotes it. Treat the folder as you treat `results.jsonl`: replies can hold whatever the
+  target said.
+- **What the key leaves out.** The key is a digest of the full request, which is never written
+  down. Credentials are not part of it: a header or a query parameter whose name says it holds
+  one (`Authorization`, `Proxy-Authorization`, `Cookie`, and any name that holds `auth`, `key`,
+  `token`, `secret`, `pass`, `credential`, `cookie`, `session` or `signature`, or is `sig`,
+  `code` or `pwd`) is left out, and so is a user name or password in an address; a judge's key is
+  never read into it. Other header values are part of it as sent, with `${NAME}` read from the
+  environment, so a secret kept in a header whose name says nothing of it, such as
+  `X-Customer: ${CUSTOMER_SECRET}`, enters the digest: name such headers for what they hold.
+- **Errors are never stored**, so a cached entry is always a reply the model gave.
+- **Replayed results are marked.** A run that used the cache says so in `summary.json`, the
+  printed summary, the pull-request comment and the recorded run's `provenance.cache`, with how
+  many replies came from the cache.
+- **Sharing a folder** shares the replies in it. Point `cache.folder` at a shared location, or
+  keep the folder in a CI cache, only where everyone who can read it may read the replies, and
+  remember that a pull request from a fork can read the repository's Actions cache. An entry
+  older than `cache.ttl_seconds` is not used, but stays on disk until a successful call replaces
+  it or the folder is deleted.
 
 ## Telemetry
 

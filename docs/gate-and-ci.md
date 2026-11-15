@@ -94,7 +94,10 @@ prompts.
   create it.
 - **What it says.** The headline follows the exit code: passed (0), failed (1),
   or did not finish (2, a case without a verdict or an invalid suite file).
-  A suite with a [policy check](evals.md#false-refusals) adds how many of its
+  A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on
+  says so first, in bold, with how many target and judge calls replayed a
+  reply an earlier run stored. A suite with a
+  [policy check](evals.md#false-refusals) adds how many of its
   benign cases were refused, so a model that refuses everything cannot look
   as if it passed. Below it are per-check counts, each pass rate with its 95%
   interval ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),
