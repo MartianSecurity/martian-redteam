@@ -13,7 +13,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the targets it can call and, optionally, a judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` for the single local user, with the targets it can call and, optionally, a judge | A `QueueWorker` whose worker process runs each piece of work with `ProcessWorker`, so that a restart loses no run and no two organisations' runs share a process ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 
 ```python
@@ -335,7 +335,7 @@ gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overv
 deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
 operation of the contract but the ones above. `tests/evals/test_worker.py`,
-`test_worker_process.py` and `test_worker_targets.py` cover the worker.
+`test_worker_process.py`, `test_worker_targets.py` and `test_worker_queue.py` cover the worker.
 
 ## The worker
 
@@ -349,12 +349,16 @@ then calls `Worker.submit(Work(...))`:
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
+| `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
+| `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
 
 `execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
 record before each case, so a cancel request reaches a worker in another process too, and move
 each record on only from the state it expects, so two workers never both take the same work. Work
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
-marked `failed` with its reason, never left running.
+marked `failed` with its reason, never left running. Work whose worker stopped part way is queued
+again by the queue's next worker (`take_over`, [the durable queue](#the-durable-queue)), or marked
+`failed` where no queue takes it again (`fail_unfinished`).
 
 A target is called once per case and returns its output ([targets](#targets)); a judge is an
 async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
@@ -362,18 +366,22 @@ apply, the `model` and `endpoint` they are pinned to, and the scoring job's `job
 `JudgeResult` (the `model` it used, the `model_version` the provider reported, the judge's own
 `judge_version`, a verdict per scorer, and the reason for each scorer it gave none). A scoring job
 sends one request per model its judges are pinned to ([judge models](#judge-models)); the judge is
-[`sdk_judge` or `agents_judge`](#the-workers-judge). There are two workers:
+[`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
   judge=None, target_timeout_seconds=120, credentials=None, executor=None)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves the local edition and tests, and runs the work inside
-  each of `ProcessWorker`'s processes. `drain()` waits for the work submitted so far. Work is lost
-  with the process: a run interrupted by a restart stays `running` until the durable queue.
+  each of `ProcessWorker`'s processes. `drain()` waits for the work submitted so far. Work it is
+  given with `submit` is lost with the process: a run interrupted by a restart stays `running`.
 - `ProcessWorker(setup, records, agents=[target_id], judges=False, options={...},
   targets={target_id: http_target}, executor=None)` runs each piece of work in a new process of
   its own, which exits when the work is done. An installation that serves organisations uses it.
+- `QueueWorker(queue, runner, records, in_process=False, lease_seconds=30, poll_seconds=1,
+  max_attempts=3)` puts each piece of work in a durable queue in the record store's database, and
+  a worker takes it from there and runs it with `runner`, either of the two above, so that a
+  restart loses no queued or running work ([the durable queue](#the-durable-queue)).
 
 ### Targets
 
@@ -475,6 +483,13 @@ setup gives a judge. When a process exits with an error, the worker marks its ru
 (`fail_unfinished`). `drain()` waits for every process started so far. There is no limit yet on
 how many processes run at once.
 
+Under a `QueueWorker`, which calls `ProcessWorker.run(work)`, the run's process ends with the
+worker that started it, the one holding the work's claim. It starts in a session of its own, with
+a pipe from the worker as its standard input, which it keeps open; it exits with status 3 as soon
+as the pipe closes, however the worker ended. So it never outlives the claim, and a signal meant
+for the worker, such as a terminal's Ctrl+C, reaches only the worker, which ends the process and
+gives the work back. A cancelled `run` ends the process and leaves the work's record as it is.
+
 `tests/evals/test_worker_process.py` launches two organisations' runs at once on one SQLite store,
 each calling an agent traced with MLflow tracing, and checks where every trace landed: with a
 process each, all of them are in their own organisation's workspace. The same work on two
@@ -486,9 +501,91 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#139 | A durable job queue: `submit` enqueues, and each `Work` taken from the queue gets a process of its own |
 | MorningHQ/martian-notes#135 | A key store for each organisation's provider keys |
 | MorningHQ/martian-notes#116 | Run and run again from the local UI |
+
+### The durable queue
+
+`QueueWorker` (`martian.evals.worker.queue`) is the worker an installation uses so that a restart
+of the API process loses and fails no queued or running run. Its `submit` puts the work in the
+queue and returns; a worker takes it from there and runs it with its `runner`, an
+`InProcessWorker` or a `ProcessWorker` (each a `Runner`). Its `judges` and `check_target` are the
+runner's, so the routes do not change.
+
+The queue is `SqlWorkQueue(database_url, schema="martian", migrate=True)`
+(`martian.evals.records.queue`): the `martian_work_queue` table in the record store's database,
+SQLite locally and Postgres on a server, created by the record store's migration `0003`.
+
+```python
+from martian.evals.records.queue import SqlWorkQueue
+from martian.evals.records.sql import SqlRecordStore
+from martian.evals.worker import InProcessWorker, QueueWorker
+
+records = SqlRecordStore("sqlite:///evals/martian.db")
+queue = SqlWorkQueue("sqlite:///evals/martian.db")
+runner = InProcessWorker(store, records, targets={agent_id: call_agent})
+worker = QueueWorker(queue, runner, records, in_process=True)
+app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=worker)
+```
+
+- **Where the worker runs.** With `in_process=True` the worker serves the queue beside the app,
+  in the API process: `create_app` starts it when the app starts serving and stops it when the
+  app stops. That is how the core runs on one machine. Otherwise the API process only queues
+  work, and a worker process of its own builds the same `QueueWorker`, usually with a
+  `ProcessWorker` runner, and runs `await worker.serve()`.
+- **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
+  `dump_work` writes it, its principal included. Submitting the same work again while it is in
+  the queue changes nothing. The row is removed once the work has ended.
+- **Claims and leases.** A worker takes the oldest row that is queued, or claimed by a lease that
+  ran out, and holds it for `lease_seconds`, renewing it every third of the lease while the work
+  runs. A claim moves a row only while the row is still claimable, in one statement; on Postgres
+  it also locks the row it read and skips rows another claim has locked (`FOR UPDATE SKIP
+  LOCKED`). So two workers never hold one piece of work. Every change to a claimed row names the
+  claim's token, so a worker whose lease ran out changes nothing any more, and a worker that finds
+  its claim taken stops the work at its next renewal. Lease times are each worker's own clock in
+  UTC: the hosts of workers that share a queue need clocks within a small part of the lease.
+- **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
+  claimable again once the lease runs out. The next worker takes it again: a run or scoring job
+  still `running` is queued again and runs from the start (`take_over`). A run's cases are called
+  again and replace the results the first worker recorded; the traces the first worker recorded
+  stay in the store. A worker that is stopped (`stop()`, or a cancelled `serve()`) stops its work
+  and gives it back at once, without counting the attempt. After `max_attempts` claims the work is
+  `failed` with "The worker stopped before this work finished, too many times; it is not taken
+  again". Work that ends `failed` stays failed: nothing retries a target or a judge.
+- **One piece at a time.** Each `QueueWorker` runs one piece of work at a time, of any
+  organisation; workers that share the queue share its work. `drain()` waits until the queue holds
+  no work.
+- **Organisations.** Each row is its organisation's, as each record is, and on Postgres
+  row-level security filters on it again. A worker takes the next work of any organisation, so the
+  claim, and nothing else, sets `martian.claim` for its own transaction, which the table's policy
+  also admits.
+- **Progress events.** The work publishes the record store's events as it moves its record on: a
+  `run` event as a run starts, after each case and when it ends, and a `scoring_job` event, which
+  names its `run_id`, as a scoring job starts, after each case it scores and when it ends
+  ([the record store](#the-record-store)). A worker in another process publishes them on its own
+  record store's event bus, so an installation with a worker process gives both processes a bus
+  that reaches between them.
+
+`tests/evals/test_worker_queue.py` runs the queue on SQLite and on Postgres, there as an ordinary
+role, so that row-level security applies: each piece of work queued once and taken oldest first,
+held by only one of two workers claiming at once, taken again with its attempt counted once a
+lease runs out, and given back without counting it. It takes over work whose worker died, fails
+work after its last attempt, gives back the work of a worker that is stopped, stops the work of a
+worker whose claim another took, and follows a run and a scoring job through their events. Then
+it serves the core in a process of its own (`tests/evals/queue_fixture.py`), launches a run, and
+stops that process with `SIGKILL` while the run is queued, and again while its first case is in
+flight: started again, the process takes the run once the lease runs out and completes it, and a
+run's own process has ended with the worker that started it. It does so with the work in the
+serving process and in a process per run on SQLite, and in the serving process on Postgres.
+
+What builds on it:
+
+| Issue | Change |
+| --- | --- |
+| MorningHQ/martian-notes#141 | Case-level checkpoints: work taken again resumes after the cases already done |
+| MorningHQ/martian-notes#144 | Limits, budgets and cancel |
+| MorningHQ/martian-notes#145 | More than one run at a time |
+| MorningHQ/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process (the backend part of MorningHQ/martian-notes#139) |
 
 ### The worker's judge
 
@@ -614,8 +711,9 @@ endpoint, and keeps the local edition's default in its data folder.
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
-  [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
-  and a one-organisation in-process worker.
+  [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
+  a one-organisation in-process worker, and a durable queue in the record store's database that
+  either runs from ([the durable queue](#the-durable-queue)).
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
@@ -792,7 +890,12 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   is not part of the shared model: `save_view` creates one or, naming the revision it read,
   replaces it; `get_view`, `list_views` and `delete_view` read and remove them. Migration `0002`
   adds its table.
-- Every change publishes an event (`martian.evals.records.events`) naming what changed.
+- The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
+  database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
+  method: only a `QueueWorker` uses it.
+- Every change publishes an event (`martian.evals.records.events`) naming what changed: its
+  `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
+  `scoring_job`, its `run_id` too, which reading the job takes.
   `InProcessEvents` delivers events within one process, which is enough for the local edition.
   The server delivers them between processes. A listener that falls too far behind gets
   `EventsLost` and reads everything again.
@@ -1034,12 +1137,12 @@ cannot be opened.
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
-| A durable worker | MorningHQ/martian-notes#139 |
+| The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py` and
-the store and record tests run the core without the backend. The `Evals core`
+`test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py`,
+`test_worker_queue.py` and the store and record tests run the core without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

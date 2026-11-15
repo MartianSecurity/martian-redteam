@@ -5,7 +5,8 @@ and review queues. The evals core also needs runs with their lifecycle, case res
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts and
 the Traces page's saved views.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
-one migration history (``martian.evals.records.sql``). Projects live in MLflow, as experiments.
+one migration history (``martian.evals.records.sql``), which also creates the worker's queue
+(``martian.evals.records.queue``). Projects live in MLflow, as experiments.
 CI gate sessions stay with the server's CI gate.
 
 Every method takes the request's principal first, and the store keeps each organisation's

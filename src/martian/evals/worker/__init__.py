@@ -16,8 +16,10 @@ their own worker without changing the routes:
 - :class:`InProcessWorker` runs one organisation's work as tasks of the calling process's event
   loop and refuses any other organisation's. It is enough for the local edition and for tests,
   and it runs the work inside each of ``ProcessWorker``'s processes.
-- A durable queue (MorningHQ/martian-notes#139) implements ``submit`` by enqueueing, and hands
-  each ``Work`` to a process of its own.
+- :class:`QueueWorker` implements ``submit`` by putting the work in a durable queue in the record
+  store's database, and a worker, beside the app or in a process of its own, takes it from there
+  and runs it with either of the two above, its :class:`Runner`. Restarting the API process then
+  loses no queued or running work (:mod:`martian.evals.worker.queue`).
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
@@ -182,10 +184,32 @@ class Worker(Protocol):
         ...
 
 
-from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished  # noqa: E402
+@runtime_checkable
+class Runner(Worker, Protocol):
+    """A worker that can also do one piece of work and wait for it, as a :class:`QueueWorker` runs
+    what it takes from its queue: :class:`InProcessWorker` and :class:`ProcessWorker`."""
+
+    async def run(self, work: Work) -> None:
+        """Do the work and return once it has ended, whatever its outcome, which its record holds.
+        Cancelled, it stops the work and leaves its record as it is."""
+        ...
+
+
+@runtime_checkable
+class Lifecycle(Protocol):
+    """A worker that runs beside the app, as a :class:`QueueWorker` serving in the API process does:
+    ``create_app`` starts it when the app starts serving and stops it when the app stops."""
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
+from martian.evals.worker.queue import QueueWorker  # noqa: E402
 
 __all__ = [
     "AgentExecutor",
@@ -196,7 +220,10 @@ __all__ = [
     "JudgeError",
     "JudgeRequest",
     "JudgeResult",
+    "Lifecycle",
     "ProcessWorker",
+    "QueueWorker",
+    "Runner",
     "TargetCall",
     "Verdict",
     "Work",
@@ -209,4 +236,5 @@ __all__ = [
     "fail_unfinished",
     "load_work",
     "sdk_judge",
+    "take_over",
 ]
