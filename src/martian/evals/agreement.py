@@ -30,6 +30,9 @@ agree:
   handful of items means nothing. At 30 items the 95% interval of an agreement rate is still up to
   34 points wide (at 50%; 28 at 80%), at 10 up to 53.
 - **Independence.** Items count as independent: the core's case results carry no group.
+- **Panels.** A judge version graded by a panel of judge models (:mod:`martian.evals.panel`) is
+  reported as one judge: its verdicts are the panel's, ``panel`` says so, and ``models`` lists its
+  members. A panel score with no majority is an error, so it is no verdict.
 
 Every interval is two-sided at :data:`~martian.evals.stats.CONFIDENCE` (95%). Kappa and the
 concordance have no interval.
@@ -53,6 +56,7 @@ from statistics import fmean
 from typing import Any, Literal
 
 from martian.evals.model import Review, Score, Value, from_results_record
+from martian.evals.panel import is_panel, member_sources
 from martian.evals.stats import Interval, mean_interval, wilson
 
 MINIMUM_LABELLED = 30
@@ -245,7 +249,9 @@ def compare(
 class JudgeAgreement:
     """One judge version's verdicts against people's labels. ``judged`` counts the items it gave a
     verdict, ``incomparable`` those whose label is of another kind than its verdicts, and
-    ``agreement.labelled`` those compared. ``models`` are the models its verdicts name."""
+    ``agreement.labelled`` those compared. ``models`` are the models its verdicts name: for a
+    panel's verdicts (``panel``), its members' models. A panel is reported as one judge, since its
+    verdict is the panel's (``martian.evals.panel``)."""
 
     judge: str
     version: str
@@ -253,6 +259,7 @@ class JudgeAgreement:
     judged: int
     incomparable: int
     agreement: Agreement
+    panel: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """The report as the evals core serves it, with the reference side named ``human``."""
@@ -263,6 +270,7 @@ class JudgeAgreement:
             "version": self.version,
             "kind": found.kind,
             "models": list(self.models),
+            "panel": self.panel,
             "judged": self.judged,
             "labelled": found.labelled,
             "incomparable": self.incomparable,
@@ -380,13 +388,19 @@ def judge_agreement(
             JudgeAgreement(
                 judge=name,
                 version=version,
-                models=tuple(sorted({v.source_id for _, v in judged if v.source_id})),
+                models=tuple(sorted({model for _, v in judged for model in _models(v) if model})),
                 judged=len(judged),
                 incomparable=incomparable,
                 agreement=compare(pairs, kind, minimum=minimum),
+                panel=any(is_panel(v.metadata) for _, v in judged),
             )
         )
     return reports
+
+
+def _models(verdict: Score) -> list[str]:
+    """The models a verdict names: a panel's members, or the one model in its ``source_id``."""
+    return member_sources(verdict.metadata) if is_panel(verdict.metadata) else [verdict.source_id]
 
 
 def _inferred(values: Sequence[Value]) -> Kind:

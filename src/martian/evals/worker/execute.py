@@ -18,6 +18,10 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   and the judge version's calibration that applied (``martian.evals.calibration``): its newest
   when the job starts, if measured on the model the job runs it on. Its scores sit beside the
   run's own, and each scored value is also kept on the case's trace.
+- A judge graded by a panel is in the request of each of its members' models, so each member
+  grades it on its own, and its score is decided by the strict majority of the members that gave
+  a verdict (``martian.evals.panel``): every member's vote is in the score's metadata, and no
+  majority is the score's error.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
 - Each piece of work runs under limits (``RunLimits``): the run's own, ``provenance["limits"]``,
@@ -54,6 +58,7 @@ from martian.evals.model import (
     CaseResult,
     CaseStatus,
     Counts,
+    PanelMember,
     Run,
     RunLimits,
     RunState,
@@ -64,6 +69,8 @@ from martian.evals.model import (
     StoreRef,
     Trace,
 )
+from martian.evals.panel import REASON_LENGTH as PANEL_ERROR_LENGTH
+from martian.evals.panel import Vote, decide, panel_source
 from martian.evals.records import RecordStore
 from martian.evals.runner import TargetCallError
 from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_config, prompt_text, text_of
@@ -502,6 +509,45 @@ def model_source(answer: JudgeResult) -> str:
     return f"{answer.model}@{answer.model_version}" if answer.model_version else answer.model
 
 
+def seats(scorer: ScorerVersion) -> list[tuple[str | None, str | None]]:
+    """The models and endpoints a judge scorer is graded on: each member of its panel, or its own."""
+    return [(member.model, member.endpoint) for member in scorer.panel] or [(scorer.model, scorer.endpoint)]
+
+
+def _vote(member: PanelMember, scorer: ScorerVersion, answer: JudgeResult | str | None) -> Vote:
+    """A panel member's vote on one scorer from the judge's answer on that member's model."""
+    if isinstance(answer, str):
+        return Vote(member.model, None, answer, member.endpoint)
+    if answer is None:
+        return Vote(member.model, None, NO_JUDGE, member.endpoint)
+    version = answer.model_version
+    if scorer.name in answer.verdicts:
+        verdict = answer.verdicts[scorer.name]
+        if type(verdict.value) is not bool:
+            return Vote(member.model, None, "The judge gave no pass/fail verdict", member.endpoint, version)
+        return Vote(member.model, verdict.value, verdict.rationale, member.endpoint, version)
+    reason = answer.errors.get(scorer.name, "")[:JUDGE_ERROR_LENGTH] or NO_JUDGE
+    return Vote(member.model, None, reason, member.endpoint, version)
+
+
+def _panel_score(
+    scorer: ScorerVersion, answers: dict[tuple[str | None, str | None], JudgeResult | str | None]
+) -> tuple[bool | None, str, str, str, dict[str, Any]]:
+    """A panel judge's value, rationale, error, source and metadata from its members' answers,
+    decided by the strict majority of the members that gave a verdict (``martian.evals.panel``)."""
+    decision = decide([_vote(member, scorer, answers.get((member.model, member.endpoint))) for member in scorer.panel])
+    metadata: dict[str, Any] = decision.metadata()
+    versions = {
+        answer.judge_version
+        for member in scorer.panel
+        if isinstance(answer := answers.get((member.model, member.endpoint)), JudgeResult) and answer.judge_version
+    }
+    if len(versions) == 1:
+        metadata[JUDGE_VERSION_KEY] = versions.pop()
+    source = panel_source((member.model, member.endpoint) for member in scorer.panel)
+    return decision.passed, decision.rationale, decision.error[:PANEL_ERROR_LENGTH], source, metadata
+
+
 def _judge_metadata(scorer: ScorerVersion, answer: JudgeResult | None) -> dict[str, Any]:
     """What a judge score records of its model: the model that answered (or the one the judge is
     pinned to, when none did), the version the provider reported, the judge's own version, and
@@ -577,17 +623,19 @@ async def _score_results(
     if moved is None:
         return
     job = moved
-    # One judge request per model the job's judges are pinned to, in the order they first appear.
+    # One judge request per model the job's judges are pinned to, in the order they first appear. A
+    # judge graded by a panel is in the request of each of its members' models.
     by_model: dict[tuple[str | None, str | None], list[ScorerVersion]] = {}
     for scorer in job.scorers:
         if scorer.kind == "llm_judge":
-            by_model.setdefault((scorer.model, scorer.endpoint), []).append(scorer)
+            for seat in seats(scorer):
+                by_model.setdefault(seat, []).append(scorer)
     definition = job_config(job)["definition_digest"]
     # The calibration each judge version had when the job started, if it checks the model the job
-    # runs the judge on.
+    # runs the judge on, or the members of its panel.
     calibrations = await latest_calibrations(records, principal, project)
     applied = {
-        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s.model, s.endpoint)
+        (s.name, s.version): applied_calibration(calibrations.get((s.name, s.version)), s.model, s.endpoint, s.panel)
         for s in job.scorers
         if s.kind == "llm_judge"
     }
@@ -648,13 +696,17 @@ async def _score_results(
                 metadata["martian.suite_id"] = job.suite_id
                 metadata["martian.suite_version"] = job.suite_version
             answer = answers.get((scorer.model, scorer.endpoint))
-            if scorer.kind == "llm_judge":
+            if scorer.kind == "llm_judge" and not scorer.panel:
                 metadata |= _judge_metadata(scorer, answer if isinstance(answer, JudgeResult) else None)
+            if scorer.kind == "llm_judge":
                 metadata[CALIBRATION_KEY] = applied[(scorer.name, scorer.version)]
             if not finished:
                 error = NO_OUTPUT
             elif scorer.kind != "llm_judge":
                 value, rationale = code_score(scorer.name, output, expected)
+            elif scorer.panel:
+                value, rationale, error, source_id, votes = _panel_score(scorer, answers)
+                metadata |= votes
             elif isinstance(answer, str):
                 error = answer
             elif answer is not None and scorer.name in answer.verdicts:

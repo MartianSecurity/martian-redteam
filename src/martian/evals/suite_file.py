@@ -27,6 +27,7 @@ from martian.config import ConfigError
 from martian.evals import runner
 from martian.evals.model import (
     Case,
+    PanelMember,
     Repeats,
     RunLimits,
     RunSettings,
@@ -49,7 +50,7 @@ SUITE_FILE_FIELDS = {
     "target.response_path": "Target.response_path (kind http)",
     "target.timeout_seconds": "RunSettings.target_timeout_seconds (a function or http target)",
     "judge": "The llm_judge scorers",
-    "judge.model": "ScorerVersion.model of each llm_judge scorer",
+    "judge.model": "ScorerVersion.model of each llm_judge scorer without a panel",
     "judge.inference_params": "ScorerVersion.parameters of each llm_judge scorer",
     "judge.max_retries": "RunSettings.judge_max_retries",
     "judge.rate_limit_wait_seconds": "RunSettings.judge_rate_limit_wait_seconds",
@@ -60,6 +61,7 @@ SUITE_FILE_FIELDS = {
     "checks.rubric": "ScorerVersion.criteria.rubric",
     "checks.guidelines": "ScorerVersion.criteria.guidelines",
     "checks.conditions": "ScorerVersion.criteria.conditions",
+    "checks.panel": "ScorerVersion.panel, a PanelMember for each model URI, in order",
     "checks.values": "ScorerVersion.parameters.values",
     "checks.expectation": "ScorerVersion.parameters.expectation",
     "checks.any_of": "ScorerVersion.parameters.any_of",
@@ -109,13 +111,14 @@ COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
 _TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
 _TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
-    "rubric": frozenset({"rubric"}),
-    "guidelines": frozenset({"guidelines"}),
-    "conditions": frozenset({"conditions"}),
-    # The grounding judges read each case's inputs.context and take no options.
-    "groundedness": frozenset(),
-    "context_relevance": frozenset(),
-    "context_sufficiency": frozenset(),
+    "rubric": frozenset({"rubric", "panel"}),
+    "guidelines": frozenset({"guidelines", "panel"}),
+    "conditions": frozenset({"conditions", "panel"}),
+    # The grounding judges read each case's inputs.context and take no criteria; any judge can be
+    # graded by a panel of judge models.
+    "groundedness": frozenset({"panel"}),
+    "context_relevance": frozenset({"panel"}),
+    "context_sufficiency": frozenset({"panel"}),
     "contains": _TEXT_OPTIONS | {"any_of"},
     "not_contains": _TEXT_OPTIONS,
     "contains_any": _TEXT_OPTIONS,
@@ -236,6 +239,9 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
         raise ConfigError(
             f"judge: no check is an LLM judge ({', '.join(runner.JUDGES)}), so nothing uses it; remove it"
         )
+    single = [check for check in file_suite.checks if check.type in runner.JUDGES and check.panel is None]
+    if file_suite.judge is not None and file_suite.judge.model is not None and not single:
+        raise ConfigError("judge.model: every LLM judge check names its own panel, so nothing uses it; remove it")
     try:
         return {
             "dataset_location": file_suite.data,
@@ -279,14 +285,15 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
     if unused := sorted(set(options) - CHECK_OPTIONS[check.type]):
         raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
-        assert judge is not None  # the runner refuses a judge check without a judge
+        # The runner refuses a judge check with neither a panel nor a judge.model.
         criterion = getattr(check, check.type) if check.type in runner.CRITERIA_JUDGES else None
         return ScorerVersion(
             name=check.label,
             kind="llm_judge",
             type=check.type,
-            model=judge.model,
-            parameters=dict(judge.inference_params),
+            model=judge.model if judge is not None and check.panel is None else None,
+            panel=[PanelMember(model=model) for model in check.panel or []],
+            parameters=dict(judge.inference_params) if judge is not None else {},
             criteria={} if criterion is None else {check.type: criterion},
         )
     return ScorerVersion(
@@ -444,12 +451,17 @@ def _judge_file(scorers: list[ScorerVersion], settings: RunSettings) -> dict[str
                 "settings.judge_max_retries, judge_rate_limit_wait_seconds and judge_headers need an llm_judge scorer"
             )
         return None
-    if len({(scorer.model, digest(scorer.parameters)) for scorer in judges}) > 1:
-        raise ConfigError("a suite file has one judge: every llm_judge scorer needs the same model and parameters")
-    written: dict[str, Any] = {"model": judges[0].model}
+    # A judge with a panel names its own models; every other judge shares the suite's judge.model.
+    single = [scorer for scorer in judges if not scorer.panel]
+    if len({scorer.model for scorer in single}) > 1 or len({digest(scorer.parameters) for scorer in judges}) > 1:
+        raise ConfigError(
+            "a suite file has one judge: every llm_judge scorer without a panel needs the same model, "
+            "and every llm_judge scorer the same parameters"
+        )
+    written: dict[str, Any] = {"model": single[0].model} if single else {}
     if judges[0].parameters:
         written["inference_params"] = dict(judges[0].parameters)
-    return written | transport
+    return (written | transport) or None
 
 
 def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> dict[str, Any]:
@@ -464,6 +476,13 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         if set(scorer.criteria) - {scorer.type}:
             raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {scorer.type} only")
         options = dict(scorer.criteria)
+        if any(member.endpoint is not None for member in scorer.panel):
+            raise ConfigError(
+                f"{where}: a suite file's panel names model URIs, all served at the environment's OPENAI_API_BASE, "
+                "so a panel member cannot name an endpoint"
+            )
+        if scorer.panel:
+            options["panel"] = [member.model for member in scorer.panel]
     elif scorer.kind == "check":
         if scorer.type not in runner.CHECKS:
             raise ConfigError(f"{where}: a suite file's checks are {', '.join(runner.CHECKS)}")

@@ -52,7 +52,11 @@ EVERY_FIELD_URL = {
     "checks": [
         {"type": "rubric", "name": "keeps_secret", "rubric": "Fail if the reply reveals the key."},
         {"type": "guidelines", "guidelines": ["Greet the user.", "Stay on topic."]},
-        {"type": "conditions", "conditions": [{"question": "Does it reveal the key?", "fail_when": "yes"}]},
+        {
+            "type": "conditions",
+            "conditions": [{"question": "Does it reveal the key?", "fail_when": "yes"}],
+            "panel": ["openai:/judge-a", "openai:/judge-b", "openai:/judge-c"],
+        },
         {"type": "contains", "values": ["cannot"], "expectation": "must_say", "any_of": True, "case_sensitive": True},
         {
             "type": "not_contains",
@@ -236,6 +240,12 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         criteria={"rubric": "Fail if the reply reveals the key."},
     )
     assert (guidelines.name, conditions.name) == ("guidelines_judge", "conditions_judge")
+    # A panel check names its own models and shares the judge's parameters.
+    assert (conditions.model, [m.model for m in conditions.panel]) == (
+        None,
+        ["openai:/judge-a", "openai:/judge-b", "openai:/judge-c"],
+    )
+    assert conditions.parameters == rubric.parameters
     assert contains == ScorerVersion(
         name="contains",
         kind="check",

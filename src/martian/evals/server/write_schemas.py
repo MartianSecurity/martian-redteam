@@ -7,6 +7,9 @@ the project, judge, question, annotation and view requests from ``app/evals_expl
 and the dataset authoring bodies from ``app/api/evals_datasets.py``. ``tests/evals/
 test_write_contract.py`` compares them. No class has a docstring: it would become the schema's
 description, which the contract's have none of.
+
+``JudgePanelRequest`` and ``JudgePanelMember`` are the core's own, for its own route that
+registers a judge graded by a panel of judge models; the contract has no such request.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from pydantic import (
 )
 
 from martian.evals.judge_settings import ENDPOINT_PATTERN, MODEL_URI_PATTERN, judge_model_problem
+from martian.evals.model import MAX_PANEL, MIN_PANEL
 from martian.evals.server.schemas import TraceQuery
 from martian.evals.worker.scorers import CODE_SCORERS, JUDGE_SCORERS
 
@@ -282,6 +286,35 @@ class JudgeModelRequest(StrictRequest):
     def consistent(self) -> JudgeModelRequest:
         if problem := judge_model_problem(self.model, self.endpoint):
             raise ValueError(problem)
+        return self
+
+
+# --- the core's own: a judge graded by a panel of judge models --------------------------------
+
+
+class JudgePanelMember(StrictRequest):
+    model: JudgeModelUri
+    endpoint: JudgeEndpoint | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> JudgePanelMember:
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
+        return self
+
+
+class JudgePanelRequest(JudgeVersionRequest):
+    panel: list[JudgePanelMember] = Field(min_length=MIN_PANEL, max_length=MAX_PANEL)
+
+    @model_validator(mode="after")
+    def panel_definition(self) -> JudgePanelRequest:
+        if self.model is not None or self.endpoint is not None:
+            raise ValueError("A panel judge names its models in panel, not in model or endpoint")
+        if self.kind != "boolean":
+            raise ValueError("A panel decides pass or fail by majority, so a panel judge's kind is boolean")
+        members = [(member.model, member.endpoint) for member in self.panel]
+        if len(set(members)) != len(members):
+            raise ValueError("A panel names each judge model once")
         return self
 
 

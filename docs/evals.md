@@ -123,7 +123,8 @@ graded by your criteria, and `groundedness`, `context_relevance` and `context_su
 the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
 instructions and refusals. Criteria written in the suite file apply to every case that does not
 carry its own in `expectations`. Use at most one check of each judge type, and give repeated check
-types a `name`.
+types a `name`. A judge check can name a `panel` of judge models in place of `judge.model`
+([a panel of judges](#a-panel-of-judges)).
 
 **Results.** The output folder receives:
 
@@ -555,6 +556,105 @@ same name. The endpoint's own error text is read to choose the message and is ne
 The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
 providers they name the provider's key and address without a variable.
 
+## A panel of judges
+
+With one judge, that judge's mistake, or its failure to answer, decides the check. A panel names
+several judge models for one judge check. Each grades the case on its own, through the same judge
+code as a single judge, and the strict majority of those that gave a verdict decides
+(`martian.evals.panel`, rule `strict-majority-v1`):
+
+- **A judge that errors does not vote.** Its error is kept as its reason.
+- **More than half of the panel must vote.** With fewer votes there is no verdict: one judge of
+  three deciding alone is the single judge the panel replaces.
+- **More than half of the votes must agree.** A tie has no verdict.
+- **No majority is an error, never a pass** (`judge_panel_no_majority`). The case has no verdict,
+  `martian evals run` exits `2`, `assert_checks` fails, and the next run grades the case again.
+
+| Panel | Votes | Verdict |
+| --- | --- | --- |
+| 3 judges | pass, pass, error | Pass: two of two votes, from two of three judges |
+| 3 judges | fail, fail, pass | Fail |
+| 3 judges | pass, fail, error | No majority: a tie |
+| 3 judges | pass, error, error | No majority: one of three judges voted |
+| 4 judges | pass, pass, fail, fail | No majority: a tie |
+| 5 judges | pass, pass, fail, error, error | Pass: two of three votes, from three of five judges |
+
+A panel names 2 to 9 different models. Name an odd number, so that a full panel cannot tie. Each
+judge is a model call, so a panel of three costs three single judges, and a run's
+`max_judge_tokens` ([time limits and budgets](#run-a-suite-file-locally)) counts the tokens of
+every member that gave a verdict, which the panel's feedback adds up; a member that gave a verdict
+and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge. The rule reads pass/fail
+verdicts, which every SDK judge gives. MLflow's own ensemble (`make_scorer_ensemble` with
+`majority_vote` in `mlflow.genai.scorers`) fails when any member errors and breaks a tie by
+sorting the answers, so the panel has its own rule.
+
+**In a suite file**, a judge check's `panel` lists the models:
+
+```yaml
+judge:
+  model: "openai:/YOUR_JUDGE_MODEL"        # every judge check without a panel
+  inference_params: {temperature: 0}       # every judge, the panel's members too
+checks:
+  - type: rubric
+    rubric: "Fail if the reply reveals the secret key. Pass if it declines."
+    panel: ["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"]
+  - type: guidelines
+    guidelines: ["Greet the user."]          # judged by judge.model alone
+```
+
+Any LLM judge check takes a `panel`: `rubric`, `guidelines`, `conditions` and the grounding
+judges. The members share `judge`'s settings (`inference_params`, `headers`, `max_retries`,
+`rate_limit_wait_seconds`) and its endpoint, `OPENAI_API_BASE`, so they are models one endpoint
+or gateway serves. A suite whose every judge check names a panel needs no `judge.model`, and
+refuses one, since nothing would use it. The panel is part of what a reused verdict depends on,
+so changing it grades the cases again.
+
+**In Python**, `judge_panel` builds one of the SDK judges for each model:
+
+```python
+from martian.evals import judge_panel, response_rubric
+
+judge = judge_panel(
+    response_rubric,
+    models=["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"],
+    name="keeps_secret",                     # default: the judge's own default name
+    inference_params={"temperature": 0},     # the judge's other arguments, for every member
+)
+```
+
+`judge` is `response_guidelines`, `response_conditions`, `response_rubric`, `groundedness`,
+`context_relevance` or `context_sufficiency`, or any function that takes `model=` and `name=` and
+returns a scorer whose value is a boolean. The members grade each case at the same time, so a
+panel takes about as long as its slowest member. With no majority the feedback has no value and
+the error code `judge_panel_no_majority`.
+
+**A registered judge.** `POST /v1/evals/judge-panels` on the evals core registers a version of a
+judge graded by a panel, and the core's worker grades it once on each member's model
+([evals core](evals-core.md#write-routes)). The Evals UI does not register panels or show a
+panel's members yet, and the Martian server does not serve the route.
+
+**What is recorded.** The score's value is the panel's verdict, and its rationale gives the count
+and each member's vote and reason. Its metadata holds the decision and every vote as flat
+strings: on the MLflow feedback in Python, under `checks.<label>.metadata` in a suite-file run's
+`results.jsonl` and on its score in the local Evals UI, and in the `provenance` of the core's
+score.
+
+| Key | Value |
+| --- | --- |
+| `martian.panel.rule` | `strict-majority-v1` |
+| `martian.panel.size` | The number of judges |
+| `martian.panel.passed`, `.failed`, `.errors` | How many judges passed, failed and gave no verdict |
+| `martian.panel.verdict` | `pass`, `fail` or `none` |
+| `martian.panel.<n>.model` | Judge n's model, from 1 in the panel's order |
+| `martian.panel.<n>.endpoint` | Its endpoint, when it names one (a registered judge only) |
+| `martian.panel.<n>.model_version` | The model version its provider reported, when it reported one |
+| `martian.panel.<n>.verdict` | `pass`, `fail` or `error` |
+| `martian.panel.<n>.reason` | Its reason, or why it gave no verdict, at most 2,000 characters |
+
+`martian.judge.version` is the members' judge version when they report one. The score's
+`source_id` is `panel:` and 12 hex digits of a digest of its members, the same for the same
+members in any order, so runs of the same panel compare.
+
 ## Judge agreement with human labels
 
 A judge's pass rate says how often it passes, not how often it is right. `martian.evals.agreement`
@@ -577,7 +677,10 @@ on, else the trace. To label a judge named `polite_tone`, give a review queue a 
 `polite_tone`, or annotate its traces with feedback named `polite_tone`. On each item a judge
 version counts its newest verdict and the criterion its newest label. A judge version is a judge's
 name and version: a registered judge's version number, or `v1` for a built-in judge. Its verdicts
-are pooled over the models it ran on, which `models` lists.
+are pooled over the models it ran on, which `models` lists. A judge version graded by a
+[panel](#a-panel-of-judges) is reported as one judge: its verdicts are the panel's, `panel` is
+`true`, and `models` lists the members' models; a panel score with no majority is no verdict.
+The members' own agreement is not reported.
 
 | Judge's verdicts | What is reported |
 | --- | --- |
@@ -644,7 +747,7 @@ the SDK. No model is called.
   so it has no calibration; use `results_agreement` on its results.
 - **What it holds.** The version's report as the agreement route gives it, the number of
   labelled items, when it was saved and who saved it, and the model the version ran on then: its
-  own, or the default judge model for a judge that names none. Every calibration is kept; the
+  own, the default judge model for a judge that names none, or its panel's members. Every calibration is kept; the
   newest of a judge version is its calibration.
 - **Checked or unchecked.** A judge version is `checked` while it runs on the model its newest
   calibration was measured on. Otherwise it is `unchecked`: `none` when it has no calibration,
@@ -656,6 +759,12 @@ the SDK. No model is called.
   `martian.calibration_id`: the judge version's newest calibration when the job started, if it was
   measured on the model the job runs the judge on, else `none`. A suite-file run's judge scores
   name `none`. A later calibration does not change what an earlier score names.
+- **A panel is calibrated as one judge.** A judge version graded by a
+  [panel](#a-panel-of-judges) has one calibration, of the panel's verdicts, which records the
+  panel's members (`panel`) in place of a model. It checks the version while the version runs on
+  exactly those members, and the panel's scores name it. The members are not calibrated one by
+  one: the verdict a score holds and a gate uses is the panel's, and the members read the same
+  reply and can share blind spots, so their own error rates do not give the panel's.
 
 ```python
 from martian.evals.calibration import save_calibration

@@ -26,6 +26,7 @@ from martian.evals.model import (
     DatasetDraft,
     Identifier,
     Page,
+    PanelMember,
     Review,
     Run,
     RunState,
@@ -66,8 +67,10 @@ class JudgeCalibration(BaseModel):
     ``GET /v1/evals/judge-agreement`` gives it, with ``labelled`` the items it rests on, and
     ``traces_examined`` and ``traces_truncated`` what the report read. ``model`` and ``endpoint``
     are the model the judge version ran on then: its own, or the default judge model when it names
-    none. A calibration is never changed: a newer one of the same judge version takes its place,
-    and a score names the one that applied when it was made."""
+    none. For a judge graded by a panel, ``panel`` is its members instead, and the calibration is
+    the panel's, as one judge: its verdicts are the panel's. A calibration is never changed: a
+    newer one of the same judge version takes its place, and a score names the one that applied
+    when it was made."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -77,6 +80,7 @@ class JudgeCalibration(BaseModel):
     version: str = Field(min_length=1, max_length=40)
     model: str | None = None
     endpoint: str | None = None
+    panel: list[PanelMember] = Field(default_factory=list)
     labelled: int = Field(ge=0)
     traces_examined: int = Field(default=0, ge=0)
     traces_truncated: bool = False

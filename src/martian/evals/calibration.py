@@ -24,16 +24,23 @@ say when the judge was last checked, and every score which check applied to it.
   started, if it was measured on the model the job runs the judge on, else :data:`NO_CALIBRATION`.
   A suite-file run's judges are checks of a suite file, not judge versions the core registers, so
   their scores name :data:`NO_CALIBRATION`.
+- **A panel is calibrated as one judge.** A judge version graded by a panel of judge models
+  (:mod:`martian.evals.panel`) has one calibration, of the panel's verdicts, measured on the
+  panel's members (``JudgeCalibration.panel``); it checks the version while the version runs on
+  exactly those members. Its members are not calibrated one by one: the panel's verdict, not a
+  member's, is what a score and a gate use, and the members' errors are not independent, so their
+  own error rates do not give the panel's.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from martian.evals.model import PanelMember
 from martian.evals.records import JudgeCalibration, RecordStore
 
 if TYPE_CHECKING:
@@ -50,22 +57,30 @@ Reason = Literal["none", "model_changed"]
 
 
 def calibration_state(
-    latest: JudgeCalibration | None, model: str | None, endpoint: str | None
+    latest: JudgeCalibration | None,
+    model: str | None,
+    endpoint: str | None,
+    panel: Sequence[PanelMember] = (),
 ) -> tuple[State, Reason | None]:
-    """Whether a judge version that runs on ``model`` at ``endpoint`` now is checked by its newest
-    calibration ``latest``, and why not."""
+    """Whether a judge version that runs on ``model`` at ``endpoint`` now, or on the judge models
+    of ``panel``, is checked by its newest calibration ``latest``, and why not."""
     if latest is None:
         return "unchecked", "none"
-    if (latest.model, latest.endpoint) != (model, endpoint):
+    if (latest.model, latest.endpoint, list(latest.panel)) != (model, endpoint, list(panel)):
         return "unchecked", "model_changed"
     return "checked", None
 
 
-def applied_calibration(latest: JudgeCalibration | None, model: str | None, endpoint: str | None) -> str:
-    """What a judge score made on ``model`` at ``endpoint`` names under :data:`CALIBRATION_KEY`:
-    the id of the judge version's newest calibration ``latest`` when it was measured on that
-    model, else :data:`NO_CALIBRATION`."""
-    if latest is not None and calibration_state(latest, model, endpoint)[0] == "checked":
+def applied_calibration(
+    latest: JudgeCalibration | None,
+    model: str | None,
+    endpoint: str | None,
+    panel: Sequence[PanelMember] = (),
+) -> str:
+    """What a judge score made on ``model`` at ``endpoint``, or by the judge models of ``panel``,
+    names under :data:`CALIBRATION_KEY`: the id of the judge version's newest calibration
+    ``latest`` when it was measured on those models, else :data:`NO_CALIBRATION`."""
+    if latest is not None and calibration_state(latest, model, endpoint, panel)[0] == "checked":
         return latest.id
     return NO_CALIBRATION
 
