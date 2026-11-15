@@ -27,7 +27,8 @@ their own worker without changing the routes:
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
 HTTP target's credentials come from the worker's :class:`Credentials`, in the process that calls
-it (:mod:`martian.evals.worker.targets`).
+it (:mod:`martian.evals.worker.targets`). A run calls only the target it was admitted with: the
+worker pins the target again before each start of a run, and fails a run whose target changed.
 
 A worker learns that someone asked it to stop from the record itself
 (``Run.cancel_requested_at``, ``ScoringJob.cancel_requested_at``), which it reads before each case,
@@ -106,7 +107,12 @@ class AgentExecutor(Protocol):
     async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
         """Admit the agent for this principal and return what pins it, which the run keeps as
         ``provenance["target"]``. Raises ``StoreError`` (``not_found`` for an agent it does not
-        know). Never calls the agent."""
+        know). Never calls the agent.
+
+        The worker asks again before each start of a run, a resume included, in the process that
+        calls the agent, and fails the run without calling the agent when the pin differs from the
+        run's. So the pin is the same for as long as the agent is, and holds nothing that changes
+        while the agent does not, such as a lease or a time."""
         ...
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
@@ -188,7 +194,9 @@ class Worker(Protocol):
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         """Before a run is recorded, check that this worker can call ``target`` for this principal
         and return what pins it, which the run keeps as ``provenance["target"]``. Raises
-        ``StoreError`` (``not_found`` for an unknown agent). Never calls the target."""
+        ``StoreError`` (``not_found`` for an unknown agent). Never calls the target. The worker
+        that runs the run pins the target again before each start and fails the run when the
+        target is no longer the one it pinned (:func:`execute_run`)."""
         ...
 
     async def submit(self, work: Work) -> None:

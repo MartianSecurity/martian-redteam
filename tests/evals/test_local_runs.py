@@ -6,6 +6,7 @@ OpenAI-compatible endpoint; nothing calls a real model."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -171,7 +172,9 @@ def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_resu
     assert {request["headers"]["Authorization"] for request in target.requests} == {f"Bearer {KEY}"}
 
 
-def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_scores_it(client, home, target):
+def _stopped_after_its_first_case(client: TestClient, target: FakeTarget) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A local target and a run of it with a suite, stopped at its time limit after its first case;
+    the target and the run."""
     defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
     suite = save_suite(client, str(uuid.uuid4()))
     # The target answers the first case 4 seconds after it is asked, past the run's limit of 3.
@@ -189,6 +192,11 @@ def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_
     queued = launch(client, defined["id"], suite, limits={"max_seconds": 3})
     assert queued["provenance"]["limits"] == {"max_seconds": 3.0, "max_judge_tokens": None}
     drain(client)
+    return defined, queued
+
+
+def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_scores_it(client, home, target):
+    _, queued = _stopped_after_its_first_case(client, target)
 
     run, work = results(client, queued["id"])
     assert run["state"] == "stopped" and run["error"].startswith("Stopped at its time limit (max_seconds 3) after ")
@@ -210,6 +218,32 @@ def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_
     assert call(client, "POST", f"{RUNS}/{queued['id']}/resume", 409, json={})["detail"] == (
         "Only a run, or its suite's scoring, stopped at one of its limits can be resumed"
     )
+
+
+def test_a_stopped_run_whose_target_changed_under_its_id_fails_when_resumed_without_calling_it(client, home, target):
+    """The UI cannot edit a local target, but ``targets.json`` can be edited by hand, keeping the
+    target's id. Resumed after that, the run fails, naming the target, in its own process, before
+    any call, and its suite does not score it."""
+    defined, queued = _stopped_after_its_first_case(client, target)
+    definitions = home / "targets.json"
+    written = json.loads(definitions.read_text(encoding="utf-8"))
+    (edited,) = written["targets"]
+    edited["body"] = {"message": "{{input}}", "channel": "support"}
+    definitions.write_text(json.dumps(written), encoding="utf-8")
+
+    call(client, "POST", f"{RUNS}/{queued['id']}/resume", 202, json={"limits": {"max_seconds": 120}})
+    drain(client)
+    run, work = results(client, queued["id"])
+    assert (run["state"], run["error"]) == (
+        "failed",
+        f'The target "Support agent" ({defined["id"]}) changed since this run started; the run did not call the '
+        "changed target. Start a new run to evaluate it as it is now",
+    )
+    assert {item["dataset_item_id"]: item["status"] for item in run["items"]} == {"faq-1": "passed"}
+    assert [(job["state"], job["error"]) for job in work["jobs"]] == [
+        ("cancelled", "The run did not complete, so its suite did not score it")
+    ]
+    assert [request["body"] for request in target.requests] == [{"message": "How do I reset my password?"}]
 
 
 def test_run_again_repeats_a_finished_run_with_its_saved_settings(client, home, target):
