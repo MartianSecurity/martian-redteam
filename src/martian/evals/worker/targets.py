@@ -24,10 +24,23 @@ the process that calls the target, each time it calls it. Neither the launch req
 carries a credential: the run keeps the target's id, and its pin keeps a digest of the target as
 written, with ``${NAME}`` unexpanded. A reference with no value fails the case with the setting
 that holds it.
+
+Every call has the worker's time limit, ``target_timeout_seconds``, whatever the target: a call
+that outlasts it is the case's error, ``item timed out``. An HTTP target's client and a registered
+agent's executor stop their own calls, but a function is the installation's own code, which may
+block its event loop or never return. So a function runs on an event loop of a thread of its own
+(:class:`FunctionTargets`), and the worker's loop waits for it with the deadline: a function that
+outlasts it ends its case, and the run goes on. Python cannot stop a thread, so a function that
+does not end once it is cancelled keeps its thread until the process ends, and the next function
+call gets a new thread. One loop for every call, rather than one per call, keeps what a function
+shares between calls, such as an HTTP client, on one loop. Each run's process ends when its run
+does (:class:`~martian.evals.worker.ProcessWorker`), which ends such a thread too.
 """
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +60,64 @@ CLIENT_SLACK_SECONDS = 5.0
 ends a slow call first, as ``item timed out``."""
 
 NOT_FOUND = "Agent not found"
+
+GRACE_SECONDS = 1.0
+"""How long a function whose call timed out has to end once it is cancelled. One that does not is
+left on its thread, and the next call gets a new one."""
+
+
+class FunctionTargets:
+    """Runs a worker's function targets on an event loop of a thread of its own, so that a function
+    that blocks its loop, ignores cancellation or never returns cannot hold up the worker's loop.
+    The thread starts with the first call; one whose function did not end after its deadline is
+    left behind, a daemon thread that ends with the process, and the next call starts another."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _current(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is None:
+                loop = asyncio.new_event_loop()
+                threading.Thread(target=loop.run_forever, name="martian-evals-function-target", daemon=True).start()
+                self._loop = loop
+            return self._loop
+
+    def _leave(self, loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            if self._loop is loop:
+                self._loop = None
+
+    def call(self, function: TargetCall) -> TargetCall:
+        """``function`` as a target call that runs on this thread's loop. Cancelled, as by the
+        worker's deadline, it cancels the function and returns at once, whether or not the
+        function ends."""
+
+        async def call(case: Case) -> Any:
+            loop = self._current()
+            ended = threading.Event()
+
+            async def run() -> Any:
+                try:
+                    return await function(case)
+                finally:
+                    ended.set()
+
+            future = asyncio.run_coroutine_threadsafe(run(), loop)
+            try:
+                return await asyncio.wrap_future(future)
+            except asyncio.CancelledError:
+                future.cancel()
+                if not await asyncio.to_thread(ended.wait, GRACE_SECONDS):
+                    self._leave(loop)  # stuck: the next call gets a thread of its own
+                raise
+
+        return call
+
+
+FUNCTIONS = FunctionTargets()
+"""The function targets' thread, one for the process."""
 
 
 def http_target(target: Target) -> Target:
@@ -135,7 +206,8 @@ def target_call(
     executor: AgentExecutor | None,
     timeout_seconds: float,
 ) -> TargetCall | None:
-    """The call for ``run``'s target, or None when the worker cannot call it."""
+    """The call for ``run``'s target, or None when the worker cannot call it. A function runs on
+    the function targets' thread (:data:`FUNCTIONS`)."""
     target = run.target
     if target is None or target.kind != "agent" or target.agent_id is None:
         return None
@@ -143,7 +215,7 @@ def target_call(
     if isinstance(found, Target):
         return http_call(principal, target.agent_id, found, credentials=credentials, timeout_seconds=timeout_seconds)
     if found is not None:
-        return found
+        return FUNCTIONS.call(found)
     if executor is None:
         return None
     agents = executor
@@ -154,4 +226,14 @@ def target_call(
     return call
 
 
-__all__ = ["CLIENT_SLACK_SECONDS", "http_call", "http_pin", "http_target", "target_call", "target_pin"]
+__all__ = [
+    "CLIENT_SLACK_SECONDS",
+    "FUNCTIONS",
+    "GRACE_SECONDS",
+    "FunctionTargets",
+    "http_call",
+    "http_pin",
+    "http_target",
+    "target_call",
+    "target_pin",
+]

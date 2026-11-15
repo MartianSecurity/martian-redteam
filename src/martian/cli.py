@@ -59,6 +59,26 @@ def run_evals(
             "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
         ),
     ] = None,
+    max_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--max-seconds",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run after this many seconds; run it again to resume. "
+            "Replaces limits.max_seconds.",
+        ),
+    ] = None,
+    max_judge_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-judge-tokens",
+            min=1,
+            show_default=False,
+            help="Suite file only: stop the run once its LLM judges have used this many tokens; run it again "
+            "to resume. Replaces limits.max_judge_tokens.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -74,12 +94,21 @@ def run_evals(
             typer.echo("Give one suite file and no pytest options: martian evals run evals.yaml", err=True)
             raise typer.Exit(code=2)
         _run_suite(
-            Path(suite_files[0]), output=output, concurrency=concurrency, limit=limit, fresh=fresh, home=data_dir
+            Path(suite_files[0]),
+            output=output,
+            concurrency=concurrency,
+            limit=limit,
+            fresh=fresh,
+            home=data_dir,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
         return
-    if output is not None or concurrency is not None or limit is not None or fresh or data_dir is not None:
+    suite_only = (output, concurrency, limit, data_dir, max_seconds, max_judge_tokens)
+    if fresh or any(option is not None for option in suite_only):
         typer.echo(
-            "--output, --concurrency, --limit, --fresh and --data-dir apply to a suite file (evals.yaml) only.",
+            "--output, --concurrency, --limit, --fresh, --max-seconds, --max-judge-tokens and --data-dir apply "
+            "to a suite file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -91,7 +120,15 @@ def run_evals(
 
 
 def _run_suite(
-    path: Path, *, output: Path | None, concurrency: int | None, limit: int | None, fresh: bool, home: Path | None
+    path: Path,
+    *,
+    output: Path | None,
+    concurrency: int | None,
+    limit: int | None,
+    fresh: bool,
+    home: Path | None,
+    max_seconds: float | None = None,
+    max_judge_tokens: int | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -111,6 +148,8 @@ def _run_suite(
             resume=not fresh,
             progress=console.print,
             home=home,
+            max_seconds=max_seconds,
+            max_judge_tokens=max_judge_tokens,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -129,6 +168,15 @@ def _run_suite(
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
             console.print(f"{count} case(s), {label}: {reason}", markup=False, highlight=False)
+    if summary["not_run"]:
+        why = "It was cancelled" if summary.get("cancelled") else summary["stopped"]["message"]
+        console.print(
+            f"{why}: {summary['not_run']} case(s) not run. Run the same command again to resume after the cases "
+            "it finished.",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
     recorded = summary["run"]
     ui = (
@@ -138,7 +186,8 @@ def _run_suite(
     console.print(
         f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
     )
-    raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
+    # A case with no verdict, or one the run stopped before, is never a pass.
+    raise typer.Exit(code=2 if summary["errors"] or summary["not_run"] else 1 if summary["failed"] else 0)
 
 
 @app.command("ui")

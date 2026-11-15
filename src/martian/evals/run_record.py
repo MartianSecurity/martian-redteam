@@ -4,9 +4,12 @@
 (:func:`martian.evals.local.open_stores`), as the single local user, in the default project:
 
 - The run is a ``Run`` of source ``local`` with the suite's id, digest, target, scorers and dataset
-  digest. Its code is the suite's name and its number among that suite's runs, such as ``evals-3``.
-  It is ``running`` while cases are graded and ``completed`` once every case has a result, whether
-  or not each has a verdict; a run that stops early is ``failed``, or ``cancelled`` when interrupted.
+  digest, and its limits in ``provenance.limits``. Its code is the suite's name and its number
+  among that suite's runs, such as ``evals-3``. It is ``running`` while cases are graded and
+  ``completed`` once every case has a result, whether or not each has a verdict. A run that
+  reached one of its limits is ``stopped``, with the limit in its ``error`` and
+  ``provenance.stopped``; one cancelled in ``martian ui``, or interrupted, is ``cancelled``; one
+  that stops on an error is ``failed``.
 - Each case graded in the run is a ``CaseResult`` with a ``Score`` per check, mapped from its
   ``results.jsonl`` record by :func:`~martian.evals.model.from_results_record`, and a trace: the one
   MLflow's evaluation harness recorded for the case, with its spans, copied into the store under a
@@ -19,7 +22,9 @@ files are written as before, and nothing here reads them.
 
 The process holds the run in the data folder's queue (:class:`~martian.evals.local_runs.RunHold`)
 from before the run is recorded until it ends, so ``martian ui`` leaves the run alone while it
-runs. A run whose process was killed, so that it could not record its end, is finished as
+runs. Cancelling it there records the request on the run, which :meth:`RunRecorder.watch_cancel`
+reads every second, so the run stops before its next case; every write of the run here keeps the
+request. A run whose process was killed, so that it could not record its end, is finished as
 interrupted once its hold's lease runs out, by a ``martian ui`` serving the folder, or at once when
 the run is cancelled there.
 """
@@ -28,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
 import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass
@@ -42,6 +49,7 @@ from martian.evals.model import (
     CaseStatus,
     Counts,
     Run,
+    RunLimits,
     RunState,
     Score,
     StoreRef,
@@ -54,6 +62,11 @@ from martian.evals.server.projection import DEFAULT_PROJECT
 
 if TYPE_CHECKING:
     from martian.evals.local_runs import RunHold
+
+log = logging.getLogger("martian.evals.runner")
+
+CANCEL_POLL_SECONDS = 1.0
+"""How often a run reads its record for a cancel request made in ``martian ui``."""
 
 
 @dataclass(frozen=True)
@@ -77,10 +90,13 @@ class RunRecorder:
     changes anything in its output folder, so a data folder that cannot be opened stops the run
     first."""
 
-    def __init__(self, home: Path, suite: Suite) -> None:
+    def __init__(self, home: Path, suite: Suite, *, limits: RunLimits | None = None) -> None:
         from martian.evals.local import LocalEditionError, open_stores
 
         self._hold: RunHold | None = None
+        self._limits = limits or RunLimits()
+        self._watching = threading.Event()  # set to stop the cancel watch
+        self._watch: threading.Thread | None = None
         try:
             self.store, self.records = open_stores(home)
         except LocalEditionError as error:
@@ -125,6 +141,7 @@ class RunRecorder:
                 "suite": {"name": suite.name, "digest": suite.digest},
                 "dataset": {"name": suite.dataset_name, "digest": suite.dataset_digest},
                 "sdk_version": __version__,
+                **({} if self._limits == RunLimits() else {"limits": self._limits.model_dump(mode="json")}),
             },
             requested_by=SINGLE_USER.user_id,
             created_at=now,
@@ -154,6 +171,37 @@ class RunRecorder:
         """Record that every case has a result."""
         return _wait(self._end("completed", ""))
 
+    def stop(self, stopped: dict[str, Any]) -> Run:
+        """Record that the run reached one of its limits before its last case (``RunLimits.stop``):
+        ``stopped``, with the limit in ``error`` and ``provenance.stopped``."""
+        return _wait(self._end("stopped", str(stopped["message"]), stopped=stopped))
+
+    def cancel(self) -> Run:
+        """Record that the run stopped before its last case because it was cancelled."""
+        return _wait(self._end("cancelled", ""))
+
+    def watch_cancel(self) -> threading.Event:
+        """An event set once someone asks, in ``martian ui``, to stop the run: a thread reads the
+        run's record every :data:`CANCEL_POLL_SECONDS` until the run ends."""
+        asked = threading.Event()
+        assert self.run is not None
+        run = self.run
+
+        def watch() -> None:
+            while not self._watching.wait(CANCEL_POLL_SECONDS):
+                try:
+                    found = asyncio.run(self.records.get_run(SINGLE_USER, run.project_id, run.id))
+                except Exception:  # noqa: BLE001 - the database is busy; read again at the next poll
+                    log.exception("Could not read run %s for a cancel request", run.code)
+                    continue
+                if found is not None and found.cancel_requested_at is not None:
+                    asked.set()
+                    return
+
+        self._watch = threading.Thread(target=watch, name="martian-run-cancel-watch", daemon=True)
+        self._watch.start()
+        return asked
+
     def __enter__(self) -> RunRecorder:
         return self
 
@@ -161,6 +209,7 @@ class RunRecorder:
         """A run that started and stops on an error is ``failed``, or ``cancelled`` when it was
         interrupted. The run is released and the stores are closed either way."""
         try:
+            self._end_watch()
             if error is not None and self.run is not None and not self._ended:
                 if isinstance(error, KeyboardInterrupt):
                     _wait(self._end("cancelled", ""))
@@ -171,13 +220,27 @@ class RunRecorder:
                 self._hold.release()
             self.records.close()
 
-    async def _end(self, state: RunState, error: str) -> Run:
+    def _end_watch(self) -> None:
+        self._watching.set()
+        if self._watch is not None:
+            self._watch.join()
+
+    async def _current(self) -> Run:
+        """The run as its record holds it now, so a write keeps a cancel request made meanwhile."""
         assert self.run is not None
+        found = await self.records.get_run(SINGLE_USER, self.run.project_id, self.run.id)
+        return found if found is not None else self.run
+
+    async def _end(self, state: RunState, error: str, *, stopped: dict[str, Any] | None = None) -> Run:
+        assert self.run is not None
+        self._end_watch()
         self._ended = True
         counts = self._counts()
-        finished = self.run.model_copy(
-            update={"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
-        )
+        current = await self._current()
+        changes: dict[str, Any] = {"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
+        if stopped is not None:
+            changes["provenance"] = {**current.provenance, "stopped": stopped}
+        finished = current.model_copy(update=changes)
         self.run = await self.records.update_run(SINGLE_USER, finished, expected_state="running")
         await self.store.finish_run(SINGLE_USER, DEFAULT_PROJECT, finished.id, state=state, counts=counts)
         return self.run
@@ -227,8 +290,9 @@ class RunRecorder:
             await self.store.link_traces(SINGLE_USER, DEFAULT_PROJECT, self.run.id, traced)
         if results:  # each result with its scores, in one transaction
             await self.records.put_results(SINGLE_USER, DEFAULT_PROJECT, results, scores=scores)
+        current = await self._current()
         self.run = await self.records.update_run(
-            SINGLE_USER, self.run.model_copy(update={"counts": self._counts()}), expected_state="running"
+            SINGLE_USER, current.model_copy(update={"counts": self._counts()}), expected_state="running"
         )
 
     def _result(self, case: GradedCase) -> tuple[CaseResult, list[Score]]:

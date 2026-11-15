@@ -74,7 +74,7 @@ target:
 | `body` | Yes | The JSON body, with placeholders in its string values |
 | `headers` | No | Request headers |
 | `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
-| `timeout_seconds` | No | Per-request limit, 1 to 600; default 120 |
+| `timeout_seconds` | No | Per-request limit, 1 to 600; default 120. A function target takes it too (**Time limits and budgets** below) |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
@@ -95,7 +95,7 @@ target:
   `results.jsonl` holds the reason, and the command prints how many cases failed for each
   reason. The reason is the SDK's own wording: it never includes the address, a header or the
   response body. A function target reports only `the target call failed`, because its
-  exception comes from your code.
+  exception comes from your code, or `the target did not answer within target.timeout_seconds`.
 
   | Reason | Usual cause |
   | --- | --- |
@@ -127,34 +127,68 @@ types a `name`.
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`), and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused |
-| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`), how many earlier results were discarded (`invalidated`), and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused |
+| `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table, with the false-refusal rate under it for a
 suite with a policy check, and the reasons cases had no verdict, and exits `0` when every case
-passed, `1` when a case failed, and `2` when a case has no verdict or the suite file is invalid.
+passed, `1` when a case failed, and `2` when a case has no verdict, the run stopped before a case,
+or the suite file is invalid.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
-run that is stopped can be started again: finished cases are skipped, and cases that errored are
-tried again. `--fresh` discards earlier results. `--data-dir` names the local Evals UI's data
-folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`, else
-`~/.martian/evals`.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh`, `--data-dir DIR`,
+`--max-seconds N` and `--max-judge-tokens N`. A run that is stopped can be started again: finished
+cases are skipped, and cases that errored are tried again. `--fresh` discards earlier results.
+`--data-dir` names the local Evals UI's data folder the run is recorded in, as for `martian ui`;
+without it, `MARTIAN_EVALS_HOME`, else `~/.martian/evals`. `--max-seconds` and
+`--max-judge-tokens` replace the suite file's `limits`, below.
+
+**Time limits and budgets.** Every target call has a time limit, and so does the run:
+
+```yaml
+target:
+  file: agent.py
+  timeout_seconds: 60        # each call, function or URL target; default 120
+limits:
+  max_seconds: 1800          # the run's wall time
+  max_judge_tokens: 200000   # the tokens its LLM judges may use, input and output together
+```
+
+- **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
+  within target.timeout_seconds`, and the run goes on. A function target runs on a thread of its
+  own, so a function that hangs cannot hold up the run; Python cannot stop a thread, so the
+  function keeps running in the background until it returns or the command ends. A URL target's
+  call ends there too, even when the server sends its reply a little at a time.
+- **A run that reaches a limit stops.** It calls no more targets, the cases in flight finish, and
+  the cases it finished are kept in `results.jsonl` and the local Evals UI. The others have no
+  result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
+  prints the limit and exits `2`, and the run shows as **stopped** in the UI with the limit as its
+  error. Limits are checked before each batch and before each target call. A batch's judges finish
+  once it has started, so a run can go past `max_judge_tokens` by up to one batch; lower `batch`
+  for a closer bound.
+- **To resume**, run the same command again, with a higher limit or none: the cases it finished are
+  skipped, as for any stopped run. Each run has its limits afresh.
+- **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
+  reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
+  batch, and says so. A judge call that fails reports nothing and counts nothing.
+  `max_judge_tokens` needs an LLM judge check.
+- **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
+  next case, as **cancelled**; the command checks for it every second.
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
 comment on the pull request with the result, still with no Martian account. See
 [gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
-A finished case is reused only while nothing that produced its verdict has changed: the checks
-and their criteria, the judge model and its `inference_params`, the target, the case's own
-inputs, expectations and stored output, and the SDK version. A function target counts by the
-contents of its file. When any of these changes, the case is graded again, and the run prints how
-many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
-`judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
-in the environment, or the MLflow location keeps earlier results. The SDK cannot see changes in
-modules the target file imports, or in the service behind a URL target: use `--fresh` after
-those.
+A finished case is reused only while nothing that produced its verdict has changed: the checks and
+their criteria, the judge model and its `inference_params`, the target, the case's own inputs,
+expectations and stored output, and the SDK version. A function target counts by the contents of
+its file. When any of these changes, the case is graded again, and the run prints how many earlier
+results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
+`judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
+address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
+changes in modules the target file imports, or in the service behind a URL target: use `--fresh`
+after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -171,7 +205,8 @@ The run is in **Runs**, named after the suite file and numbered among that suite
 reasons, and each case's trace with your target's own spans. **Compare** pairs two runs of the
 same data case by case, and **Traces** lists every case's trace. A case reused from an earlier
 run keeps its verdict but not its trace, which stays with the run that graded it. A run that
-stops early shows as failed, or cancelled when interrupted. A run whose process was killed shows
+stops early shows as failed, cancelled when interrupted or cancelled in the UI, and stopped when it
+reached one of its limits. A run whose process was killed shows
 as running for about ten seconds while `martian ui` serves the folder, or until it next starts,
 and then as interrupted ([runs whose process stopped](evals-core.md#runs-whose-process-stopped)). How a run maps onto the
 Evals objects is in [command-line runs](evals-core.md#command-line-runs).
