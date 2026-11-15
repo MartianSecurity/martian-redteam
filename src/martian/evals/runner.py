@@ -1267,19 +1267,24 @@ class _ProcessTarget:
         self._process.close()
 
 
-def _private_paths(suite: Suite, suite_file: Path, base: Path, output: Path, home: Path) -> list[Path]:
+def _private_paths(
+    suite: Suite, suite_file: Path, base: Path, output: Path, home: Path, cache: Path | None = None
+) -> list[Path]:
     """What a function target must not reach, because it grades the target or holds what grading
     found: the suite file, which holds the checks and their criteria; the data file, which holds the
     expectations; each python check's file and the compiled copies beside it; the output folder,
     with the results and MLflow's local store; MLflow's store when the suite names a local SQLite
-    or file one; and the local Evals UI's data folder. A target whose own file is among them cannot
-    be run, and is a ``ConfigError`` naming the setting that holds it."""
+    or file one; the local Evals UI's data folder; and the folder of the cache of model calls the
+    run uses (``cache``), which holds the judges' stored judgments. A target whose own file is among
+    them cannot be run, and is a ``ConfigError`` naming the setting that holds it."""
     named: list[tuple[str, Path]] = [
         ("the suite file", suite_file),
         ("data", _relative(suite.data, base)),
         ("the output folder", output),
         ("the local Evals UI's data folder", home),
     ]
+    if cache is not None:
+        named.append(("cache.folder", cache))
     for check in suite.checks:
         if check.type in CODE_CHECKS:
             scorer = _relative(check.file or "", base)
@@ -1650,6 +1655,17 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _left_out(check: CheckSpec) -> set[str]:
+    """The fields of a check a fingerprint and a baseline digest leave out when the check leaves
+    them at their default: a panel, an installed check's options and the default scope. So a check
+    that sets none of them keeps the fingerprint and digest it had before they existed."""
+    return (
+        ({"panel"} if check.panel is None else set())
+        | ({"options"} if check.options is None else set())
+        | ({"scope"} if check.scope == "turn" else set())
+    )
+
+
 def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | None = None) -> str:
     """Everything in the suite a verdict depends on: the checks and their criteria, the judge model
     and its parameters, the target, the values of the combination of the suite's matrix that
@@ -1677,10 +1693,7 @@ def _suite_fingerprint(suite: Suite, base: Path, matrix: Mapping[str, Any] | Non
             target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
     checks = []
     for check in suite.checks:
-        # A check without a panel, or of the default scope, leaves the field out, so its fingerprint
-        # is the one it had before panels and scopes existed.
-        left_out = ({"panel"} if check.panel is None else set()) | ({"scope"} if check.scope == "turn" else set())
-        written = check.model_dump(mode="json", exclude={"combine"} | left_out)
+        written = check.model_dump(mode="json", exclude={"combine"} | _left_out(check))
         if check.type in CODE_CHECKS:
             written["file_sha256"] = hashlib.sha256(_relative(check.file or "", base).read_bytes()).hexdigest()
         checks.append(written)
@@ -2207,7 +2220,9 @@ def run_suite(
     # calls with its values, and which cannot reach the suite file, its data or the results.
     process: _ProcessTarget | None = None
     if suite.target is not None and suite.target.file is not None:
-        private = _private_paths(suite, Path(path).resolve(), base, folder, data_folder(home))
+        private = _private_paths(
+            suite, Path(path).resolve(), base, folder, data_folder(home), None if calls is None else calls.folder
+        )
         loaded = _load_target(suite.target, base, suite.input_key, private)
         assert isinstance(loaded, _ProcessTarget)
         process = loaded
@@ -3081,15 +3096,8 @@ def _verdicts(
     checks = {
         check.label: baselines.digest(
             {
-                # A check without a panel, or of the default scope, leaves the field out, as in the
-                # suite's fingerprint, so a check keeps the digest it had before panels and scopes
-                # existed.
-                "check": check.model_dump(
-                    mode="json",
-                    exclude={"combine"}
-                    | ({"panel"} if check.panel is None else set())
-                    | ({"scope"} if check.scope == "turn" else set()),
-                ),
+                # As in the suite's fingerprint, a field a check leaves at its default is left out.
+                "check": check.model_dump(mode="json", exclude={"combine"} | _left_out(check)),
                 "judge": judged_by(check),
                 "combine": repeats["checks"][check.label]["combine"] if repeats else None,
             }

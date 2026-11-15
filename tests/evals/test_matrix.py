@@ -485,3 +485,27 @@ def test_a_function_target_in_a_matrix_is_given_only_the_conversation_inputs_it_
             f"{model}: Hi after 0 turns",
             f"{model}: Again after 2 turns",
         ]
+
+
+def test_only_a_suite_file_s_url_target_takes_a_matrix_placeholder():
+    body = {"model": "{{matrix.model}}", "message": "{{input}}"}
+    # A worker's HTTP target shares the body check, and nothing there fills {{matrix.NAME}}.
+    with pytest.raises(ValueError, match=r"unknown targets\['agent'\]\.body placeholder\(s\) matrix\.model"):
+        runner.check_body(body, "targets['agent'].body")
+    runner.check_body(body, "body", matrix=True)
+    # A matrix placeholder never opens a way to the grader's values.
+    with pytest.raises(ValueError, match="expectations or outputs"):
+        runner.check_body({**body, "answer": "{{expected}}"}, "body", matrix=True)
+
+
+def test_an_installed_check_stops_a_matrix_before_any_combination_runs(tmp_path):
+    path = example(tmp_path / "suite")
+    suite = load_suite_file(path)[0]
+    assert suite.matrix
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text + "  - type: installed\n    name: ledger_holds\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="check ledger_holds: an installed check runs in a worker"):
+        run_suite(path)
+    # Nothing ran or was recorded.
+    assert not (tmp_path / "suite" / "results").exists()
+    assert local_ui(tmp_path).get("/v1/evals").json() == []

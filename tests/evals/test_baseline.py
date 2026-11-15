@@ -2,6 +2,7 @@
 
 import json
 import random
+from pathlib import Path
 
 import mlflow
 import pytest
@@ -319,8 +320,38 @@ def test_a_conversation_case_is_paired_by_its_turns_and_a_check_s_default_scope_
     assert first["cases"][0]["digest"] != second["cases"][0]["digest"]
     # The default scope is left out of a check's digest, and so is the panel of a check without
     # one, so a baseline from before scopes and panels pairs.
-    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope", "panel"})
+    check = suite.checks[0].model_dump(mode="json", exclude={"combine", "scope", "panel", "options"})
     assert first["checks"]["short"] == baseline.digest({"check": check, "judge": None, "combine": None})
+
+
+def test_an_installed_check_s_options_are_in_its_digest_and_a_check_without_them_keeps_its_own():
+    from martian.evals.runner import CheckSpec, Suite, _suite_fingerprint, _verdicts
+
+    case = {"id": "a", "inputs": {"message": "Hi"}, "expectations": {}}
+    record = {
+        "id": "a",
+        "passed": True,
+        "error": None,
+        "checks": {"ledger": {"passed": True}, "short": {"passed": True}},
+    }
+
+    def written(options):
+        checks = [
+            CheckSpec(type="installed", name="ledger", options=options),
+            CheckSpec(type="length", name="short", max_length=10),
+        ]
+        suite = Suite(data="cases.jsonl", checks=checks)
+        return _verdicts(suite, [record], [case], None)["checks"], _suite_fingerprint(suite, Path("."))
+
+    (first, print_one), (second, print_two) = written({"at_least": 1}), written({"at_least": 2})
+    # Another option is another definition: the comparison names the check changed.
+    assert first["ledger"] != second["ledger"] and print_one != print_two
+    # A check that names no options leaves the field out of its digest (and of the suite's
+    # fingerprint), as it had before installed checks existed.
+    assert first["short"] == second["short"]
+    short = CheckSpec(type="length", name="short", max_length=10)
+    kept = short.model_dump(mode="json", exclude={"combine", "scope", "panel", "options"})
+    assert first["short"] == baseline.digest({"check": kept, "judge": None, "combine": None})
 
 
 def test_a_panel_check_s_digest_counts_its_members_and_not_the_judge_model_and_keeps_no_votes():

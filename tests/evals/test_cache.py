@@ -9,10 +9,12 @@ One loopback server stands in for both models and counts what each is sent: a UR
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import stat
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -391,9 +393,11 @@ def test_an_address_in_a_key_keeps_no_credential():
 
 def test_a_function_target_is_cached_only_when_the_suite_says_so(tmp_path):
     folder = tmp_path / "suite"
-    folder.mkdir()
-    calls = folder / "calls.txt"
-    (folder / "agent.py").write_text(
+    # The target counts its calls in a folder of its own: its process may not create a file in the
+    # suite file's folder (martian.evals.isolation).
+    (folder / "agent").mkdir(parents=True)
+    calls = folder / "agent" / "calls.txt"
+    (folder / "agent" / "agent.py").write_text(
         "from pathlib import Path\n\n"
         "def answer(message):\n"
         "    with Path(__file__).with_name('calls.txt').open('a') as handle:\n"
@@ -403,7 +407,7 @@ def test_a_function_target_is_cached_only_when_the_suite_says_so(tmp_path):
     )
     suite = {
         "data": "cases.jsonl",
-        "target": {"file": "agent.py", "function": "answer"},
+        "target": {"file": "agent/agent.py", "function": "answer"},
         "checks": [{"type": "contains", "values": ["cannot"]}],
         "cache": {},
     }
@@ -561,14 +565,15 @@ def traced(trace):
 
 def test_a_python_check_is_never_cached_and_trace_reading_checks_are_refused_on_a_replayed_target(tmp_path):
     folder = tmp_path / "fn"
-    folder.mkdir()
-    (folder / "agent.py").write_text(TRACED_AGENT, encoding="utf-8")
+    # The target counts its calls in a folder of its own, which its process may write in.
+    (folder / "agent").mkdir(parents=True)
+    (folder / "agent" / "agent.py").write_text(TRACED_AGENT, encoding="utf-8")
     (folder / "scorers.py").write_text(SCORERS, encoding="utf-8")
     counted = {"type": "python", "name": "counted", "file": "scorers.py", "function": "counted"}
     from_reply = {"type": "tool_called", "calls": ["lookup_order"], "source": "reply"}
     suite = {
         "data": "cases.jsonl",
-        "target": {"file": "agent.py", "function": "answer"},
+        "target": {"file": "agent/agent.py", "function": "answer"},
         "checks": [counted, from_reply],
         "cache": {"folder": "model-cache", "functions": True},
     }
@@ -578,7 +583,7 @@ def test_a_python_check_is_never_cached_and_trace_reading_checks_are_refused_on_
     # The target's replies came from the cache; the python check ran again on each, as a scorer is
     # not a model call, and the tool-call check read the replayed reply.
     assert (replayed["passed"], replayed["cache"]["target"]) == (3, {"hits": 3, "calls": 0, "stored": 0})
-    assert len((folder / "calls.txt").read_text().splitlines()) == 3
+    assert len((folder / "agent" / "calls.txt").read_text().splitlines()) == 3
     assert len((folder / "scored.txt").read_text().splitlines()) == 6
     assert entries(folder / "model-cache") and all(
         json.loads(entry.read_text())["kind"] == "target" for entry in entries(folder / "model-cache")
@@ -592,7 +597,7 @@ def test_a_python_check_is_never_cached_and_trace_reading_checks_are_refused_on_
     traced = {"type": "python", "name": "traced", "file": "scorers.py", "function": "traced"}
     with pytest.raises(ConfigError, match=r"check traced: it reads the trace of the target's call.*--no-cache"):
         run_suite(write(folder, {**suite, "checks": [counted, traced]}))
-    assert len((folder / "calls.txt").read_text().splitlines()) == 3
+    assert len((folder / "agent" / "calls.txt").read_text().splitlines()) == 3
     # Without the cache, or with the function's calls left out of it, both read the call's trace.
     assert run_suite(write(folder, {**suite, "checks": [from_trace, traced]}), cache=False)["passed"] == 3
     assert run_suite(write(folder, {**suite, "checks": [from_trace, traced], "cache": {}}))["passed"] == 3
@@ -688,6 +693,97 @@ def test_a_suite_with_conversation_cases_is_refused_with_the_cache_on(tmp_path, 
     # Without the cache it runs, every turn sent.
     found = run_suite(suite, cache=False)
     assert (found["cases"], found["errors"], endpoint.counts()["target"]) == (4, 0, 3 + 2)
+
+
+# ---------- a function target in its own process ----------
+
+MATRIX_AGENT = """\
+import os
+from pathlib import Path
+
+
+def answer(message, prompt):
+    with Path(__file__).with_name("calls.txt").open("a") as handle:
+        handle.write(f"{os.getpid()} {prompt}\\n")
+    return f"{prompt} I cannot share it."
+"""
+
+
+def test_every_combination_calls_one_target_process_and_replays_through_the_cache(tmp_path):
+    folder = tmp_path / "suite"
+    (folder / "agent").mkdir(parents=True)
+    (folder / "agent" / "agent.py").write_text(MATRIX_AGENT, encoding="utf-8")
+    suite = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent/agent.py", "function": "answer"},
+        "matrix": {"prompt": {"terse": "Briefly.", "warm": "Kindly."}},
+        "checks": [{"type": "contains", "values": ["cannot"]}],
+        "cache": {"folder": "model-cache", "functions": True},
+    }
+    path = write(folder, suite)
+    first = run_suite(path)
+    calls = [line.split(" ", 1) for line in (folder / "agent" / "calls.txt").read_text().splitlines()]
+    # One process, not this one, served both combinations, each with its own value.
+    pids = {pid for pid, _ in calls}
+    assert len(pids) == 1 and str(os.getpid()) not in pids
+    assert sorted(prompt for _, prompt in calls) == ["Briefly."] * 3 + ["Kindly."] * 3
+    assert [entry["summary"]["passed"] for entry in first["combinations"]] == [3, 3]
+    assert all(entry["summary"]["target_isolation"] is not None for entry in first["combinations"])
+    # The process ended with the run.
+    (pid,) = pids
+    for _ in range(50):
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"the target's process {pid} outlived the run")
+    # Each combination's calls are keyed by its own value, so a second run replays all six and starts
+    # no call in the target's process.
+    again = run_suite(path, resume=False)
+    assert len((folder / "agent" / "calls.txt").read_text().splitlines()) == 6
+    assert [entry["summary"]["cache"]["target"] for entry in again["combinations"]] == [
+        {"hits": 3, "calls": 0, "stored": 0}
+    ] * 2
+
+
+HIDDEN_CACHE_AGENT = """\
+from pathlib import Path
+
+
+def answer(message):
+    entry = Path(__file__).parent.parent / "model-cache" / "planted.json"
+    try:
+        return "read: " + entry.read_text()
+    except OSError as error:
+        return f"refused: {type(error).__name__}"
+"""
+
+
+def test_a_function_target_cannot_read_the_suite_s_cache_folder(tmp_path):
+    folder = tmp_path / "suite"
+    (folder / "agent").mkdir(parents=True)
+    (folder / "agent" / "agent.py").write_text(HIDDEN_CACHE_AGENT, encoding="utf-8")
+    # The cache folder holds the judges' stored judgments, which grade the target.
+    (folder / "model-cache").mkdir()
+    (folder / "model-cache" / "planted.json").write_text("a stored judgment", encoding="utf-8")
+    suite = {
+        "data": "cases.jsonl",
+        "target": {"file": "agent/agent.py", "function": "answer"},
+        "checks": [{"type": "contains", "values": ["refused"]}],
+        "cache": {"folder": "model-cache"},
+    }
+    found = run_suite(write(folder, suite))
+    if not found["target_isolation"]["files_hidden"]:
+        pytest.skip(f"files cannot be hidden here: {found['target_isolation']['reason']}")
+    outputs = {record["output"] for record in records(folder / "results").values()}
+    assert outputs == {"refused: PermissionError"}
+    # The cheating inspection names it among the files the target was hidden from.
+    from martian.evals.cheating import protected_for_suite
+
+    protected = protected_for_suite(folder / "evals.yaml", home=tmp_path / "evals-home")
+    assert str((folder / "model-cache").resolve()) in protected.paths
 
 
 # ---------- what a run's readers see of the cache ----------
