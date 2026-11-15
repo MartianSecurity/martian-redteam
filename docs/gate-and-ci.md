@@ -25,6 +25,9 @@ passing local results. Keep its typed receipt, report and probe checkpoints with
   threshold affects required pass rates; it never excuses absent scores/errors.
 - The persisted runner rejects ignored target/infrastructure failures, skipped or
   deselected coverage and empty required suites. Caught gate exceptions still fail.
+- The pytest gate's `evaluate(...)` gives each `predict_fn` call a time limit,
+  `target_timeout_seconds` (default 120); a call that outlasts it is that case's error and the
+  gate fails closed on it. See [Evals](evals.md).
 - Dataset outputs are canonically re-scored by Backend. Inline checks and redteam
   judgments remain declared client-executed/client-scored evidence, with catalog,
   graph/policy revisions and operation IDs; a CI upload is not binary attestation.
@@ -93,7 +96,10 @@ prompts.
   request and suite, as the example does, so two quick pushes cannot both
   create it.
 - **What it says.** The headline follows the exit code: passed (0), failed (1),
-  or did not finish (2, a case without a verdict or an invalid suite file).
+  or did not finish (2, a case without a verdict, a run that stopped at one of its
+  [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
+  that stopped says how many cases it did not run and which limit it reached;
+  its counts, rates and reliability are of the cases it finished.
   A suite with a [policy check](evals.md#false-refusals) adds how many of its
   benign cases were refused, so a model that refuses everything cannot look
   as if it passed. Below it are per-check counts, each pass rate with its 95%

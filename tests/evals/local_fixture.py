@@ -27,19 +27,21 @@ SUITE_SCORERS = ["contains_expected", "response_length"]
 
 class FakeTarget:
     """An HTTP target on 127.0.0.1 that wants ``key`` as ``Authorization: Bearer <key>``. With a
-    ``gate``, it answers each request only once the gate is set."""
+    ``gate``, it answers each request only once the gate is set; with ``held`` too, only the
+    requests whose message is one of ``held`` wait for it."""
 
     def __init__(self, key: str) -> None:
         self.key = key
         self.requests: list[dict[str, Any]] = []
         self.gate: threading.Event | None = None
+        self.held: set[str] | None = None
         target = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 - the name http.server calls
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 target.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
-                if target.gate is not None:
+                if target.gate is not None and (target.held is None or body.get("message") in target.held):
                     target.gate.wait(120)
                 if self.headers.get("Authorization") != f"Bearer {target.key}":
                     self.send_response(401)
