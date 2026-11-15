@@ -350,6 +350,38 @@ class StoreContract:
             else:
                 assert key not in read.metadata and shown == whole
 
+    async def test_free_text_looks_in_the_start_of_a_long_request_and_response(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        """Free text matches a trace's name, its request and its response up to 1,000 characters,
+        and the first 997 of a longer one, which MLflow's preview holds before its "..."
+        (MartianSecurity/martian-notes#348). Read back, the trace has both whole."""
+        inside, outside = "|inside-the-reach|", "|outside-the-reach|"
+        request = "a" * (997 - len(inside)) + inside + outside + "b" * 2000
+        await store.record_trace(ORG_A, trace("long", minutes=2, request=request, response=LONG_RESPONSE))
+        at_most = "c" * (1000 - len("|ends-at-1000|")) + "|ends-at-1000|"
+        await store.record_trace(ORG_A, trace("whole", minutes=1, request=at_most, response="Thirty days."))
+        await store.record_trace(ORG_A, trace("short", minutes=0, response="What is the refund window? Thirty days."))
+
+        async def ids(text: str) -> list[str]:
+            pages = [await store.search_traces(ORG_A, TraceQuery(project_id="p1", text=text))]
+            while (cursor := pages[-1].next_cursor) is not None:
+                pages.append(await store.search_traces(ORG_A, TraceQuery(project_id="p1", text=text, cursor=cursor)))
+            return [t.id for page in pages for t in page.items]
+
+        assert await ids("INSIDE-the-reach") == ["long"]
+        assert await ids("a|inside-the-reach|") == ["long"]
+        assert await ids("outside-the-reach") == []
+        assert await ids("inside-the-reach||out") == []
+        assert await ids("...") == []
+        assert await ids("|ends-at-1000|") == ["whole"]
+        assert await ids("An answer quoting the policy") == ["long"]
+        assert await ids("Thirty days.") == ["whole", "short"]  # LONG_RESPONSE ends with it, past the reach
+        sessions = await store.search_sessions(ORG_A, TraceQuery(project_id="p1", text="outside-the-reach"))
+        assert sessions.traces_examined == 0
+        read = await store.get_trace(ORG_A, "p1", "long")
+        assert read is not None and (read.request, read.response) == (request, LONG_RESPONSE)
+
     async def test_a_trace_keeps_the_state_it_was_recorded_with(self, store: EvalStore, project: Project) -> None:
         span = Span(id="s1", name="model call", kind="LLM", status="ok")
         states = ("ok", "error", "in_progress", "unknown")
