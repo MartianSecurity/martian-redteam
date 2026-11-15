@@ -355,6 +355,8 @@ routes, and the local edition's [launch and run again](#local-runs)), the proven
 | `target` | `kind`, `agent_id`, `name`, `digest` |
 | `suite` | `id`, `version`, `version_id`, `name`, `digest`, `model_judges` |
 | `repeats` | `attempts`, `combine`, `checks` |
+| `conversations` | How many of the run's cases are conversations, a number |
+| `simulator` | The model that played the simulated users: `model`, `parameters`, `version` |
 | `limits` | `max_seconds`, `max_judge_tokens` ([limits](#limits-stopping-and-resuming)) |
 | `stopped` | `limit`, `value`, `used`, `message` |
 | `inspect` | What an [imported Inspect log](#imported-inspect-logs) records: `log`, `log_sha256`, `format`, `log_version`, `status`, `eval_id`, `run_id`, `eval_set_id`, `task`, `task_id`, `task_version`, `task_file`, `model`, `created`, `epochs`, `dataset`, `tags`, `packages`, `results`, `model_usage` |

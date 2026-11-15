@@ -303,6 +303,10 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     "target": ("kind", "agent_id", "name", "digest"),
     "suite": ("id", "version", "version_id", "name", "digest", "model_judges"),
     "repeats": ("attempts", "combine", "checks"),
+    # How many of a run's cases are conversations, and the model that played their simulated
+    # users (martian.evals.run_record).
+    "conversations": None,
+    "simulator": ("model", "parameters", "version"),
     "repeat_of": None,
     "sdk_version": None,
     # A run's limits and the one it stopped at (martian.evals.limits).
