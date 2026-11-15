@@ -432,6 +432,8 @@ What builds on it:
   [the local edition](#the-local-edition-martian-ui).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
+- `martian evals import inspect` records Inspect AI logs there as runs:
+  [imported Inspect logs](#imported-inspect-logs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
@@ -648,10 +650,11 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
   records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
   default project (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs
-  into the same folder ([command-line runs](#command-line-runs)), and an application can record
-  its traces there with MLflow tracing ([below](#traces-from-an-application)). What another
-  process writes while the UI is open shows when a page reads again, since the UI gets no live
-  event from it.
+  into the same folder ([command-line runs](#command-line-runs)), `martian evals import inspect`
+  writes Inspect AI logs there as runs ([imported Inspect logs](#imported-inspect-logs)), and an
+  application can record its traces there with MLflow tracing
+  ([below](#traces-from-an-application)). What another process writes while the UI is open
+  shows when a page reads again, since the UI gets no live event from it.
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
   and a session. The local edition answers it with the fixed principal, so the UI needs no
   sign-in:
@@ -843,6 +846,53 @@ default project:
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
 trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
 cannot be opened.
+
+## Imported Inspect logs
+
+`martian evals import inspect` records the logs [Inspect AI](https://inspect.aisi.org.uk/) writes
+as runs in the local edition's data folder (`martian.evals.inspect_import`), so `martian ui` opens
+them in Runs and the run detail, compares two of them case by case, shows each case's messages and
+tool calls as a trace, and takes reviews of them. Inspect has no server, permissions or run
+comparison of its own.
+
+```bash
+martian evals import inspect logs/*.eval                 # each log Inspect wrote to logs/
+martian evals import inspect run.json --data-dir ./evals-data
+```
+
+It reads both of Inspect's formats, `.eval` and `.json`, against Inspect's published log schema
+(log format version 2), without Inspect installed; the `zstandard` package in `martian-sdk[evals]`
+reads the Zstandard entries of an `.eval` log. The data folder is `--data-dir`, else
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui`. Each log is one run, written
+through the store and the record store as `SINGLE_USER`, in the default project; the
+[eval model](eval-model.md#inspect-ai-logs) maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, a `stored` target, the state of the log (`success` is `completed`), Inspect's times, and a scorer for each score name. The code is `inspect-`, the task's name and the run's number among that task's imported runs, such as `inspect-my_task-2`. `provenance["inspect"]` keeps the log's path, its SHA-256 and format, the eval id, task, model and status, and Inspect's results with each scorer's metrics |
+| `CaseResult` | One per sample and epoch: the input, the target as `expected_response`, the completion, the sample's error and time |
+| `Score` | One per Inspect score value, the value kept exactly; a dict or list value is one per entry, named `<scorer>/<key>`. Inspect's `C` and `true` pass and `I`, `P`, `N` and `false` fail; numbers have no verdict. Unscored (NaN) is a score with no value and an error. A scorer that called a model is an `llm_judge` with that model as its source |
+| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments |
+
+- A case's status follows its scores: `error` when the sample failed, `failed` when a score fails,
+  else `error` when one is unscored, `passed` when one passes, and `skipped` when none gives a
+  verdict. Two imported runs compare when they cover the same samples; a sample's first epoch has
+  its own id as its case id, so runs with different numbers of epochs pair on it.
+- Every log is read before anything is written, so a file that is not a finished Inspect log
+  (a log still `started`, another format version, one with no samples, a damaged archive) stops
+  the command with exit code `2` and writes nothing. A data folder that cannot be opened does
+  the same.
+- The run is `running` while its cases are written; an import that stops early leaves it
+  `failed`, with `error` naming the exception's type, or `cancelled` when interrupted.
+- Importing the same log again makes another run. The log is not changed or copied: the run
+  names it.
+
+`tests/evals/test_inspect_import.py` imports two real Inspect logs from `tests/fixtures/inspect/`
+(one on GLM 5 in the JSON format, one with two epochs on Inspect's mock model in the `.eval`
+format; `fixture_task.py` there wrote them) and reads them back through the local edition's
+routes: every score against the log, Inspect's metrics recomputed from them, the run and its
+trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
+inputs, an `.eval` log with Deflate entries, and the files the command refuses.
 
 ## Not built yet
 
