@@ -3,8 +3,10 @@ names a database the tests may create schemas and roles in. The migrations run b
 both databases and create exactly the tables the store uses."""
 
 import inspect
+import json
 import os
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -12,8 +14,10 @@ from sqlalchemy import JSON, Column, DateTime, MetaData, String, Table, create_e
 
 from martian.evals.model import Score
 from martian.evals.records import RECORD_METHODS, RecordStore
+from martian.evals.records.queue import SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore, downgrade, engine_for, upgrade
 from martian.evals.records.tables import TABLES, metadata, scores
+from martian.evals.store import StoreError
 from tests.evals.record_contract import ORG_A, T0, RecordContract, run
 from tests.evals.record_contract import test_a_listener_that_falls_behind_is_told_to_read_again as _listener_test
 
@@ -209,6 +213,129 @@ def test_a_score_keeps_its_source_through_the_migrations_on_postgres_as_the_tabl
         _sources_join_the_score_key(engine)
     finally:
         engine.dispose()
+
+
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=needs_postgres)])
+def database(request, tmp_path, schema) -> tuple[str, str]:
+    """The URL and schema of a fresh record store database: SQLite, or Postgres as the tables'
+    owner, held by row-level security."""
+    if request.param == "sqlite":
+        return f"sqlite:///{tmp_path / 'martian.db'}", schema
+    return request.getfixturevalue("owner_url"), schema
+
+
+GONE, KEPT = "run-gone-5c1e", "run-kept-8d2f"
+KEYED_TO_A_RUN = {
+    "martian_runs",
+    "martian_case_results",
+    "martian_scores",
+    "martian_scoring_jobs",
+    "martian_reviews",
+    "martian_work_queue",
+    "martian_deliveries",
+    "martian_schedule_runs",
+}
+
+
+async def _everything_of_a_run(records: SqlRecordStore, queue: SqlWorkQueue, run_id: str, day: int) -> None:
+    """A finished run with a row in every table keyed to a run: results, its own scores, a
+    cancelled scoring job's scores, a person's answer, a review chain, the answer's delivery, the
+    schedule slot that started it, and work for it a worker has not yet removed from the queue."""
+    from martian.evals.model import CaseResult, Review, ScoringJob
+    from martian.evals.outbox import score_delivery
+    from martian.evals.records import ScheduledRun
+    from martian.evals.worker import Work
+    from martian.evals.worker.process import dump_work
+    from martian.evals.worker.queue import entry_id
+    from tests.evals.record_contract import JUDGE
+
+    await records.create_run(ORG_A, run(run_id, minutes=day, state="completed"))
+    own = Score(run_id=run_id, case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+    await records.put_results(ORG_A, "p1", [CaseResult(run_id=run_id, case_id="c1", status="passed")], scores=[own])
+    job = ScoringJob(id=f"{run_id}-job", run_id=run_id, scorers=[JUDGE], state="cancelled")
+    await records.create_scoring_job(ORG_A, "p1", job)
+    # A person's answer named like the check: a row of its own, keyed by its source (migration 0012).
+    answer = own.model_copy(update={"source": "human", "trace_id": f"tr-{run_id}"})
+    await records.put_scores(ORG_A, "p1", [own.model_copy(update={"scoring_job_id": job.id}), answer])
+    first = await records.add_review(
+        ORG_A, "p1", Review(id=f"{run_id}-v1", run_id=run_id, case_id="c1", state="pending")
+    )
+    await records.add_review(ORG_A, "p1", first.model_copy(update={"id": f"{run_id}-v2", "previous_id": first.id}))
+    await records.put_delivery(ORG_A, "p1", score_delivery("p1", answer))
+    slot = ScheduledRun(schedule_id="sc1", slot=T0 + timedelta(days=day), state="admitted", run_id=run_id)
+    await records.add_scheduled_run(ORG_A, "p1", slot)
+    for work in (
+        Work(kind="run", principal=ORG_A, project_id="p1", run_id=run_id),
+        Work(kind="scoring", principal=ORG_A, project_id="p1", run_id=run_id, job_id=job.id),
+    ):
+        await queue.put(ORG_A, "p1", entry_id(work), work.kind, dump_work(work))
+
+
+def _rows_naming(engine, space: str, text_: str) -> dict[str, int]:
+    """How many rows of the space each table holds with ``text_`` in any column, its JSON included."""
+    found = {}
+    with engine.begin() as connection:
+        _in_space(connection, space)
+        for table in TABLES:
+            rows = connection.execute(select(table).where(table.c.space == space)).mappings().all()
+            found[table.name] = sum(text_ in json.dumps(dict(row), default=str) for row in rows)
+    return found
+
+
+async def test_a_deleted_run_leaves_no_row_naming_it_in_any_table(database):
+    from tests.evals.record_contract import schedule
+
+    url, schema = database
+    records = SqlRecordStore(url, schema=schema)
+    queue = SqlWorkQueue(url, schema=schema, migrate=False)
+    engine = engine_for(url, schema=schema)
+    try:
+        await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        for day, run_id in enumerate((GONE, KEPT)):
+            await _everything_of_a_run(records, queue, run_id, day)
+        before, kept = _rows_naming(engine, "org-a", GONE), _rows_naming(engine, "org-a", KEPT)
+        assert {name for name, count in before.items() if count} == KEYED_TO_A_RUN
+        assert before["martian_scores"] == 3  # the check's, the scoring job's and the person's answer
+
+        removed = await records.delete_run(ORG_A, "p1", GONE)
+        assert removed == {name: count for name, count in before.items() if count}
+        assert _rows_naming(engine, "org-a", GONE) == dict.fromkeys(before, 0)
+        assert _rows_naming(engine, "org-a", KEPT) == kept
+    finally:
+        records.close()
+        queue.close()
+        engine.dispose()
+
+
+async def test_a_run_a_worker_holds_is_not_deleted_until_its_lease_runs_out(database):
+    from martian.evals.worker import Work
+    from martian.evals.worker.process import dump_work
+    from martian.evals.worker.queue import entry_id
+
+    url, schema = database
+    records = SqlRecordStore(url, schema=schema)
+    queue = SqlWorkQueue(url, schema=schema, migrate=False)
+    try:
+        # The run has ended, and its worker is still finishing its turn, as it does for a run a
+        # schedule started before it removes the work from the queue.
+        await records.create_run(ORG_A, run("r1", state="completed"))
+        work = Work(kind="run", principal=ORG_A, project_id="p1", run_id="r1")
+        await queue.put(ORG_A, "p1", entry_id(work), work.kind, dump_work(work))
+        claim = await queue.claim(lease_seconds=60)
+        assert claim is not None and claim.id == entry_id(work)
+        with pytest.raises(StoreError) as caught:
+            await records.delete_run(ORG_A, "p1", "r1")
+        assert caught.value.kind == "conflict"
+        assert await records.get_run(ORG_A, "p1", "r1") is not None
+        # A claim whose lease ran out holds nothing: its worker is gone.
+        await queue.release(claim)
+        assert (await queue.claim(lease_seconds=-1)) is not None
+        removed = await records.delete_run(ORG_A, "p1", "r1")
+        assert (removed["martian_runs"], removed["martian_work_queue"]) == (1, 1)
+        assert not await queue.contains(ORG_A, "p1", entry_id(work))
+    finally:
+        records.close()
+        queue.close()
 
 
 @needs_postgres

@@ -93,9 +93,10 @@ from martian.evals.records.tables import (
     suites,
     threshold_alerts,
     thresholds,
+    work_queue,
 )
 from martian.evals.records.tables import scores as score_rows
-from martian.evals.store import StoreError, cursor_offset
+from martian.evals.store import StoreError, check_trace_deletion, cursor_offset
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -312,6 +313,114 @@ class SqlRecordStore:
         saved = await self._run(principal, work)
         self._emit(principal, "run", run.project_id, run.id)
         return saved
+
+    async def list_finished_runs(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        created_before: datetime,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Run]:
+        offset = cursor_offset(cursor)
+        _bounds(offset, limit, 500)
+
+        def work(connection: Connection, space: str) -> Page[Run]:
+            where = [
+                runs.c.space == space,
+                runs.c.project_id == project_id,
+                runs.c.created_at < created_before.astimezone(UTC),
+                runs.c.state.not_in(_ACTIVE),
+            ]
+            total = connection.execute(select(func.count()).select_from(runs).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(runs.c.record)
+                    .where(*where)
+                    .order_by(runs.c.created_at, runs.c.id)
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([Run.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    async def delete_run(self, principal: Principal, project_id: str, run_id: str) -> dict[str, int]:
+        from martian.evals.records.queue import CLAIMED  # the queue's module imports this one
+
+        def work(connection: Connection, space: str) -> tuple[dict[str, int], list[str]]:
+            stored = self._one(connection, runs, space, project_id, id=run_id)
+            if stored is None:
+                raise StoreError("not_found", "run not found")
+            if Run.model_validate(stored).state in _ACTIVE:
+                raise StoreError("conflict", "the run is queued or running; cancel it, or let it end, first")
+            jobs = (
+                scoring_jobs.c.space == space,
+                scoring_jobs.c.project_id == project_id,
+                scoring_jobs.c.run_id == run_id,
+            )
+            if connection.execute(select(scoring_jobs.c.id).where(*jobs, scoring_jobs.c.state.in_(_ACTIVE))).first():
+                raise StoreError(
+                    "conflict", "a scoring job of the run is queued or running; cancel it, or let it end, first"
+                )
+            # Run and scoring work name their run; a worker holds work while its claim's lease runs.
+            its_work = (
+                work_queue.c.space == space,
+                work_queue.c.project_id == project_id,
+                work_queue.c.work["run_id"].as_string() == run_id,
+            )
+            held = work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at >= _now()
+            if connection.execute(select(work_queue.c.id).where(*its_work, *held)).first():
+                raise StoreError("conflict", "a worker is still on the run's work; let it end first")
+            slots = (schedule_runs.c.space == space, schedule_runs.c.project_id == project_id)
+            schedule_ids: list[str] = list(
+                connection.execute(
+                    select(schedule_runs.c.schedule_id).where(*slots, schedule_runs.c.run_id == run_id).distinct()
+                ).scalars()
+            )
+            removed: dict[str, int] = {}
+            for table, key in (
+                (case_results, case_results.c.run_id),
+                (score_rows, score_rows.c.run_id),
+                (scoring_jobs, scoring_jobs.c.run_id),
+                (reviews, reviews.c.run_id),
+                (schedule_runs, schedule_runs.c.run_id),
+            ):
+                removed[table.name] = connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == run_id)
+                ).rowcount
+            removed[work_queue.name] = connection.execute(delete(work_queue).where(*its_work)).rowcount
+            removed[deliveries.name] = connection.execute(
+                delete(deliveries).where(
+                    deliveries.c.space == space,
+                    deliveries.c.project_id == project_id,
+                    deliveries.c.kind == "score",
+                    deliveries.c.record[("payload", "score", "run_id")].as_string() == run_id,
+                )
+            ).rowcount
+            # Last, and only while it is still finished: a stopped run resumed meanwhile is queued
+            # again, and the whole delete is undone.
+            removed[runs.name] = connection.execute(
+                delete(runs).where(
+                    runs.c.space == space,
+                    runs.c.project_id == project_id,
+                    runs.c.id == run_id,
+                    runs.c.state.not_in(_ACTIVE),
+                )
+            ).rowcount
+            if removed[runs.name] != 1:
+                raise StoreError("conflict", "the run changed while it was being deleted; try again")
+            return removed, schedule_ids
+
+        removed, schedule_ids = await self._run(principal, work)
+        self._emit(principal, "run", project_id, run_id)
+        for schedule_id in schedule_ids:
+            self._emit(principal, "schedule", project_id, schedule_id)
+        return removed
 
     # --- case results and scores ------------------------------------------------------------
 
@@ -1583,6 +1692,36 @@ class SqlRecordStore:
             return [MonitoredTrace.model_validate(r) for r in rows]
 
         return await self._run(principal, work)
+
+    async def forget_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> dict[str, int]:
+        check_trace_deletion(trace_ids=trace_ids)
+        ids = list(dict.fromkeys(trace_ids))
+
+        def work(connection: Connection, space: str) -> tuple[dict[str, int], list[str]]:
+            taken = (
+                monitored_traces.c.space == space,
+                monitored_traces.c.project_id == project_id,
+                monitored_traces.c.trace_id.in_(ids),
+            )
+            monitor_ids: list[str] = list(
+                connection.execute(select(monitored_traces.c.monitor_id).where(*taken).distinct()).scalars()
+            )
+            removed = {monitored_traces.name: connection.execute(delete(monitored_traces).where(*taken)).rowcount}
+            # A score's delivery names its trace in the score, a review queue item's beside the queue.
+            score_trace = deliveries.c.record[("payload", "score", "trace_id")].as_string()
+            item_trace = deliveries.c.record[("payload", "trace_id")].as_string()
+            to_them = ((deliveries.c.kind == "score") & score_trace.in_(ids)) | (
+                (deliveries.c.kind == "queue_item") & item_trace.in_(ids)
+            )
+            removed[deliveries.name] = connection.execute(
+                delete(deliveries).where(deliveries.c.space == space, deliveries.c.project_id == project_id, to_them)
+            ).rowcount
+            return removed, monitor_ids
+
+        removed, monitor_ids = await self._run(principal, work)
+        for monitor_id in monitor_ids:
+            self._emit(principal, "monitor", project_id, monitor_id)
+        return removed
 
     # --- thresholds and their alerts -------------------------------------------------------------
 

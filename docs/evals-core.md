@@ -2117,7 +2117,7 @@ store keeps the watch, its progress and the noted changes on both databases.
   | Projects | `create_project`, `get_project`, `list_projects`, `archive_project` |
   | Datasets | `create_dataset`, `list_datasets`, `get_dataset`, `find_dataset`, `read_cases` |
   | Run telemetry | `start_run`, `get_run`, `finish_run` |
-  | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces` |
+  | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces`, `delete_traces`, `delete_traces_before` |
   | Scores | `log_score`, `list_scores` |
   | Registered scorers | `register_scorer`, `list_scorers`, `scorer_versions` |
   | Review | `save_question`, `list_questions`, `create_queue`, `get_queue`, `queue_items`, `set_queue_item` |
@@ -2151,7 +2151,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   looks into a long request and response, alone and with those filters, sessions and users, traces in each attribute style mapped with their
   attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
-  review queues, artifact names, and organisations never seeing each other. A binding's tests
+  review queues, artifact names, traces deleted for good by id and before a cutoff
+  ([deleting runs and traces](#deleting-runs-and-traces)), and organisations never seeing each
+  other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
   route the edition leaves out, and `require_capability` a write route the role does not allow.
@@ -2566,7 +2568,8 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   adds its table.
 - The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
   database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
-  method: only a `QueueWorker` uses it.
+  method: only a `QueueWorker` uses it, and `delete_run` removes a deleted run's work left in it
+  ([deleting runs and traces](#deleting-runs-and-traces)).
 - A judge calibration (`JudgeCalibration` in `martian.evals.records`) is the core's own record,
   not part of the shared model: `save_calibration` records one, or returns the stored one with
   the same id; `get_calibration` reads one and `list_calibrations` lists a project's, or one
@@ -2632,6 +2635,57 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
 `tests/evals/record_contract.py` is the behaviour; it runs on SQLite always and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` is set. On Postgres it runs as an ordinary role that owns its schema,
 so row-level security applies.
+
+## Deleting runs and traces
+
+Both stores can remove a run or a trace for good, in every edition. They hold no policy: when to
+delete, how long to keep, and legal holds are the calling edition's (the Martian server's
+retention, MartianSecurity/martian-notes#162). No route calls them; the edition calls the stores.
+
+- `RecordStore.list_finished_runs(principal, project_id, created_before=..., limit=100, cursor=None)`
+  lists the project's runs that are neither `queued` nor `running` and were created before the
+  cutoff, oldest first, paged by offset as `list_runs` is: the candidates, without paging every
+  run. A caller that deletes what it lists asks again without a cursor.
+- `RecordStore.delete_run(principal, project_id, run_id)` removes, in one transaction, the run and
+  every row keyed to it: its case results, its scores of every source and scoring job (a person's
+  answer beside a check's score of the same name included), its scoring jobs, its reviews, its
+  work left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
+  the schedule that started it, so the schedule's history and the thresholds on its gate results
+  no longer count that run. The tables have no foreign keys, so the delete names each one. It
+  returns the rows it removed from each table, by table name, such as
+  `{"martian_runs": 1, "martian_case_results": 40, "martian_scores": 80, ...}`. It refuses with
+  `conflict` while anything still works on the run: the run or one of its scoring jobs is
+  `queued` or `running`, or a worker's claim whose lease has not run out holds its work, as one
+  does while the worker finishes its turn after the run ended. Cancel it, or let it end, first.
+  The run's own row goes last, and only while the run is still finished, so a stopped run resumed
+  meanwhile undoes the whole delete.
+- `EvalStore.delete_traces(principal, project_id, trace_ids)` and
+  `delete_traces_before(principal, project_id, before, limit=1000)` delete traces for good, at
+  most 1,000 a call (`TRACE_DELETE_LIMIT` in `martian.evals.store`): each trace, its spans, its
+  scores and its review queue items, so none of it reads back. `delete_traces` returns the ids it
+  deleted, in the order given, leaving out any the project does not hold. `delete_traces_before`
+  deletes the project's oldest traces whose request time is before the cutoff and returns their
+  ids, oldest first; a caller deletes until a call returns fewer than its `limit`. Both work in
+  an archived project.
+- `RecordStore.forget_traces(principal, project_id, trace_ids)` then removes what the records keep
+  of those traces, in one transaction: each monitor's row for them in `martian_monitored_traces`,
+  with the scores it kept there, so they leave its thresholds' windows and its score trends, and
+  the outbox's deliveries to them in any state, which would otherwise retry against a trace that
+  is gone. A run's case results and scores that name a deleted trace stay with the run.
+- On [the in-process binding](#the-in-process-binding), a trace is deleted with MLflow's own
+  tracking store delete (`delete_traces` with the traces' MLflow ids, 100 at a time), which
+  removes its `trace_info` row and, through MLflow's cascades, its tags, metadata, metrics, spans
+  and assessments, and its review queue items. MLflow keeps one row: a linked trace's
+  `entity_associations` link to its MLflow run, which holds the two ids and nothing else.
+- A deleted run's record in the store, its MLflow run with `martian/run.json` and its artifacts,
+  stays: `EvalStore` has no run delete ([not built yet](#not-built-yet)).
+
+`tests/evals/record_contract.py` deletes runs, refuses one in progress, lists the finished runs
+before a cutoff and forgets traces, on SQLite and Postgres. `tests/evals/test_records.py` gives a
+run a row in every table keyed to a run, deletes it, and reads every table of the record store's
+database to find no row that names it, on both databases. `tests/evals/store_contract.py` deletes
+traces on `MemoryStore` and `MlflowStore`, and `tests/evals/test_store_mlflow.py` reads every one
+of MLflow's tables to find nothing of a deleted trace but its run link, on SQLite and Postgres.
 
 ## The local edition (`martian ui`)
 
@@ -3473,6 +3527,8 @@ export holds, resuming, and what the receiving store assigns are in [data export
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
+| Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |
+| `delete_traces` and `delete_traces_before` on the Martian server's MLflow REST binding (`ServerStore` in MartianSecurity/MartianBackend) | MartianSecurity/martian-notes#162 |
 
 ## The Martian server
 

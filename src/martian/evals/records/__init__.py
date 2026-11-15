@@ -645,6 +645,34 @@ class RecordStore(Protocol):
         so two workers cannot both move it on."""
         ...
 
+    async def list_finished_runs(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        created_before: datetime,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Run]:
+        """The project's runs that are neither ``queued`` nor ``running`` and were created before
+        ``created_before``, oldest first: the runs a retention policy may remove with
+        :meth:`delete_run`. A caller that deletes what it lists asks again without a cursor."""
+        ...
+
+    async def delete_run(self, principal: Principal, project_id: str, run_id: str) -> dict[str, int]:
+        """Remove the run and every record keyed to it, in one transaction: its case results, its
+        scores of every source and scoring job, its scoring jobs, its reviews, its work left in the
+        worker's queue, the outbox's
+        deliveries of its scores, whatever their state, and the slot of the schedule that started
+        it. Returns how many rows it removed from each of those tables, by table name.
+
+        Refused as a ``conflict`` while anything still works on the run: the run or one of its
+        scoring jobs is ``queued`` or ``running``, or a worker's claim whose lease has not run out
+        holds its work. Cancel it, or let it end, first. A run that does not exist is
+        ``not_found``. The run's traces and its record in the store (``EvalStore``) are the
+        store's, and stay."""
+        ...
+
     # Case results and the scores the core gates on.
     async def put_results(
         self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
@@ -926,6 +954,14 @@ class RecordStore(Protocol):
     ) -> list[MonitoredTrace]:
         """The monitor's ``scored`` traces it took in ``[since, until)``, newest first, at most
         ``limit``: the window a threshold on its scores reads."""
+        ...
+
+    async def forget_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> dict[str, int]:
+        """Remove what the records keep of traces the store deleted (``EvalStore.delete_traces``),
+        at most ``TRACE_DELETE_LIMIT`` of them a call, in one transaction: each monitor's record of
+        having taken them, with the scores it kept there, and the outbox's deliveries to them,
+        whatever their state. Returns how many rows it removed from each of those tables, by table
+        name. The case results and scores of a run that name a trace stay with their run."""
         ...
 
     # Thresholds on scores, their state, and the alerts they raise.
