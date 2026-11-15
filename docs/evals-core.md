@@ -3273,6 +3273,8 @@ martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
 [`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
 configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
 the results promptfoo writes for that config with its two providers, also written by hand.
+[`tests/evals/promptfoo`](../tests/evals/promptfoo) has results promptfoo 0.125.1 wrote itself,
+for a config with two prompts and two Python providers that answer from a table.
 
 ### Imported results
 
@@ -3294,7 +3296,11 @@ maps every field:
 - A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
   grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
   `threshold` counts as promptfoo counted it.
-- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts,
+  and a case id names the test and the prompt. promptfoo numbers each provider's prompts as
+  columns of their own (`promptIdx` 0 and 1 for the first provider's two prompts, 2 and 3 for the
+  second's), so `prompt <m>` counts the prompts by their `promptId` instead, in the order the file
+  first gives them.
 - Every file is read before anything is written, so a file that is not promptfoo results, one
   of another version, one without rows, or one that has a provider's case twice or two providers
   with one label stops the command with exit code `2` and writes nothing.
@@ -3309,7 +3315,8 @@ and writes the suite files where the features map:
   `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
   `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
   Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
-  promptfoo. Case ids are the ones the importer gives the same tests' results.
+  promptfoo. Case ids are the ones the importer gives the same tests' results under every
+  provider, when the file's first provider runs every prompt.
 - `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
   them. `{{ name }}` in an assertion's value is filled from the test's vars.
 - A suite file applies every check to every case, and promptfoo asserts per test, so tests that
@@ -3326,7 +3333,7 @@ and writes the suite files where the features map:
 - A folder that already has one of the files to write stops the command with exit code `2` before
   anything is written, and so does a config with nothing that converts.
 
-Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+Assertions map onto the built-in checks ([deterministic checks](evals.md#deterministic-checks) and
 the rubric judge). An assertion converts only when its check decides the way promptfoo does;
 everything else is listed:
 
@@ -3358,7 +3365,7 @@ a score threshold.
 | --- | --- |
 | `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
 | `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
-| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `is-json` with any other schema, `equals` with a JSON value | No built-in check validates a schema or compares JSON values |
 | `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
 | `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
 | `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
@@ -3371,7 +3378,7 @@ a score threshold.
 | `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
 | `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
 | Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
-| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No built-in check reads them |
 | `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
 
 `not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
@@ -3392,12 +3399,15 @@ each suite file holds it as comments at its top, with the tests it covers.
 `tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
 through the local edition's routes: both providers' runs, their cases and verdicts, every
 assertion's pass and score against the file, the provenance, a trace, and Compare of the two
-providers; it also covers repeated and nested assertions, grader errors, and the files the command
-refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
-file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
-stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
-and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
-convert is listed.
+providers. It compares the two providers of the file promptfoo 0.125.1 wrote case by case too, and
+checks that a case id names the same prompt under every provider when two prompts share a label
+or a provider runs only some prompts; it also covers repeated and nested assertions, grader
+errors, and the files the command refuses. `tests/evals/test_promptfoo_convert.py` converts the
+example config, checks each suite file and the list of what it left out, and runs its three suites
+against `agent.py`; it runs a stored-reply suite, checks that the converted cases of the config
+promptfoo 0.125.1 ran have the case ids its results give both providers, that each converted
+assertion type decides a reply, or a call's time and cost, as promptfoo does, and that every
+assertion, option, prompt and test that does not convert is listed.
 
 ## Copied MLflow stores
 
