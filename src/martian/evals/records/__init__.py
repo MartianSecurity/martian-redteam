@@ -5,7 +5,8 @@ and review queues. The evals core also needs runs with their lifecycle, case res
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
 Traces page's saved views and each judge version's calibrations.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
-one migration history (``martian.evals.records.sql``). Projects live in MLflow, as experiments.
+one migration history (``martian.evals.records.sql``), which also creates the worker's queue
+(``martian.evals.records.queue``). Projects live in MLflow, as experiments.
 CI gate sessions stay with the server's CI gate.
 
 Every method takes the request's principal first, and the store keeps each organisation's
@@ -111,14 +112,24 @@ class RecordStore(Protocol):
         """Newest first."""
         ...
 
+    async def count_active_runs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        """How many runs of the organisation, in every project, are ``queued`` or ``running``, in
+        one query. With ``up_to``, it stops counting there and reads at most that many rows."""
+        ...
+
     async def update_run(self, principal: Principal, run: Run, *, expected_state: RunState | None = None) -> Run:
         """Replace the stored run. With ``expected_state``, only while the run is still in that state,
         so two workers cannot both move it on."""
         ...
 
     # Case results and the scores the core gates on.
-    async def put_results(self, principal: Principal, project_id: str, results: list[CaseResult]) -> None:
-        """Store case results of existing runs, replacing earlier ones for the same case."""
+    async def put_results(
+        self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
+    ) -> None:
+        """Store case results of existing runs, replacing earlier ones for the same case, and
+        ``scores`` of those cases as :meth:`put_scores` stores them, all in one transaction: a case
+        has its result and its scores, or neither. A worker records each finished case so, and a
+        run it takes again resumes after the cases that have a result."""
         ...
 
     async def list_results(
@@ -144,6 +155,12 @@ class RecordStore(Protocol):
     ) -> ScoringJob: ...
 
     async def list_scoring_jobs(self, principal: Principal, project_id: str, run_id: str) -> list[ScoringJob]: ...
+
+    async def count_active_scoring_jobs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        """How many scoring jobs of the organisation's completed runs, in every project, are
+        ``queued`` or ``running``, in one query. With ``up_to``, it stops counting there and reads
+        at most that many rows."""
+        ...
 
     # Human reviews: append-only chains.
     async def add_review(self, principal: Principal, project_id: str, review: Review) -> Review:
