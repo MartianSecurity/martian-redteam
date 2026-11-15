@@ -315,6 +315,14 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     # A run's limits and the one it stopped at (martian.evals.limits).
     "limits": ("max_seconds", "max_judge_tokens"),
     "stopped": ("limit", "value", "used", "message"),
+    # A suite-file run's combination of its matrix (martian.evals.matrix), the registered prompt
+    # version each of its values matched, one object per axis (martian.evals.prompts), and its use
+    # of the cache of model calls (martian.evals.cache): that it was on, and the hits, calls made
+    # and replies stored of the target's and the judges' calls. Never the cache's settings, such as
+    # its folder, a path on the machine that ran it.
+    "matrix": ("id", "values", "axes", "invocation"),
+    "prompts": ("axis", "value", "name", "version", "digest"),
+    "cache": ("on", "target", "judge"),
     # The model a run's target reported (martian.evals.worker.execute), and the schedule and slot a
     # run was admitted for (martian.evals.worker.schedule).
     "model": ("name", "cases"),
@@ -370,12 +378,12 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
         "datasets",
     ),
 }
-"""What of a run's provenance its readers see: each key, with the keys of its object, or None for a
-key whose value is text, a number, a boolean or null. Anything else a run's provenance holds stays
-in the record store for the server's own use: a CI run's ``ci``, with the CI token's id and name and
-the digests of the upload request and its items (the run routes show its public keys as ``ci``),
-and whatever else a worker pins with a target, such as a registered agent's connection and
-approval."""
+"""What of a run's provenance its readers see: each key, with the keys of its object (or of each
+object of its list), or None for a key whose value is text, a number, a boolean or null. Anything
+else a run's provenance holds stays in the record store for the server's own use: a CI run's
+``ci``, with the CI token's id and name and the digests of the upload request and its items (the
+run routes show its public keys as ``ci``), and whatever else a worker pins with a target, such as
+a registered agent's connection and approval."""
 
 
 def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
@@ -390,6 +398,10 @@ def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
             shown[key] = value
         elif keys is not None and isinstance(value, dict):
             shown[key] = {name: value[name] for name in keys if name in value}
+        elif keys is not None and isinstance(value, list):
+            shown[key] = [
+                {name: item[name] for name in keys if name in item} for item in value if isinstance(item, dict)
+            ]
     return shown
 
 
@@ -497,6 +509,7 @@ class ReviewRow:
     state: str
     value: Value
     comment: str
+    blind: bool
     created_at: datetime | None
 
     @classmethod
@@ -513,6 +526,7 @@ class ReviewRow:
             state=review.state,
             value=review.value,
             comment=review.comment,
+            blind=review.blind,
             created_at=review.created_at,
         )
 

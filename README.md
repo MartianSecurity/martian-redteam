@@ -34,21 +34,28 @@ model plays a goal and a persona, which `martian evals personas` can build from 
 conversations. Simulated results are labelled as such, and `martian evals fidelity` compares a
 simulator's conversations with real ones.
 
-The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, can run each case several times, combine the attempts and report the
-share of cases that passed every attempt and the flaky ones, and can be stopped and resumed. It is also recorded for `martian ui`
+The run stays on your machine. It writes `results.jsonl`, `summary.json`, `junit.xml` and
+`verdicts.json`, prints a summary table, can run each case several times, combine the attempts
+and report the share of cases that passed every attempt and the flaky ones, can run every
+combination of several prompts, models or other values (`matrix`) with one row each, can compare itself
+case by case with an earlier run (`--baseline`), can replay the target's and the judges' replies
+from a cache instead of calling them again (`--cache`), and can be stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
 [Evals](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md) has the full
 guide: data formats, every check, provider setup and results.
 
 On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
-push and keeps one comment with the result, also without a Martian account. See
+push and keeps one comment with the result, also without a Martian account. It can compare each
+pull request with the last result of `main` and name the cases that went from pass to fail. See
 [gate and CI](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian evals prompts push`: a suite file's matrix prompts kept as immutable versions in the
+  local Evals UI, where each later run shows the prompt version it used; see
+  [prompt versions](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md#prompt-versions).
 - `martian evals audit`: the same suite graded on replies that do nothing or cheat, to find
   checks that pass them; see
   [audit a suite](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md#audit-a-suite).
@@ -70,6 +77,10 @@ push and keeps one comment with the result, also without a Martian account. See
   folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
   JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
   see [data export](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/data-export.md).
+- `martian evals push`: `martian ui`'s finished runs, with their case results, scores and traces,
+  sent to a Martian server with an organisation API key; pushing again sends only what the server
+  lacks; see
+  [pushed runs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#pushed-runs).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see

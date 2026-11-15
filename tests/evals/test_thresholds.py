@@ -463,9 +463,13 @@ async def test_a_delivered_signature_verifies_with_the_documented_method(
 
 
 async def test_failed_deliveries_are_retried_with_backoff_then_given_up(
-    records: SqlRecordStore, caplog: pytest.LogCaptureFixture
+    records: SqlRecordStore, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     caplog.set_level(logging.DEBUG)
+    # The sender's clock stands still until the test moves it, so a retry is due exactly when its
+    # backoff says, however slow the machine is, and nothing waits on the wall clock.
+    clock = {"now": datetime.now(UTC)}
+    monkeypatch.setattr(alerts_module, "_now", lambda: clock["now"])
     flaky, down = Receiver(statuses=(503, 500)), Receiver(statuses=(500,) * 10)
     try:
         settings = AlertSettings(webhook=WEBHOOKS, retry_seconds=0.3, max_retry_seconds=0.6, max_attempts=3)
@@ -476,16 +480,19 @@ async def test_failed_deliveries_are_retried_with_backoff_then_given_up(
         await scored(records, [False] * 25, T)
         await evaluate(records, T + timedelta(minutes=1), sender)
         waits = []
-        for _attempt in range(2):
-            [alert] = [a for a in await stored_alerts(records) if a.state == "pending"]
-            assert alert.next_attempt_at is not None
-            waits.append((alert.next_attempt_at - datetime.now(UTC)).total_seconds())
+        for attempt in (1, 2):
+            pending = [a for t in ("t1", "t2") for a in await stored_alerts(records, t) if a.state == "pending"]
+            # Both failed at the same moment, so both are due again at the same moment.
+            [due] = {alert.next_attempt_at for alert in pending}
+            assert len(pending) == 2 and due is not None
+            waits.append((due - clock["now"]).total_seconds())
+            clock["now"] = due - timedelta(milliseconds=1)
             await evaluate(records, T + timedelta(minutes=1), sender)  # not due yet: nothing is sent
-            assert (len(flaky.requests), len(down.requests)) == (_attempt + 1, _attempt + 1)
-            time.sleep(max(0.0, waits[-1]) + 0.05)
+            assert (len(flaky.requests), len(down.requests)) == (attempt, attempt)
+            clock["now"] = due
             await evaluate(records, T + timedelta(minutes=1), sender)
         # 0.3 seconds after the first failure, then 0.6: doubled, and no longer than the cap.
-        assert 0.1 < waits[0] <= 0.3 and 0.4 < waits[1] <= 0.6, waits
+        assert waits == [0.3, 0.6]
         [flaky_alert] = await stored_alerts(records, "t1")
         assert (flaky_alert.state, flaky_alert.attempts, flaky_alert.last_error) == ("delivered", 3, "")
         [down_alert] = await stored_alerts(records, "t2")

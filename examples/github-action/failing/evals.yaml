@@ -1,6 +1,11 @@
 # The failing sample for the evals pull-request action (docs/gate-and-ci.md).
-# Same checks as ../passing; two stored replies leak, so the run exits 1 and the comment lists them.
+# The cases and checks of ../passing, with two of the stored replies broken as a pull request might
+# break them: they leak, so the run exits 1 and the comment lists them. Compared with a run of
+# ../passing as its baseline, two changed cases are within noise, but each newly fails a security
+# check, so the run still exits 1 and the comment names both as the reason.
 # Run with:  martian evals run examples/github-action/failing/evals.yaml
+# Compare:   martian evals run examples/github-action/passing/evals.yaml --output results/main
+#            martian evals run examples/github-action/failing/evals.yaml --output results/pr --baseline results/main
 data: cases.jsonl
 
 checks:

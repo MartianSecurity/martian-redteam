@@ -17,6 +17,12 @@ question and annotation routes of ``app/api/evals_explorer.py`` (MartianSecurity
   human score's source recorded, by the API's name for them (``projection.user_out``), the id
   the bootstrap gives, so the local user's own id is an assignee the routes accept.
 - The store keeps one definition per question name, so the library has version 1 of each question.
+- ``POST /blind-review-queues`` is the core's own: it creates a queue with blind double review
+  (:mod:`martian.evals.server.blind`), which the contract's ``QueueRequest`` has no field for. In
+  such a queue a reader reads none of the other reviewers' reviews of an item until they have
+  answered it, an answer follows the chain's newest review, its human score is not copied to the
+  case's trace, and a reviewer's first answer is recorded as given blind. Every queue and review
+  these routes answer with says whether it is blind.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -34,7 +40,8 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from martian.evals.model import CaseResult, Review, ReviewQueue, Run, Score
 from martian.evals.model import ReviewQuestion as Question
 from martian.evals.outbox import save_queue_item, save_score
-from martian.evals.records import RecordStore
+from martian.evals.records import BlindQueue, RecordStore
+from martian.evals.server.blind import blind_queue_ids, hidden_items, queue_with, visible_reviews
 from martian.evals.server.dependencies import (
     EntitlementsDep,
     PrincipalDep,
@@ -53,7 +60,6 @@ from martian.evals.server.projection import (
     item_out,
     mlflow_assessment,
     project_key,
-    queue_out,
     result_id,
     score_id,
     user_out,
@@ -130,7 +136,12 @@ async def sync_queue_item(
 # --- answering a result ---------------------------------------------------------------------
 
 
-def _same_review(review: Review, result: CaseResult, criterion: str, body: ReviewRequest, principal: Principal) -> bool:
+def _same_review(
+    review: Review, result: CaseResult, criterion: str, body: ReviewRequest, principal: Principal, *, blind: bool
+) -> bool:
+    """Whether a stored review is the one the request made. In a blind queue the review follows the
+    chain's newest review rather than the one the request named, so that is not compared."""
+
     def text(value: uuid.UUID | None) -> str | None:
         return None if value is None else str(value)
 
@@ -138,8 +149,8 @@ def _same_review(review: Review, result: CaseResult, criterion: str, body: Revie
         review.case_id == result.case_id
         and review.criterion == criterion
         and review.reviewer == principal.user_id
-        and (review.previous_id, review.assignee, review.queue_id)
-        == (text(body.previous_id), text(body.assignee_id), text(body.queue_id))
+        and (blind or review.previous_id == text(body.previous_id))
+        and (review.assignee, review.queue_id) == (text(body.assignee_id), text(body.queue_id))
         and (review.state, review.value, review.comment) == (body.state, body.value, body.comment)
         and type(review.value) is type(body.value)
     )
@@ -179,15 +190,23 @@ async def review(
         if body.state == "complete" and not accepts(question, body.value):
             raise HTTPException(422, "Rating differs from the queue question schema")
     review_id = str(derived_id("review", str(body.request_id)))
+    blind = queue is not None and queue.id in await blind_queue_ids(records, principal, run.project_id, run.id)
     chain = await records.list_reviews(principal, run.project_id, run.id, case_id=result.case_id, current_only=False)
     if old := next((r for r in chain if r.id == review_id), None):
-        if not _same_review(old, result, criterion, body, principal):
+        if not _same_review(old, result, criterion, body, principal, blind=blind):
             raise HTTPException(409, "request_id belongs to a different review")
         return ReviewRow.of(old).public()
     await writable_key(store, principal, run.project_id)
     if run.state != "completed" or result.status not in FINISHED:
         raise HTTPException(409, "Only finished results can be reviewed")
-    previous = _latest([r for r in chain if r.criterion == criterion]).get((result.case_id, criterion))
+    links = [r for r in chain if r.criterion == criterion]
+    head = _latest(links).get((result.case_id, criterion))
+    answered = any(r.reviewer == principal.user_id and r.state == "complete" for r in links)
+    if blind and queue is not None:
+        # The request names the newest review the reviewer may read; the answer follows the
+        # chain's newest, which may be another reviewer's they may not read yet.
+        links = visible_reviews(links, hidden_items(links, {queue.id}, principal.user_id), principal.user_id)
+    previous = _latest(links).get((result.case_id, criterion))
     if previous is not None and previous.queue_id != (str(body.queue_id) if body.queue_id else None):
         raise HTTPException(409, "Keep the existing review question and queue audit chain")
     if (str(body.previous_id) if body.previous_id else None) != (previous.id if previous else None):
@@ -206,7 +225,8 @@ async def review(
         score = Score(
             run_id=run.id,
             case_id=result.case_id,
-            trace_id=result.store.trace_id,
+            # A blind queue's answer is not copied to the trace, where any trace read would show it.
+            trace_id=None if blind else result.store.trace_id,
             scorer=criterion,
             source="human",
             source_id=me,
@@ -230,8 +250,9 @@ async def review(
             reviewer=principal.user_id,
             assignee=str(body.assignee_id) if body.assignee_id else None,
             queue_id=str(body.queue_id) if body.queue_id else None,
-            previous_id=str(body.previous_id) if body.previous_id else None,
+            previous_id=head.id if blind and head else str(body.previous_id) if body.previous_id else None,
             score_id=str(score_id(score)) if score else None,
+            blind=blind and body.state == "complete" and not answered,
             created_at=_now(),
         ),
     )
@@ -263,8 +284,12 @@ async def reviews(
     me = user_out(principal.user_id)
     needle = q.casefold()
     rows: list[tuple[Review, Run, CaseResult]] = []
+    blind = await blind_queue_ids(records, principal, key)
     for run in await project_runs(records, principal, key):
-        latest = _latest(await records.list_reviews(principal, run.project_id, run.id, current_only=False))
+        chains = await records.list_reviews(principal, run.project_id, run.id, current_only=False)
+        if blind:
+            chains = visible_reviews(chains, hidden_items(chains, blind, principal.user_id), principal.user_id)
+        latest = _latest(chains)
         if not latest:
             continue
         results = {r.case_id: r for r in await run_results(records, principal, run)}
@@ -351,14 +376,39 @@ def _same_queue(queue: ReviewQueue, run: Run, body: QueueRequest, cases: list[st
 async def create_queue(
     body: QueueRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep
 ) -> dict[str, Any]:
+    return await _create_queue(body, principal, store, records, blind=False)
+
+
+@explorer.post(
+    "/blind-review-queues",
+    status_code=201,
+    response_model=None,
+    dependencies=[Depends(require_entitlement("review_queues")), Depends(require_capability("createReviewQueues"))],
+)
+async def create_blind_queue(
+    body: QueueRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep
+) -> dict[str, Any]:
+    # The core's own: a queue with blind double review, which the contract's QueueRequest has no
+    # field for (martian.evals.server.blind).
+    return await _create_queue(body, principal, store, records, blind=True)
+
+
+async def _create_queue(
+    body: QueueRequest, principal: Principal, store: EvalStore, records: RecordStore, *, blind: bool
+) -> dict[str, Any]:
+    """Create the review queue a request asks for, or return the one it created. A blind queue is
+    recorded as blind before it is created, so no answer is ever given in it unblinded."""
     run = await find_run(store, records, principal, body.run_id)
     queue_id = str(derived_id("queue", str(body.request_id)))
     results = {result_id(run.id, r.case_id): r for r in await run_results(records, principal, run)}
     cases = [results[i].case_id for i in body.item_ids if i in results]
+    marked = await blind_queue_ids(records, principal, run.project_id, run.id)
     if existing := await store.get_queue(principal, run.project_id, queue_id):
-        if not _same_queue(existing, run, body, cases, principal):
+        if not _same_queue(existing, run, body, cases, principal) or (existing.id in marked) != blind:
             raise HTTPException(409, "request_id belongs to a different queue request")
-        return queue_out(existing)
+        return queue_with(existing, marked)
+    if not blind and queue_id in marked:
+        raise HTTPException(409, "request_id belongs to a different queue request")
     await writable_key(store, principal, run.project_id)
     if run.state != "completed":
         raise HTTPException(409, "Review a completed run")
@@ -376,6 +426,11 @@ async def create_queue(
     chosen = [results[i] for i in body.item_ids]
     if any(not r.store.trace_id for r in chosen):
         raise HTTPException(409, "Only results with a saved trace can be reviewed in a queue")
+    if blind:
+        await records.add_blind_queue(
+            principal, run.project_id, BlindQueue(id=queue_id, run_id=run.id, created_by=principal.user_id)
+        )
+        marked.add(queue_id)
     assignee = str(body.assignee_id) if body.assignee_id else None
     queue = await store.create_queue(
         principal,
@@ -409,7 +464,7 @@ async def create_queue(
                     created_at=_now(),
                 ),
             )
-    return queue_out(queue)
+    return queue_with(queue, marked)
 
 
 @router.get("/review-queues", response_model=None, dependencies=[Depends(require_entitlement("review_queues"))])
@@ -427,6 +482,7 @@ async def queues(
         for queue in await run_queues(store, records, principal, run)
     ]
     found.sort(key=lambda pair: (pair[0].created_at or EPOCH, pair[0].id), reverse=True)
+    blind = await blind_queue_ids(records, principal, project_key(project_id))
     items = []
     for queue, run in found[(page - 1) * limit : page * limit]:
         required = {q.name for q in queue.questions}
@@ -442,7 +498,7 @@ async def queues(
         total_answers = len(queue.case_ids) * len(required)
         items.append(
             {
-                **queue_out(queue),
+                **queue_with(queue, blind),
                 "completed": completed,
                 "total": len(queue.case_ids),
                 "answered": answered,
@@ -478,7 +534,7 @@ async def reconcile_queue(
     for case_id in queue.case_ids:
         if case_id in results:
             await sync_queue_item(store, records, principal, run, queue, results[case_id])
-    return queue_out(queue)
+    return queue_with(queue, await blind_queue_ids(records, principal, run.project_id, run.id))
 
 
 # --- the question library -------------------------------------------------------------------

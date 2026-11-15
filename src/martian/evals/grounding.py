@@ -37,7 +37,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
@@ -46,6 +46,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from martian.evals._judge_transport import DEFAULT_RATE_LIMIT_WAIT_SECONDS, invoke_response_judge
 from martian.evals.judges import _judge_options
+
+if TYPE_CHECKING:
+    from martian.evals.cache import ModelCallCache
 
 GROUNDEDNESS_VERSION = "groundedness-v1"
 CONTEXT_RELEVANCE_VERSION = "context-relevance-v1"
@@ -343,6 +346,7 @@ def _grounding_judge(
     max_retries: int,
     rate_limit_wait_seconds: float,
     headers: Mapping[str, str] | None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     kind = _KINDS[kind_name]
     params, extra_headers = _judge_options(
@@ -394,6 +398,8 @@ def _grounding_judge(
             max_retries=max_retries,
             rate_limit_wait_seconds=rate_limit_wait_seconds,
             headers=extra_headers,
+            cache=cache,
+            judge_version=kind.version,
         )
         try:
             reply = kind.verdict.model_validate(feedback.value).model_dump()
@@ -457,6 +463,7 @@ def groundedness(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge whether the response is supported by the documents at ``inputs[context_key]``.
 
@@ -477,6 +484,7 @@ def groundedness(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
@@ -491,6 +499,7 @@ def context_relevance(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge whether at least one document at ``inputs[context_key]`` bears on the request.
 
@@ -508,6 +517,7 @@ def context_relevance(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
@@ -522,6 +532,7 @@ def context_sufficiency(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge whether the documents at ``inputs[context_key]`` hold everything the answer needs.
 
@@ -540,6 +551,7 @@ def context_sufficiency(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
