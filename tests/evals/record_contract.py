@@ -38,6 +38,7 @@ from martian.evals.records import (
     ScheduledRun,
     ScheduleGates,
     ScheduleProgress,
+    SuiteAudit,
     Threshold,
     ThresholdStatus,
     WebhookChannel,
@@ -298,6 +299,31 @@ class RecordContract:
         assert await records.get_suite(ORG_A, "p1", "s9") is None
         await records.save_suite(ORG_A, "p1", suite("x", name="Another").model_copy(update={"id": "s0"}))
         assert [(s.id, s.version) for s in await records.list_suites(ORG_A, "p1")] == [("s0", 1), ("s1", 2)]
+
+    async def test_an_audit_is_kept_with_its_suite_version_and_replaced_by_the_next(self, records: RecordStore) -> None:
+        suite = Suite(id="s1", name="Support", scorers=[JUDGE], digest="b" * 64)
+        await records.save_suite(ORG_A, "p1", suite)
+
+        def audit(flagged: bool, version: int = 1) -> SuiteAudit:
+            return SuiteAudit(
+                suite_id="s1",
+                suite_version=version,
+                suite_digest="b" * 64,
+                dataset_name="faq",
+                dataset_digest="c" * 64,
+                flagged=flagged,
+                result={"flagged": flagged, "findings": []},
+            )
+
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) is None
+        first = await records.put_suite_audit(ORG_A, "p1", audit(True))
+        assert (first.created_by, first.flagged) == ("user-a", True) and first.created_at is not None
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) == first
+        again = await records.put_suite_audit(ORG_A, "p1", audit(False))
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) == again and not again.flagged
+        await refused("not_found", records.put_suite_audit(ORG_A, "p1", audit(True, version=2)))
+        assert await records.get_suite_audit(ORG_B, "p1", "s1", 1) is None
+        await refused("not_found", records.put_suite_audit(ORG_B, "p1", audit(True)))
 
     async def test_a_draft_takes_edits_in_turn_and_none_after_publishing(self, records: RecordStore) -> None:
         draft = await records.create_draft(ORG_A, "p1", DatasetDraft(id="d1", project_id="p1", name="Refunds"))

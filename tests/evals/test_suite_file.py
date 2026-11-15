@@ -159,6 +159,7 @@ EVERY_FIELD_FUNCTION = {
             "max_score": 1,
             "security": True,
         },
+        {"type": "installed", "name": "prepared_state", "options": {"at_least": 1, "names": ["a", "b"]}},
     ],
 }
 
@@ -189,7 +190,7 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows", "calls")
+            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows", "calls", "options")
             if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
@@ -213,14 +214,14 @@ def round_trip(path: Path) -> str:
 
 def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
-    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
+    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS + runner.INSTALLED_CHECKS)
     used = set().union(*CHECK_OPTIONS.values()) | COMMON_CHECK_FIELDS
     assert used == {info.alias or name for name, info in runner.CheckSpec.model_fields.items()}
 
 
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
-    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
+    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS + runner.INSTALLED_CHECKS)
     groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS + runner.TOOL_CHECKS
     assert set(groups) <= set(runner.CHECKS)
     assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
