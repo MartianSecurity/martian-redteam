@@ -215,7 +215,9 @@ For monitoring production traffic (MartianSecurity/martian-notes#196) on this st
 - **Requests and responses of any length**, at a write time and size per trace that this report
   has measured only up to 7,900 characters.
 - **Plan for retention**: at 50 traces a second the store grows by about 4.3 million traces and
-  about 70 GB a day (extrapolated from 17 KB a trace).
+  about 70 GB a day (extrapolated from 17 KB a trace). The store deletes a project's traces older
+  than a cutoff, 1,000 a call; the edition decides when
+  ([deleting runs and traces](evals-core.md#deleting-runs-and-traces)).
 
 ## When a different trace store is needed
 
