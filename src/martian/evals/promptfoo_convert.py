@@ -227,14 +227,14 @@ UNSUPPORTED: dict[str, str] = {
         "guidelines and conditions",
     ),
     **dict.fromkeys(("classifier", "moderation", "pi"), "calls a classifier or moderation model of its own"),
-    **dict.fromkeys(_CLOSENESS, "scores closeness to a reference text, or perplexity; no check on main does"),
+    **dict.fromkeys(_CLOSENESS, "scores closeness to a reference text, or perplexity; no built-in check does"),
     "contains-json": "finds JSON inside other text; is_json needs the whole reply to be JSON",
     **dict.fromkeys(
         ("contains-html", "is-html", "contains-sql", "is-sql", "contains-xml", "is-xml"),
-        "checks a format no check on main reads",
+        "checks a format no built-in check reads",
     ),
     **dict.fromkeys(_CALL_DATA, "reads the provider's trace or metadata, which a suite file's checks do not see"),
-    "is-refusal": "passes only a refusal; no check on main does (no_refusal passes the opposite)",
+    "is-refusal": "passes only a refusal; no built-in check does (no_refusal passes the opposite)",
     "not-is-refusal": "is promptfoo's refusal test, which counts a reply as a refusal when it starts with one of "
     'its refusal phrases, such as "I\'m sorry", or holds one anywhere, such as "as an AI"; no_refusal reads '
     "the reply's opening and passes a decline that goes on to answer, so the two decide some replies "
@@ -246,7 +246,7 @@ UNSUPPORTED: dict[str, str] = {
     "promptfoo:redteam:indirect-prompt-injection": "is promptfoo's grader: a model judges whether the reply "
     "followed the injected instructions its value holds; resists_injection looks for a marker that only "
     "following them produces, and the config names none (add resists_injection by hand with one)",
-    "word-count": "counts words; no check on main does",
+    "word-count": "counts words; no built-in check does",
     "assert-set": "groups assertions under a threshold and weights of its own; a suite's case passes when every "
     "check passes",
     **dict.fromkeys(
@@ -344,7 +344,7 @@ def _refusal(kind: str) -> str | None:
         return "is a promptfoo red team grader, which a model grades with its own prompt"
     base = kind.removeprefix("not-")
     if base != kind and (base in UNSUPPORTED or base in ASSERTION_CHECKS):
-        return f"passes when {base} fails; no check on main does that"
+        return f"passes when {base} fails; no built-in check does that"
     return "is not an assertion type in promptfoo's documented list"
 
 
@@ -479,7 +479,7 @@ def _check(kind: str, value: Any, variables: dict[str, Any], judge_model: str | 
         check, shape = PATTERN_CHECKS[kind]
         exact = kind in ("equals", "not-equals")
         if exact and isinstance(value, dict | list):
-            return "compares JSON values; no check on main does"
+            return "compares JSON values; no built-in check does"
         if not exact and not isinstance(value, str):
             return "needs a text value"
         given = _text(value)
@@ -544,7 +544,9 @@ def _items(value: Any) -> list[Any]:
 
 
 def _prompts(value: Any, base: Path, notes: _Notes) -> tuple[int, list[tuple[int, str]]]:
-    """How many prompts promptfoo would run, and the ones that convert, by promptfoo's index."""
+    """How many prompts promptfoo would run, and the ones that convert, by their position among
+    them: the prompt a case id names, which is not promptfoo's ``promptIdx`` (a column per
+    provider and prompt)."""
     if isinstance(value, dict):
         notes.add("prompts", "", "maps prompt files to labels, which this converter does not read")
         return 0, []
