@@ -474,7 +474,9 @@ class Span(_Object):
 class Trace(_Object):
     """A recorded call to the thing under test, from an eval run or from live traffic. A case result
     is a trace of a run; a trace need not belong to one. ``spans`` is empty in search results and
-    filled when one trace is read."""
+    filled when one trace is read. A search may give a preview of a long ``request`` or
+    ``response``, and the trace's ``martian.request_preview_truncated`` or
+    ``martian.response_preview_truncated`` metadata is then ``"true"``; one trace read has both whole."""
 
     id: Identifier
     project_id: Identifier
