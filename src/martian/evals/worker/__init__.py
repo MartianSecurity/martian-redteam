@@ -59,13 +59,21 @@ the case's error; the worker never retries."""
 class JudgeRequest:
     """One saved output for a judge to grade, with the judge scorers to apply. Each scorer's
     ``criteria`` carry its definition: a registered judge's instructions, or a policy judge's
-    guidelines."""
+    guidelines.
+
+    Every scorer of one request runs on the same model: ``model``, an MLflow model URI such as
+    ``openai:/gpt-4o-mini``, served at ``endpoint``, the base address of an OpenAI-compatible
+    endpoint, or at the provider's own address when it is None. ``model`` is None when neither the
+    judges nor the default judge model name one; the judge then uses its own. The request never
+    carries a key: the judge reads the provider's key from its own environment."""
 
     principal: Principal
     prompt: str
     expected: str
     output: str
     scorers: tuple[ScorerVersion, ...]
+    model: str | None = None
+    endpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,16 +84,21 @@ class Verdict:
 
 @dataclass(frozen=True)
 class JudgeResult:
-    """A judge's verdicts by scorer name. ``model`` names the model and its revision; every score
-    the verdicts make records it as its ``source_id``."""
+    """A judge's verdicts by scorer name. ``model`` is the model URI the judge used: the request's
+    ``model`` when it names one, or the judge's own. ``model_version`` is the version the provider
+    reported for the call (an OpenAI-compatible endpoint's ``model`` in its reply), or empty when
+    it reports none. Every score the verdicts make records both, and its ``source_id`` is
+    ``model@model_version``, or ``model`` alone without a version."""
 
     model: str
     verdicts: Mapping[str, Verdict] = field(default_factory=dict)
+    model_version: str = ""
 
 
 Judge = Callable[[JudgeRequest], Awaitable[JudgeResult]]
-"""Grades one saved output with a model. A scorer missing from the result, or an exception, is
-that score's error; the worker never retries."""
+"""Grades one saved output with a model. A scorer missing from the result, an exception, or a
+result from another model than the request names, is that score's error; the worker never
+retries."""
 
 
 @runtime_checkable

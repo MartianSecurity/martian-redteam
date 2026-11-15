@@ -10,6 +10,8 @@ scorers and, through its judge, the model judges. The request calls no model.
   version, or a saved suite version's scorers and policies.
 - Judge scorers need a worker with a judge (``Worker.judges``), as the server needs a configured
   judge.
+- Each judge scorer is pinned to its model when the job is admitted: the judge's own, or the
+  default judge model when it names none. Changing the default later does not change the job.
 - One active scoring job per run. The server holds one per organisation, to bound model use; that
   bound belongs to the worker that runs the jobs.
 
@@ -25,9 +27,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import Policy, Run, ScorerVersion, ScoringJob
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
+    JudgeSettingsDep,
     PrincipalDep,
     RecordsDep,
     StoreDep,
@@ -103,10 +107,39 @@ async def _pinned_judges(
     return pinned
 
 
+async def with_models(
+    settings: JudgeSettings | None, principal: Principal, scorers: list[ScorerVersion]
+) -> list[ScorerVersion]:
+    """The scorers with each judge that names no model pinned to the default judge model. With no
+    default either, the judge stays without one, and the worker's judge uses its own."""
+    if not any(s.kind == "llm_judge" and s.model is None for s in scorers) or settings is None:
+        return scorers
+    default = await settings.default_model(principal)
+    return [
+        s.model_copy(update={"model": default.model, "endpoint": default.endpoint})
+        if s.kind == "llm_judge" and s.model is None
+        else s
+        for s in scorers
+    ]
+
+
 async def scoring_plan(
+    store: EvalStore,
+    records: RecordStore,
+    principal: Principal,
+    run: Run,
+    body: ScoreRequest,
+    settings: JudgeSettings | None = None,
+) -> tuple[list[ScorerVersion], list[Policy], str | None, int | None]:
+    """The scorers, policies and suite version a scoring request asks for, each judge pinned to the
+    model it will run on."""
+    scorers, policies, suite_id, suite_version = await _planned(store, records, principal, run, body)
+    return await with_models(settings, principal, scorers), policies, suite_id, suite_version
+
+
+async def _planned(
     store: EvalStore, records: RecordStore, principal: Principal, run: Run, body: ScoreRequest
 ) -> tuple[list[ScorerVersion], list[Policy], str | None, int | None]:
-    """The scorers, policies and suite version a scoring request asks for."""
     if body.suite_version_id is not None:
         if body.judges:
             raise HTTPException(422, "This suite pins its own criteria; apply custom judges as a separate scoring job")
@@ -164,9 +197,10 @@ async def score(
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
+    settings: JudgeSettingsDep,
 ) -> dict[str, Any]:
     run = await find_run(store, records, principal, run_id)
-    scorers, policies, suite_id, suite_version = await scoring_plan(store, records, principal, run, body)
+    scorers, policies, suite_id, suite_version = await scoring_plan(store, records, principal, run, body, settings)
     job_id = str(derived_id("scoring-job", str(body.request_id)))
     if existing := await _job(records, principal, run, job_id):
         if not _same_job(existing, run, scorers, policies, (suite_id, suite_version), principal):
@@ -311,4 +345,4 @@ async def monitoring(
     }
 
 
-__all__ = ["find_suite_version", "router", "scoring_plan"]
+__all__ = ["find_suite_version", "router", "scoring_plan", "with_models"]
