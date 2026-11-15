@@ -15,6 +15,12 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   Its scores sit beside the run's own, and each scored value is also kept on the case's trace.
 - Before each case the record is read again. A cancel request stops the work there; a record that
   is no longer running (someone else failed or finished it) ends it without another write.
+- Each piece of work runs under limits (``RunLimits``): the run's own, ``provenance["limits"]``,
+  which a scoring job takes from its run, else the worker's. Each start of the work has them
+  afresh. Before each case, work that has run for ``max_seconds``, or whose judges have used
+  ``max_judge_tokens``, stops: it is ``stopped``, with the limit in its ``error`` and a run's in
+  ``provenance["stopped"]`` too, and keeps the cases it finished. A run's remaining cases get no
+  result, so a resumed run calls them; the case in flight finishes within its target's own limit.
 - Each finished case is checkpointed before the next one starts: a run's case result and its score
   in one transaction (``put_results`` with ``scores``), and a scoring job's scores of one case in
   one transaction. Work that runs again skips the cases already finished, so their target or
@@ -36,12 +42,14 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+from martian.evals.limits import Budget
 from martian.evals.model import (
     Case,
     CaseResult,
     CaseStatus,
     Counts,
     Run,
+    RunLimits,
     RunState,
     Score,
     ScorerVersion,
@@ -78,10 +86,23 @@ JUDGE_VERSION_KEY = "martian.judge.version"
 JUDGE_ERROR_LENGTH = 500
 INTERRUPTED = "Interrupted: the process working on this run stopped before it finished"
 NOT_ACCEPTED = "The worker did not accept this work, so nothing ran"
+LIMITS_KEY = "limits"
+"""``Run.provenance`` key of the limits a run, and its scoring jobs, run under."""
+STOPPED_KEY = "stopped"
+"""``Run.provenance`` key of the limit a stopped run reached (``RunLimits.stop``)."""
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def run_limits(run: Run, default: RunLimits | None = None) -> RunLimits:
+    """The limits ``run`` and its scoring jobs run under: its own, ``provenance["limits"]``, else
+    ``default``, the worker's."""
+    own = run.provenance.get(LIMITS_KEY)
+    if isinstance(own, dict):
+        return RunLimits.model_validate(own)
+    return default or RunLimits()
 
 
 def _detail(error: Exception, fallback: str) -> str:
@@ -108,9 +129,11 @@ async def execute_run(
     *,
     call_for: Callable[[Run], TargetCall | None],
     timeout_seconds: float,
+    limits: RunLimits | None = None,
 ) -> None:
     """Run a queued run. ``call_for`` gives the call for the run's target, or ``None`` when the
-    worker cannot call it, which fails the run."""
+    worker cannot call it, which fails the run. ``timeout_seconds`` bounds each target call, and
+    ``limits`` are the worker's, for a run that has none of its own."""
     principal = work.principal
     run = await records.get_run(principal, work.project_id, work.run_id)
     if run is None or run.state != "queued":
@@ -129,7 +152,7 @@ async def execute_run(
     except StoreError:
         return  # another worker took it, or it was cancelled meanwhile
     try:
-        await _run_cases(store, records, principal, run, call_for(run), timeout_seconds)
+        await _run_cases(store, records, principal, run, call_for(run), timeout_seconds, limits)
     except Exception as error:  # noqa: BLE001 - a run never stays running after its worker fails
         log.exception("Eval run %s failed", run.id)
         await _fail_run(records, principal, run, _detail(error, "runner crashed"))
@@ -187,10 +210,13 @@ async def _run_cases(
     run: Run,
     call: TargetCall | None,
     timeout_seconds: float,
+    default_limits: RunLimits | None,
 ) -> None:
     if call is None:
         await _fail_run(records, principal, run, "The worker cannot call this run's target")
         return
+    limits = run_limits(run, default_limits)
+    budget = Budget(limits)
     dataset_id = run.store.dataset_id
     dataset = await store.get_dataset(principal, DEFAULT_PROJECT, dataset_id) if dataset_id else None
     if dataset is None or (run.dataset_digest is not None and dataset.digest != run.dataset_digest):
@@ -207,9 +233,10 @@ async def _run_cases(
     stored = StoreRef(
         experiment_id=native.store.experiment_id, run_id=native.store.run_id, dataset_id=run.store.dataset_id
     )
-    moved = await _move_run(
-        records, principal, run, {"counts": counts, "truncated": truncated, "store": stored}, "running"
-    )
+    changes: dict[str, Any] = {"counts": counts, "truncated": truncated, "store": stored}
+    if LIMITS_KEY not in run.provenance and limits != RunLimits():  # the worker's: kept with the run
+        changes["provenance"] = {**run.provenance, LIMITS_KEY: limits.model_dump(mode="json")}
+    moved = await _move_run(records, principal, run, changes, "running")
     if moved is None:
         return
     run = moved
@@ -228,6 +255,18 @@ async def _run_cases(
             await records.put_results(principal, run.project_id, stopped)
             counts = counts.model_copy(update={"skipped": counts.skipped + len(stopped)})
             break
+        if (reached := budget.reached()) is not None:
+            # The cases not run keep no result, so a resumed run calls them.
+            await store.finish_run(principal, run.project_id, run.id, state="stopped", counts=counts)
+            stop = {
+                "state": "stopped",
+                "counts": counts,
+                "error": reached["message"],
+                "provenance": {**current.provenance, STOPPED_KEY: reached},
+                "finished_at": _now(),
+            }
+            await _move_run(records, principal, current, stop, "running")
+            return
         result, score = await _run_case(store, principal, run, position, case, call, timeout_seconds)
         # The case's checkpoint: its result and its score in one transaction, before the next case.
         await records.put_results(principal, run.project_id, [result], scores=[score] if score else [])
@@ -371,8 +410,11 @@ async def _run_case(
 # --- scoring jobs ---------------------------------------------------------------------------
 
 
-async def execute_scoring(store: EvalStore, records: RecordStore, work: Work, *, judge: Judge | None) -> None:
-    """Score a finished run with a queued scoring job. Without a judge, judge scores are errors."""
+async def execute_scoring(
+    store: EvalStore, records: RecordStore, work: Work, *, judge: Judge | None, limits: RunLimits | None = None
+) -> None:
+    """Score a finished run with a queued scoring job. Without a judge, judge scores are errors.
+    The job runs under its run's limits, else ``limits``, the worker's."""
     principal, project = work.principal, work.project_id
     job = await _job(records, principal, project, work.run_id, work.job_id or "")
     if job is None or job.state != "queued":
@@ -387,7 +429,7 @@ async def execute_scoring(store: EvalStore, records: RecordStore, work: Work, *,
     except StoreError:
         return
     try:
-        await _score_results(store, records, principal, project, job, judge)
+        await _score_results(store, records, principal, project, job, judge, limits)
     except Exception:  # noqa: BLE001 - a job never stays running after its worker fails
         log.exception("Scoring job %s failed", job.id)
         current = await _job(records, principal, project, job.run_id, job.id)
@@ -493,12 +535,19 @@ async def all_results(records: RecordStore, principal: Principal, run: Run) -> l
 
 
 async def _score_results(
-    store: EvalStore, records: RecordStore, principal: Principal, project: str, job: ScoringJob, judge: Judge | None
+    store: EvalStore,
+    records: RecordStore,
+    principal: Principal,
+    project: str,
+    job: ScoringJob,
+    judge: Judge | None,
+    default_limits: RunLimits | None,
 ) -> None:
     run = await records.get_run(principal, project, job.run_id)
     results = await all_results(records, principal, run) if run else []
     if run is None or run.state != "completed" or len(results) > MAX_SCORED_RESULTS:
         raise ValueError("Saved run must be complete and bounded")
+    budget = Budget(run_limits(run, default_limits))
     # The cases a worker that stopped part way already scored: each case's scores of the job are
     # recorded in one transaction, so a case has all of them or none. They are not scored again.
     earlier = [
@@ -538,6 +587,11 @@ async def _score_results(
                 "running",
             )
             return
+        if (reached := budget.reached()) is not None:
+            # The cases not scored keep no scores of the job, so a resumed job scores them.
+            stop = {"state": "stopped", "finished_at": _now(), "error": reached["message"]}
+            await _move_job(records, principal, project, current, stop, "running")
+            return
         finished = result.status in ("passed", "failed")
         output, expected = text_of(result.output), expected_text(result.expectations)
         answers: dict[tuple[str | None, str | None], JudgeResult | str | None] = {}
@@ -557,6 +611,9 @@ async def _score_results(
                     ),
                     f"case {result.case_id} of run {run.id}",
                 )
+        for answer in answers.values():
+            if isinstance(answer, JudgeResult):  # a judge that failed reported nothing to count
+                budget.spend(answer.tokens)
         scores = []
         for scorer in job.scorers:
             value: Any = None

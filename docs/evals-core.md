@@ -295,14 +295,17 @@ All paths are under `/v1/evals`. How the core carries them out:
   id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One
   run at a time per organisation (`409` "An eval run is already in progress"). Run codes count up
   from `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with
-  no usable prompt or expected text, calls the target once per case with no retry, grades each
-  output by exact match and records a trace per called case.
+  no usable prompt or expected text, calls the target once per case with no retry, within the
+  worker's time limit, grades each output by exact match and records a trace per called case. The
+  frozen launch body has no field for a run's limits, so a launched run runs under the worker's
+  ([limits](#limits-stopping-and-resuming)).
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
   target request"), a job keeps the scores it made. A running run whose worker says that nothing is
   working on it any more (`InterruptedRuns`, [the worker](#the-worker)) is cancelled at once, with
-  the reason as its `error`, even when a stop was asked before. Cancelling a finished run is `409`.
+  the reason as its `error`, even when a stop was asked before. Cancelling a finished run, a
+  `stopped` one included, is `409`.
 - **Scoring.** The scorers are the built-in ones by name (`exact_match`, `contains_expected`,
   `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
   registered judges pinned by name and version, or a saved suite version's scorers and policies
@@ -357,7 +360,7 @@ operation of the contract but the ones above. `tests/evals/test_user_ids.py` sav
 `martian ui`'s application with the UI's default reviewer, the session's user, and checks that
 every route that takes or names a user uses the bootstrap's id, for the local user and for a user
 whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
-`test_worker_targets.py` and `test_worker_queue.py` cover the worker.
+`test_worker_targets.py`, `test_worker_queue.py` and `test_worker_limits.py` cover the worker.
 
 ## The worker
 
@@ -389,12 +392,13 @@ A target is called once per case and returns its output ([targets](#targets)); a
 async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
 apply, the `model` and `endpoint` they are pinned to, and the scoring job's `job_id`) to a
 `JudgeResult` (the `model` it used, the `model_version` the provider reported, the judge's own
-`judge_version`, a verdict per scorer, and the reason for each scorer it gave none). A scoring job
+`judge_version`, a verdict per scorer, the reason for each scorer it gave none, and the `tokens`
+the provider reported, or `None`). A scoring job
 sends one request per model its judges are pinned to ([judge models](#judge-models)); the judge is
 [`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
 
 - `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
-  judge=None, target_timeout_seconds=120, credentials=None, executor=None)` runs each piece of
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, limits=None)` runs each piece of
   work as a task of the calling process's event loop. It runs one organisation's work,
   `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
   and `submit` for any other's. It serves tests and runs the work inside each of
@@ -418,13 +422,26 @@ of these (`martian.evals.worker.targets`):
 
 | Target | Given as | Called |
 | --- | --- | --- |
-| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process |
+| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process, on an event loop of a thread of its own |
 | An HTTP target | The shared model's `Target(kind="http")` in `targets` | By the worker itself, with no martian-agents service |
 | A registered agent | An id the worker's `AgentExecutor` admits | Through martian-agents, with leased credentials |
 
 The worker asks the executor only for ids it does not know itself; without an executor it calls
 no registered agent, so an install with no martian-agents service runs functions and HTTP targets.
 
+- **Every call has a time limit**, the worker's `target_timeout_seconds` (`WorkerServices` in a run's
+  process), whatever the target: a call that outlasts it is the case's error, `item timed out`, and
+  the run goes on. An HTTP target's client and a registered agent's executor end their own calls.
+  A function is the installation's own code, which may block its event loop, ignore being
+  cancelled or never return, so it runs on an event loop of a thread of its own
+  (`FunctionTargets` in `martian.evals.worker.targets`), which the worker's loop waits for with the
+  deadline. One loop serves every call, so what a function keeps between calls, such as an HTTP
+  client, stays on one loop. Python cannot stop a thread: a function that has not ended a second
+  after it was cancelled (`GRACE_SECONDS`) keeps its thread, and the next call gets a new one. The
+  thread ends with the process, and each run's process ends with its run
+  ([one process per run](#one-process-per-run)). A thread was chosen over a process per call
+  because a function shares the run's process, its MLflow state and its setup's objects; a process
+  could not call it.
 - **HTTP targets** follow a suite file's URL target, with the same code: the worker POSTs `body`
   to `url` once per case, with no retry, no redirect and no proxy from the environment.
   `{{input}}` in the body is the case's prompt (the text a registered agent is sent),
@@ -500,8 +517,8 @@ process:
 3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
    function, named by its import path so that the new process can import it, and returns
    `WorkerServices`: the store, the record store, the targets by id, the judge, the target
-   timeout, the HTTP targets' `credentials` and the registered agents' `executor`. `options` must
-   be JSON;
+   timeout, the HTTP targets' `credentials`, the registered agents' `executor` and the `limits` of
+   a run that has none of its own. `options` must be JSON;
 4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
    organisation, and exits.
 
@@ -626,7 +643,6 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#144 | Limits, budgets and cancel |
 | MorningHQ/martian-notes#145 | More than one run at a time |
 | MorningHQ/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process (the backend part of MorningHQ/martian-notes#139) |
 
@@ -662,6 +678,9 @@ again continues where it stopped instead of starting over:
   hold one per scorer.
 - **The unit is the case.** The worker calls each case's target once, so a case's result is its
   checkpoint.
+- **A run stopped at a limit** resumes from the same checkpoints when it is queued again
+  ([limits](#limits-stopping-and-resuming)): the cases it stopped before have no result, so they
+  are the ones called.
 
 `tests/evals/record_contract.py` checks that a case's result and its scores are stored together or
 not at all. `tests/evals/test_worker_queue.py` takes over a run whose first worker recorded one
@@ -671,6 +690,47 @@ job's second case: the next worker judges that case again and not the first. Its
 test does the same for a run in a process of its own ([runs whose process
 stopped](#runs-whose-process-stopped)), with newer versions of the dataset and the suite saved
 while the run is in flight.
+
+#### Limits, stopping and resuming
+
+Each piece of work runs under limits (`RunLimits` in the [shared model](eval-model.md)):
+`max_seconds` of wall time and `max_judge_tokens`, the tokens its judges may use, input and output
+together. `None` is no limit.
+
+- **Whose limits.** A run's own, in `provenance.limits`: those its launch gave, else its suite
+  version's (`Suite.settings.limits`). Without either, the worker's (`InProcessWorker(limits=...)`,
+  `WorkerServices.limits`), which the run then keeps in `provenance.limits` when it starts. A
+  scoring job runs under its run's limits, else the worker's. The frozen contract's launch body has
+  no field for limits (`additionalProperties: false`), so a run launched through `POST /v1/evals`
+  runs under the worker's: that is the server setting. The local edition's own launch takes them
+  ([local runs](#local-runs)).
+- **Stopping.** Before each case, work that has run for `max_seconds` since it started, or whose
+  judges have used `max_judge_tokens`, stops. A run is `stopped`, with the limit as a message in
+  `error` (`Stopped at its time limit (max_seconds 1800) after 1803 seconds`) and as
+  `RunLimits.stop` in `provenance.stopped` (`limit`, `value`, `used`, `message`). It keeps its
+  finished cases; the others get no result, not a skipped one, so a resume calls them. The case in
+  flight finishes within its target's time limit. A scoring job is `stopped` the same way, with the
+  limit in `error`, and keeps its scores. A cancel request is checked first, so a run asked to stop
+  ends `cancelled`.
+- **Judge tokens** are what the judge reports in `JudgeResult.tokens`: `sdk_judge` reports the usage
+  the provider gave with its reply. A judgment with no usage, as from `agents_judge`, leaves the
+  limit unkeepable, so a job with `max_judge_tokens` stops after it and says so. A judge that fails
+  counts nothing. A run makes no judge calls in the core; its scoring jobs do.
+- **Resuming.** `resume_run(store, records, worker, principal, run, limits=...)` and
+  `resume_scoring(records, worker, principal, run, job, limits=...)` in `martian.evals.server.launch`
+  queue a stopped run or scoring job again and submit it; the worker goes on after its checkpoints.
+  New `limits`, when given, replace the run's own; a scoring job's replace its run's. Each start
+  has its limits afresh. Resuming is refused (`409`) for work that is not `stopped`, while the
+  organisation has another run in progress or the run another active scoring job, and (`422`) for
+  a run the worker did not run, such as a `martian evals run`, which resumes when its command runs
+  again. The frozen contract has no resume route; the local edition serves one.
+
+`tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
+ignores being cancelled, each ending as `item timed out` while the run completes; stops a run at
+its time limit with one case kept, refuses to cancel it, resumes it with a higher limit and checks
+that only the cases without a result are called; stops a scoring job at its judge token limit and
+resumes it, judging only the cases it had not scored; and stops a job whose judge reports no
+tokens. `tests/evals/test_worker_judges.py` checks the tokens `sdk_judge` reports.
 
 ### The worker's judge
 
@@ -802,7 +862,9 @@ endpoint, and keeps the local edition's default in its data folder.
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
   a one-organisation in-process worker, and a durable queue in the record store's database that
-  either runs from ([the durable queue](#the-durable-queue)).
+  either runs from ([the durable queue](#the-durable-queue)). Every target call has a time limit,
+  and a run or scoring job stops at its time or judge token limit and resumes after what it
+  finished ([limits](#limits-stopping-and-resuming)).
 - [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
   by the edition, and the model and version that produced it recorded with every judge score.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
@@ -1203,11 +1265,13 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 | Route | What it does |
 | --- | --- |
 | `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
-| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
+| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ..., "limits": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
+| `POST /v1/local/runs/{run_id}/resume` | `{"limits": ...}`: go on with a run that stopped at one of its limits, or whose suite's scoring job did, after what it finished, optionally under new limits. `202` with the run |
 
 ```json
 {"request_id": "…", "agent_id": "<target id>", "dataset_name": "support-faq", "max_items": 100,
- "suite_version_id": "<suite version id>", "acknowledge_model_cost": true}
+ "suite_version_id": "<suite version id>", "acknowledge_model_cost": true,
+ "limits": {"max_seconds": 1800, "max_judge_tokens": 200000}}
 ```
 
 - **Admission** is the launch's (`admit_run` in `martian.evals.server.launch`): one run at a time
@@ -1223,7 +1287,9 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
   target's `name`, which is the run's `agent_name`. It keeps the published dataset version it
   reads (`store.dataset_id`, `dataset_digest`) and the suite version (`suite_id`,
   `suite_version`, `suite_digest`, and `provenance.suite` with its API id, its name and
-  `model_judges`, whether it has a model judge).
+  `model_judges`, whether it has a model judge), and its `limits` in `provenance.limits`, which its
+  suite's scoring job runs under too ([limits](#limits-stopping-and-resuming)). `LocalWorker` has
+  no limits of its own, so a run launched without any has none.
 - **The run.** `LocalWorker` queues each piece of work, and its worker, served beside the app,
   hands it to a `ProcessWorker` whose HTTP targets
   ([targets](#targets)) are the local targets, read from the data folder at each check and each
@@ -1241,11 +1307,17 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
   its own if the run completed (`execute_scoring`: the suite's scorers and policies over the saved outputs, its
   judges on the SDK judge, which reads the provider's key from the environment `martian ui` runs
   in; a skipped case has no output, so its scores are errors and the job ends `partial`), and is
-  `cancelled` otherwise ("The run did not complete, so its suite did not score it").
-- **Run again** repeats a run that has finished (`completed`, `partial`, `failed` or `cancelled`;
-  a queued or running one is `409`) with what it kept: the same target, the same dataset version,
-  even when a newer one is published, the same suite version, even when the suite has a newer one,
-  and the same record budget. Its suite's judges are pinned to the default judge model of the
+  `cancelled` otherwise ("The run did not complete, so its suite did not score it"). A run that
+  stopped at one of its limits leaves the job queued, to score the run once it resumes and
+  completes.
+- **Resume** goes on with a run that stopped at one of its limits, in a new process, after the cases
+  it finished, and then its suite scores it; or, for a completed run whose suite's scoring job
+  stopped at one, with that job, after the cases it scored. `limits` in the request replace the
+  run's. A run in neither case is `409`, and a run `martian evals run` recorded `422`.
+- **Run again** repeats a run that has finished (`completed`, `partial`, `failed`, `cancelled` or
+  `stopped`; a queued or running one is `409`) with what it kept: the same target, the same dataset
+  version, even when a newer one is published, the same suite version, even when the suite has a
+  newer one, the same record budget and the same limits, unless the request gives others. Its suite's judges are pinned to the default judge model of the
   moment, as any new scoring job is. The new run names the one it repeats in
   `provenance.repeat_of`. A run with no saved settings, such as a suite-file run from `martian evals run` or a CI run, is
   `422`; a run whose target was removed is `404` ("Target not found").
@@ -1257,8 +1329,10 @@ with a loopback HTTP target that wants the key and a loopback OpenAI-compatible 
 default judge model, and checks that the run completes in its own process with its results,
 traces and the suite's scores, model judges included, that the server's process never reads the
 key, that run again keeps the target, dataset version, suite version and budget when newer
-versions exist, the refusals above, the suite job of a run that does not complete, and that the
-frozen launch runs too.
+versions exist, the refusals above, the suite job of a run that does not complete, that the
+frozen launch runs too, and that a run whose target answers after its time limit stops with its
+first case, leaves its suite's job queued, and resumed with a higher limit calls only its second
+case and is then scored.
 
 #### Runs whose process stopped
 
@@ -1381,18 +1455,23 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version. In the store, an MLflow run in the default project's experiment |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version and the run's `limits` when it has any. In the store, an MLflow run in the default project's experiment |
 | `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id` |
 | `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
   not. A run that stops on an error is `failed`, with `error` naming the exception's type, and an
-  interrupted one is `cancelled`. The process holds the run while it runs, so `martian ui` leaves
-  it alone; a run whose process was killed before it could record its end is finished by
-  `martian ui` when it starts or when the run is cancelled there
-  ([runs whose process stopped](#runs-whose-process-stopped)).
-- A resumed run is a new run. A case whose verdict it reuses from the output folder's
+  interrupted one is `cancelled`. A run that reached one of its limits (`limits` in the suite file,
+  `--max-seconds`, `--max-judge-tokens`) is `stopped`, with the limit in `error` and
+  `provenance.stopped`, and the cases it did not reach have no result
+  ([`docs/evals.md`](evals.md#run-a-suite-file-locally)). The process holds the run while it runs,
+  so `martian ui` leaves it alone; cancelling it there sets `cancel_requested_at`, which the
+  process reads every second (`RunRecorder.watch_cancel`), so it stops before its next case as
+  `cancelled`, keeping the cases it finished, and no later write of the run drops the request. A
+  run whose process was killed before it could record its end is finished by `martian ui` when it
+  starts or when the run is cancelled there ([runs whose process stopped](#runs-whose-process-stopped)).
+- A resumed run is a new run, with its limits afresh. A case whose verdict it reuses from the output folder's
   `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
   that graded the case; that result's trace route answers `409`.
 - The data folder is opened, with its default project, before anything in the output folder
@@ -1409,7 +1488,10 @@ default project:
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
 trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
-cannot be opened.
+cannot be opened. It also times out a function target that hangs and a URL target that sends its
+reply a byte at a time while the run finishes; stops a run at its time limit and at its judge token
+limit, against a loopback judge that reports its usage, and resumes each after the cases it
+finished; and cancels a running command's run from the local edition's cancel route.
 
 ## Not built yet
 
@@ -1419,11 +1501,12 @@ cannot be opened.
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
 | The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
+| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
-`test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py`, `test_worker_queue.py`
-and the store and record tests run the core without the backend. The `Evals core`
+`test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py`, `test_worker_queue.py`,
+`test_worker_limits.py` and the store and record tests run the core without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

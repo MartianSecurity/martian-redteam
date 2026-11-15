@@ -10,11 +10,19 @@ point it at your own server. The run, its case results, scores and traces are al
 local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
 a finished case is skipped while nothing that produced its verdict has changed. Use ``martian ci``
 when a result must be recorded on the platform.
+
+Every target call has a time limit, ``target.timeout_seconds``: a URL target's client stops the
+call, and a function runs on a thread of its own, which the run stops waiting for at the limit. A
+run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``): once it reaches one, it
+calls no more targets, records the cases it finished, and ends ``stopped``; running it again
+resumes after them. Cancelling the run in ``martian ui`` stops it the same way, as ``cancelled``.
 """
 
 from __future__ import annotations
 
+import contextvars
 import csv
+import functools
 import hashlib
 import importlib.util
 import json
@@ -24,7 +32,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -132,7 +140,8 @@ def _check_url(url: str) -> None:
 
 
 class TargetRef(_Model):
-    """The thing under test: a Python function in a file, or an HTTP endpoint that takes a JSON POST."""
+    """The thing under test: a Python function in a file, or an HTTP endpoint that takes a JSON POST.
+    ``timeout_seconds`` bounds each call of either."""
 
     file: str | None = None
     function: str = "target"
@@ -148,7 +157,7 @@ class TargetRef(_Model):
             raise ValueError("a target needs a file or a url, not both")
         given = self.model_fields_set
         if self.file is not None:
-            extra = sorted(given & {"headers", "body", "response_path", "timeout_seconds"})
+            extra = sorted(given & {"headers", "body", "response_path"})
             if extra:
                 raise ValueError(f"{', '.join(extra)} only applies to a url target")
             return self
@@ -320,6 +329,14 @@ class MlflowConfig(_Model):
     experiment: str | None = None
 
 
+class LimitsConfig(_Model):
+    """When the run stops before its last case: after ``max_seconds`` of wall time, or once its
+    judges have used ``max_judge_tokens`` tokens (``RunLimits``)."""
+
+    max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_judge_tokens: int | None = Field(default=None, ge=1)
+
+
 class Suite(_Model):
     """The YAML file. Paths are relative to the file itself."""
 
@@ -332,6 +349,7 @@ class Suite(_Model):
     output: str = "results"
     input_key: str = "message"
     mlflow: MlflowConfig = Field(default_factory=MlflowConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -343,6 +361,8 @@ class Suite(_Model):
             raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
+        if self.limits.max_judge_tokens is not None and not kinds:
+            raise ValueError("limits.max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
         calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
         if calls and self.target is None:
             raise ValueError(
@@ -536,12 +556,19 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
     return reply
 
 
+TIMED_OUT = "the target did not answer within target.timeout_seconds"
+NOT_RUN = "the run stopped before this case"
+CLIENT_SLACK_SECONDS = 1.0
+"""How much longer than ``timeout_seconds`` a URL target's call may take in all: its client's
+timeout bounds each step of the call, so a server that sends its reply a little at a time could
+otherwise outlast it, and the client's own errors, which name the setting to check, end it first."""
+
+
 def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     """Call the endpoint once per case: no retry, no redirect, no proxy from the environment.
 
-    Errors name what went wrong but never the address, the headers or the response body. The
-    returned function has a ``failure_reason(inputs)`` attribute, so the runner can report why
-    a case's call failed. The evals core's worker calls an HTTP target with the same pieces
+    Errors are ``TargetCallError``s that name what went wrong but never the address, the headers or
+    the response body. The evals core's worker calls an HTTP target with the same pieces
     (:mod:`martian.evals.worker.targets`).
     """
     url = _from_environment(reference.url or "", "target.url")
@@ -552,45 +579,93 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     headers = {name: _from_environment(value, f"target.headers.{name}") for name, value in reference.headers.items()}
     steps = [part for part in (reference.response_path or "").split(".") if part]
 
-    def send(inputs: dict[str, Any]) -> Any:
+    def call(**inputs: Any) -> Any:
         body = _fill(reference.body, _case_values(inputs, input_key))
         try:
             with httpx.Client(timeout=reference.timeout_seconds, follow_redirects=False, trust_env=False) as client:
                 response = client.post(url, headers=headers, json=body)
         except httpx.ReadTimeout:
-            raise TargetCallError("the target did not answer within target.timeout_seconds") from None
+            raise TargetCallError(TIMED_OUT) from None
         except httpx.HTTPError as error:
             raise _unreachable(error) from None
         return _reply(response, steps)
 
-    # Why each failed call failed, by the inputs it was given: the evaluator reports only that
-    # a call failed. Two cases with identical inputs send identical requests, so sharing is safe.
-    reasons: dict[str, list[str]] = {}
-    lock = threading.Lock()
-
-    def key(inputs: dict[str, Any]) -> str:
-        return json.dumps(inputs, sort_keys=True, default=str)
-
-    def call(**inputs: Any) -> Any:
-        try:
-            return send(inputs)
-        except TargetCallError as error:
-            with lock:
-                reasons.setdefault(key(inputs), []).append(str(error))
-            raise
-
-    def failure_reason(inputs: dict[str, Any]) -> str | None:
-        with lock:
-            found = reasons.get(key(inputs))
-            return found.pop(0) if found else None
-
-    call.failure_reason = failure_reason  # type: ignore[attr-defined]
     return call
 
 
+def _function_target(function: Callable[..., Any], timeout_seconds: float) -> Callable[..., Any]:
+    """Call the target function on a thread of its own and wait for it at most ``timeout_seconds``.
+
+    A function that has not returned by then is the case's error (``TIMED_OUT``), and the run goes
+    on. Python cannot stop a thread, so the function keeps its thread, a daemon thread that ends
+    with the process, until it returns. The thread runs in a copy of the caller's context, so the
+    spans the function records with MLflow tracing stay in the case's trace. The wrapper keeps the
+    function's signature, which MLflow's evaluation harness reads."""
+
+    @functools.wraps(function)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        context = contextvars.copy_context()
+        outcome: dict[str, Any] = {}
+        ended = threading.Event()
+
+        def run() -> None:
+            try:
+                outcome["value"] = context.run(function, *args, **kwargs)
+            except BaseException as error:  # noqa: BLE001 - raised again in the caller's thread
+                outcome["error"] = error
+            finally:
+                ended.set()
+
+        threading.Thread(target=run, name="martian-evals-target", daemon=True).start()
+        if not ended.wait(timeout_seconds):
+            raise TargetCallError(TIMED_OUT)
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["value"]
+
+    return call
+
+
+class _Calls:
+    """The target as MLflow's evaluation harness calls it, once per case. Once the run must stop
+    (``stopping()``) it calls the target no more, and the case is ``NOT_RUN``. It keeps why each
+    call failed with a ``TargetCallError``, the SDK's own words, by the inputs it was given, since
+    the harness reports only that a call failed; two cases with identical inputs send identical
+    requests, so sharing is safe. A function target's own exception may hold anything, so it is
+    not kept."""
+
+    def __init__(self, target: Callable[..., Any], stopping: Callable[[], bool]) -> None:
+        self._reasons: dict[str, list[str]] = {}
+        self._lock = threading.Lock()
+
+        @functools.wraps(target)
+        def call(**inputs: Any) -> Any:
+            try:
+                if stopping():
+                    raise TargetCallError(NOT_RUN)
+                return target(**inputs)
+            except TargetCallError as error:
+                with self._lock:
+                    self._reasons.setdefault(self._key(inputs), []).append(str(error))
+                raise
+
+        self.predict_fn = call
+
+    @staticmethod
+    def _key(inputs: dict[str, Any]) -> str:
+        return json.dumps(inputs, sort_keys=True, default=str)
+
+    def failure_reason(self, inputs: dict[str, Any]) -> str | None:
+        """Why one call with ``inputs`` failed, in the SDK's words, or None."""
+        with self._lock:
+            found = self._reasons.get(self._key(inputs))
+            return found.pop(0) if found else None
+
+
 def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
+    """The target's call, which never takes much longer than ``timeout_seconds``, whatever it is."""
     if reference.url is not None:
-        return _http_target(reference, input_key)
+        return _function_target(_http_target(reference, input_key), reference.timeout_seconds + CLIENT_SLACK_SECONDS)
     file = Path(reference.file or "")
     file = file if file.is_absolute() else (base / file)
     spec = importlib.util.spec_from_file_location("martian_evals_target", file)
@@ -605,7 +680,7 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
     function: Callable[..., Any] | None = getattr(module, reference.function, None)
     if function is None or not callable(function):
         raise ConfigError(f"the target file has no function {reference.function!r}")
-    return function
+    return _function_target(function, reference.timeout_seconds)
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
@@ -868,6 +943,9 @@ def _summary(
     seconds: float,
     invalidated: int,
     false_refusals: dict[str, Any] | None = None,
+    *,
+    not_run: int = 0,
+    stopped: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     per_check = {
         label: {
@@ -898,17 +976,28 @@ def _summary(
         "target_errors": target_errors,
         "check_errors": check_errors,
         "invalidated": invalidated,
+        "not_run": not_run,
+        "stopped": stopped,
         "seconds_this_run": round(seconds, 1),
     }
 
 
-def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str) -> None:
-    """JUnit XML for CI systems: a failed check is a failure, a case without a verdict an error."""
+def write_junit(
+    records: list[dict[str, Any]],
+    path: Path,
+    *,
+    suite_name: str,
+    not_run: Sequence[str] = (),
+    stopped: str = "",
+) -> None:
+    """JUnit XML for CI systems: a failed check is a failure, a case without a verdict an error,
+    and so is each case of ``not_run``, which a run that stopped did not reach, with ``stopped``."""
     failures = sum(r["passed"] is False for r in records)
-    errors = sum(r["passed"] is None for r in records)
+    errors = sum(r["passed"] is None for r in records) + len(not_run)
+    tests = len(records) + len(not_run)
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        f'<testsuite name={quoteattr(suite_name)} tests="{len(records)}" failures="{failures}" errors="{errors}">',
+        f'<testsuite name={quoteattr(suite_name)} tests="{tests}" failures="{failures}" errors="{errors}">',
     ]
     for record in records:
         lines.append(f"  <testcase classname={quoteattr(suite_name)} name={quoteattr(str(record['id']))}>")
@@ -923,8 +1012,28 @@ def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str) -
         elif record["passed"] is None:
             lines.append(f"    <error message={quoteattr(message[:2000])}/>")
         lines.append("  </testcase>")
+    for case_id in not_run:
+        lines.append(f"  <testcase classname={quoteattr(suite_name)} name={quoteattr(case_id)}>")
+        lines.append(f"    <error message={quoteattr(f'not run: {stopped}'[:2000])}/>")
+        lines.append("  </testcase>")
     lines.append("</testsuite>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _judge_tokens(assessments: Any, judges: set[str]) -> list[int | None]:
+    """The tokens of each judgment of one case that has a verdict, as the provider reported them
+    in its feedback (None for one that reported none). A judgment that failed reports nothing."""
+    from martian.evals.limits import reported_tokens
+
+    found: list[int | None] = []
+    for assessment in assessments if isinstance(assessments, list) else []:
+        feedback = assessment.get("feedback") if isinstance(assessment, dict) else None
+        if assessment.get("assessment_name") not in judges or not isinstance(feedback, dict):
+            continue
+        if feedback.get("error") or feedback.get("value") is None:
+            continue
+        found.append(reported_tokens(assessment.get("metadata") or {}))
+    return found
 
 
 def run_suite(
@@ -936,6 +1045,8 @@ def run_suite(
     resume: bool = True,
     progress: Callable[[str], None] | None = None,
     home: str | Path | None = None,
+    max_seconds: float | None = None,
+    max_judge_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Run the suite and return its summary. Writes results.jsonl, summary.json and junit.xml, and
     records the run, its case results, scores and traces in the local edition's data folder
@@ -943,10 +1054,17 @@ def run_suite(
     shows it (:mod:`martian.evals.run_record`). The returned summary also names that run, under
     ``run``; summary.json does not.
 
+    ``max_seconds`` and ``max_judge_tokens`` replace the suite file's ``limits``. A run that
+    reaches one, or that is cancelled in ``martian ui``, calls no more targets: the cases it
+    finished are kept, the others have no result (``not_run``), and running it again resumes
+    after them. The summary's ``stopped`` says which limit it reached.
+
     The suite is read through the shared model (:func:`martian.evals.suite_file.load_suite_file`),
     so a field the model has no place for is refused with the field named, never ignored.
     """
+    from martian.evals.limits import Budget
     from martian.evals.local import data_folder
+    from martian.evals.model import RunLimits
     from martian.evals.run_record import GradedCase, RunRecorder
     from martian.evals.suite_file import load_suite_file
 
@@ -969,14 +1087,20 @@ def run_suite(
         raise ConfigError("without a target, every case needs an `outputs` (or `output`) value to grade")
     if suite.target is not None and stored:
         raise ConfigError("the data file has stored outputs and the suite also names a target; use one or the other")
+    limits = RunLimits(
+        max_seconds=suite.limits.max_seconds if max_seconds is None else max_seconds,
+        max_judge_tokens=suite.limits.max_judge_tokens if max_judge_tokens is None else max_judge_tokens,
+    )
+    judges = {check.label for check in suite.checks if check.type in JUDGES}
+    if limits.max_judge_tokens is not None and not judges:
+        raise ConfigError("max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
-    failure_reason: Callable[[dict[str, Any]], str | None] | None = getattr(target, "failure_reason", None)
     scorers = _build_scorers(suite)
     labels = [check.label for check in suite.checks]
 
     folder = Path(output) if output is not None else base / suite.output
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
-    with RunRecorder(data_folder(home), model) as recorder:
+    with RunRecorder(data_folder(home), model, limits=limits) as recorder:
         results = Results(folder, resume=resume)
         suite_print = _suite_fingerprint(suite, base)
         prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
@@ -1014,6 +1138,16 @@ def run_suite(
             limit=limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
         )
+        # Started once the run is recorded: its limits run from here, and a cancel in martian ui
+        # reaches it from here.
+        budget = Budget(limits)
+        cancelled = recorder.watch_cancel()
+
+        def stopping() -> bool:
+            return cancelled.is_set() or budget.reached() is not None
+
+        calls = _Calls(target, stopping) if target is not None else None
+        ran: set[str] = set()  # the cases graded in this run
         # Leave MLflow as it was found: another evaluation in this process must not inherit this
         # run's store, experiment or worker settings.
         previous_uri = mlflow.get_tracking_uri()
@@ -1028,6 +1162,10 @@ def run_suite(
             mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")
             mlflow.set_experiment(suite.mlflow.experiment or Path(path).stem)
             for start in range(0, len(todo), suite.batch):
+                # Limits are checked before each batch, and before each target call within one:
+                # a batch's judges finish once it has started.
+                if stopping():
+                    break
                 batch = todo[start : start + suite.batch]
                 data = []
                 for case in batch:
@@ -1040,19 +1178,27 @@ def run_suite(
                         row["outputs"] = case["outputs"]
                     data.append(row)
                 frame: Any = evaluate_rows(
-                    data=data, scorers=scorers, predict_fn=target
+                    data=data, scorers=scorers, predict_fn=calls.predict_fn if calls else None
                 ).result_df  # never None: evaluate_rows raises
                 by_id = {case["id"]: case for case in batch}
                 recorded: list[GradedCase] = []
+                skipped: set[str] = set()  # the cases of the batch the run stopped before
                 for position in range(len(frame)):
                     case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
                     response = frame["response"].iloc[position] if "response" in frame.columns else None
                     state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
                     broke = _missing(response) or "ERROR" in state
-                    # A function target's exception may hold anything, so only a URL target gives a reason.
-                    reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
+                    # A function target's exception may hold anything, so only the SDK's own words
+                    # (TargetCallError) give a reason.
+                    reason = (calls.failure_reason(case["inputs"]) if broke and calls else None) or (
                         "the target call failed" if broke else None
                     )
+                    if reason == NOT_RUN:
+                        skipped.add(case["id"])
+                        continue
+                    if "assessments" in frame.columns:
+                        for tokens in _judge_tokens(frame["assessments"].iloc[position], judges):
+                            budget.spend(tokens)
                     verdicts: dict[str, dict[str, Any]] = {}
                     for label in labels:
                         value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
@@ -1093,25 +1239,33 @@ def run_suite(
                     results.append(record)
                     trace = frame["trace"].iloc[position] if "trace" in frame.columns else None
                     recorded.append(graded(case, record, trace))
-                # MLflow leaves out a row whose trace it could not read back. That case has no
-                # verdict, so it is an error now and is graded again on the next run.
-                seen = {item.record["id"] for item in recorded}
+                # MLflow leaves out a row whose trace it could not read back, such as a traced
+                # function's that had not ended: that case has no verdict, so it is an error now,
+                # with the target's reason when it gave one, and is graded again on the next run.
+                seen = {item.record["id"] for item in recorded} | skipped
                 for case in batch:
-                    if case["id"] not in seen:
-                        missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
-                        record = {
-                            "id": case["id"],
-                            "passed": None,
-                            "checks": {label: dict(missing) for label in labels},
-                            "inputs": case["inputs"],
-                            "output": None,
-                            "error": None,
-                            "fingerprint": prints[case["id"]],
-                        }
-                        results.append(record)
-                        recorded.append(graded(case, record))
+                    if case["id"] in seen:
+                        continue
+                    reason = calls.failure_reason(case["inputs"]) if calls else None
+                    if reason == NOT_RUN:
+                        skipped.add(case["id"])
+                        continue
+                    detail = "the target failed" if reason else "no result was recorded for this case"
+                    missing = {"passed": None, "rationale": None, "error": detail}
+                    record = {
+                        "id": case["id"],
+                        "passed": None,
+                        "checks": {label: dict(missing) for label in labels},
+                        "inputs": case["inputs"],
+                        "output": None,
+                        "error": reason,
+                        "fingerprint": prints[case["id"]],
+                    }
+                    results.append(record)
+                    recorded.append(graded(case, record))
                 recorder.graded(recorded)
-                say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
+                ran |= {item.record["id"] for item in recorded}
+                say(f"{len(ran)}/{len(todo)} cases graded")
         finally:
             mlflow.set_tracking_uri(previous_uri)
             restore_active_experiment_id(previous_experiment)
@@ -1121,12 +1275,32 @@ def run_suite(
                 else:
                     os.environ[name] = value
 
+        # The cases the run stopped before have no result, so the next run grades them.
+        not_run = [case["id"] for case in todo if case["id"] not in ran]
+        stopped = budget.reached() if not_run and not cancelled.is_set() else None
         final = results.records()
-        ordered = [final[case["id"]] for case in cases if case["id"] in final]
+        ordered = [final[case["id"]] for case in cases if case["id"] in final and case["id"] not in not_run]
         refusals = _false_refusals(suite.checks, ordered, {case["id"]: case["expectations"] for case in cases})
-        summary = _summary(ordered, labels, time.monotonic() - started, invalidated, refusals)
+        summary = _summary(
+            ordered,
+            labels,
+            time.monotonic() - started,
+            invalidated,
+            refusals,
+            not_run=len(not_run),
+            stopped=stopped,
+        )
         summary["output"] = str(folder)
+        if not_run and cancelled.is_set():
+            summary["cancelled"] = True
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)
-        recorder.finish()
+        why = "the run was cancelled" if cancelled.is_set() else (stopped or {}).get("message", "")
+        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem, not_run=not_run, stopped=why)
+        if not not_run:
+            recorder.finish()
+        elif cancelled.is_set():
+            recorder.cancel()
+        else:
+            assert stopped is not None  # only a limit or a cancel leaves a case not run
+            recorder.stop(stopped)
     return {**summary, "run": recorder.reference()}

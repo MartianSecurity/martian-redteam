@@ -35,6 +35,12 @@ so a worker in another process sees it too. A worker that can tell when nothing 
 any more also implements :class:`InterruptedRuns`, so that cancelling such a run finishes it at once
 instead of waiting for a next case that never comes. :func:`execute_run` and
 :func:`execute_scoring` are the work itself, for any worker to call.
+
+Every target call has the worker's time limit (``target_timeout_seconds``), whatever the target.
+Each piece of work also runs under limits (:class:`~martian.evals.model.RunLimits`): the run's own,
+kept in ``Run.provenance["limits"]`` (a scoring job has its run's), else the worker's. Work that
+reaches one stops before its next case as ``stopped``, with the limit in its ``error``, and keeps
+its finished cases, so it can be resumed (:func:`martian.evals.server.launch.resume_run`).
 """
 
 from __future__ import annotations
@@ -67,7 +73,9 @@ class Work:
 
 TargetCall = Callable[[Case], Awaitable[Any]]
 """Calls the thing under test with one case and returns its output. An exception or a timeout is
-the case's error; the worker never retries."""
+the case's error; the worker never retries. A function the worker is given as a target runs on an
+event loop of a thread of its own, so a function that blocks, or never returns, ends its case as
+``item timed out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
 
 
 class Credentials(Protocol):
@@ -145,13 +153,16 @@ class JudgeResult:
     ``model@model_version``, or ``model`` alone without a version. ``judge_version`` names the
     judge's own prompt and rules (``response-rubrics-v1`` for the SDK judge), recorded on each
     score. ``errors`` holds, by scorer name, why the judge gave a scorer of the request no verdict,
-    such as a judge kind it cannot grade."""
+    such as a judge kind it cannot grade. ``tokens`` is how many tokens the judge's model calls for
+    the request used, input and output together, as the provider reported them, or None when it
+    reported none; a scoring job counts them against its judge token limit (``RunLimits``)."""
 
     model: str
     verdicts: Mapping[str, Verdict] = field(default_factory=dict)
     model_version: str = ""
     judge_version: str = ""
     errors: Mapping[str, str] = field(default_factory=dict)
+    tokens: int | None = None
 
 
 class JudgeError(Exception):

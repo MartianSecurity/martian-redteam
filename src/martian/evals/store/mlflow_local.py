@@ -130,6 +130,7 @@ _RUN_STATUS = {
     "partial": "FINISHED",
     "failed": "FAILED",
     "cancelled": "KILLED",
+    "stopped": "KILLED",
 }
 _TRACE_STATE = {"ok": "OK", "error": "ERROR", "in_progress": "IN_PROGRESS", "unknown": "STATE_UNSPECIFIED"}
 _TRACE_STATE_BACK: dict[str, ModelTraceState] = {

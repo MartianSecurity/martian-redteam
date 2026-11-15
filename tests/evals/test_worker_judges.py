@@ -193,6 +193,21 @@ def test_server_scoring_grades_with_the_sdk_judge_on_the_judges_endpoint(records
     assert len(judged(found["exact_match"])) == 2
 
 
+def test_the_sdk_judge_reports_the_tokens_its_provider_reported(endpoint):
+    judge = sdk_judge(model="openai:/your-model", max_retries=0)
+    request = JudgeRequest(
+        principal=SINGLE_USER,
+        prompt="How do I reset my password?",
+        expected="Use the reset link.",
+        output="Use the reset link.",
+        scorers=(builtin_scorer("correctness"),),
+        endpoint=endpoint.origin + "/v1",
+    )
+    answer = asyncio.run(judge(request))
+    # The loopback model reports 10 prompt and 5 completion tokens; a token limit counts both.
+    assert (answer.verdicts["correctness"].value, answer.tokens) == (True, 15)
+
+
 def test_a_provider_failure_names_the_setting_on_each_score(records, endpoint, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "a-wrong-key")
     client, served = core(records, sdk_judge(model="openai:/your-model", max_retries=0))

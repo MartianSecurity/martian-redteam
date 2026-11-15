@@ -13,7 +13,9 @@ work stays in the queue until it has ended, and a worker takes it again if this 
 first. ``targets`` are the targets it calls itself, by id: a ``TargetCall``, or an HTTP target whose
 ``${NAME}`` values come from ``credentials``. ``executor`` calls the registered agents, through
 martian-agents, for any other id (:mod:`martian.evals.worker.targets`). The judge, if any, is one
-``Judge`` for every model scorer.
+``Judge`` for every model scorer. ``target_timeout_seconds`` bounds every target call, and
+``limits`` are the installation's limits for a run that has none of its own
+(:class:`~martian.evals.model.RunLimits`).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from martian.evals.model import Run, Target
+from martian.evals.model import Run, RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
@@ -47,6 +49,7 @@ class InProcessWorker:
         target_timeout_seconds: float = 120.0,
         credentials: Credentials | None = None,
         executor: AgentExecutor | None = None,
+        limits: RunLimits | None = None,
     ) -> None:
         self._store = store
         self._records = records
@@ -59,6 +62,7 @@ class InProcessWorker:
         self._timeout = target_timeout_seconds
         self._credentials = credentials
         self._executor = executor
+        self._limits = limits
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -108,6 +112,7 @@ class InProcessWorker:
                 work,
                 call_for=lambda run: self._call_for(work.principal, run),
                 timeout_seconds=self._timeout,
+                limits=self._limits,
             )
         else:
-            await execute_scoring(self._store, self._records, work, judge=self._judge)
+            await execute_scoring(self._store, self._records, work, judge=self._judge, limits=self._limits)
