@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
@@ -20,6 +20,10 @@ from martian.evals._judge_transport import (
     PROVIDER_RETRIES_KEY,
     invoke_response_judge,
 )
+from martian.evals.cache import HIT_KEY
+
+if TYPE_CHECKING:
+    from martian.evals.cache import ModelCallCache
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
 RESPONSE_CONDITIONS_VERSION = "response-conditions-v1"
@@ -408,6 +412,7 @@ def response_guidelines(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Create a response-only MLflow-compatible scorer for expectations.guidelines.
 
@@ -430,6 +435,8 @@ def response_guidelines(
     errors raise, so MLflow records a scorer error and assert_checks fails closed.
     Private local Feedback metadata retains validated per-rule checks and prompt
     digests. Opt in to the rendered prompt only in a private evidence store.
+    ``cache`` (:class:`martian.evals.cache.ModelCallCache`, as ``martian evals run --cache``
+    passes it) replays the judgment stored for the same full request, and stores a new one.
     """
     return _response_judge(
         model=model,
@@ -443,6 +450,7 @@ def response_guidelines(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
@@ -457,6 +465,7 @@ def response_conditions(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge expectations.conditions with explicit, caller-controlled polarity.
 
@@ -482,6 +491,7 @@ def response_conditions(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
@@ -497,6 +507,7 @@ def response_rubric(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge expectations.rubric / expectations.rubrics with direct pass/fail verdicts.
 
@@ -516,6 +527,7 @@ def response_rubric(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+        cache=cache,
     )
 
 
@@ -583,6 +595,7 @@ def _response_judge(
     rate_limit_wait_seconds: float,
     headers: Mapping[str, str] | None,
     endpoint: str | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """The three judges' shared implementation. ``endpoint`` is the base address of the
     OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
@@ -598,6 +611,14 @@ def _response_judge(
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
         headers=headers,
+    )
+
+    version = (
+        RESPONSE_CONDITIONS_VERSION
+        if mode == "conditions"
+        else RESPONSE_RUBRICS_VERSION
+        if mode == "rubrics"
+        else RESPONSE_GUIDELINES_VERSION
     )
 
     @scorer(name=name)
@@ -698,6 +719,8 @@ def _response_judge(
             rate_limit_wait_seconds=rate_limit_wait_seconds,
             headers=extra_headers,
             endpoint=endpoint,
+            cache=cache,
+            judge_version=version,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -729,6 +752,8 @@ def _response_judge(
                 rate_limit_wait_seconds=rate_limit_wait_seconds,
                 headers=extra_headers,
                 endpoint=endpoint,
+                cache=cache,
+                judge_version=version,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
@@ -740,13 +765,6 @@ def _response_judge(
             review_messages = []
         rendered = _json([{"role": m.role, "content": m.content} for m in messages])
         metadata = dict(feedback.metadata or {})
-        version = (
-            RESPONSE_CONDITIONS_VERSION
-            if mode == "conditions"
-            else RESPONSE_RUBRICS_VERSION
-            if mode == "rubrics"
-            else RESPONSE_GUIDELINES_VERSION
-        )
         criteria_hash_key = (
             "martian.judge.conditions_sha256"
             if mode == "conditions"
@@ -780,10 +798,18 @@ def _response_judge(
         if verify:
             metadata["martian.judge.draft"] = _json(draft)
             metadata["martian.judge.review_metadata"] = _json(dict(feedback.metadata or {}))
+            # A stage replayed from the cache made no call and used no tokens. The judgment is
+            # replayed only when both stages were.
+            stages = (draft["metadata"], metadata)
+            replayed = [stage.get(HIT_KEY) == "hit" for stage in stages]
             for token_key in ("mlflow.assessment.judgeInputTokens", "mlflow.assessment.judgeOutputTokens"):
-                first, second = draft["metadata"].get(token_key), metadata.get(token_key)
+                first, second = (
+                    0 if hit else stage.get(token_key) for hit, stage in zip(replayed, stages, strict=True)
+                )
                 if first is not None and second is not None:
                     metadata[token_key] = str(int(first) + int(second))
+            if not all(replayed):
+                metadata.pop(HIT_KEY, None)
             review_rendered = _json([{"role": m.role, "content": m.content} for m in review_messages])
             metadata["martian.judge.review_prompt_sha256"] = _digest(review_rendered)
             if include_judge_prompt:

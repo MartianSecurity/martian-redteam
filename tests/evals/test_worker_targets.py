@@ -256,17 +256,23 @@ def test_an_unreachable_target_is_each_cases_error_naming_the_setting(records):
 def test_a_launch_of_a_target_the_worker_refuses_names_the_setting_and_records_no_run(records):
     store, principal = MemoryStore(), member("org-a")
     asyncio.run(publish(store, principal))
-    # A ProcessWorker reads its targets at each check, so a live view can hold one it refuses.
-    function = Target(kind="function", file="agent.py", function="target")
-    worker = ProcessWorker(http_services, records, targets={HTTP_TARGET: function})
+    # A ProcessWorker reads its targets at each check, so a live view can hold one it refuses: one
+    # that is neither an HTTP nor a function target, which the worker would run in its own process.
+    function_id = str(uuid.uuid4())
+    targets = {HTTP_TARGET: Target(kind="stored"), function_id: Target(kind="function", file="agent.py", function="f")}
+    worker = ProcessWorker(http_services, records, targets=targets)
     app = create_app(store=store, records=records, principal=lambda: principal, worker=worker)
     with TestClient(app) as client:
         refused = client.post("/v1/evals", json={"agent_id": HTTP_TARGET, "dataset_name": "support-faq"})
         assert (refused.status_code, refused.json()["detail"]) == (
             422,
-            f"the worker calls a Target itself only when it is an http target; check targets['{HTTP_TARGET}']",
+            "the worker calls a Target itself only when it is an http or a function target; "
+            f"check targets['{HTTP_TARGET}']",
         )
         assert client.get("/v1/evals").json() == []
+    # The function target is the worker's own, pinned by its digest, not refused.
+    pinned = asyncio.run(worker.check_target(principal, Target(kind="agent", agent_id=function_id)))
+    assert (pinned["kind"], pinned["agent_id"]) == ("function", function_id)
 
 
 def test_registered_agents_run_through_martian_agents_and_never_over_direct_http(records, endpoint, tmp_path):
@@ -300,10 +306,10 @@ def test_registered_agents_run_through_martian_agents_and_never_over_direct_http
     assert (unknown.status_code, unknown.json()["detail"]) == (404, "Agent not found")
 
 
-async def test_a_worker_calls_a_target_itself_only_when_it_is_an_http_target(records, tmp_path):
-    function = Target(kind="function", file="agent.py", function="target")
-    with pytest.raises(ValueError, match="only when it is an http target"):
-        InProcessWorker(MemoryStore(), records, targets={HTTP_TARGET: function})
+async def test_a_worker_calls_a_target_itself_only_when_it_is_an_http_or_a_function_target(records, tmp_path):
+    stored = Target(kind="stored")
+    with pytest.raises(ValueError, match="only when it is an http or a function target"):
+        InProcessWorker(MemoryStore(), records, targets={HTTP_TARGET: stored})
     with pytest.raises(ValueError, match="both an agent and an http target"):
         ProcessWorker(http_services, records, agents=[HTTP_TARGET], targets={HTTP_TARGET: http_target("http://x")})
     worker = ProcessWorker(
@@ -379,7 +385,7 @@ def test_a_run_reads_and_checks_only_the_target_it_names(tmp_path, endpoint, que
     """Another target the worker has, under some other id, that it would refuse is never read: not
     when the launch checks its own target, before the run is recorded, and not when the run's
     process starts (MartianSecurity/martian-notes#337)."""
-    refused = Target(kind="function", file="agent.py", function="target")
+    refused = Target(kind="stored")
 
     def worker_for(records: SqlRecordStore) -> Any:
         targets = {HTTP_TARGET: http_target(endpoint.url), str(uuid.uuid4()): refused}

@@ -1,7 +1,7 @@
 """Review queues with blind double review.
 
 Revision ID: 0014
-Revises: 0011
+Revises: 0013
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0014"
-down_revision = "0011"
+down_revision = "0013"
 branch_labels = None
 depends_on = None
 

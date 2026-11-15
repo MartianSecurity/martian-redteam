@@ -2,12 +2,13 @@
 
 MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, registered judges
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
-it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
-Traces page's saved views, each judge version's calibrations and their re-checks, the monitors
-that score a project's live traces with what each has scored, the thresholds on their scores
-with the alerts they raise, and the schedules that run a suite against a target with the slots
-each has run, and with how far each has watched the model behind its target; also what
-publishing each dataset version wrote, and the outbox of store writes not yet delivered.
+it gates on, scoring jobs, the human review chain, versioned suites and their audits, editable
+dataset drafts, the Traces page's saved views, each judge version's calibrations and their
+re-checks, the monitors that score a project's live traces with what each has scored, the
+thresholds on their scores with the alerts they raise, and the schedules that run a suite against
+a target with the slots each has run, and with how far each has watched the model behind its
+target; also what publishing each dataset version wrote, and the outbox of store writes not yet
+delivered.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -69,6 +70,24 @@ class SavedView(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class SuiteAudit(BaseModel):
+    """The latest audit of one saved suite version (``martian.evals.audit``): the dataset it was
+    run over, whether it flagged the suite, and the whole result. The evals core's own record: the
+    server keeps no audits, so the shared model has no object for one."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    suite_id: Identifier
+    suite_version: int = Field(ge=1)
+    suite_digest: Digest
+    dataset_name: str = Field(min_length=1, max_length=200)
+    dataset_digest: Digest
+    flagged: bool
+    result: dict[str, Any]
+    created_at: datetime | None = None
+    created_by: str | None = None
 
 
 class DatasetManifest(BaseModel):
@@ -660,6 +679,34 @@ class RecordStore(Protocol):
         so two workers cannot both move it on."""
         ...
 
+    async def list_finished_runs(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        created_before: datetime,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Run]:
+        """The project's runs that are neither ``queued`` nor ``running`` and were created before
+        ``created_before``, oldest first: the runs a retention policy may remove with
+        :meth:`delete_run`. A caller that deletes what it lists asks again without a cursor."""
+        ...
+
+    async def delete_run(self, principal: Principal, project_id: str, run_id: str) -> dict[str, int]:
+        """Remove the run and every record keyed to it, in one transaction: its case results, its
+        scores of every source and scoring job, its scoring jobs, its reviews, the blind mode of its
+        review queues (:class:`BlindQueue`), its work left in the worker's queue, the outbox's
+        deliveries of its scores, whatever their state, and the slot of the schedule that started
+        it. Returns how many rows it removed from each of those tables, by table name.
+
+        Refused as a ``conflict`` while anything still works on the run: the run or one of its
+        scoring jobs is ``queued`` or ``running``, or a worker's claim whose lease has not run out
+        holds its work. Cancel it, or let it end, first. A run that does not exist is
+        ``not_found``. The run's traces and its record in the store (``EvalStore``) are the
+        store's, and stay."""
+        ...
+
     # Case results and the scores the core gates on.
     async def put_results(
         self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
@@ -677,8 +724,9 @@ class RecordStore(Protocol):
         ...
 
     async def put_scores(self, principal: Principal, project_id: str, scores: list[Score]) -> None:
-        """Store scores of a run's cases. A score is replaced only by one from the same scorer and
-        scoring job; a scoring job's scores never replace the run's own."""
+        """Store scores of a run's cases. A score is replaced only by one from the same scorer,
+        scoring job and source: a scoring job's scores never replace the run's own, and a person's
+        answer never replaces a check's or a judge's score of the same name."""
         ...
 
     async def list_scores(
@@ -733,6 +781,15 @@ class RecordStore(Protocol):
     async def list_suites(self, principal: Principal, project_id: str) -> list[Suite]:
         """The latest version of each suite."""
         ...
+
+    async def put_suite_audit(self, principal: Principal, project_id: str, audit: SuiteAudit) -> SuiteAudit:
+        """Store the audit with its suite version, replacing an earlier audit of that version. A
+        suite version not saved raises ``not_found``."""
+        ...
+
+    async def get_suite_audit(
+        self, principal: Principal, project_id: str, suite_id: str, version: int
+    ) -> SuiteAudit | None: ...
 
     # Dataset drafts: editable until published.
     async def create_draft(self, principal: Principal, project_id: str, draft: DatasetDraft) -> DatasetDraft: ...
@@ -954,6 +1011,14 @@ class RecordStore(Protocol):
         ``limit``: the window a threshold on its scores reads."""
         ...
 
+    async def forget_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> dict[str, int]:
+        """Remove what the records keep of traces the store deleted (``EvalStore.delete_traces``),
+        at most ``TRACE_DELETE_LIMIT`` of them a call, in one transaction: each monitor's record of
+        having taken them, with the scores it kept there, and the outbox's deliveries to them,
+        whatever their state. Returns how many rows it removed from each of those tables, by table
+        name. The case results and scores of a run that name a trace stay with their run."""
+        ...
+
     # Thresholds on scores, their state, and the alerts they raise.
     async def create_threshold(
         self, principal: Principal, project_id: str, threshold: Threshold, *, webhook_secret: str | None
@@ -1133,6 +1198,7 @@ __all__ = [
     "ScheduleProgress",
     "ScheduledRun",
     "Subscription",
+    "SuiteAudit",
     "Threshold",
     "ThresholdStatus",
     "WebhookChannel",

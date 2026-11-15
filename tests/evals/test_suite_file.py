@@ -38,9 +38,19 @@ EVERY_FIELD_URL = {
     "target": {
         "url": "https://agent.example/api/chat",
         "headers": {"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
-        "body": {"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        "body": {
+            "message": "{{input}}",
+            "session": "{{uuid}}",
+            "lang": "{{inputs.lang}}",
+            "model": "{{matrix.model}}",
+            "system": "{{matrix.prompt}}",
+        },
         "response_path": "choices.0.message.content",
         "timeout_seconds": 30.5,
+    },
+    "matrix": {
+        "model": ["small", "large"],
+        "prompt": {"terse": "Answer in one line.", "friendly": "Greet, then answer."},
     },
     "judge": {
         "model": "openai:/judge-model",
@@ -142,6 +152,7 @@ EVERY_FIELD_URL = {
     "input_key": "prompt",
     "mlflow": {"tracking_uri": "http://127.0.0.1:5000", "experiment": "every-field"},
     "limits": {"max_seconds": 1800.0, "max_judge_tokens": 200000},
+    "cache": {"folder": "model-cache", "ttl_seconds": 3600.0},
 }
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
@@ -159,7 +170,9 @@ EVERY_FIELD_FUNCTION = {
             "max_score": 1,
             "security": True,
         },
+        {"type": "installed", "name": "prepared_state", "options": {"at_least": 1, "names": ["a", "b"]}},
     ],
+    "cache": {"functions": True},
 }
 
 
@@ -189,7 +202,17 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows", "calls")
+            opaque = (
+                "headers",
+                "body",
+                "inference_params",
+                "conditions",
+                "schema",
+                "rows",
+                "matrix",
+                "calls",
+                "options",
+            )
             if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
@@ -213,14 +236,14 @@ def round_trip(path: Path) -> str:
 
 def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
-    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
+    assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS + runner.INSTALLED_CHECKS)
     used = set().union(*CHECK_OPTIONS.values()) | COMMON_CHECK_FIELDS
     assert used == {info.alias or name for name, info in runner.CheckSpec.model_fields.items()}
 
 
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
-    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS)
+    assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS + runner.CODE_CHECKS + runner.INSTALLED_CHECKS)
     groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS + runner.TOOL_CHECKS
     assert set(groups) <= set(runner.CHECKS)
     assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
@@ -264,9 +287,20 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         kind="http",
         url="https://agent.example/api/chat",
         headers={"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
-        body={"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        body={
+            "message": "{{input}}",
+            "session": "{{uuid}}",
+            "lang": "{{inputs.lang}}",
+            "model": "{{matrix.model}}",
+            "system": "{{matrix.prompt}}",
+        },
         response_path="choices.0.message.content",
     )
+    # The matrix keeps the form it was written in: a list, and a mapping of names to values.
+    assert suite.matrix == {
+        "model": ["small", "large"],
+        "prompt": {"terse": "Answer in one line.", "friendly": "Greet, then answer."},
+    }
     rubric, guidelines, conditions, contains, *_ = suite.scorers
     assert rubric == ScorerVersion(
         name="keeps_secret",
@@ -345,6 +379,7 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
         "limits": {"max_seconds": 1800.0, "max_judge_tokens": 200000},
+        "cache": {"folder": "model-cache", "ttl_seconds": 3600.0, "functions": None},
         "simulator_max_retries": 1,
         "simulator_rate_limit_wait_seconds": 30.0,
         "simulator_headers": {"X-Gateway-Key": "${GATEWAY_KEY}"},
@@ -399,10 +434,13 @@ def test_a_function_target_keeps_its_time_limit_and_a_stored_one_has_none(tmp_pa
 
 
 def test_settings_the_file_leaves_out_stay_the_runners_defaults(tmp_path):
-    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    without_cache = {name: value for name, value in EVERY_FIELD_FUNCTION.items() if name != "cache"}
+    suite, _ = load_suite_file(write(tmp_path, without_cache))
     assert set(suite.settings.model_dump().values()) == {None}
     # Unset limits are left out, so a suite without them keeps the digest it had before them.
     assert "limits" not in suite.settings.model_dump()
+    # No cache block, no cache in the settings, so a suite without one keeps its digest.
+    assert suite.settings.cache is None and "cache" not in suite.model_dump()["settings"]
     assert "concurrency" not in yaml.safe_load(suite_to_yaml(suite))
 
 
