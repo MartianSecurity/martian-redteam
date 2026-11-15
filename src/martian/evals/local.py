@@ -10,7 +10,9 @@ unless the caller names another:
   runs, case results, scores, scoring jobs, reviews, suites and dataset drafts.
 
 ``martian evals run`` records each suite-file run in the same folder
-(:mod:`martian.evals.run_record`), so the UI shows it.
+(:mod:`martian.evals.run_record`), so the UI shows it. Both create the default project when they
+open the folder, so that an application can then record traces into the project's experiment with
+MLflow tracing (``docs/evals-core.md`` gives the settings).
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes and the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal. Every other path is a file of
@@ -23,6 +25,7 @@ stays on there, with any names :data:`ALLOWED_HOSTS_ENV` adds.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import re
@@ -36,9 +39,11 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from martian.evals.model import Project
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import SINGLE_USER, Principal, create_app, current_principal
+from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Principal, create_app, current_principal
 from martian.evals.server.bootstrap import BootstrapPrincipal, principal_out
+from martian.evals.store import StoreError
 from martian.evals.store.mlflow_local import MlflowStore
 
 HOST = "127.0.0.1"
@@ -86,13 +91,25 @@ def data_folder(home: str | Path | None = None) -> Path:
 
 
 def open_stores(home: Path) -> tuple[MlflowStore, SqlRecordStore]:
-    """The store and the record store in the data folder ``home``, created on first use. ``martian
-    ui`` serves them, and ``martian evals run`` records its runs in them."""
+    """The store and the record store in the data folder ``home``, created on first use, with the
+    default project. ``martian ui`` serves them, and ``martian evals run`` records its runs in them.
+
+    The default project is created here, before an application can record traces into its
+    experiment with MLflow tracing: MLflow would otherwise create the experiment itself, with its
+    artifacts outside the data folder, and the store does not take such an experiment as the
+    project. A data folder holding one is refused with :class:`LocalEditionError`."""
     # The local edition sends nothing off this machine.
     os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
     home.mkdir(parents=True, exist_ok=True)
     store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
-    return store, SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    default = Project(id=DEFAULT_PROJECT, name="Default", description="Organization evaluation project")
+    try:
+        asyncio.run(store.create_project(SINGLE_USER, default))
+    except StoreError as error:
+        records.close()
+        raise LocalEditionError(f"the data folder {home} cannot hold the default project: {error.detail}") from None
+    return store, records
 
 
 def listen_address(value: str | None) -> str:

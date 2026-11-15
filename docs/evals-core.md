@@ -479,19 +479,30 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
     tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
     metadata keys, [above](#sessions-and-users).
+  - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
+    a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
+    is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
+    gives as `native.id`). A trace recorded inside an MLflow run that is not a run's, such as one
+    an application starts with `mlflow.start_run()`, belongs to no run.
   - A score is a feedback assessment, and a registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts are files under the run's folder in the artifact root, which must be a local
   folder.
 - Trace search applies MLflow's own filters (run, session, user, tags, time), then the text filter
-  in this process, so a text search reads every trace the other filters match. A session search
-  reads the same traces and groups the first of them in this process.
+  in this process, so a text search reads every trace the other filters match. MLflow's filters
+  have no "or", so a search for a run's traces is two searches, on the tag and on
+  `mlflow.sourceRun`. A session search reads the same traces and groups the first of them in this
+  process.
+- An experiment named by a project's id that the store did not create, such as one MLflow tracing
+  created for an application before the project existed, is not that project: creating the
+  project is refused as a `conflict`.
 
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
-database and reads their sessions, turns and users back through the binding. That module belongs
+database and reads back through the binding their sessions, turns and users, and the run of a
+trace recorded inside a run's MLflow run. That module belongs
 to the [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
 written by one MLflow release reads back the same on the next.
 
@@ -563,10 +574,12 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 - The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
   [above](#bootstrap-response).
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
-  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start
-  (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
-  folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
-  page reads again, since the UI gets no live event from another process.
+  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
+  default project (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs
+  into the same folder ([command-line runs](#command-line-runs)), and an application can record
+  its traces there with MLflow tracing ([below](#traces-from-an-application)). What another
+  process writes while the UI is open shows when a page reads again, since the UI gets no live
+  event from it.
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
   and a session. The local edition answers it with the fixed principal, so the UI needs no
   sign-in:
@@ -601,7 +614,67 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
-when no `--ui-dir` is given, and the container settings below with their warning.
+when no `--ui-dir` is given, the container settings below with their warning, and an application's
+traces ([below](#traces-from-an-application)).
+
+### Traces from an application
+
+An application instrumented with MLflow tracing (`@mlflow.trace`, `mlflow.start_span` or an MLflow
+autolog integration) can record its traces straight into the data folder. `martian ui` then shows
+them in **Traces**, and their conversations in **Sessions**. MLflow's own client writes them into
+the store's database; no other service runs. Start `martian ui` once first, or record a
+`martian evals run`, so the data folder and its default project exist. Then start the application
+with these settings in its environment:
+
+```bash
+export MLFLOW_TRACKING_URI="sqlite:///$HOME/.martian/evals/mlflow.db"
+export MLFLOW_ENABLE_WORKSPACES=true
+export MLFLOW_WORKSPACE=local
+export MLFLOW_EXPERIMENT_NAME=default
+```
+
+| Setting | What it does |
+| --- | --- |
+| `MLFLOW_TRACKING_URI` | The data folder's `mlflow.db`, as `sqlite:///` and the file's absolute path. With `--data-dir` or `MARTIAN_EVALS_HOME`, name that folder's `mlflow.db` |
+| `MLFLOW_ENABLE_WORKSPACES`, `MLFLOW_WORKSPACE` | The store keeps the local user's objects in the MLflow workspace `local` ([the in-process binding](#the-in-process-binding)). Without the first, MLflow refuses to open the database; without the second, it refuses to write |
+| `MLFLOW_EXPERIMENT_NAME` | The default project's experiment, named by the project's id, `default`. Another project's experiment is named by that project's id |
+
+```python
+import mlflow
+
+
+@mlflow.trace
+def answer(message: str, conversation: str, user: str) -> str:
+    # A session and a user group the application's traces in Sessions.
+    mlflow.update_current_trace(session_id=conversation, user=user)
+    return "..."
+```
+
+- A trace's session and user are the ones [above](#sessions-and-users). A trace without a session
+  is in Traces only.
+- A trace recorded inside the application's own MLflow run (`mlflow.start_run()`) belongs to no
+  run in the UI; one recorded inside a run's MLflow run belongs to that run
+  ([the in-process binding](#the-in-process-binding)).
+- Run the application with the MLflow release the SDK installs, such as in the same environment as
+  `martian-sdk[evals]`. A newer MLflow migrates the database's tables, and the SDK then refuses it.
+- MLflow tracing sends traces in the background and sends the rest when the process exits;
+  `mlflow.flush_trace_async_logging()` sends them sooner.
+- The database is a file on this machine, so this does not reach the container image or another
+  machine. An OpenTelemetry endpoint for those is MorningHQ/martian-notes#149.
+
+If the application names the experiment before the default project exists, MLflow creates the
+experiment itself, with its artifacts under the application's working folder, and the store does
+not take it as the project: `martian ui` and `martian evals run` then refuse the data folder with
+exit code `2`. With the settings above, rename that experiment; the next start creates the
+project, and the traces recorded so far stay in the renamed experiment, which the UI does not
+show:
+
+```bash
+python -c 'from mlflow import MlflowClient; c = MlflowClient(); c.rename_experiment(c.get_experiment_by_name("default").experiment_id, "default-old")'
+```
+
+`tests/evals/test_local.py` runs such an application in a process of its own, with only these
+settings, and reads its traces, sessions and spans back through the local edition's routes.
 
 ### The local edition in a container
 
@@ -677,15 +750,16 @@ default project:
 - A resumed run is a new run. A case whose verdict it reuses from the output folder's
   `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
   that graded the case; that result's trace route answers `409`.
-- The data folder is opened before anything in the output folder changes. One that cannot be
-  opened stops the run with exit code `2`.
+- The data folder is opened, with its default project, before anything in the output folder
+  changes. One that cannot be opened stops the run with exit code `2`.
 - The output folder is written as before: `results.jsonl`, `summary.json` and `junit.xml` hold
   what they held. `run_suite` returns the summary with the recorded run under `run`, and the
   command prints the run's code and how to open it. The output folder's `mlflow.db` stays as the
   store of MLflow's evaluation harness, or the server `mlflow.tracking_uri` names gets those
   runs. The core does not read it.
-- Traces that an application records with MLflow tracing, and mapping their `mlflow.sourceRun`
-  to a run, are MorningHQ/martian-notes#148.
+- A suite whose target is instrumented with MLflow tracing shows the target's own spans inside
+  each case's trace. The same application, run outside a suite, can record into the data folder
+  too ([traces from an application](#traces-from-an-application)).
 
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
