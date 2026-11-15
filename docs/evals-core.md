@@ -483,7 +483,7 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **A person's answer never waits on the store** (`martian.evals.outbox`). A review's score is
   saved in the record store first, and a review queue item's status with it; their writes to the
   store are deliveries kept in the record store's outbox (`Delivery`, record store migration
-  `0006`). Each is attempted in the request; when the store cannot take it (MLflow is down), the
+  `0009`). Each is attempted in the request; when the store cannot take it (MLflow is down), the
   request still succeeds and `deliver_due` retries it, 5 seconds after the first failure, doubling
   to at most 15 minutes, until it is delivered or the store refuses it for good (`invalid`:
   `failed`). Every attempt reads back first, so a write that reached the store is never made twice:
@@ -508,8 +508,9 @@ All paths are under `/v1/evals`. How the core carries them out:
   digest in order) as `publishing`, writes the version, reads every case back and marks the
   manifest `published` only when they match (otherwise `409`, and publishing again finishes it).
   While a publication is `publishing`, launching a run, or resuming a stopped one, is `409` ("A
-  dataset is being published; new runs are paused until it finishes"); one that has been `publishing` for more than ten
-  minutes no longer holds runs back. A dataset operation is the record of a published draft; none
+  dataset is being published; new runs are paused until it finishes"), and a
+  [schedule](#schedules)'s slot due then is skipped with that reason; one that has been
+  `publishing` for more than ten minutes no longer holds runs back. A dataset operation is the record of a published draft; none
   is ever left running, so resuming or aborting one is `409` ("Dataset operation is already
   finished").
 - **Manifest-pinned versions.** A run reads every case of its dataset version before it calls the
@@ -2462,6 +2463,13 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   thresholds; `threshold_status` and `set_threshold_status` (a change of state with its alerts, in
   one transaction, while the sequence is the one read) the status; `take_due_alerts`,
   `finish_alert` and `list_alerts` the alerts.
+- Dataset publications (`DatasetManifest` in `martian.evals.records`, [publishing](#write-routes))
+  and the outbox (`Delivery`) are the core's own records too. Migration `0008` adds
+  `martian_dataset_manifests`, one row per publication with its state and the store's dataset id
+  once published; `begin_publication`, `finish_publication`, `manifest_of` and
+  `list_publications` keep them. Migration `0009` adds `martian_deliveries`, one row per store
+  write with its state and next attempt; `put_delivery`, `settle_delivery`, `get_delivery` and
+  `due_deliveries` keep them.
 - Every change publishes an event (`martian.evals.records.events`) naming what changed: its
   `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
   `scoring_job`, its `run_id` too, which reading the job takes.
