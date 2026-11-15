@@ -10,11 +10,11 @@ builds it with `create_app` and supplies these:
 
 | Argument | What it is | Local edition | Martian server |
 | --- | --- | --- | --- |
-| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST: `ServerStore` for the routes it mounts ([the Martian server](#the-martian-server)) |
+| `store` | An `EvalStore` (`martian.evals.store`) | `MlflowStore`, `mlflow-skinny` in-process on SQLite | Its MLflow server over REST: `ServerStore` ([the Martian server](#the-martian-server)) |
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | A `QueueWorker` whose worker process runs each piece of work with `ProcessWorker`, so that a restart loses no run and no two organisations' runs share a process ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | Its `ServerWorker`: each piece of work in a `ProcessWorker` process of its own with the agent's target lease, so no two organisations' runs share a process; the durable queue, so that a restart loses no run, is MorningHQ/martian-notes#139 ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 | `agent_names` | An async function from a principal and agent ids to the agents' display names (`AgentNames`), optional | None: a run carries the name its worker pinned with the target | Its agent registry |
 
@@ -2457,22 +2457,29 @@ an export holds, resuming, and what the receiving store assigns are in
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
-| The rest of the core in the Martian server: runs, scoring, reviews, suites, judges, datasets and drafts, on its records and worker ([the Martian server](#the-martian-server)) | MorningHQ/martian-notes#102 |
+| The Martian server's work on the durable queue (`QueueWorker`) with a worker process of its own ([the Martian server](#the-martian-server)) | MorningHQ/martian-notes#139 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 
 ## The Martian server
 
-MorningHQ/MartianBackend depends on this package and mounts part of the core
-(`app/evals_core.py` there). It binds `current_principal` to its session lookup
-(`organisation_principal` with the member's role, names and platform-admin flag),
-`current_entitlements` to the organisation's plan and `current_store` to a `ServerStore` per
-request: the read half of `EvalStore` on its MLflow REST binding, with the organisation's
-evaluation experiment as the default project. It serves the core's `GET /v1/evals/projects` and
-trace reads (`POST /traces/search`, `POST /sessions/search`, `GET /traces/{trace_id}` and its
-`/payload`), and builds `GET /v1/evals/bootstrap` with `build_bootstrap`. Every other route is
-still the server's own until the record store, the worker and the judge are bound there
-(MorningHQ/martian-notes#102).
+MorningHQ/MartianBackend depends on this package and mounts the core on its own application
+(`app/evals_core.py` there), without `create_app`: it includes the routers of the frozen contract
+and binds the core's dependencies with FastAPI's dependency overrides. `current_principal` is its
+session lookup (`organisation_principal` with the member's role, names and platform-admin flag),
+`current_entitlements` the organisation's plan, `current_store` a `ServerStore` per request (the
+whole `EvalStore` on its MLflow REST binding, with the organisation's evaluation experiment as the
+default project), `current_records` a `SqlRecordStore` on its Postgres (schema `martian`),
+`current_worker` and `optional_worker` its worker (one `ProcessWorker` process per run or
+scoring job, with the agent's target lease; not the durable queue yet), `current_judge_settings`
+each organisation's default judge model, and `current_agent_names` its agent registry. It
+answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
+names, keeps its CI gate and a few explorer routes, and leaves out the core's routes outside the
+contract (`GET /v1/evals/{run_id}/attempts`, OpenTelemetry's `POST /v1/traces`). So a route reads
+what an edition supplies only through these dependencies, never from `create_app`'s
+`app.state` (the OTLP route's write lock is the exception, and the server does not mount it).
+`tests/evals/test_write_routes.py` serves the scorers route on an application of its own that
+way.
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

@@ -8,15 +8,27 @@ import asyncio
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
 
 from martian.evals.manifests import CHANGED, PAUSED, manifest_for
 from martian.evals.model import Case
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, ENTERPRISE, create_app, organisation_principal
+from martian.evals.server import (
+    COMMUNITY,
+    DEFAULT_PROJECT,
+    ENTERPRISE,
+    SINGLE_USER,
+    create_app,
+    current_principal,
+    organisation_principal,
+    scoring,
+)
+from martian.evals.server.dependencies import optional_worker
 from martian.evals.server.drafts import MAX_UPLOAD_BYTES, _limit_body
 from martian.evals.server.projection import user_out
 from martian.evals.store import MemoryStore
@@ -221,6 +233,22 @@ def test_roles_come_from_the_capability_table(memory: Served):
 
 
 # --- scoring ----------------------------------------------------------------------------------
+
+
+def test_the_scorers_read_the_worker_an_edition_binds_on_its_own_application():
+    # The server mounts the core's routers on its own application and binds the core's
+    # dependencies there, without create_app's state (MorningHQ/MartianBackend app/evals_core.py).
+    app = FastAPI()
+    app.include_router(scoring.router)
+    app.dependency_overrides[current_principal] = lambda: SINGLE_USER
+    with TestClient(app) as client:
+        workers = ((SimpleNamespace(judges=True), True), (SimpleNamespace(judges=False), False), (None, False))
+        for worker, judging in workers:
+            app.dependency_overrides[optional_worker] = lambda found=worker: found
+            answered = client.get("/v1/evals/scorers")
+            assert answered.status_code == 200, answered.text
+            available = {s["name"]: s["available"] for s in answered.json()}
+            assert (available["exact_match"], available["correctness"]) == (True, judging)
 
 
 def test_scoring_needs_a_completed_run_and_a_judge_for_model_scorers(records):

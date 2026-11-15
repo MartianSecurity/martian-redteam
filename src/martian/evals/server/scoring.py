@@ -26,7 +26,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import Policy, Run, ScorerVersion, ScoringJob
@@ -36,6 +36,7 @@ from martian.evals.server.admission import ACTIVE, ensure_scoring_place
 from martian.evals.server.dependencies import (
     EntitlementsDep,
     JudgeSettingsDep,
+    OptionalWorkerDep,
     PrincipalDep,
     RecordsDep,
     StoreDep,
@@ -61,7 +62,7 @@ from martian.evals.server.write_schemas import ScoreRequest
 from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
-from martian.evals.worker import Work, Worker, execute
+from martian.evals.worker import Work, execute
 from martian.evals.worker.scorers import BUILTIN_SCORERS, CODE_SCORERS, JUDGE_SCORERS, builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -83,11 +84,6 @@ MONITORING_NOTE = (
 
 def _now() -> datetime:
     return datetime.now(UTC)
-
-
-def _worker(request: Request) -> Worker | None:
-    worker: Worker | None = request.app.state.martian_evals_worker
-    return worker
 
 
 async def find_suite_version(records: RecordStore, principal: Principal, version_id: uuid.UUID) -> Any:
@@ -161,8 +157,9 @@ async def _planned(
 
 
 @router.get("/scorers", response_model=None)
-async def scorers(request: Request, principal: PrincipalDep) -> list[dict[str, Any]]:
-    worker = _worker(request)
+async def scorers(principal: PrincipalDep, worker: OptionalWorkerDep) -> list[dict[str, Any]]:
+    # The worker through its dependency, as every route reads it, so an edition that binds the
+    # dependency (the server mounts the core on its own application) is served the same.
     judging = worker is not None and worker.judges
     return [
         {
