@@ -97,6 +97,8 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    query_keeps,
+    query_order,
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
@@ -614,11 +616,11 @@ class MlflowStore:
                     break
         runs = self._run_ids(experiment.experiment_id, list(infos.values()))
         found = [
-            t for t in (_trace(info, query.project_id, runs=runs) for info in infos.values()) if _matches(t, query)
+            t
+            for t in (_trace(info, query.project_id, runs=runs) for info in infos.values())
+            if _matches(t, query) and query_keeps(t, query)
         ]
-        epoch = datetime.min.replace(tzinfo=UTC)
-        found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
-        return found
+        return query_order(found, query)
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         def work() -> Page[Trace]:

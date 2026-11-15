@@ -174,7 +174,7 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
 | `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
-| `POST /v1/evals/sessions/search` | The sessions among the first 1,000 matching traces ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
+| `POST /v1/evals/sessions/search` | The sessions among the first 1,000 traces the query matches ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
@@ -226,14 +226,13 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `expectation` assessment in a `TraceInfo` and in a result's `annotations`, and every other score
   a `feedback` assessment. Trace search lists feedback only, and its assessment filter reads
   feedback only, as the server's search did (`projection.is_expectation`).
-- **Trace search and sessions.** The store filters on project, session, user, text, state and
-  time and orders by time. The core applies the contract's minimum latency and assessment filters
-  to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
-  most 1,000 matching traces (more is `422`). A cursor belongs to its query: reused with another,
-  it is `409`. A session search is the store's `search_sessions`; with a latency or assessment
-  filter or a latency order, the core reads the first 1,000 traces the store's filters match,
-  applies the rest and groups them the same way. A session search with a cursor is `422`, as on
-  the server.
+- **Trace search and sessions.** Every filter and order of the contract's query is the store's
+  (`TraceQuery` in the model): project, session, user, text, state, time, minimum latency
+  (`min_latency_ms`), a boolean assessment (`verdicts`, feedback only) and newest, oldest, slowest
+  or fastest first (`oldest_first`, `slowest_first`). A page of results is the store's page of the
+  whole project, whatever its size. A cursor names the store's page and belongs to its query:
+  reused with another, it is `409`. A session search is the store's `search_sessions` with the same
+  filters and order. A session search with a cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
