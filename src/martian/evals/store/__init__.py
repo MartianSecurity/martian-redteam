@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import (
     SESSION_TRACE_LIMIT,
     Case,
@@ -79,6 +80,20 @@ def check_session_search(query: TraceQuery, max_traces: int) -> None:
         raise StoreError("invalid", "a session search starts from the first trace; leave out the cursor")
     if not 1 <= max_traces <= SESSION_TRACE_LIMIT:
         raise StoreError("invalid", f"a session search reads between 1 and {SESSION_TRACE_LIMIT} traces")
+
+
+CURSOR_DIGITS = 18
+"""The most digits an offset cursor has, so that it fits SQL's 64-bit ``OFFSET``."""
+
+
+def cursor_offset(cursor: str | None) -> int:
+    """The offset an offset cursor names: 0 without one, else the digits 0-9 a ``next_cursor``
+    holds. Any other cursor is refused as ``invalid``, naming the parameter."""
+    if not cursor:
+        return 0
+    if len(cursor) > CURSOR_DIGITS or not ascii_digits(cursor):
+        raise StoreError("invalid", "cursor is not a next_cursor this store returned")
+    return int(cursor)
 
 
 @runtime_checkable
@@ -245,4 +260,5 @@ __all__ = [
     "StoreState",
     "StoreStatus",
     "check_session_search",
+    "cursor_offset",
 ]

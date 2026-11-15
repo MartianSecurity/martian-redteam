@@ -142,7 +142,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   ([telemetry](security-and-data.md#telemetry)). The child processes import
   `tests/evals/no_outbound_fixture.py`, so run it from the repository root.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
-- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
+- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, the Evals UI is recorded as first-party Apache-2.0 and `NOTICE` attributes it, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - `tests/evals/test_policy_checks.py` measures each policy check on its labelled set in `tests/evals/policy_sets/` and fails unless the error-rate table in `docs/evals.md` gives the same numbers; when a check or its set changes, copy the row the failure prints into that table. Every value in the sets is synthetic, and each secret in `no_secrets.jsonl` has one character written as a JSON escape so the file holds no secret shape.
 - `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
   checks the shape of their labelled set, `tests/evals/benchmarks/grounding_judges.jsonl`.
@@ -150,6 +150,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   `scripts/benchmark_grounding_judges.py --model openai:/<model> --out results.jsonl` (with the
   provider's key and address in the environment) makes one call per case, about 75 in all, and
   prints each judge's false pass and false fail rates for [the evals guide](evals.md#grounding-and-retrieval-judges).
+- `tests/evals/test_conversation_judges.py` drives the conversation judges with a fake provider:
+  their flat verdicts, the turns and quotes checked against the conversation, the suite file's
+  refusals, and a scripted and a simulated conversation run through `martian evals run`, with the
+  verdicts in `results.jsonl`, the summary, the pull-request comment and the core's routes. It also
+  checks the shape of their labelled set, `tests/evals/benchmarks/conversation_judges.jsonl`, which
+  `scripts/benchmark_conversation_judges.py --model openai:/<model> --out results.jsonl` scores with
+  a real model, one call per case, 30 in all, outside CI, for
+  [the evals guide](evals.md#conversation-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.

@@ -121,9 +121,11 @@ agent needs anything else: another HTTP method, a non-JSON body, a multi-step ca
 secret in the body.
 
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
-graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
+graded by your criteria, `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
-`inputs.context` and take no options; `python` names a Python function of your own, in a file
+`inputs.context` and take no options, and `task_completion`, `policy_adherence` and
+`knowledge_retention` the [conversation judges](#conversation-judges), which read a whole
+[conversation](#conversations); `python` names a Python function of your own, in a file
 beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
 the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
 example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
@@ -139,7 +141,7 @@ whether it grades each turn of a [conversation](#conversations) or the conversat
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; and the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -169,7 +171,7 @@ target:
   timeout_seconds: 60        # each call, function or URL target; default 120
 limits:
   max_seconds: 1800          # the run's wall time
-  max_judge_tokens: 200000   # the tokens its LLM judges may use, input and output together
+  max_judge_tokens: 200000   # the tokens its LLM judges and simulated users may use together
 ```
 
 - **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
@@ -182,14 +184,23 @@ limits:
   result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
   prints the limit and exits `2`, and the run shows as **stopped** in the UI with the limit as its
   error. Limits are checked before each batch and before each target call. A batch's judges finish
-  once it has started, so a run can go past `max_judge_tokens` by up to one batch; lower `batch`
-  for a closer bound.
+  once it has started, and a simulated user's reply counts when it comes back, so a run can go past
+  `max_judge_tokens` by up to one batch's judgments, or one reply of each simulated conversation in
+  flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
-- **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
-  reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
-  batch, and says so. A judge call that fails reports nothing and counts nothing.
-  `max_judge_tokens` needs an LLM judge check.
+- **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
+  each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
+  output together, as the provider reports them. A provider that reports none leaves the limit
+  unkeepable, so with `max_judge_tokens` set the run stops after that batch, or before the turn
+  that simulated user wrote is sent, and says which of the two reported none. A call that fails
+  reports nothing and counts nothing. When the run stops there, the message counts the simulated users' tokens
+  apart from the judges', such as `Stopped at its judge token limit (max_judge_tokens 45) after 60
+  tokens (0 by its judges, 60 by its simulated users)`. `max_judge_tokens` needs an LLM judge
+  check or a simulated user.
+- **Tokens used.** `summary.json` has `tokens_this_run`: the tokens of this run's `judges` and,
+  with simulated users, of its `simulator`, each `null` when one of its calls reported none. A
+  resumed run counts only its own calls, as `seconds_this_run` counts only its own time.
 - **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
   next case, as **cancelled**; the command checks for it every second.
 - **With [repeats](#repeated-attempts)**, each attempt's call has the target's time limit, and a
@@ -401,8 +412,8 @@ run stops at and resumes from:
   check. So the attempts that ran are dropped: the case has no result in `results.jsonl` or the
   local Evals UI, `summary.json` counts it in `not_run`, and running again runs all of its
   attempts.
-- **Their judge tokens count.** The judges of the dropped attempts were asked, so what they used
-  counts towards `max_judge_tokens`.
+- **Their tokens count.** The judges of the dropped attempts, and the simulated users of dropped
+  conversations, were asked, so what they used counts towards `max_judge_tokens`.
 - **An attempt that outlasts `timeout_seconds`** is an attempt whose target call failed, an attempt
   without a verdict, as above; it does not stop the run.
 - **What a stopped run counts.** `cases`, the counts and pass rates, `attempts`, `reliability`, the
@@ -497,9 +508,11 @@ with the case's inputs only, so a function that serves both gives `history` a de
   fails when it failed one; a turn without a verdict otherwise leaves it open. Its rationale says
   how the turns went, such as `1 of 2 turns passed, failed on turn 3`.
 - A **conversation check** grades the conversation once: the target's replies, in order, joined
-  by a blank line, against the case's own `expectations`. It is a deterministic check or a
-  [`python` check](#custom-python-checks): an LLM judge grades one turn's reply against that
-  turn's input, `latency` and `cost` measure one call, and the
+  by a blank line, against the case's own `expectations`. It is a deterministic check, a
+  [`python` check](#custom-python-checks) or a [conversation judge](#conversation-judges)
+  (`task_completion`, `policy_adherence`, `knowledge_retention`), which reads the conversation
+  turn by turn and must say `scope: conversation`. The other LLM judges grade one turn's reply
+  against that turn's input, `latency` and `cost` measure one call, and the
   [tool-call checks](#tool-calls-and-trajectories) read the tool calls of one call, so they take
   no `scope: conversation`.
 - **Tool-call checks** grade each turn: a turn's `tool_called`, `tool_not_called`,
@@ -519,7 +532,10 @@ with the case's inputs only, so a function that serves both gives `history` a de
   scope.
 
 Loading refuses a turn that names a check the suite does not have or a conversation check, a
-conversation that no check grades, and a conversation in a suite without a target.
+conversation that no check grades, a conversation in a suite without a target, and a
+[conversation judge](#conversation-judges) the data cannot feed: one in a suite whose data has a
+case of one input, a `task_completion` judge with a scripted conversation that gives no
+`expectations.goal`, and a `policy_adherence` judge with a conversation that has no guidelines.
 
 **False refusals.** A conversation counts once in [`false_refusals`](#false-refusals). A turn
 `no_refusal` check with an expectation key reads each turn's own flag, so a conversation is benign
@@ -540,11 +556,13 @@ checked before each turn's call, so a run can stop in the middle of a conversati
 is then not run, as a case is whose attempts did not all run
 ([limits and repeats](#limits-and-repeats)): the turns it sent are dropped, the case has no
 result, `summary.json` counts it in `not_run`, and running again sends every turn again. The
-judge tokens of the dropped turns still count towards `max_judge_tokens`. Each turn's call has
+judge tokens of the dropped turns still count towards `max_judge_tokens`, as do those of the
+[conversation judges](#conversation-judges), which grade a batch's conversations once their turns
+are done. Each turn's call has
 the target's `timeout_seconds`; a turn that outlasts it is a failed call, which ends its
 conversation as above. A [simulated user](#simulated-users)'s model calls, the turns it writes and
-its goal verdict, are the simulator's, not a judge's: `max_judge_tokens` does not count them, and
-`max_seconds` stops its conversation at the next target call.
+its goal verdict, count towards `max_judge_tokens` too, and a limit stops its conversation at the
+next target call: the turn it wrote then is not sent.
 
 **Resume.** A conversation's turns are part of what its verdict depends on, so changing a turn's
 input, expectations or checks, or a check's scope, grades it again.
@@ -552,7 +570,8 @@ input, expectations or checks, or a check's scope, grades it again.
 **Suite-file runs only.** The pytest gate evaluates one input per row, and the evals core's worker
 sends one prompt per case: it skips a conversation case, scripted or simulated, saying so. Its
 HTTP targets fill in `{{session_id}}`, `{{history}}` and `{{messages}}` as for a case of one input.
-LLM judges of a whole conversation are not built yet (MartianSecurity/martian-notes#176).
+The [conversation judges](#conversation-judges) are scorers in Python too, for conversations you
+pass to `evaluate(...)` yourself.
 
 Every turn is recorded:
 
@@ -624,7 +643,8 @@ and a check named `goal_reached`.
 - After each reply it writes the next message, or sets `done` when its stop condition is met.
 - When the user has sent `max_turns` messages, it is asked once more, only whether the goal was
   reached. A conversation costs at most `max_turns + 1` simulator calls, besides the target's and
-  the judges'.
+  the judges'. The run's `max_judge_tokens` counts their tokens with the judges'
+  ([limits](#run-a-suite-file-locally)), so one limit caps what the run spends on models.
 - Each message is a turn, sent as a [conversation](#conversations)'s turns are, and graded by
   every turn check against the case's expectations; the conversation checks then grade the
   replies.
@@ -635,7 +655,11 @@ its reason as the rationale, such as `With its budget of 4 messages spent, the s
 not reach its goal: ...`. The case passes when every check passes it and the goal was reached.
 With [repeats](#repeated-attempts) each attempt is a conversation of its own, and the goal's
 verdicts combine by the suite's `combine`. A model plays the user, so the same suite can talk
-differently from run to run; repeats show how much.
+differently from run to run; repeats show how much. The simulator grades its own conversation;
+for a second opinion, add a [`task_completion`](#conversation-judges) judge, which reads the same
+goal and the conversation with the suite's judge model. In a suite with one, a simulated
+conversation's conversation checks read its user's goal as `expectations.goal` unless the case's
+expectations give one.
 
 **When it fails.** A simulator call that fails, or a reply that neither ends the conversation nor
 holds a message, ends the conversation as a failed target call does: no check has a verdict, the
@@ -647,7 +671,7 @@ only the last call, the one after the budget is spent, fails, the goal alone has
 | Where | What |
 | --- | --- |
 | `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
-| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation` |
+| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation`. `tokens_this_run` has the simulator's tokens, `simulator`, beside the judges' |
 | The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
 | The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
@@ -2109,6 +2133,122 @@ documents; every verdict it gave was right. The one groundedness error above is 
 A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, by judge.
 Calibrate on your own documents and model before relying on these rates; a change to a judge's
 prompt or schema needs the benchmark run again.
+
+### Conversation judges
+
+Three judges read a whole [conversation](#conversations), turn by turn, where the judges above read
+one reply. Each is a suite-file `type` that takes `scope: conversation`, and a function of the same
+name in `martian.evals`.
+
+| Type | Reads | Passes when | A fail names |
+| --- | --- | --- | --- |
+| `task_completion` | The conversation and the user's goal, `expectations.goal` | By the end, the assistant has done or given what the goal asks for, in full | The turn whose reply fell short, if one did, quoting it |
+| `policy_adherence` | The conversation and `guidelines`, the case's `expectations.guidelines` or else the check's own | No reply breaks a guideline, each read in the light of the turns before it | The first turn whose reply broke one, the guideline, and the words that broke it unless the reply broke it by leaving something out |
+| `knowledge_retention` | The conversation | No reply contradicts or forgets what the user said in that turn or before | The turn whose reply did, the turn the user said it in and the fact, quoted from the user's message, and the reply's words unless it forgot by leaving something out |
+
+A pass of `task_completion` names the turn whose reply completed the goal and quotes it. The
+rationale gives the turn and its words, such as `Turn 3 contradicts or forgets what the user said
+on turn 1: "My order number is A-1002.". It asked for the number again. Turn 3 reply: "What is your
+order number?"`.
+
+```yaml
+checks:
+  - type: task_completion          # each case gives expectations.goal
+    scope: conversation
+  - type: policy_adherence
+    scope: conversation
+    guidelines:                    # for every conversation whose case gives none
+      - "Never ask the customer again for something they already gave."
+  - type: knowledge_retention
+    scope: conversation
+```
+
+- **Conversations only.** A conversation judge without `scope: conversation`, and one in a suite
+  whose data has a case of one input, are refused when the suite loads, with the case named:
+  `case one has one input, and task_completion_judge (a task_completion judge) reads a whole
+  conversation; give the case turns or a simulated_user, or remove the check`. So are a
+  `task_completion` judge with a scripted conversation that gives no `expectations.goal`, and a
+  `policy_adherence` judge with a conversation that has no guidelines. A
+  [simulated conversation](#simulated-users)'s goal is its user's, unless its case gives
+  `expectations.goal`.
+- **What they read.** The conversation as the target answered it, after every turn: the turn checks
+  grade each reply first, and a conversation whose turn did not complete is not judged. A
+  [repeated](#repeated-attempts) case's attempts are each judged, and combine by the check's rule,
+  as any check's do.
+- **In Python**, a judge reads the conversation at `inputs["messages"]`, `role` and `content`
+  messages, each user message followed by the assistant's reply (`system` messages are left out),
+  as `martian evals run` gives it; `messages_key` selects another field:
+
+  ```python
+  from martian.evals import assert_checks, evaluate, knowledge_retention, task_completion
+
+  messages = [
+      {"role": "user", "content": "My order number is A-1002."},
+      {"role": "assistant", "content": "Order A-1002 is waiting for stock."},
+      {"role": "user", "content": "Then please cancel it."},
+      {"role": "assistant", "content": "What is your order number?"},
+  ]
+  model = "openai:/YOUR_JUDGE_MODEL"
+  result = evaluate(
+      data=[{"inputs": {"messages": messages}, "outputs": messages[-1]["content"],
+             "expectations": {"goal": "Cancel order A-1002."}}],
+      scorers=[task_completion(model=model), knowledge_retention(model=model)],
+  )
+  assert_checks(result)
+  ```
+
+**The evidence is checked.** The verdict is one flat JSON object, a reason, the turn numbers and
+quotes, and `pass`, `fail` or `uncertain`, because some models, GLM 5 among them, break nested JSON
+in structured output. The SDK checks it against the conversation: each turn number must be one of
+its turns (a fact's turn no later than the reply's), a guideline number one of the guidelines, and
+each quote a passage of the message it names, letting only runs of whitespace differ, as for the
+[grounding judges](#grounding-and-retrieval-judges). A turn or quote the verdict needs that is
+missing or not there, and `uncertain`, are scorer errors (`judge_missing_turn`,
+`judge_invalid_turn`, `judge_invalid_guideline`, `judge_missing_quote`, `judge_invalid_quote`,
+`judge_uncertain`): the conversation has no verdict, and `martian evals run` and `assert_checks`
+count it as an error. Each judge makes one model call through the shared transport, with its
+retries of replies that carry no judgment and its failure codes. An endpoint that declines
+structured output is asked once more without it; a reply that is not the verdict asked for is
+final, never repaired or asked for again. A conversation that is not user and assistant messages in
+turn, a missing or empty goal and guidelines that are not a nonempty list of text are errors before
+any model call. Feedback metadata records `martian.judge.version` (`task-completion-v1`,
+`policy-adherence-v1` or `knowledge-retention-v1`), `verdict`, `turn` (and `guideline` or
+`fact_turn`), `evidence` (each quote's turn, `user` or `assistant`, and code-point offsets),
+`turns`, `conversation_sha256`, `criteria_sha256`, `prompt_sha256` and `model_calls`;
+`include_judge_prompt=True` also keeps the rendered prompt.
+
+**Where the verdicts show.** A conversation judge is a conversation check, so its verdict on each
+conversation, with the rationale naming the turn, is in `results.jsonl` under the case's `checks`,
+in `summary.json` with `scope: conversation`, in the printed table, in the
+[pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) (its counts, and its
+name among a failed case's checks; the comment never carries a rationale), in the
+[`/turns`](evals-core.md#read-routes) route's `checks` for the conversation, and in the core's read
+routes as a score of source `llm_judge` whose `source_id` is the judge model.
+
+**Measured error rates.** Each judge was scored once against a hand-written labelled set of
+invented conversations of one to three turns,
+[`tests/evals/benchmarks/conversation_judges.jsonl`](../tests/evals/benchmarks/conversation_judges.jsonl)
+(ten cases a judge, half labelled pass; each labelled fail names its turn, and its guideline or the
+turn of its fact), by [`scripts/benchmark_conversation_judges.py`](../scripts/benchmark_conversation_judges.py),
+with GLM 5 (`zai.glm-5` on Amazon Bedrock, us-west-2, through a LiteLLM proxy as `openai:/glm-5`)
+at temperature 0, on 15 November 2026, in 30 model calls. False pass, false fail and errors are as
+for the [grounding judges](#grounding-and-retrieval-judges); "Named the turn" counts the labelled
+fails the judge failed whose verdict named the labelled turn, and guideline or fact turn.
+
+| Judge | Cases (pass / fail) | False pass | False fail | Errors | Named the turn | Mean latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `task_completion` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.8 s |
+| `policy_adherence` | 10 (5 / 5) | 0 of 5 | 1 of 5 | 0 | 5 of 5 | 1.5 s |
+| `knowledge_retention` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.7 s |
+
+The one false fail is a conversation that asked "Which one should I cancel, Music or Video?" before
+cancelling, under the guideline "Before cancelling anything, confirm with the customer which item
+they mean": the judge read it as asking for a second confirmation after the customer answered. The
+prompts were not revised on this set. These are very small samples: with five cases a side,
+observing no error still allows a true rate of up to about 50% (the 95% upper bound), and one run
+measures no run-to-run variation. A judgment took about 460 to 500 input tokens and 75 to 85 output
+tokens on average, by judge. Calibrate on your own conversations and model before relying on them
+in a gate; a change to a judge's prompt or schema needs the benchmark run again.
 
 ### Session enforcement
 

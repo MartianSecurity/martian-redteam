@@ -111,18 +111,26 @@ The grounding judges (`groundedness`, `context_relevance`, `context_sufficiency`
 flat verdict of strings. Their quotes are copied by the model and must be passages of a named
 text (the documents, the response, the request or the expected response) up to whitespace;
 a quote that is not, a missing quote or `uncertain` is a scorer error, never repaired.
+The conversation judges (`task_completion`, `policy_adherence`, `knowledge_retention`,
+`martian.evals.conversation_judges`) read a whole conversation, at `scope: conversation`, with the
+same transport, one call each and a flat verdict of strings and turn numbers. The SDK checks each
+turn number against the conversation and each quote against the message of the turn it names.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
 
 ## Open-source evals core
 
-This repository is the home of the open-source evals core. The names stay as they are: the
+This public repository is the home of the open-source evals core. The names stay as they are: the
 repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
-and the command `martian`. Everything here is Apache-2.0, except `src/martian/ui/`: a build of the
-Evals app from the private frontend, whose packages carry no licence yet
-(MartianSecurity/martian-notes#220). Paid Enterprise features live in the private Martian backend and
-console, which use the core; this repository holds no commercially licensed code. The repository is private until the open-source launch.
+and the command `martian`. Everything here is Apache-2.0 except the third-party code bundled in
+`src/martian/ui/`, a build of the Evals app from the private frontend: the app's own packages are
+Apache-2.0, and the third-party packages and the Inter font bundled with them keep their licences,
+which the build's `third-party-licenses.md` lists. `NOTICE` attributes both. The core is the same
+code in every edition, its paid features behind feature keys; Martian Cloud and On-Premises serve
+it, and the features made only for them are built in the private Martian backend and console,
+outside this repository, which holds no commercially licensed code
+([editions](evals-core.md#editions-and-entitlements)).
 
 The core grows into this layout. Paths marked as planned do not exist yet; the issue named
 next to each one creates it.
@@ -132,7 +140,7 @@ next to each one creates it.
 | `src/martian/evals/` | SDK: suite runner (conversations, and [simulated users](evals.md#simulated-users) with personas from real conversations and a [fidelity report](evals.md#simulator-fidelity)), suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
 | `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes and the OpenTelemetry traces endpoint |
-| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MartianSecurity/martian-notes#105 |
+| `src/martian/evals/store/` | Store interface with its in-process bindings | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; Martian Cloud's binding is its own, outside this repository |
 | `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views) and the worker's queue, portable to SQLite and Postgres | Exists |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
 | `src/martian/evals/local_targets.py` | The local edition's targets in place of an Agents registry: an HTTP endpoint or an OpenAI-compatible model, with the user's key in a file only the user can read, and their `/v1/local/targets` routes ([local targets](evals-core.md#local-targets)) | Exists |

@@ -114,6 +114,16 @@ class RecordContract:
         assert [r.id for r in (await records.list_runs(ORG_A, "p1", states=["running"])).items] == ["r3", "r1"]
         assert await records.get_run(ORG_A, "p1", "r9") is None
 
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; 19 nines is
+    # past the 64-bit OFFSET SQL takes.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 19, id="19-nines")])
+    async def test_a_run_cursor_the_store_did_not_return_is_refused(self, records: RecordStore, cursor: str) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        with pytest.raises(StoreError) as caught:
+            await records.list_runs(ORG_A, "p1", cursor=cursor)
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+
     async def test_a_run_moves_on_only_from_the_state_it_was_expected_in(self, records: RecordStore) -> None:
         started = await records.create_run(ORG_A, run("r1"))
         done = started.model_copy(update={"state": "completed", "counts": Counts(cases=2, passed=2)})
@@ -382,6 +392,8 @@ class RecordContract:
         assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-2", pass_id="third")
         page = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1)
         assert [t.trace_id for t in page.items] == ["tr-2"] and page.next_cursor
+        # A cursor of other digits than 0-9, such as ``²``, which ``int()`` refuses, is no cursor.
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor="²")).items == page.items
         rest = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor=page.next_cursor)
         [scored] = rest.items
         assert (scored.state, scored.scores, scored.created_at is not None) == ("scored", [score], True)
@@ -463,6 +475,7 @@ class RecordContract:
         assert await records.threshold_status(ORG_A, "p1", "t1") == breached
         [stored] = (await records.list_alerts(ORG_A, "p1", "t1")).items
         assert (stored.id, stored.state, stored.created_at is not None) == ("a1", "pending", True)
+        assert (await records.list_alerts(ORG_A, "p1", "t1", cursor="²")).items == [stored]
         assert stored.next_attempt_at is not None
 
         # A due alert is taken by one delivery until it is held no longer, then recorded.

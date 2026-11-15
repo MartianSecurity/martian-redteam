@@ -28,9 +28,11 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    query_keeps,
+    query_order,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import StoreError, StoreStatus, check_session_search, cursor_offset
 from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
@@ -53,7 +55,7 @@ def _new_id(prefix: str) -> str:
 
 
 def _page[T](items: list[T], cursor: str | None, limit: int) -> Page[T]:
-    start = int(cursor) if cursor and cursor.isdigit() else 0
+    start = cursor_offset(cursor)
     chunk = items[start : start + limit]
     return Page[T](items=chunk, next_cursor=str(start + limit) if start + limit < len(items) else None)
 
@@ -266,13 +268,8 @@ class MemoryStore:
                 continue
             if query.until is not None and (when is None or when >= query.until):
                 continue
-            found.append(trace)
-        epoch = datetime.min.replace(tzinfo=UTC)
-        found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
-        return [
-            t.model_copy(update={"spans": [], "scores": self._scores.get((space, query.project_id, t.id), [])})
-            for t in found
-        ]
+            found.append(trace.model_copy(update={"spans": [], "scores": self._scores.get((space, p, trace.id), [])}))
+        return query_order([t for t in found if query_keeps(t, query)], query)
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         return _page(self._matching(principal, query), query.cursor, query.limit)
