@@ -53,6 +53,9 @@ It leaves out what the interfaces cannot list or the model does not describe:
   parameters and metrics (a run's counts are logged again on import), and MLflow's own form of a
   scorer registered outside Martian (its name and version are kept).
 - CI gate sessions, which stay with the server's CI gate.
+- Monitors, their progress and their record of the traces they took
+  ([monitors](evals-core.md#monitors)); exporting them is not built yet. The scores they stored are
+  on their traces, which are exported.
 
 ## The format
 

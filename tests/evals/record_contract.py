@@ -21,7 +21,7 @@ from martian.evals.model import (
     Suite,
     digest,
 )
-from martian.evals.records import EventsLost, RecordStore, SavedView
+from martian.evals.records import EventsLost, Monitor, MonitoredTrace, MonitorProgress, RecordStore, SavedView
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -29,6 +29,10 @@ ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
 T0 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 JUDGE = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", model="openai:/judge")
+
+
+def monitor(monitor_id: str, *, name: str = "Safety") -> Monitor:
+    return Monitor(id=monitor_id, project_id="p1", name=name, scorers=[JUDGE], sampling_rate=0.5)
 
 
 def run(run_id: str, *, minutes: int = 0, state: str = "running") -> Run:
@@ -292,6 +296,57 @@ class RecordContract:
         await records.create_run(ORG_B, run("r1", state="queued"))
         assert (await records.get_run(ORG_A, "p1", "r1")).state == "running"
         assert (await records.list_results(ORG_A, "p1", "r1")).items[0].status == "passed"
+
+    async def test_a_monitor_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_monitor(ORG_A, "p1", monitor("m1", name="Other")) == made
+        await records.create_monitor(ORG_A, "p1", monitor("m0", name="A first"))
+        assert [m.id for m in await records.list_monitors(ORG_A, "p1")] == ["m0", "m1"]
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == MonitorProgress()
+        progress = MonitorProgress(watermark=T0, day=T0.date(), judge_tokens=12, scored=3)
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)
+        paused = await records.update_monitor(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_monitor(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == progress
+        assert await records.get_monitor(ORG_A, "p1", "m1") == paused
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.get_monitor(ORG_A, "p1", "m1") is None
+        assert await records.monitor_progress(ORG_A, "p1", "m1") is None
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_monitor(ORG_A, "p1", "m1"))
+        await refused("not_found", records.update_monitor(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_monitor_takes_each_trace_once_and_only_while_active(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")  # its own
+        # A pass that stopped before storing its scores is taken over by the next.
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="second")
+        score = Score(trace_id="tr-1", scorer="safety", source="llm_judge", value=True, passed=True)
+        done = MonitoredTrace(monitor_id="m1", trace_id="tr-1", state="scored", pass_id="second", scores=[score])
+        await records.finish_monitored_trace(ORG_A, "p1", done)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="third")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-2", pass_id="third")
+        page = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1)
+        assert [t.trace_id for t in page.items] == ["tr-2"] and page.next_cursor
+        rest = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor=page.next_cursor)
+        [scored] = rest.items
+        assert (scored.state, scored.scores, scored.created_at is not None) == ("scored", [score], True)
+        # Paused or gone, it takes nothing; another organisation's monitor of the same id is its own.
+        stored = await records.get_monitor(ORG_A, "p1", "m1")
+        assert stored is not None
+        await records.update_monitor(ORG_A, "p1", stored.model_copy(update={"state": "paused"}), expected_revision=1)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-3", pass_id="third")
+        assert not await records.claim_monitored_trace(ORG_B, "p1", "m1", "tr-3", pass_id="third")
+        assert await records.get_monitor(ORG_B, "p1", "m1") is None
+        assert (await records.list_monitored_traces(ORG_B, "p1", "m1")).items == []
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1")).items == []
 
     async def test_changes_reach_listeners_of_the_same_organisation_only(self, records: RecordStore) -> None:
         mine, theirs = records.events.subscribe(ORG_A), records.events.subscribe(ORG_B)

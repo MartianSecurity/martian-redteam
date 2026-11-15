@@ -59,6 +59,7 @@ from martian.evals.store.mlflow_local import workspace_name
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import fail_unfinished
 from martian.evals.worker.inprocess import InProcessWorker
+from martian.evals.worker.monitor import SETTLE_SECONDS
 from martian.evals.worker.targets import http_target, target_pin
 
 log = logging.getLogger("martian.evals.worker")
@@ -84,7 +85,8 @@ class WorkerServices:
     """What a run's process runs its work with, built in that process by the worker's setup: the
     store and the record store, the targets it calls itself by id, the judge, if any, the time
     limit of each target call, the credentials of HTTP targets, the executor of registered agents,
-    if any, and the limits of a run that has none of its own."""
+    if any, the limits of a run that has none of its own, and how long after its request time a
+    monitor first reads a trace."""
 
     store: EvalStore
     records: RecordStore
@@ -94,6 +96,7 @@ class WorkerServices:
     credentials: Credentials | None = None
     executor: AgentExecutor | None = None
     limits: RunLimits | None = None
+    monitor_settle_seconds: float = SETTLE_SECONDS
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -105,6 +108,7 @@ def dump_work(work: Work) -> dict[str, Any]:
         "project_id": work.project_id,
         "run_id": work.run_id,
         "job_id": work.job_id,
+        "monitor_id": work.monitor_id,
     }
 
 
@@ -117,6 +121,7 @@ def load_work(data: Mapping[str, Any]) -> Work:
         project_id=data["project_id"],
         run_id=data["run_id"],
         job_id=data["job_id"],
+        monitor_id=data.get("monitor_id"),
     )
 
 
@@ -285,6 +290,7 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         credentials=services.credentials,
         executor=services.executor,
         limits=services.limits,
+        monitor_settle_seconds=services.monitor_settle_seconds,
     )
     await worker.submit(work)
     await worker.drain()

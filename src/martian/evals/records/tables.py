@@ -143,9 +143,40 @@ saved_views = Table(
     Column("record", JSON, nullable=False),
 )
 
+# Monitors (migration 0005): ``record`` is the monitor as its routes write it, ``progress`` how far
+# the worker has read the project's traces, which only the worker writes.
+monitors = Table(
+    "martian_monitors",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("progress", JSON, nullable=False),
+)
+
+# Each trace a monitor took for scoring, once: the key is what keeps a monitor from scoring a trace twice.
+monitored_traces = Table(
+    "martian_monitored_traces",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("monitor_id", String(ID), primary_key=True),
+    Column("trace_id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("pass_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_monitored_traces_created", "space", "project_id", "monitor_id", "created_at"),
+)
+
 # The worker's queue (``martian.evals.records.queue``): one row per run launch or scoring job that
-# no worker has finished, removed when one does. ``work`` is the work as the worker reads it.
-# ``token`` is the current claim's, and the claim holds the row until ``lease_expires_at``.
+# no worker has finished, removed when one does, and one per monitor while it exists, taken again
+# each time it is due. ``work`` is the work as the worker reads it. ``token`` is the current
+# claim's, and the claim holds the row until ``lease_expires_at``. A row with ``available_at`` in
+# the future is not taken before then (migration 0005).
 work_queue = Table(
     "martian_work_queue",
     metadata,
@@ -159,6 +190,7 @@ work_queue = Table(
     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("work", JSON, nullable=False),
+    Column("available_at", DateTime(timezone=True), nullable=True),
     Index("ix_martian_work_queue_next", "state", "created_at"),
 )
 
@@ -173,4 +205,6 @@ TABLES = (
     dataset_draft_cases,
     saved_views,
     work_queue,
+    monitors,
+    monitored_traces,
 )

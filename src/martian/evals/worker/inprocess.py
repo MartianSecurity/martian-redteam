@@ -17,7 +17,9 @@ run it pins the run's target again, as :meth:`InProcessWorker.check_target` pinn
 run was admitted, and fails the run without calling a target whose pin changed. The judge, if
 any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds every target call, and
 ``limits`` are the installation's limits for a run that has none of its own
-(:class:`~martian.evals.model.RunLimits`).
+(:class:`~martian.evals.model.RunLimits`). A monitor's work is one pass over its project's new
+traces (:mod:`martian.evals.worker.monitor`), which reads a trace ``monitor_settle_seconds`` after
+its request time.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import execute_run, execute_scoring
+from martian.evals.worker.monitor import SETTLE_SECONDS, execute_monitor
 from martian.evals.worker.targets import http_target, target_call, target_pin
 
 if TYPE_CHECKING:
@@ -52,7 +55,10 @@ class InProcessWorker:
         credentials: Credentials | None = None,
         executor: AgentExecutor | None = None,
         limits: RunLimits | None = None,
+        monitor_settle_seconds: float = SETTLE_SECONDS,
     ) -> None:
+        if monitor_settle_seconds < 0:
+            raise ValueError("monitor_settle_seconds is 0 or more")
         self._store = store
         self._records = records
         self._organisation = organisation_id
@@ -65,6 +71,7 @@ class InProcessWorker:
         self._credentials = credentials
         self._executor = executor
         self._limits = limits
+        self._settle = monitor_settle_seconds
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -122,5 +129,7 @@ class InProcessWorker:
                 timeout_seconds=self._timeout,
                 limits=self._limits,
             )
-        else:
+        elif work.kind == "scoring":
             await execute_scoring(self._store, self._records, work, judge=self._judge, limits=self._limits)
+        else:
+            await execute_monitor(self._store, self._records, work, judge=self._judge, settle_seconds=self._settle)

@@ -555,6 +555,37 @@ same name. The endpoint's own error text is read to choose the message and is ne
 The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
 providers they name the provider's key and address without a variable.
 
+## Score production traces
+
+On an edition with monitoring (Enterprise and On-Premises), a monitor scores a sample of a
+project's live traces, the ones an application records with MLflow tracing or sends over
+[OpenTelemetry](evals-core.md#opentelemetry-traces), with judges and checks, and stores each score
+on its trace, where the Traces page shows it as an assessment. Create one on the evals core:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/monitors" -H 'Content-Type: application/json' -d '{
+  "request_id": "0b9f3c4e-5d0a-4d8e-9a43-3f6d2b9e8c11", "name": "Live safety",
+  "scorers": ["safety", "response_length"], "sampling_rate": 0.1, "filter": {"state": "OK"},
+  "max_judge_tokens_per_day": 200000, "acknowledge_model_cost": true}'
+```
+
+- **Scorers** that need no expected response, since live traffic has none: the checks
+  `valid_json` and `response_length`, the judges `safety` and `policy`, and registered judges by
+  name and version.
+- **`sampling_rate`**, 0 to 1, chooses traces by their id, so the same traces on every pass, and a
+  trace sampled at one rate is sampled at every higher one.
+- **`filter`** takes the Traces page's search filters: text, state, session, user, minimum
+  latency and an assessment.
+- **`max_judge_tokens_per_day`** is required with judges. Once a UTC day's judge tokens reach it,
+  the monitor scores nothing until the next midnight, and its `progress.capped` says so.
+- A new trace is scored within about 31 seconds of its request time, plus its judge's time. A
+  trace recorded more than 20 seconds after its request time is not scored. Each trace is scored
+  at most once by a monitor.
+- `POST .../monitors/{id}/pause`, `.../resume` and `DELETE .../monitors/{id}` stop and restart it.
+
+The local edition (`martian ui`) is Community, so it runs no monitors. How the worker scores,
+the routes and the progress a monitor reports are in [monitors](evals-core.md#monitors).
+
 ## Use
 
 `martian.evals.evaluate(...)` provides the same MLflow prediction/scorer/result

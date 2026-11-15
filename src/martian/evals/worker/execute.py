@@ -705,8 +705,11 @@ async def take_over(records: RecordStore, work: Work) -> None:
     scored again. The case that was in flight has neither, so it runs again.
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
-    A finished or queued record is left alone."""
+    A finished or queued record is left alone. A monitor's pass has no record to queue again: the
+    next pass goes on from the monitor's watermark and takes over the traces it had taken."""
     principal, project = work.principal, work.project_id
+    if work.kind == "monitor":
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state == "running":
@@ -743,9 +746,16 @@ async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> No
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
     as a run's process that exited early: a run or scoring job still queued or running becomes
-    ``failed``. A finished record is left alone."""
+    ``failed``. A finished record is left alone. A monitor, which has no end, keeps ``detail`` as
+    its progress's ``error`` and runs again at its next pass."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "monitor":
+        progress = await records.monitor_progress(principal, project, work.monitor_id or "")
+        if progress is not None:
+            failed = progress.model_copy(update={"error": detail, "last_pass_at": _now()})
+            await records.set_monitor_progress(principal, project, work.monitor_id or "", failed)
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state in ("queued", "running"):
