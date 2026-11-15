@@ -108,7 +108,8 @@ async def admit_run(
 
     A launch admits every run this way. The local edition's launch also names a saved ``suite``
     version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
-    ``provenance.suite``), and adds its own ``provenance``."""
+    ``provenance.suite``, which says whether the suite has a model judge), and adds its own
+    ``provenance``."""
     if await _active(store, records, principal):
         raise HTTPException(409, "An eval run is already in progress")
     admitted: dict[str, Any] = {
@@ -125,6 +126,7 @@ async def admit_run(
             "version_id": str(suite_version_id(suite.id, suite.version)),
             "name": suite.name,
             "digest": suite.digest,
+            "model_judges": any(scorer.kind == "llm_judge" for scorer in suite.scorers),
         }
     run = Run(
         id=run_id,

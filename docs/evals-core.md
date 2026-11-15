@@ -13,7 +13,7 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: each run in a process of its own (`ProcessWorker`), against the user's [local targets](#local-runs) | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | `ProcessWorker`, so that no two organisations' runs share a process ([the worker](#the-worker)) |
 | `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 
 ```python
@@ -409,8 +409,8 @@ no registered agent, so an install with no martian-agents service runs functions
   unexpanded. A worker with no credentials, or one that has no value for a name, fails each case
   with the setting that holds it (`target.headers.Authorization needs the credential
   MARTIAN_TARGET_KEY`) and sends nothing. The local edition's credentials are the keys it keeps
-  for its targets (`LocalTargets.key`, MorningHQ/martian-notes#116); a per-organisation key store
-  is MorningHQ/martian-notes#135.
+  for its targets (`LocalTargets.credential`, [local runs](#local-runs)); a per-organisation key
+  store is MorningHQ/martian-notes#135.
 - **Registered agents** need leased credentials, so they stay on the martian-agents path. An
   `AgentExecutor` has `check(principal, agent_id)`, which admits the agent and returns its pin
   (`provenance.target`), or raises `StoreError` (`not_found`), and `call(principal, run, case,
@@ -610,7 +610,8 @@ endpoint, and keeps the local edition's default in its data folder.
   above.
 - `martian ui`, the local edition: the core and the Evals UI from one process, with no login, the
   targets its user defines in place of an Agents registry, and runs started in the UI, each in a
-  process of its own, which run again with their saved settings. See
+  process of its own and scored by its suite, model judges included, which run again with their
+  saved settings. See
   [the local edition](#the-local-edition-martian-ui), [local targets](#local-targets) and
   [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
@@ -839,8 +840,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   ([below](#traces-from-an-application)). What another process writes while the UI is open shows
   when a page reads again, since the UI gets no live event from it.
 - The worker is `LocalWorker` (`martian.evals.local_runs`): each run started in the UI runs in a
-  process of its own against a local target, and a finished one runs again with the same settings
-  ([local runs](#local-runs)).
+  process of its own against a local target, scored by its suite with the SDK judge, and a
+  finished one runs again with the same settings ([local runs](#local-runs)).
 - The default judge model is a local setting, `judge_model` in `settings.json` in the data folder
   (`FileJudgeSettings`), set from the Judges page or `PUT /v1/evals/judge-model`. The file is
   written when the default is first set ([judge models](#judge-models)).
@@ -981,9 +982,9 @@ Where the keys are and are not:
 - In the shared model a local target is an `http` `Target` whose key header names
   `${MARTIAN_TARGET_KEY}` (`LocalTargets.model_target`), so a run that records it keeps the
   reference, never the key. `LocalTargets.key(id)` is the one way to read a key, and only each
-  run's process reads it, through `LocalTargets.credential(principal, target_id, name)`, which
-  answers `${MARTIAN_TARGET_KEY}` with the key and any other name with nothing
-  ([local runs](#local-runs)).
+  run's process reads it, through `LocalTargets.credential(principal, target_id, name)`, the
+  worker's [`Credentials`](#targets), which answers `MARTIAN_TARGET_KEY` with the key and any other
+  name with nothing ([local runs](#local-runs)).
 
 A launch from the local UI names the chosen target by its id in the launch request's `agent_id`,
 the frozen contract's one target field. Editing a target is not built; remove it and define it
@@ -1008,43 +1009,51 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, and an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`). `202` with the queued run, as the launch |
-| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
+| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
+| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
 
 ```json
 {"request_id": "…", "agent_id": "<target id>", "dataset_name": "support-faq", "max_items": 100,
- "suite_version_id": "<suite version id>"}
+ "suite_version_id": "<suite version id>", "acknowledge_model_cost": true}
 ```
 
 - **Admission** is the launch's (`admit_run` in `martian.evals.server.launch`): one run at a time
   (`409`), run codes from `EV-1001`, idempotent by `request_id` (the same `request_id` with other
   settings is `409`). A target that is not defined is `404` ("Target not found"), a dataset not
-  published `422`, a suite version not saved `404`. A suite with a model judge is `422`: the local
-  edition's worker has no judge.
+  published `422`, a suite version not saved `404`. A suite with a model judge (`correctness`,
+  `safety` or `policy`) calls a model for each judged case, so both routes refuse it with `422`
+  ("Model scoring requires cost acknowledgement") unless `acknowledge_model_cost` is true, as a
+  scoring request does.
 - **What a run keeps.** The run names the target by id (`Run.target`, kind `agent`) and pins it in
-  `provenance.target`: its id, its name and its definition as the shared model's target, with the
-  key as `${MARTIAN_TARGET_KEY}`. The run's `agent_name` is the target's name. It keeps the
-  published dataset version it reads (`store.dataset_id`, `dataset_digest`) and the suite version
-  (`suite_id`, `suite_version`, `suite_digest`, and `provenance.suite` with its API id and name).
-- **The run.** `LocalWorker` hands each piece of work to a `ProcessWorker`, whose setup,
-  `worker_services(home)`, opens the data folder's stores in the new process and builds a call for
-  each local target there (`LocalTargets.call`): one JSON `POST` per case with no retry, no
-  redirect and no proxy from the environment, `{{input}}` filled with the case's prompt and
-  `${MARTIAN_TARGET_KEY}` with the key, read through `LocalTargets.credential` each time the
-  target is called. The work is the core's (`execute_run`): each output graded by exact match, a
-  trace per called case. A call that fails is the case's error, in words that never hold the
-  address, a header, the key or the response.
+  `provenance.target` as the worker pins an HTTP target, `{"kind": "http", "agent_id", "digest"}`
+  with a digest of the target as written and its key as `${MARTIAN_TARGET_KEY}`, and with the
+  target's `name`, which is the run's `agent_name`. It keeps the published dataset version it
+  reads (`store.dataset_id`, `dataset_digest`) and the suite version (`suite_id`,
+  `suite_version`, `suite_digest`, and `provenance.suite` with its API id, its name and
+  `model_judges`, whether it has a model judge).
+- **The run.** `LocalWorker` hands each piece of work to a `ProcessWorker` whose HTTP targets
+  ([targets](#targets)) are the local targets, read from the data folder at each check and each
+  run (`LocalTargets.http_targets`), so each run's process receives them as written. Its setup,
+  `worker_services(home)`, opens the data folder's stores in the new process, gives the worker
+  the keys as its `Credentials` (`LocalTargets.credential`) and the SDK judge (`sdk_judge()`).
+  The worker calls the target itself, once per case, with `{{input}}` the case's prompt and
+  `${MARTIAN_TARGET_KEY}` filled in each time, and grades each output by exact match, with a
+  trace per called case (`execute_run`). A call that fails is the case's error, naming the
+  setting to check and never the address, a header, the key or the response.
 - **The suite.** With a suite, the worker records a queued scoring job of that suite version when
-  it starts the run, so the UI shows it from the start. Once the run's process ends, the job runs
-  in a process of its own if the run completed (`execute_scoring`: the suite's scorers and
-  policies over the saved outputs; a skipped case has no output, so its scores are errors and the
-  job ends `partial`), and is `cancelled` otherwise ("The run did not complete, so its suite did
-  not score it").
+  it starts the run, so the UI shows it from the start. Each judge that names no model is pinned
+  to the default judge model ([judge models](#judge-models)) when the job is recorded, as the
+  scoring route pins it. Once the run's process ends, the job runs in a process of its own if the
+  run completed (`execute_scoring`: the suite's scorers and policies over the saved outputs, its
+  judges on the SDK judge, which reads the provider's key from the environment `martian ui` runs
+  in; a skipped case has no output, so its scores are errors and the job ends `partial`), and is
+  `cancelled` otherwise ("The run did not complete, so its suite did not score it").
 - **Run again** repeats a run that has finished (`completed`, `partial`, `failed` or `cancelled`;
   a queued or running one is `409`) with what it kept: the same target, the same dataset version,
   even when a newer one is published, the same suite version, even when the suite has a newer one,
-  and the same record budget. The new run names the one it repeats in `provenance.repeat_of`. A
-  run with no saved settings, such as a suite-file run from `martian evals run` or a CI run, is
+  and the same record budget. Its suite's judges are pinned to the default judge model of the
+  moment, as any new scoring job is. The new run names the one it repeats in
+  `provenance.repeat_of`. A run with no saved settings, such as a suite-file run from `martian evals run` or a CI run, is
   `422`; a run whose target was removed is `404` ("Target not found").
 - **The key.** The server's own process never reads a key: only each run's process does, and no
   request but the one that defines a target, no answer, log line, trace or record holds one.
@@ -1054,9 +1063,10 @@ stays `running`, as with every worker until the durable queue (MorningHQ/martian
 then blocks the next launch with `409`.
 
 `tests/evals/test_local_runs.py` starts runs through these routes on `martian ui`'s application,
-with a loopback HTTP target that wants the key, and checks that the run completes in its own
-process with its results, traces and the suite's scores, that the server's process never reads
-the key, that run again keeps the target, dataset version, suite version and budget when newer
+with a loopback HTTP target that wants the key and a loopback OpenAI-compatible endpoint as the
+default judge model, and checks that the run completes in its own process with its results,
+traces and the suite's scores, model judges included, that the server's process never reads the
+key, that run again keeps the target, dataset version, suite version and budget when newer
 versions exist, the refusals above, the suite job of a run that does not complete, and that the
 frozen launch runs too.
 

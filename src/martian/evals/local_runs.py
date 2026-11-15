@@ -11,19 +11,22 @@ contract:
   output by exact match, as every launched run does. With a suite, the worker records a queued
   scoring job of that suite version beside the run, and runs it once the run completes, so the
   suite's scorers and policies apply to its results; a run that does not complete cancels it.
+  The suite's model judges run on the SDK judge (:func:`~martian.evals.worker.sdk_judge`), each on
+  its own model or the default judge model, pinned when the job is recorded.
 - ``POST /v1/local/runs/{run_id}/again``: a new run of a finished run with its saved settings: the
   same target, the same dataset version, the same suite version and the same case limit. The new
   run names the one it repeats in ``provenance.repeat_of``.
 
 Both take a ``request_id`` and are idempotent by it, as the launch is. A suite with a model judge
-is refused: the local edition's worker has no judge.
+needs ``acknowledge_model_cost``, in both, as a scoring request does: each judged case is a model
+call on the user's own key.
 
-The key of a local target reaches the target call only inside each run's process: the worker's
-setup (:func:`worker_services`) builds a call for each target there
-(:meth:`~martian.evals.local_targets.LocalTargets.call`), which fills in ``${MARTIAN_TARGET_KEY}``
-from :meth:`~martian.evals.local_targets.LocalTargets.credential`, and so from
-:meth:`~martian.evals.local_targets.LocalTargets.key`, each time it calls the target. The server's
-own process never reads a key, and no request, answer, log line, trace or record holds one.
+The worker calls a local target itself, as an HTTP target of the worker
+(:meth:`~martian.evals.local_targets.LocalTargets.http_targets`, :mod:`martian.evals.worker.targets`),
+in each run's process, and fills in ``${MARTIAN_TARGET_KEY}`` there from the worker's
+``Credentials``, :meth:`~martian.evals.local_targets.LocalTargets.credential`, each time it calls
+the target. The server's own process never reads a key, and no request, answer, log line, trace or
+record holds one.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
@@ -40,6 +43,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Run, ScoringJob, Suite, Target
 from martian.evals.records import RecordStore
@@ -49,17 +53,18 @@ from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
 from martian.evals.server.runs import find_run, lookup_run, writable_key, writable_project
 from martian.evals.server.schemas import EvalRunOut
-from martian.evals.server.scoring import find_suite_version
+from martian.evals.server.scoring import find_suite_version, with_models
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import StoreError
-from martian.evals.worker import ProcessWorker, Work, Worker, WorkerServices
+from martian.evals.worker import ProcessWorker, Work, WorkerServices, sdk_judge
+from martian.evals.worker.targets import http_pin
 
 log = logging.getLogger("martian.evals.worker")
 
 TARGET_TIMEOUT_SECONDS = 120.0
 """How long one call of a local target may take before its case is an error."""
 
-NO_JUDGE = "Model judges require a judge configured for this installation's worker"
+NO_ACKNOWLEDGEMENT = "Model scoring requires cost acknowledgement"
 USED = "request_id was already used for a different eval"
 NOT_COMPLETED = "The run did not complete, so its suite did not score it"
 
@@ -69,54 +74,68 @@ NOT_COMPLETED = "The run did not complete, so its suite did not score it"
 
 def worker_services(home: str) -> WorkerServices:
     """:class:`LocalWorker`'s setup, called in each run's process: the stores in the data folder
-    ``home``, and a call for each local target, which reads the target's key in that process
-    (``LocalTargets.call``)."""
+    ``home``, the local targets' keys as the worker's ``Credentials``, read in that process, and
+    the SDK judge. The local targets themselves arrive with the work, as written, with their keys
+    as references. The judge has no model of its own: each judge scorer names the model it was
+    pinned to, and reads the provider's key from this process's environment."""
     from martian.evals.local import open_stores
 
     folder = Path(home)
     store, records = open_stores(folder)
-    targets = LocalTargets(folder)
-    calls = {target.id: targets.call(target, timeout_seconds=TARGET_TIMEOUT_SECONDS) for target in targets.defined()}
-    return WorkerServices(store, records, targets=calls, target_timeout_seconds=TARGET_TIMEOUT_SECONDS)
+    return WorkerServices(
+        store,
+        records,
+        judge=sdk_judge(),
+        target_timeout_seconds=TARGET_TIMEOUT_SECONDS,
+        credentials=LocalTargets(folder).credential,
+    )
 
 
 class LocalWorker:
     """The local edition's worker. Each piece of work runs in a new process of its own, started by
     a :class:`~martian.evals.worker.ProcessWorker` whose setup is :func:`worker_services`, never in
-    the server's process: MLflow keeps its state for the whole process. It runs no model judge.
+    the server's process: MLflow keeps its state for the whole process. Its HTTP targets are the
+    local targets (``LocalTargets.http_targets``), read at each use, and its judge is the SDK
+    judge.
 
     A run admitted with a suite gets a scoring job of that suite version, recorded ``queued`` when
-    the run is submitted, so the UI shows it from the start. Once the run's process ends, the job
-    runs in a process of its own if the run completed, and is cancelled otherwise.
+    the run is submitted, so the UI shows it from the start, with each judge that names no model
+    pinned to the default judge model then (``judge_settings``). Once the run's process ends, the
+    job runs in a process of its own if the run completed, and is cancelled otherwise.
 
     The work runs while ``martian ui`` does: a run its process had not finished when the server
     stopped stays ``running``, as with any worker until the durable queue (MorningHQ/martian-notes#139).
     """
 
-    def __init__(self, home: Path, records: RecordStore, targets: LocalTargets) -> None:
+    def __init__(
+        self, home: Path, records: RecordStore, targets: LocalTargets, judge_settings: JudgeSettings | None = None
+    ) -> None:
         self._home = home
         self._records = records
         self._targets = targets
+        self._http = targets.http_targets()
+        self._settings = judge_settings
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
     def judges(self) -> bool:
-        return False
+        return True
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
-        """A local target by its id (``agent_id``), pinned by its name and its definition as the
-        shared model's target, with the key as a reference (``LocalTargets.model_target``)."""
+        """A local target by its id (``agent_id``), pinned as the worker pins an HTTP target, by
+        its id and a digest of it as written (``http_pin``), and by its name, which the run shows."""
         found = self._targets.get(target.agent_id) if target.kind == "agent" and target.agent_id else None
         if found is None:
             raise StoreError("not_found", "Target not found")
-        endpoint = self._targets.model_target(found).model_dump(mode="json", exclude_defaults=True)
-        return {"kind": "agent", "agent_id": found.id, "name": found.name, "endpoint": endpoint}
+        return {**http_pin(found.id, self._targets.model_target(found)), "name": found.name}
 
     async def submit(self, work: Work) -> None:
         """Record the suite's scoring job of a run, start the work's process and return; a task
         waits for the process, then runs or cancels the scoring job."""
         scoring = await self._suite_job(work) if work.kind == "run" else None
-        processes = ProcessWorker(worker_services, self._records, options={"home": str(self._home)})
+        processes = ProcessWorker(
+            worker_services, self._records, judges=True, options={"home": str(self._home)}, targets=self._http
+        )
         await processes.submit(work)
         task = asyncio.get_running_loop().create_task(self._then(processes, work, scoring))
         self._tasks.add(task)
@@ -142,7 +161,7 @@ class LocalWorker:
             ScoringJob(
                 id=str(derived_id("suite-scoring", run.id)),
                 run_id=run.id,
-                scorers=list(suite.scorers),
+                scorers=await with_models(self._settings, principal, list(suite.scorers)),
                 policies=list(suite.policies),
                 suite_id=suite.id,
                 suite_version=suite.version,
@@ -189,12 +208,14 @@ class LocalWorker:
 
 class LocalRunRequest(EvalRunRequest):
     suite_version_id: uuid.UUID | None = None
+    acknowledge_model_cost: bool = False
 
 
 class RunAgainRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    acknowledge_model_cost: bool = False
 
 
 def _suite_version_id(run: Run) -> str | None:
@@ -215,10 +236,11 @@ def _same_launch(run: Run, body: LocalRunRequest, principal: Principal) -> bool:
     )
 
 
-def _runnable(suite: Suite, worker: Worker) -> Suite:
-    if any(scorer.kind == "llm_judge" for scorer in suite.scorers) and not worker.judges:
-        raise HTTPException(422, NO_JUDGE)
-    return suite
+def _acknowledged(suite: Suite, acknowledged: bool) -> None:
+    """A suite with a model judge calls a model for each judged case: refuse it unless the request
+    acknowledges the cost, as a scoring request must."""
+    if any(scorer.kind == "llm_judge" for scorer in suite.scorers) and not acknowledged:
+        raise HTTPException(422, NO_ACKNOWLEDGEMENT)
 
 
 router = APIRouter(prefix="/v1/local/runs", tags=["local runs"])
@@ -244,7 +266,7 @@ async def launch_local_run(
         suite = await find_suite_version(records, principal, body.suite_version_id)
         if suite is None:
             raise HTTPException(404, "Suite version not found")
-        _runnable(suite, worker)
+        _acknowledged(suite, body.acknowledge_model_cost)
     run = await admit_run(
         store,
         records,
@@ -296,7 +318,7 @@ async def run_again(
         suite = await records.get_suite(principal, DEFAULT_PROJECT, original.suite_id, version=original.suite_version)
         if suite is None:
             raise HTTPException(422, "The run's suite version is no longer saved")
-        _runnable(suite, worker)
+        _acknowledged(suite, body.acknowledge_model_cost)
     run = await admit_run(
         store,
         records,

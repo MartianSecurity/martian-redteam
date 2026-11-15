@@ -20,7 +20,9 @@ open the folder, so that an application can then record traces into the project'
 MLflow tracing (``docs/evals-core.md`` gives the settings).
 
 Runs started in the UI run in processes of their own, with the edition's worker
-(:class:`~martian.evals.local_runs.LocalWorker`), against the targets the user defines.
+(:class:`~martian.evals.local_runs.LocalWorker`), against the targets the user defines, and their
+suites' model judges run on the SDK judge, on the default judge model in ``settings.json`` or the
+judge's own.
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
@@ -191,13 +193,14 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS)
         raise LocalEditionError(f"there is no built Evals UI in {ui}: index.html is missing")
     store, records = open_stores(home)
     targets = local_targets.LocalTargets(home)
-    worker = local_runs.LocalWorker(home, records, targets)
+    judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
+    worker = local_runs.LocalWorker(home, records, targets, judge_settings)
     app = create_app(
         store=store,
         records=records,
         principal=lambda: SINGLE_USER,
         worker=worker,
-        judge_settings=FileJudgeSettings(home / SETTINGS_FILE),
+        judge_settings=judge_settings,
     )
     app.state.martian_local_targets = targets
     app.include_router(session_router)
