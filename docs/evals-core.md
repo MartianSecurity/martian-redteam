@@ -174,7 +174,7 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}` | `EvalRunDetailOut`: the run and its case results | Records |
 | `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
-| `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
+| `GET /v1/evals/{run_id}/provenance` | The run as admitted, as far as its readers see it (`admission`, the run's [provenance](#run-provenance)), and its run in the store (`native`) | Records and store |
 | `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
 | `POST /v1/evals/sessions/search` | The sessions among the first 1,000 traces the query matches ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
@@ -219,7 +219,7 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   application's user, not a person of the server.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
-  (`NO_AGENT`). `agent_name` is the registered agent's display name from the edition's `agent_names` lookup, asked once per page of runs; without one it is the name a worker pinned with the target (`provenance.target.name`, as the local edition's does), or `null`. A CI run's `ci` is its provenance's `ci`, or its whole provenance. The Evals UI names a run
+  (`NO_AGENT`). `agent_name` is the registered agent's display name from the edition's `agent_names` lookup, asked once per page of runs; without one it is the name a worker pinned with the target (`provenance.target.name`, as the local edition's does), or `null`. A CI run's `ci` is the public keys of its provenance's `ci`, or of its whole provenance: `git_sha`, `ref`, `repo`, `run_url`, `kit_version`, `threshold` and `minimum_coverage`. `provenance` is what the run's readers see of it ([run provenance](#run-provenance)), never the whole of it. The Evals UI names a run
   without an agent name by its dataset, and one whose `source` is `local` as a **Local run**. `dataset_id` is the run's
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
@@ -297,6 +297,46 @@ questions, dataset drafts and operations, Monitoring) are [write routes](#write-
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
+
+### Run provenance
+
+The record store keeps a run's whole `provenance`, for the server's own use. What a route shows
+of it goes through one allowlist of what the run's readers see (`READER_PROVENANCE` and
+`reader_provenance` in `martian.evals.server.projection`): a run response's `provenance` on every
+route that answers with a run (`GET /v1/evals`, `GET /v1/evals/{run_id}`, the launch and cancel
+routes, and the local edition's [launch and run again](#local-runs)), the provenance route's
+`admission`, and the attempts route's `repeats`.
+
+| Key | What a response shows |
+| --- | --- |
+| `dataset` | `id`, `name`, `digest`, `content_sha256` |
+| `agent` | `id`, `artifact_revision`, `revision_source` |
+| `model_version`, `prompt_version`, `repeat_of`, `sdk_version` | The value, when it is text, a number, a boolean or `null` |
+| `target` | `kind`, `agent_id`, `name`, `digest` |
+| `suite` | `id`, `version`, `version_id`, `name`, `digest`, `model_judges` |
+| `repeats` | `attempts`, `combine`, `checks` |
+
+A key or a sub-key the run does not have is left out, and a value of another form than the table
+gives is not shown. Nothing else a run's provenance holds is in any response:
+
+- **A CI run's `provenance.ci`.** The server's CI gate records there the run's attribution with
+  the CI token that uploaded it (`token_id`, `token_name`) and the digests of the upload request
+  and of its items (`request_digest`, `items_digest`). A response shows the attribution only as
+  the run's `ci`, with its public keys (`git_sha`, `ref`, `repo`, `run_url`, `kit_version`,
+  `threshold`, `minimum_coverage`), as the server's own run routes do.
+- **Anything else a worker pins with a target**, beyond the four keys above, such as what the
+  server's `AgentExecutor` pins of a registered agent's connection and approval.
+- **Any other key**, whoever writes it. A key a writer adds for readers is shown only once it is
+  added to the allowlist.
+
+The Evals UI reads `provenance.suite`, `provenance.repeats` and `ci` on the run routes, and
+`dataset`, `agent`, `model_version` and `prompt_version` of the provenance route's `admission`, so
+the allowlist leaves what it shows of a run unchanged.
+`test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps` in
+`tests/evals/test_read_routes.py` records a CI run carrying all four CI token fields and reads it
+through every route that answers with a run or with what a run holds, the core's and the local
+edition's. It also fails when a route under `/v1/evals/{run_id}` or `/v1/local/runs` is added
+that it neither reads nor lists as answering with no run.
 
 ## Write routes
 
@@ -503,7 +543,8 @@ no registered agent, so an install with no martian-agents service runs functions
   store is MorningHQ/martian-notes#135.
 - **Registered agents** need leased credentials, so they stay on the martian-agents path. An
   `AgentExecutor` has `check(principal, agent_id)`, which admits the agent and returns its pin
-  (`provenance.target`), or raises `StoreError` (`not_found`), and `call(principal, run, case,
+  (`provenance.target`, of which the run routes show only `kind`, `agent_id`, `name` and `digest`:
+  [run provenance](#run-provenance)), or raises `StoreError` (`not_found`), and `call(principal, run, case,
   timeout_seconds=...)`, which calls the agent once. On the Martian server, admission pins the
   agent's approved connection and each call carries a short-lived target lease that martian-agents
   exchanges for the credential (`app/evals_targets.py` in MorningHQ/MartianBackend), so the worker
