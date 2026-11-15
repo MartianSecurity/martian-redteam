@@ -27,11 +27,12 @@ from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
 from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
-from mlflow.store.tracking.dbmodels.models import SqlRun
+from mlflow.store.tracking.dbmodels.models import SqlRun, SqlTraceInfo
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
 from mlflow.tracking import fluent as _fluent
+from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
 
@@ -64,11 +65,13 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
     ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
+    ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.request_preview"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
     ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
     ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
+    ("mlflow.utils.search_utils", "SearchTraceUtils.create_page_token"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
 )
 
@@ -81,6 +84,11 @@ MLFLOW_PYTEST_PLUGIN = "mlflow.pytest.plugin"
 RUN_ARTIFACT_URI_LENGTH: int = SqlRun.artifact_uri.type.length
 """The length of MLflow's ``runs.artifact_uri`` column, which keeps a run's artifact location:
 200 characters. Postgres enforces it; SQLite does not."""
+
+TRACE_PREVIEW_LENGTH: int = SqlTraceInfo.request_preview.type.length
+"""The length of MLflow's ``trace_info.request_preview`` column, and of ``response_preview`` beside
+it, which keep a trace's previews: 1,000 characters, the length MLflow tracing shortens its own
+previews to. Postgres enforces it; SQLite does not."""
 
 
 def active_experiment_id() -> str | None:
@@ -122,10 +130,31 @@ class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
         return root
 
 
+def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore) -> None:
+    """Keep the values of the store's SQL statements out of SQLAlchemy's errors and log lines.
+
+    MLflow's SQL store creates its engine itself (``engine``, one per database URL, shared by every
+    MLflow store in the process on that URL), and SQLAlchemy writes a failed statement's values
+    into its error, which MLflow passes on in its own and logs for some database failures. The
+    values of a trace are its request and its response.
+    """
+    store.engine.hide_parameters = True
+
+
 def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, page_token: str | None) -> Any:
     """One page of a dataset's records and the next page token. MLflow has no public reader that
     takes a store."""
     return store._load_dataset_records(dataset_id, page_token=page_token)
+
+
+def trace_page_token(offset: int) -> str | None:
+    """MLflow's page token for a trace search that starts after its first ``offset`` traces, or
+    ``None`` for the first page. MLflow's SQL store pages traces by offset; the token is its own
+    encoding of the offset, which it does not promise to keep."""
+    if offset == 0:
+        return None
+    token: bytes = SearchTraceUtils.create_page_token(offset)  # type: ignore[no-untyped-call]
+    return token.decode("ascii")
 
 
 def mlflow_test_attr() -> str:
@@ -141,6 +170,7 @@ __all__ = [
     "MLFLOW_PYTEST_PLUGIN",
     "PRIVATE_DEPENDENCIES",
     "RUN_ARTIFACT_URI_LENGTH",
+    "TRACE_PREVIEW_LENGTH",
     "TYPE_ONLY",
     "WORKSPACE_HEADER_NAME",
     "AssessmentMetadataKey",
@@ -159,6 +189,7 @@ __all__ = [
     "error_text",
     "get_adapter",
     "get_request_workspace",
+    "hide_sql_parameters",
     "invoke_litellm",
     "is_context_window_error",
     "is_response_format_error",
@@ -168,4 +199,5 @@ __all__ = [
     "parse_model_uri",
     "provider_instance",
     "restore_active_experiment_id",
+    "trace_page_token",
 ]

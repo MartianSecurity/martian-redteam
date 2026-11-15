@@ -115,6 +115,10 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
+- `scripts/trace_store_load.py` is the in-process store's trace load test. It is not part of the
+  suite: `tests/evals/test_trace_store_load.py` only checks its arguments and runs every phase on
+  a few traces on SQLite. Its results and how to re-run it are in
+  [trace store limits](trace-store-limits.md).
 - `tests/evals/test_no_outbound.py` runs `martian evals run`, `martian ui` and the core with a
   process worker as subprocesses under `tests/evals/outbound_guard/sitecustomize.py`, which every
   Python process with that folder on `PYTHONPATH` loads at start. The guard refuses and records
@@ -174,10 +178,10 @@ run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 ## MLflow upgrades
 
 `mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
-test module that runs MLflow itself: the store binding (`test_store_mlflow.py`), the judge
-transport and the judges built on it, the private-import guard (`test_mlflow_private.py`), the
-pytest kit, the suite runner, and the setting that turns MLflow's telemetry off
-(`test_no_outbound.py`). `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
+test module that runs MLflow itself: the store binding (`test_store_mlflow.py`) and its errors
+(`test_store_errors.py`), the judge transport and the judges built on it, the private-import
+guard (`test_mlflow_private.py`), the pytest kit, the suite runner, and the setting that turns
+MLflow's telemetry off (`test_no_outbound.py`). `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
 the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
 the store giving MLflow only ids of MLflow's own form, and the upgrade path.
 `scripts/mlflow_compat.py` lists the modules and runs them on any release:

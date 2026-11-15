@@ -37,15 +37,15 @@ from martian.evals.local import create_local_app
 from martian.evals.model import Project, Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app, organisation_principal, otlp
-from martian.evals.store import MemoryStore, StoreError
-from martian.evals.store.mlflow_local import MlflowStore
+from martian.evals.store import REQUEST_PREVIEW_TRUNCATED, RESPONSE_PREVIEW_TRUNCATED, MemoryStore, StoreError
+from martian.evals.store.mlflow_local import TRACE_SPAN_KEY, MlflowStore
 from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.trace_samples import MODEL, QUESTION, STYLES, UNKNOWN, sample_spans
 
 PROTOBUF = {"content-type": "application/x-protobuf"}
 JSON = {"content-type": "application/json"}
 TRACE = "5b8efff798038103d269b633813fc60c"
-ROOT, CHILD = "eee19b7ec3c1b173", "eee19b7ec3c1b174"
+ROOT, CHILD, TOOL = "eee19b7ec3c1b173", "eee19b7ec3c1b174", "eee19b7ec3c1b175"
 NANOS = 1_763_200_000_000_000_000
 
 
@@ -282,6 +282,55 @@ def test_spans_of_one_trace_in_several_requests_make_one_trace(store, records):
         (CHILD, ROOT, "CHAT_MODEL"),
     ]
     assert detail["info"]["trace_metadata"][MAPPING_KEY] == MAPPING_VERSION
+
+
+def test_a_long_request_stays_whole_in_one_root_span_as_batches_arrive(tmp_path, records):
+    """On the in-process binding the request and response the mapping reads from a trace's root
+    span are kept whole in the binding's own root span, and searched as shortened previews the
+    trace's metadata flags, through every batch that records the trace again."""
+    store = MlflowStore(f"sqlite:///{tmp_path / 'mlflow.db'}", tmp_path / "artifacts")
+    client = TestClient(create_app(store=store, records=records, principal=lambda: SINGLE_USER))
+    request, response = "Where is order 42? " * 100, "Order 42 has shipped. " * 100
+    chat = json_span(CHILD, parent=ROOT, offset_ms=10, duration_ms=50, attributes=[attribute("llm.model_name", MODEL)])
+    root = json_span(
+        ROOT,
+        status={"code": 1},
+        attributes=[attribute("input.value", request), attribute("output.value", response)],
+        name="answer",
+    )
+    # An application span may carry any attribute, the binding's root span marker among them, and
+    # start before its parent, as a span from a host with a skewed clock does. It stays the
+    # application's span.
+    marked = {"key": TRACE_SPAN_KEY, "value": {"boolValue": True}}
+    tool = json_span(TOOL, parent=ROOT, offset_ms=-50, duration_ms=20, attributes=[marked])
+
+    def parentless() -> list[Any]:
+        """The trace's spans without a parent, as MLflow itself reads them."""
+        native = store._store.get_trace("tr-" + TRACE, allow_partial=True)
+        return [span for span in native.data.spans if span.parent_id is None]
+
+    for batch, spans in (((chat,), [CHILD]), ((root, chat), [ROOT, CHILD]), ((tool,), [ROOT, TOOL, CHILD])):
+        assert client.post("/v1/traces", content=json_body(*batch), headers=JSON).json() == {}
+        (stored,) = asyncio.run(store._call(SINGLE_USER, parentless))
+        assert stored.get_attribute(TRACE_SPAN_KEY) is True
+        if batch == (chat,):
+            # Until the root span arrives the trace has no request.
+            assert (stored.inputs, search(client)[0]["request"]) == ("", "")
+            continue
+        assert (stored.inputs, stored.outputs) == (request, response)
+        (row,) = search(client)
+        assert (row["request"], row["response"]) == (request[:997] + "...", response[:997] + "...")
+        detail = client.get(f"/v1/evals/traces/tr-{TRACE}").json()
+        assert (detail["info"]["request_preview"], detail["info"]["response_preview"]) == (request, response)
+        assert (
+            detail["info"]["trace_metadata"].items()
+            >= {
+                REQUEST_PREVIEW_TRUNCATED: "true",
+                RESPONSE_PREVIEW_TRUNCATED: "true",
+                MAPPING_KEY: MAPPING_VERSION,
+            }.items()
+        )
+        assert [s["id"] for s in detail["spans"]] == spans
 
 
 class Refusing(MemoryStore):
