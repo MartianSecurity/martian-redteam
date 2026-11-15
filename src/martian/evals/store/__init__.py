@@ -1,7 +1,7 @@
 """The store interface the evals core reads and writes through.
 
 The core never talks to MLflow or a database directly: an edition gives it an ``EvalStore``. The
-local edition binds ``mlflow-skinny`` in-process (MorningHQ/martian-notes#106) and the server
+local edition binds ``mlflow-skinny`` in-process (MartianSecurity/martian-notes#106) and the server
 binds its MLflow server over REST (#105). ``MemoryStore`` is the reference implementation, and
 ``tests/evals/store_contract.py`` is the behaviour every binding must pass.
 

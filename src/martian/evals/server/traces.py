@@ -1,5 +1,5 @@
 """Trace search, sessions and trace detail: a port of the trace routes of the server's
-``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store.
+``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store.
 
 The store's ``TraceQuery`` filters on project, session, user, text, state and time and orders by
 time. The contract's search also filters on minimum latency and a boolean assessment, and orders

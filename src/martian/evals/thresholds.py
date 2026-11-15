@@ -1,5 +1,5 @@
 """Thresholds on scores, judged on their 95% intervals, with a state machine that raises one alert
-per breach and one per recovery (MorningHQ/martian-notes#198).
+per breach and one per recovery (MartianSecurity/martian-notes#198).
 
 A threshold (:class:`~martian.evals.records.Threshold`) is healthy while a measure of a source's
 scores, a pass rate or a mean, is at least or at most a value. Each evaluation reads the scores of
@@ -34,7 +34,7 @@ window of values. :class:`MonitorSource` reads a monitor's scores: the traces th
 the window, by when it took them, newest first, at most
 :data:`~martian.evals.records.THRESHOLD_WINDOW_BOUND`, with the value of the threshold's scorer on
 each (a score without a verdict counts for nothing). :class:`GateSource` reads a schedule's gate
-results (MorningHQ/martian-notes#197): the scheduled runs whose slots are in the window and whose
+results (MartianSecurity/martian-notes#197): the scheduled runs whose slots are in the window and whose
 suite has scored them, each gate as a boolean, judged by the same state machine.
 """
 

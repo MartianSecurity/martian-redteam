@@ -1,4 +1,4 @@
-"""Thresholds on monitor scores and the alerts they send (MorningHQ/martian-notes#198).
+"""Thresholds on monitor scores and the alerts they send (MartianSecurity/martian-notes#198).
 
 A threshold is judged on the 95% interval of the scores in its window, not on the point estimate,
 so noise around its value raises nothing, and its state machine sends exactly one alert when it
@@ -409,7 +409,7 @@ async def test_a_worker_restart_sends_nothing_again(tmp_path: Path, receiver: Re
 
 
 async def test_a_second_source_feeds_the_same_state_machine(records: SqlRecordStore) -> None:
-    """The source is an interface: scheduled runs' gate results (MorningHQ/martian-notes#197) will be
+    """The source is an interface: scheduled runs' gate results (MartianSecurity/martian-notes#197) will be
     one, as booleans, judged and alerted on as a monitor's scores are."""
 
     class Gates:

@@ -1,4 +1,4 @@
-"""One pass of a monitor over its project's new traces (MorningHQ/martian-notes#196).
+"""One pass of a monitor over its project's new traces (MartianSecurity/martian-notes#196).
 
 A monitor attaches scorers, judges and deterministic checks, to a project's live traffic with a
 sampling rate, a trace filter and a daily judge token cap (:class:`~martian.evals.records.Monitor`).

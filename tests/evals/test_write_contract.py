@@ -66,8 +66,8 @@ WRITE_OPERATIONS = [
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
 # The core's own routes, which the server's contract does not have: the attempts of repeated cases
-# (MorningHQ/martian-notes#180), the turns of conversation cases (MorningHQ/martian-notes#191) and
-# prompt versions (MorningHQ/martian-notes#207).
+# (MartianSecurity/martian-notes#180), the turns of conversation cases (MartianSecurity/martian-notes#191) and
+# prompt versions (MartianSecurity/martian-notes#207).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
 OWN_NAMES |= {
     ("get", "/v1/evals/prompts"),
@@ -75,7 +75,7 @@ OWN_NAMES |= {
     ("get", "/v1/evals/prompts/{name}"),
     ("post", "/v1/evals/prompts/{name}/versions"),
 }
-# The core's own monitor routes, which the contract does not have either (MorningHQ/martian-notes#196).
+# The core's own monitor routes, which the contract does not have either (MartianSecurity/martian-notes#196).
 OWN_NAMES |= {
     ("get", "/v1/evals/monitors"),
     ("post", "/v1/evals/monitors"),
@@ -84,9 +84,9 @@ OWN_NAMES |= {
     ("post", "/v1/evals/monitors/{monitor_id}/resume"),
     ("delete", "/v1/evals/monitors/{monitor_id}"),
 }
-# And its monitors' score trends (MorningHQ/martian-notes#199).
+# And its monitors' score trends (MartianSecurity/martian-notes#199).
 OWN_NAMES |= {("get", "/v1/evals/monitors/{monitor_id}/trends")}
-# And its threshold routes (MorningHQ/martian-notes#198).
+# And its threshold routes (MartianSecurity/martian-notes#198).
 OWN_NAMES |= {
     ("get", "/v1/evals/thresholds"),
     ("post", "/v1/evals/thresholds"),
@@ -94,9 +94,9 @@ OWN_NAMES |= {
     ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
     ("delete", "/v1/evals/thresholds/{threshold_id}"),
 }
-# And the route that gives an imported threshold's webhook its secret again (MorningHQ/martian-notes#361).
+# And the route that gives an imported threshold's webhook its secret again (MartianSecurity/martian-notes#361).
 OWN_NAMES |= {("post", "/v1/evals/thresholds/{threshold_id}/secret")}
-# And its schedule routes (MorningHQ/martian-notes#197).
+# And its schedule routes (MartianSecurity/martian-notes#197).
 OWN_NAMES |= {
     ("get", "/v1/evals/schedules"),
     ("post", "/v1/evals/schedules"),

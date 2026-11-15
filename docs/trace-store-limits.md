@@ -193,7 +193,7 @@ previews of them in `trace_info`. Its write and read times and its size are not 
 
 ## Volume ceiling for monitoring
 
-For monitoring production traffic (MorningHQ/martian-notes#196) on this store as it is:
+For monitoring production traffic (MartianSecurity/martian-notes#196) on this store as it is:
 
 - **Browsing does not limit a project's size up to 100,000 traces**: the Traces page, its filters
   and the Sessions page answer in under 0.3 seconds there, and the last pages in about a second.

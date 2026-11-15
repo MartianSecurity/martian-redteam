@@ -1,5 +1,5 @@
 """Admitting work reads the record store a constant number of times, whatever the number of runs
-the organisation has (MorningHQ/martian-notes#350)."""
+the organisation has (MartianSecurity/martian-notes#350)."""
 
 from __future__ import annotations
 
