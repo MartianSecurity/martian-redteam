@@ -166,9 +166,9 @@ run. On GitHub's runners `-n auto` starts one worker per runner CPU.
 ## MLflow upgrades
 
 `mlflow-skinny` is pinned exactly in the `evals` extra. The MLflow compatibility suite is every
-test module that runs MLflow itself: the store binding (`test_store_mlflow.py`), the judge
-transport and the judges built on it, the private-import guard (`test_mlflow_private.py`), the
-pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
+test module that runs MLflow itself: the store binding (`test_store_mlflow.py`) and its errors
+(`test_store_errors.py`), the judge transport and the judges built on it, the private-import
+guard (`test_mlflow_private.py`), the pytest kit and the suite runner. `tests/evals/test_mlflow_compat.py` adds the MLflow behaviour
 the store contract does not pin: MLflow refusing a trace id that would leave its trace folder,
 the store giving MLflow only ids of MLflow's own form, and the upgrade path.
 `scripts/mlflow_compat.py` lists the modules and runs them on any release:

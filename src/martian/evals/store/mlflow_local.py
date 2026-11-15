@@ -73,9 +73,18 @@ from martian.evals._mlflow import (
     TraceTagKey,
     WorkspaceSqlAlchemyStore,
     WorkspaceStore,
+    hide_sql_parameters,
     load_dataset_records,
 )
-from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
+from martian.evals._sql import (
+    check_schema,
+    create_schema,
+    database_cause,
+    database_refusal,
+    is_postgres,
+    operation_name,
+    postgres_url,
+)
 from martian.evals.model import (
     SESSION_TRACE_LIMIT,
     Case,
@@ -123,6 +132,9 @@ _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
 _MLFLOW_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
 _SAFE_FILTER_VALUE = re.compile(r"^[^'`\\]*$")
 _QUESTION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,59}$")
+_LENGTH_REFUSAL = re.compile(r"'[A-Za-z0-9_.\[\]]+' exceeds the maximum length of \d+ characters")
+"""MLflow's refusal of a value over a length limit, which names the field, not the value."""
+_ERROR_CODE = re.compile(r"[A-Z_]+")
 _RUN_STATUS = {
     "queued": "SCHEDULED",
     "running": "RUNNING",
@@ -197,6 +209,7 @@ class MlflowStore:
         # MLflow's stores are untyped.
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]
+        hide_sql_parameters(self._store)
         self._ready: set[str] = set()
 
     # --- plumbing ----------------------------------------------------------------------------
@@ -216,14 +229,20 @@ class MlflowStore:
         return name
 
     async def _call(self, principal: Principal, work: Callable[[], T]) -> T:
+        """Run ``work`` in the principal's workspace, on a thread. An error MLflow raises becomes a
+        ``StoreError`` naming the method ``work`` belongs to (:func:`_store_error`)."""
         workspace = await asyncio.to_thread(self._workspace, principal)
+        operation = operation_name(work)
 
         def run() -> T:
             with ServerWorkspaceContext(workspace):
                 try:
                     return work()
                 except MlflowException as error:
-                    raise _store_error(error) from None
+                    refused = _store_error(error, operation)
+                # Raised outside the except clause, so that MLflow's error, and the database's
+                # under it, which hold the values written, do not stay on it as its context.
+                raise refused
 
         return await asyncio.to_thread(run)
 
@@ -952,13 +971,22 @@ def _quoted(value: str) -> str:
     return value
 
 
-def _store_error(error: MlflowException) -> StoreError:
+def _store_error(error: MlflowException, operation: str) -> StoreError:
+    """The store's error for MLflow's: the operation and what was refused, never a value. A
+    database error under MLflow's is reported by its table and its code (:func:`database_refusal`).
+    MLflow's own message is passed on only when it is its length refusal, which names the field
+    and the limit; its other messages, and the database's, can quote what was written."""
     code = str(getattr(error, "error_code", ""))
     if "DOES_NOT_EXIST" in code or "NOT_FOUND" in code:
-        return StoreError("not_found", "not found")
+        return StoreError("not_found", f"{operation}: not found")
     if "ALREADY_EXISTS" in code:
-        return StoreError("conflict", "already exists")
-    return StoreError("invalid", error.message[:300])
+        return StoreError("conflict", f"{operation}: already exists")
+    if (cause := database_cause(error)) is not None:
+        return database_refusal(operation, cause)
+    if _LENGTH_REFUSAL.fullmatch(error.message):
+        return StoreError("invalid", f"{operation}: {error.message}")
+    said = f" ({code})" if _ERROR_CODE.fullmatch(code) else ""
+    return StoreError("invalid", f"{operation}: MLflow refused the request{said}")
 
 
 def _mlflow_trace_id(trace_id: str) -> str:

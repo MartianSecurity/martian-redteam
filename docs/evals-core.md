@@ -41,7 +41,8 @@ injected values through `current_principal`, `current_entitlements`, `current_st
 `current_records` and `current_worker` (`martian.evals.server.dependencies`). `principal` is a
 FastAPI dependency, so it can declare its own parameters (a header, a cookie) and raise `401`. A
 request the store or the record store refuses with a `StoreError` is answered `404`
-(`not_found`), `409` (`conflict`) or `422` (`invalid`), with the error's detail.
+(`not_found`), `409` (`conflict`) or `422` (`invalid`), with the error's detail, which names the
+operation and never a value written ([what store errors contain](security-and-data.md#what-store-errors-contain)).
 
 ## Editions and entitlements
 
@@ -774,7 +775,12 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
   A session search reads the same traces and groups the first of them in this process.
 - On Postgres, a trace's request and its response are each at most 8,000 characters: the binding
   keeps them whole in MLflow's trace metadata, a `varchar(8000)` column, and a longer one is
-  refused as `invalid`. SQLite does not enforce the length.
+  refused as `invalid`, naming `record_trace` and MLflow's `trace_request_metadata` table, not the
+  text. SQLite does not enforce the length.
+- An error MLflow raises is a `StoreError` that names the method: not found is `not_found`, an
+  object that exists `conflict`, and anything else `invalid`, with the table and the database's
+  error code when the database refused it. MLflow's own message is not passed on, except its
+  length refusal; see [what store errors contain](security-and-data.md#what-store-errors-contain).
 - How far these hold, measured: [trace store limits](trace-store-limits.md).
 - An experiment named by a project's id that the store did not create, such as one MLflow tracing
   created for an application before the project existed, is not that project: creating the
@@ -817,6 +823,11 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   filter.
 - Updates that move a run or scoring job on name the state they expect, and draft and view edits
   name the revision they expect. A review chain never forks: a review is replaced at most once.
+- A write the database refuses is a `StoreError` naming the method and the table: a duplicate
+  key, such as a run two writers create at once, is a `conflict`, and any other refused value,
+  such as a case position beyond Postgres's `integer`, is `invalid`. Any other database failure,
+  such as a lost connection, raises SQLAlchemy's error, whose engine hides the statement's values.
+  See [what store errors contain](security-and-data.md#what-store-errors-contain).
 - A suite version records who saved it and when (`Suite.created_by`, `created_at`). A draft can be
   renamed or described (`edit_draft`) and removed with its cases (`delete_draft`).
 - A saved view (`SavedView` in `martian.evals.records`) is UI state, not evaluation content, so it
