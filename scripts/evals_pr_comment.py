@@ -166,6 +166,8 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             lines.append(f"\n{_repeats(repeats)}")
         if talks:
             lines.append(f"\n{_conversations(talks)}")
+        if simulated := summary.get("simulator"):
+            lines.append(f"\n{_simulated(simulated)}")
         if reliable:
             lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
@@ -231,6 +233,15 @@ def _conversations(talks: Mapping[str, Any]) -> str:
     return (
         f"{cases} of {talks['turns']['total']} turns in all. A conversation counts once: it passes when each "
         "turn check passed every turn it grades and each conversation check passed the whole conversation."
+    )
+
+
+def _simulated(simulated: Mapping[str, Any]) -> str:
+    """How many conversations had a simulated user, and which model played them."""
+    cases = "1 conversation has" if simulated["cases"] == 1 else f"{simulated['cases']} conversations have"
+    return (
+        f"{cases} a simulated user, played by {code(simulated['model'], 120, cell=False)}; "
+        f"{code('goal_reached', cell=False)} is whether each reached its goal."
     )
 
 

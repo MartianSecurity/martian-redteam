@@ -320,15 +320,47 @@ def _phones(text: str, taken: list[tuple[int, int]]) -> Iterator[_Found]:
                 yield "phone", match.span(), digits
 
 
+def _personal_found(plain: str) -> list[_Found]:
+    """Every piece of personal data in text already made plain (:func:`_visible`)."""
+    found = [item for reader in (_emails, _cards, _ibans, _national_ids) for item in reader(plain)]
+    return found + list(_phones(plain, [span for _, span, _ in found]))
+
+
 def personal_data(text: str, kinds: Sequence[str]) -> Iterator[tuple[str, str]]:
     """Each piece of personal data of the given kinds in the text, as its kind and a canonical form
     to compare with allowed values."""
-    plain = _visible(text)
-    found = [item for reader in (_emails, _cards, _ibans, _national_ids) for item in reader(plain)]
-    found += list(_phones(plain, [span for _, span, _ in found]))
-    for kind, _, value in found:
+    for kind, _, value in _personal_found(_visible(text)):
         if kind in kinds:
             yield kind, value
+
+
+def redact_personal_data(text: str) -> tuple[str, dict[str, int]]:
+    """The text with each piece of personal data the ``no_personal_data`` check finds, of every
+    kind, replaced by its kind in brackets (``[email]``, ``[phone]``, ``[card]``, ``[iban]``,
+    ``[national_id]``), and how many of each kind were replaced. The text returned is the form the
+    check reads: invisible formatting characters removed and compatibility forms made plain. What
+    the check does not look for, such as names and street addresses, stays."""
+    plain = _visible(text)
+    spans = sorted((span, kind) for kind, span, _ in _personal_found(plain))
+    parts: list[str] = []
+    counts: dict[str, int] = {}
+    end = 0
+    for (start, stop), kind in spans:
+        if start < end:  # inside a value already replaced
+            continue
+        parts += [plain[end:start], f"[{kind}]"]
+        counts[kind] = counts.get(kind, 0) + 1
+        end = stop
+    return "".join(parts) + plain[end:], counts
+
+
+def personal_data_text(counts: dict[str, int]) -> str:
+    """How many pieces of personal data of each kind, in words, such as ``2 email addresses and 1
+    phone number``; ``no personal data`` for none."""
+    if not counts:
+        return "no personal data"
+    parts = [f"{count} {_PERSONAL_NAMES[kind][count != 1]}" for kind, count in counts.items()]
+    return ", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0]
 
 
 # --- secrets ------------------------------------------------------------------------------------------

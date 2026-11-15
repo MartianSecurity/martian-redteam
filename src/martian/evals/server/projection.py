@@ -266,8 +266,9 @@ def turn_out(turn: TurnResult) -> dict[str, Any]:
 def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, Any]:
     """A conversation case's result, for the core's own turns route: its verdict and each check's
     verdict on the whole conversation (``scores``, the run's own scores of the case), its session
-    id, which its turns' traces share, its latency, and its turns. With repeats these are the
-    attempt's that stands for the case; the attempts route has every attempt's."""
+    id, which its turns' traces share, its latency, its turns, and whether a simulator wrote its
+    user's turns (``simulated``). With repeats these are the attempt's that stands for the case;
+    the attempts route has every attempt's."""
     own = [score for score in scores if score.scoring_job_id is None]
     return {
         "id": result_id(result.run_id, result.case_id),
@@ -275,6 +276,7 @@ def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, A
         "position": result.position,
         "status": result.status,
         "session_id": result.session_id,
+        "simulated": result.simulated,
         "latency_ms": result.latency_ms,
         "checks": {
             score.scorer: {"passed": score.passed, "rationale": score.rationale, "error": score.error} for score in own

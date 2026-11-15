@@ -193,6 +193,11 @@ def _run_suite(
             "each counts once, passing when each turn check passed every turn it grades and each conversation "
             "check passed. Turns counts the conversations' turns"
         )
+    if simulated := summary.get("simulator"):
+        notes.append(
+            f"{simulated['cases']} {'conversation has' if simulated['cases'] == 1 else 'conversations have'} a "
+            f"simulated user, played by {simulated['model']}; goal_reached is whether each reached its goal"
+        )
     title = f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else "")
     if summary["not_run"]:
         title += f", {summary['not_run']} not run"
@@ -562,6 +567,88 @@ def import_martian(
     typer.echo(f"Imported into {home}: {_export_counts(summary.manifest['files'])}.")
     ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
     typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
+@evals_app.command("personas")
+def build_personas(
+    transcripts: Annotated[
+        Path | None,
+        typer.Argument(
+            dir_okay=False,
+            show_default=False,
+            help='A JSON Lines file of conversations, one per line: {"id": ..., "messages": [...]}.',
+        ),
+    ] = None,
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model", help="The model that reads each conversation, as for simulator.model: openai:/<model>."
+        ),
+    ] = "",
+    output: Annotated[Path, typer.Option("--output", "-o", dir_okay=False, help="The data file to write.")] = Path(
+        "personas.jsonl"
+    ),
+    session: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--session", help="Read this session's traces from the local Evals UI's data folder instead; repeatable."
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="With --session: the data folder. Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns", min=1, max=100, help="Each persona's turn budget. Default: the messages its user sent."
+        ),
+    ] = None,
+) -> None:
+    """Build simulated users from real conversations: a data file of goal and persona cases.
+
+    martian evals personas transcripts.jsonl --model openai:/<model> -o personas.jsonl
+    martian evals personas --session <id> --model openai:/<model> -o personas.jsonl
+
+    Personal data that the no_personal_data check finds is removed before the model reads a
+    conversation and from everything written. Names and street addresses are not found: read the
+    file before you share it.
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Building personas needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.config import ConfigError
+    from martian.evals._policy import personal_data_text
+    from martian.evals.local import data_folder
+    from martian.evals.personas import build_personas as build
+    from martian.evals.personas import read_transcripts, transcripts_from_store, write_personas
+
+    if (transcripts is None) == (not session) or not model:
+        typer.echo("Give --model, and a transcripts file or --session, not both.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        found = (
+            read_transcripts(transcripts)
+            if transcripts
+            else transcripts_from_store(data_folder(data_dir), session or [])
+        )
+        built = build(found, model=model, max_turns=max_turns)
+        written = write_personas(built, output)
+    except (ConfigError, ValueError) as error:
+        typer.echo(f"Building personas failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    plural = "persona" if len(built.cases) == 1 else "personas"
+    typer.echo(f"Wrote {len(built.cases)} {plural} to {written}.")
+    typer.echo(
+        f"Personal data removed: {personal_data_text(built.removed)} (the kinds no_personal_data finds: email "
+        "addresses, phone numbers, card numbers, IBANs and national IDs). Names and street addresses are not "
+        "found: read the file before you share it."
+    )
 
 
 @app.command("ui")

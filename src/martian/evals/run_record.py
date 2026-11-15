@@ -29,6 +29,11 @@
   case result's trace is that of its first turn whose verdict is the conversation's, else of its
   first turn, its latency the turns' latencies added up. Its scores are the conversation's
   verdicts, which no one trace carries, so they name no trace.
+- A run with simulated users says which simulator played them: the run's ``provenance`` holds its
+  model, inference parameters and version under ``simulator``, and the run's scorers include the
+  goal verdict (``goal_reached``), a model-judged scorer of the conversation whose model is the
+  simulator's, so each goal score names that model. A simulated case's result is marked
+  ``simulated``, and each of its turns' traces is tagged ``martian.simulated``.
 - A run that stops at a limit records only the cases whose attempts all ran, and a
   conversation case only when every turn of every attempt ran.
 
@@ -68,6 +73,8 @@ from martian.evals.model import (
     RunLimits,
     RunState,
     Score,
+    ScorerVersion,
+    Simulator,
     StoreRef,
     Suite,
     Trace,
@@ -77,6 +84,7 @@ from martian.evals.model import (
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
+from martian.evals.simulation import GOAL, SIMULATOR_VERSION
 
 if TYPE_CHECKING:
     from martian.evals.local_runs import RunHold
@@ -146,14 +154,33 @@ class RunRecorder:
         reused: list[GradedCase],
         repeats: dict[str, Any] | None = None,
         conversations: int = 0,
+        simulator: Simulator | None = None,
     ) -> Run:
         """Record that the run started over ``planned`` of the dataset's ``total`` cases, with the
         results it reuses from earlier runs, with ``repeats``, the suite's repeat plan, when it
-        runs each case more than once, and with ``conversations``, how many of the planned cases
-        are conversations."""
+        runs each case more than once, with ``conversations``, how many of the planned cases are
+        conversations, and with ``simulator``, the model that plays its simulated users, when it
+        has any."""
+        if simulator is not None:
+            # The goal verdict is the simulator's judgment of each simulated conversation.
+            self._scorers[GOAL] = ScorerVersion(
+                name=GOAL,
+                kind="llm_judge",
+                type="simulated_user",
+                version=SIMULATOR_VERSION,
+                model=simulator.model,
+                parameters=dict(simulator.parameters),
+                scope="conversation",
+            )
         return _wait(
             self._start(
-                planned=planned, total=total, limit=limit, reused=reused, repeats=repeats, conversations=conversations
+                planned=planned,
+                total=total,
+                limit=limit,
+                reused=reused,
+                repeats=repeats,
+                conversations=conversations,
+                simulator=simulator,
             )
         )
 
@@ -166,6 +193,7 @@ class RunRecorder:
         reused: list[GradedCase],
         repeats: dict[str, Any] | None,
         conversations: int,
+        simulator: Simulator | None,
     ) -> Run:
         from martian.evals.local_runs import RunHold
 
@@ -182,6 +210,8 @@ class RunRecorder:
             provenance["conversations"] = conversations
         if self._limits != RunLimits():
             provenance["limits"] = self._limits.model_dump(mode="json")
+        if simulator is not None:
+            provenance["simulator"] = {**simulator.model_dump(mode="json"), "version": SIMULATOR_VERSION}
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,
@@ -193,7 +223,7 @@ class RunRecorder:
             dataset_name=suite.dataset_name or "",
             dataset_digest=suite.dataset_digest,
             target=suite.target,
-            scorers=list(suite.scorers),
+            scorers=list(self._scorers.values()),
             counts=Counts(cases=planned),
             max_cases=limit or None,
             truncated=planned < total,
@@ -461,6 +491,8 @@ class RunRecorder:
             tags = {"martian.case_id": result.case_id, "martian.turn": str(turn.number)}
             if attempt is not None:
                 tags["martian.attempt"] = str(attempt)
+            if result.simulated:
+                tags["martian.simulated"] = "true"
             trace = self._as_run_trace(
                 trace_json,
                 result,

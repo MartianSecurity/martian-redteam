@@ -89,6 +89,19 @@ class Turn(_Object):
     checks: list[Identifier] | None = None
 
 
+class SimulatedUser(_Object):
+    """A user a model plays in a conversation case, in place of scripted turns
+    (:mod:`martian.evals.simulation`): what the user wants (``goal``), who they are and how they
+    write (``persona``), the most messages they send (``max_turns``), and when they stop
+    (``stop_when``). The simulator writes each message from the conversation so far, and says at
+    the end whether the goal was reached."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    persona: str = Field(min_length=1, max_length=4000)
+    max_turns: int = Field(ge=1, le=MAX_TURNS)
+    stop_when: str = Field(min_length=1, max_length=4000)
+
+
 class Case(_Object):
     """One test case: what the target receives, what to check it against, and optionally a stored
     output to grade instead of calling a target.
@@ -97,7 +110,12 @@ class Case(_Object):
     order, in one conversation. Its ``expectations`` are the conversation's, for the scorers that
     grade it as a whole. It always runs against a target, so it has no stored ``outputs``.
     ``turns`` is left out when empty, so a case of one input has the digest it had before the field
-    existed."""
+    existed.
+
+    A simulated conversation case has a ``simulated_user`` instead of ``turns``: a model writes the
+    user's turns as the conversation goes. Its ``expectations`` are the conversation's and each of
+    its turns'. ``simulated_user`` is left out when there is none, so other cases keep their
+    digests."""
 
     id: Identifier
     inputs: dict[str, Any] = Field(default_factory=dict)
@@ -106,14 +124,18 @@ class Case(_Object):
     tags: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     turns: list[Turn] = Field(default_factory=list, max_length=MAX_TURNS)
+    simulated_user: SimulatedUser | None = None
 
     @model_validator(mode="after")
     def inputs_or_turns(self) -> Case:
-        if not self.turns and not self.inputs:
-            raise ValueError("a case needs inputs, or turns for a conversation")
+        given = [name for name in ("inputs", "turns", "simulated_user") if getattr(self, name)]
+        if not given:
+            raise ValueError("a case needs inputs, turns for a conversation, or a simulated user")
         if self.turns and self.inputs:
             raise ValueError("a conversation case gives its inputs in each turn, not as the case's inputs")
-        if self.turns and self.outputs is not None:
+        if len(given) > 1:
+            raise ValueError("a case with a simulated user has neither inputs nor turns: the simulator writes them")
+        if (self.turns or self.simulated_user) and self.outputs is not None:
             raise ValueError("a conversation case runs against a target, so it has no stored outputs")
         return self
 
@@ -122,6 +144,8 @@ class Case(_Object):
         written = handler(self)
         if isinstance(written, dict) and not self.turns:
             written.pop("turns", None)
+        if isinstance(written, dict) and self.simulated_user is None:
+            written.pop("simulated_user", None)
         return written
 
 
@@ -257,11 +281,14 @@ class RunLimits(_Object):
         return {"limit": limit, "value": value, "used": used, "message": message}
 
 
+_UNSET_LEFT_OUT = ("limits", "simulator_max_retries", "simulator_rate_limit_wait_seconds", "simulator_headers")
+
+
 class RunSettings(_Object):
     """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
     default. A case result's fingerprint leaves these out, so changing one keeps earlier results.
-    Unset ``limits`` are left out when the settings are written, so a suite without them keeps the
-    digest it had before the field existed."""
+    Unset ``limits`` and simulator settings are left out when the settings are written, so a suite
+    without them keeps the digest it had before those fields existed."""
 
     concurrency: int | None = Field(default=None, ge=1)
     batch: int | None = Field(default=None, ge=1)
@@ -274,13 +301,28 @@ class RunSettings(_Object):
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
     limits: RunLimits | None = None
+    simulator_max_retries: int | None = Field(default=None, ge=0)
+    simulator_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Headers added to every simulator request, values as written with ${NAME} unexpanded.
+    simulator_headers: dict[str, str] | None = None
 
     @model_serializer(mode="wrap")
-    def _without_unset_limits(self, handler: SerializerFunctionWrapHandler) -> Any:
+    def _without_unset(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
-        if isinstance(written, dict) and written.get("limits", "") is None:
-            del written["limits"]
+        if isinstance(written, dict):
+            for name in _UNSET_LEFT_OUT:
+                if written.get(name, "") is None:
+                    del written[name]
         return written
+
+
+class Simulator(_Object):
+    """The model that plays a suite's simulated users (``Case.simulated_user``): an MLflow model URI
+    (``openai:/<model>``) on the judges' provider path, and its inference ``parameters``. Never a
+    key: the provider's key comes from the environment."""
+
+    model: str = Field(min_length=1, max_length=240)
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class Repeats(_Object):
@@ -303,6 +345,7 @@ class Suite(_Object):
     there. ``input_key`` names the input that judges grade against and that a plain-text case
     input fills. ``repeats`` is left out when it is the default (one attempt, rule ``all``, no
     check rules), so a suite without repeats has the digest it had before the field existed.
+    ``simulator`` is the model that plays its cases' simulated users, left out when there is none.
     """
 
     id: Identifier
@@ -317,6 +360,7 @@ class Suite(_Object):
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
     repeats: Repeats = Repeats()
+    simulator: Simulator | None = None
     digest: Digest
     created_at: datetime | None = None
     created_by: str | None = None
@@ -337,6 +381,8 @@ class Suite(_Object):
         written = handler(self)
         if isinstance(written, dict) and self.repeats == Repeats():
             written.pop("repeats", None)
+        if isinstance(written, dict) and self.simulator is None:
+            written.pop("simulator", None)
         return written
 
 
@@ -455,7 +501,10 @@ class CaseResult(_Object):
     every turn it sent in ``turns``; its ``output`` is the conversation as ``role`` and ``content``
     messages, and its scores are the conversation's verdicts, a turn check's passing when it
     passed every turn it grades. With repeats, these are the attempt's that stands for the case.
-    Both are left out for a case of one input."""
+    Both are left out for a case of one input.
+
+    ``simulated`` marks the result of a case whose user turns a simulator wrote
+    (``Case.simulated_user``), left out for every other case."""
 
     run_id: Identifier
     case_id: Identifier
@@ -472,12 +521,15 @@ class CaseResult(_Object):
     attempts: list[Attempt] = Field(default_factory=list)
     session_id: str | None = None
     turns: list[TurnResult] = Field(default_factory=list)
+    simulated: bool = False
 
     @model_serializer(mode="wrap")
     def _without_empty_attempts(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
         if isinstance(written, dict) and not self.attempts:
             written.pop("attempts", None)
+        if isinstance(written, dict) and not self.simulated:
+            written.pop("simulated", None)
         return _without_unused_conversation(written, self)
 
 
@@ -736,6 +788,7 @@ RESULTS_RECORD_FIELDS = {
     "attempts": "CaseResult.attempts (only when the suite repeats its cases)",
     "session_id": "CaseResult.session_id (only for a conversation case)",
     "turns": "CaseResult.turns (only for a conversation case)",
+    "simulated": "CaseResult.simulated (only for a case with a simulated user)",
 }
 
 # Every field of one entry of a results.jsonl record's ``attempts``, and where the model keeps it.
@@ -817,6 +870,7 @@ def from_results_record(
         attempts=[_attempt(entry) for entry in record.get("attempts") or []],
         session_id=record.get("session_id"),
         turns=[_turn(entry) for entry in record.get("turns") or []],
+        simulated=record.get("simulated") is True,
     )
     scores = []
     for label, check in (record.get("checks") or {}).items():
@@ -854,6 +908,8 @@ __all__ = [
     "QueueItem",
     "Session",
     "SessionSearch",
+    "SimulatedUser",
+    "Simulator",
     "Span",
     "Trace",
     "TraceQuery",

@@ -25,6 +25,9 @@ line, against the case's own expectations.
 The conversation's verdict on a turn check passes when the check passed every turn it grades
 (:func:`over_turns`); the case passes when every check, so combined, passes it. A target call
 that fails ends the conversation: the later turns are not sent, and the case has no verdict.
+
+A conversation's user can be simulated instead of scripted (:mod:`martian.evals.simulation`): its
+turns are then written as it goes, and its goal verdict is one more conversation-level result.
 """
 
 from __future__ import annotations
@@ -113,6 +116,7 @@ def conversation_record(
     session_id: str,
     messages: list[dict[str, str]],
     broken: int | None,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """One conversation's record: its verdict, each check's verdict on it, the conversation as
     messages, the error of the turn that failed, its session id and its turns.
@@ -120,9 +124,9 @@ def conversation_record(
     ``turns`` are the turns sent, in order; ``labels`` every check in the suite's order; ``graded``
     each turn check and the numbers of the turns it grades; ``conversation`` each conversation
     check and its verdict, None when it has none; ``broken`` the number of the turn that did not
-    complete, if one did not. A turn check that grades no turn of this conversation is not among
-    its checks. When a turn did not complete, no check has a verdict: the conversation did not
-    finish.
+    complete, if one did not, and ``error`` why, when no turn sent says so (a simulated user that
+    could not write it). A turn check that grades no turn of this conversation is not among its
+    checks. When a turn did not complete, no check has a verdict: the conversation did not finish.
     """
     by_number = {turn["number"]: turn for turn in turns}
     unfinished = {"passed": None, "rationale": None, "error": f"turn {broken} did not complete"}
@@ -139,7 +143,7 @@ def conversation_record(
             else:
                 checks[label] = dict(found)
     values = [check["passed"] for check in checks.values()]
-    error = next((turn["error"] for turn in turns if turn.get("error")), None)
+    error = next((turn["error"] for turn in turns if turn.get("error")), error)
     return {
         "passed": None if broken is not None or any(value is None for value in values) else all(values),
         "checks": checks,
