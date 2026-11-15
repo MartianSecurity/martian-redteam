@@ -6,7 +6,7 @@ import importlib.util
 import ipaddress
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -68,6 +68,16 @@ def run_evals(
             "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
         ),
     ] = None,
+    baseline: Annotated[
+        Path | None,
+        typer.Option(
+            "--baseline",
+            file_okay=False,
+            show_default=False,
+            help="Suite file only: an earlier run's output folder. Compare with it case by case and gate on "
+            "the comparison: fail on a change worse than noise or on a failed case it has no result for.",
+        ),
+    ] = None,
 ) -> None:
     """Run an eval suite file locally, or run pytest with the eval gate.
 
@@ -90,12 +100,13 @@ def run_evals(
             repeats=repeats,
             fresh=fresh,
             home=data_dir,
+            baseline=baseline,
         )
         return
-    if any(value is not None for value in (output, concurrency, limit, repeats, data_dir)) or fresh:
+    if any(value is not None for value in (output, concurrency, limit, repeats, baseline, data_dir)) or fresh:
         typer.echo(
-            "--output, --concurrency, --limit, --repeats, --fresh and --data-dir apply to a suite file "
-            "(evals.yaml) only.",
+            "--output, --concurrency, --limit, --repeats, --fresh, --baseline and --data-dir apply to a suite "
+            "file (evals.yaml) only.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -115,6 +126,7 @@ def _run_suite(
     repeats: int | None,
     fresh: bool,
     home: Path | None,
+    baseline: Path | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -136,6 +148,7 @@ def _run_suite(
             progress=console.print,
             home=home,
             repeats=repeats,
+            baseline=baseline,
         )
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
@@ -194,7 +207,12 @@ def _run_suite(
     for label, reasons in summary.get("check_errors", {}).items():
         for reason, count in list(reasons.items())[:5]:
             console.print(f"{count} {unit}, {label}: {reason}", markup=False, highlight=False)
-    console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
+    comparison = summary.get("comparison")
+    if comparison is not None:
+        for line in _comparison_lines(comparison):
+            console.print(line, markup=False, highlight=False, soft_wrap=True)
+    files = "results.jsonl, summary.json, junit.xml, verdicts.json" + (", comparison.json" if comparison else "")
+    console.print(f"Results: {summary['output']}/{files}")
     recorded = summary["run"]
     ui = (
         "martian ui" if data_folder() == Path(recorded["data_dir"]) else f"martian ui --data-dir {recorded['data_dir']}"
@@ -203,7 +221,42 @@ def _run_suite(
     console.print(
         f"Run {recorded['code']} is in the local Evals UI: {ui}", markup=False, highlight=False, soft_wrap=True
     )
-    raise typer.Exit(code=2 if summary["errors"] else 1 if summary["failed"] else 0)
+    # With a baseline the comparison is the gate; a case without a verdict still fails the run.
+    if summary["errors"]:
+        raise typer.Exit(code=2)
+    if comparison is not None:
+        raise typer.Exit(code=1 if comparison["gate"] == "failed" else 0)
+    raise typer.Exit(code=1 if summary["failed"] else 0)
+
+
+def _comparison_lines(found: dict[str, Any]) -> list[str]:
+    """What ``martian evals run --baseline`` prints about the comparison, under the table."""
+    where = f"Compared with {found['baseline']}"
+    significance = found["significance"]
+    if significance is None:
+        lines = [f"{where}: no case could be compared"]
+    else:
+        label = {"better": "better", "worse": "worse, beyond noise", "within_noise": "within noise"}[found["label"]]
+        p = significance["p_value"]
+        lines = [
+            f"{where}: {label}. {significance['compared']} cases compared: {significance['regressed']} from pass "
+            f"to fail, {significance['improved']} from fail to pass "
+            f"(exact McNemar test, {'p < 0.001' if p < 0.001 else f'p = {p:.2g}'})"
+        ]
+    if found["regressed"]:
+        shown = ", ".join(f"{case['id']} ({', '.join(case['checks'])})" for case in found["regressed"][:10])
+        more = len(found["regressed"]) - 10
+        lines.append(f"From pass to fail: {shown}" + (f" and {more} more" if more > 0 else ""))
+    unpaired = [(found["new"], "new"), (found["changed"], "with changed inputs or expectations")]
+    unpaired.append((found["unverified"], "without a verdict in one of the runs"))
+    if counted := [f"{len(ids)} {what}" for ids, what in unpaired if ids]:
+        lines.append(f"Not compared: {', '.join(counted)}")
+    if failures := found["unpaired_failures"]:
+        shown = ", ".join(failures[:10]) + (f" and {len(failures) - 10} more" if len(failures) > 10 else "")
+        lines.append(f"Failed with no result in the baseline to compare with, which fails the gate: {shown}")
+    if found["missing"]:
+        lines.append(f"{len(found['missing'])} of the baseline's cases did not run")
+    return lines
 
 
 @app.command("ui")

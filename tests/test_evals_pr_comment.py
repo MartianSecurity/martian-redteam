@@ -19,6 +19,7 @@ from martian.evals.state import STATE
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "examples/github-action"
 SHA = "0123456789abcdef0123456789abcdef01234567"
+BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 RUN_URL = "https://github.com/example/agent/actions/runs/1"
 TOKEN = "test-token"
 BOT = "github-actions[bot]"
@@ -33,19 +34,26 @@ _spec.loader.exec_module(comment)
 
 @pytest.fixture(scope="module")
 def sample_runs(tmp_path_factory):
-    """Run both sample suites once through the CLI, with no Martian setting, as the action does."""
+    """Run both sample suites once through the CLI, with no Martian setting, as the action does,
+    and the failing one again with the passing one's output folder as its baseline, as a pull
+    request that broke two of the passing suite's cases would be compared with main."""
     runs = {}
     with pytest.MonkeyPatch.context() as patch:
         for name in ("MARTIAN_API_URL", "MARTIAN_API_TOKEN", "MARTIAN_AGENT_ID"):
             patch.delenv(name, raising=False)
         patch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+        # Runs are recorded in the local edition's data folder; never the real one in a test.
+        patch.setenv("MARTIAN_EVALS_HOME", str(tmp_path_factory.mktemp("evals-home")))
         patch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
         old_uri = mlflow.get_tracking_uri()
-        for name in ("passing", "failing"):
+        for name, suite, baseline in (("passing", "passing", None), ("failing", "failing", None)) + (
+            ("compared", "failing", "passing"),
+        ):
             STATE.reset()
             folder = tmp_path_factory.mktemp(name) / "results"
+            extra = ["--baseline", str(runs[baseline][0])] if baseline else []
             result = CliRunner().invoke(
-                app, ["evals", "run", str(SAMPLE / name / "evals.yaml"), "--output", str(folder)]
+                app, ["evals", "run", str(SAMPLE / suite / "evals.yaml"), "--output", str(folder), *extra]
             )
             runs[name] = (folder, result.exit_code)
         STATE.reset()
@@ -53,13 +61,110 @@ def sample_runs(tmp_path_factory):
     return runs
 
 
-@pytest.mark.parametrize(("name", "exit_code", "expected"), [("passing", 0, "passed.md"), ("failing", 1, "failed.md")])
-def test_sample_suites_render_the_checked_in_comments(sample_runs, name, exit_code, expected):
+@pytest.mark.parametrize(
+    ("name", "suite", "exit_code", "expected", "baseline"),
+    [
+        ("passing", "passing", 0, "passed.md", None),
+        ("failing", "failing", 1, "failed.md", None),
+        ("compared", "failing", 0, "compared.md", comment.Baseline("main", BASE_SHA)),
+    ],
+)
+def test_sample_suites_render_the_checked_in_comments(sample_runs, name, suite, exit_code, expected, baseline):
     folder, code = sample_runs[name]
     assert code == exit_code
-    suite = f"examples/github-action/{name}/evals.yaml"
-    body = comment.render(comment.load_outcome(folder, code), suite=suite, key=suite, sha=SHA, run_url=RUN_URL)
+    suite = f"examples/github-action/{suite}/evals.yaml"
+    outcome = comment.load_outcome(folder, code)
+    body = comment.render(outcome, suite=suite, key=suite, sha=SHA, run_url=RUN_URL, baseline=baseline)
     assert body == (SAMPLE / "comments" / expected).read_text(encoding="utf-8")
+
+
+def test_a_pull_request_that_breaks_cases_is_reported_with_each_case_named(sample_runs):
+    """The failing sample is the passing one with two replies broken: against the passing run as
+    its baseline both cases are named with their check and reason, and two of three changed cases
+    are within noise, so the comparison does not fail the gate on them."""
+    folder, code = sample_runs["compared"]
+    outcome = comment.load_outcome(folder, code)
+    assert outcome.comparison is not None
+    assert (outcome.comparison["label"], outcome.comparison["gate"], code) == ("within_noise", "passed", 0)
+    assert outcome.comparison["regressed"] == [
+        {"id": "declines-prompt-dump", "checks": {"no_secret_leak": "1 of 1 forbidden values found"}},
+        {"id": "answers-safely", "checks": {"no_api_key": "pattern found"}},
+    ]
+    body = comment.render(outcome, suite=SUITE, key=SUITE, baseline=comment.Baseline("main"))
+    rows = body.splitlines()
+    table = rows.index("#### Cases that went from pass to fail")
+    assert rows[table + 4 : table + 6] == [
+        "| `declines-prompt-dump` | `no_secret_leak` | `1 of 1 forbidden values found` |",
+        "| `answers-safely` | `no_api_key` | `pattern found` |",
+    ]
+    # The cases named there are not listed again, and nothing else failed.
+    assert "Failed cases" not in body and "Other failed cases" not in body
+    # The same folder without the action's baseline still shows the comparison it holds.
+    assert "### Martian evals passed against the baseline" in comment.render(outcome, suite=SUITE, key=SUITE)
+
+
+def test_without_a_baseline_yet_the_comment_says_so_and_the_run_is_gated_on_its_own(sample_runs):
+    folder, code = sample_runs["failing"]
+    body = comment.render(comment.load_outcome(folder, code), suite=SUITE, key=SUITE, baseline=comment.Baseline("main"))
+    assert body.splitlines()[1] == "### Martian evals failed"
+    assert (
+        "**Compared with `main`: no baseline yet.** No result of `main` is saved for this suite, so this run "
+        "is gated on its own and any failed case fails it. The next push to `main` saves one."
+    ) in body
+    # Without the action's baseline branch nothing is said about a baseline.
+    assert "baseline" not in comment.render(comment.load_outcome(folder, code), suite=SUITE, key=SUITE)
+
+
+def test_a_comparison_says_what_fails_the_gate_and_what_it_could_not_pair():
+    counts = {"passed": 30, "failed": 10, "errors": 0, "pass_rate": 0.75, "confidence_95": [0.6, 0.86]}
+    summary = {"cases": 40, **counts, "groups": None, "checks": {"judge": counts}}
+    significance = {
+        "label": "worse",
+        "test": "mcnemar_exact",
+        "p_value": 1058 / 2**32,
+        "alpha": 0.05,
+        "compared": 40,
+        "changed": 32,
+        "improved": 2,
+        "regressed": 30,
+        "baseline": 0.95,
+        "candidate": 0.25,
+        "effect": -0.7,
+        "minimum_detectable_effect": 0.15,
+    }
+    comparison = {
+        "baseline": "/tmp/baseline",
+        "label": "worse",
+        "significance": significance,
+        "regressed": [{"id": f"q{n}", "checks": {"judge": None}} for n in range(30)],
+        "improved": ["q40"],
+        "new": ["n1", "n2"],
+        "changed": ["c1"],
+        "unverified": [],
+        "missing": ["gone"],
+        "unpaired_failures": ["n2"],
+        "checks": {"added": ["judge"], "removed": ["old"], "changed": []},
+        "attempts": {"baseline": 1, "candidate": 3},
+        "gate": "failed",
+    }
+    outcome = comment.Outcome(1, summary, comparison=comparison)
+    body = comment.render(outcome, suite=SUITE, key=SUITE, baseline=comment.Baseline("main", SHA))
+    assert body.splitlines()[1] == "### Martian evals failed against `main`"
+    assert (
+        "**Compared with `main` at `0123456`: worse, beyond noise.** Of 40 cases compared, 30 went from pass to "
+        "fail and 2 from fail to pass (exact McNemar test, p < 0.001). The smallest change of the pass rate it can "
+        "tell from chance is 15 points."
+    ) in body
+    assert (
+        "Not compared: 2 cases new since `main`, 1 case with changed inputs or expectations. Failed with no result "
+        "to compare with, which fails the gate: `n2`. 1 case of `main` did not run here. The suite changed since "
+        "`main` (added `judge`; removed `old`; attempts per case 1 on `main` and 3 here), so the label measures "
+        "that change too."
+    ) in body
+    # A judge's reason is never shown, and the table stops at 25 cases.
+    assert "| `q0` | `judge` | — |" in body and "`q25`" not in body
+    assert "5 more; comparison.json in the output folder has every case." in body
+    assert "— is a reason that could quote the reply" in body
 
 
 def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_path):
@@ -322,3 +427,18 @@ def test_outside_a_pull_request_nothing_is_sent(github, sample_runs, tmp_path):
     assert comment.main(action_env(github, folder, code, tmp_path / "summary.md", MARTIAN_EVALS_PR_NUMBER="")) == 0
     assert github.calls == []
     assert "### Martian evals passed" in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+def test_the_action_passes_the_baseline_branch_and_commit_to_the_comment(github, sample_runs, tmp_path):
+    folder, code = sample_runs["compared"]
+    env = action_env(
+        github,
+        folder,
+        code,
+        tmp_path / "summary.md",
+        MARTIAN_EVALS_BASELINE_BRANCH="main",
+        MARTIAN_EVALS_BASELINE_SHA=BASE_SHA,
+    )
+    assert comment.main(env) == 0
+    [posted] = github.comments
+    assert posted["body"] == (SAMPLE / "comments/compared.md").read_text(encoding="utf-8")

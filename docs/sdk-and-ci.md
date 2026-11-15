@@ -127,6 +127,8 @@ martian ci --redteam-config redteam.yaml --output results
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
 # A suite file, run locally with only a model key (see the eval guide):
 martian evals run evals.yaml
+# The same, compared case by case with an earlier run's output folder and gated on the comparison:
+martian evals run evals.yaml --output results/pr --baseline results/main
 # The Evals UI on this machine, one user and no login (see the evals core guide):
 martian ui
 # Additional existing interfaces:
@@ -144,6 +146,16 @@ redteam records. The CLI no longer combines two subprocess exit codes.
 `martian ci --redteam-config` also persists it through Backend. `martian evals
 run` forwards pytest options and supports eval-only xdist. The combined runner
 is serial. Do not also include the same redteam assessment as a pytest test.
+
+A suite file's run (`martian evals run evals.yaml`) is local and gated on its
+own exit code. With `--baseline DIR` it compares its cases with
+the earlier run in `DIR` by their `verdicts.json` and gates on the comparison:
+it fails on a change worse than noise or on a failed case with no result in
+the baseline, not on cases that failed in both runs or on a few that changed
+within noise ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+The [evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps
+`main`'s `verdicts.json` in the Actions cache and passes it on each pull
+request. The pytest gate and `martian ci` have no baseline.
 
 Success requires every required test/probe to complete and meet its policy,
 and a complete, consistent Backend session acknowledgment.

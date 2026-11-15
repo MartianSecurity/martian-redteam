@@ -30,16 +30,18 @@ checks:
 `target` can also name an HTTP endpoint (`url`, `headers`, `body`, `response_path`), so an agent
 behind an API needs no Python file.
 
-The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, can run each case several times, combine the attempts and report the
-share of cases that passed every attempt and the flaky ones, and can be stopped and resumed. It is also recorded for `martian ui`
+The run stays on your machine. It writes `results.jsonl`, `summary.json`, `junit.xml` and
+`verdicts.json`, prints a summary table, can run each case several times, combine the attempts
+and report the share of cases that passed every attempt and the flaky ones, can compare itself
+case by case with an earlier run (`--baseline`), and can be stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
 [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full
 guide: data formats, every check, provider setup and results.
 
 On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
-push and keeps one comment with the result, also without a Martian account. See
+push and keeps one comment with the result, also without a Martian account. It can compare each
+pull request with the last result of `main` and name the cases that went from pass to fail. See
 [gate and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 ## What is in the package

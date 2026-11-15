@@ -133,6 +133,8 @@ types a `name`.
 | `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
+| `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, and a digest of each check's definition: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
+| `comparison.json` | With `--baseline` only: the run compared with the baseline ([comparing with a baseline](#comparing-with-a-baseline)). A run without one removes an earlier run's |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
@@ -140,17 +142,21 @@ interval, such as `67% (20–94%)`, with repeats the rule each check's attempts 
 the [reliability](#reliability-and-flaky-cases) and flaky cases; under it, the false-refusal
 rate for a suite with a policy check and the reasons cases had no verdict. It exits `0` when
 every case passed, `1` when a case failed, and `2` when a case has no verdict or the suite file
-is invalid.
+is invalid. With `--baseline`, `1` means the change is worse than noise or a case with no result
+in the baseline failed instead.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh` and
-`--data-dir DIR`. A run that is stopped can be started again: finished cases are skipped, and
-cases that errored are tried again. `--repeats` runs each case N times, 1 to 100, in place of the
-suite file's `repeats` ([repeated attempts](#repeated-attempts)). `--fresh` discards earlier
-results. `--data-dir` names the local Evals UI's data folder the run is recorded in, as for
-`martian ui`; without it, `MARTIAN_EVALS_HOME`, else `~/.martian/evals`.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
+`--baseline DIR` and `--data-dir DIR`. A run that is stopped can be started again: finished cases
+are skipped, and cases that errored are tried again. `--repeats` runs each case N times, 1 to 100,
+in place of the suite file's `repeats` ([repeated attempts](#repeated-attempts)). `--fresh`
+discards earlier results. `--baseline` compares the run with an earlier run's output folder and
+gates on the comparison ([comparing with a baseline](#comparing-with-a-baseline)). `--data-dir`
+names the local Evals UI's data folder the run is recorded in, as for `martian ui`; without it,
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`.
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
-comment on the pull request with the result, still with no Martian account. See
+comment on the pull request with the result, still with no Martian account, and can compare each
+pull request with the last result of `main`. See
 [gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
@@ -426,7 +432,43 @@ a group, such as paraphrases of one attack, the label can overstate the evidence
 | --- | --- |
 | `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
-| `martian evals run` | Nothing. No command compares two runs; open them in `martian ui` and use Compare |
+| `martian evals run --baseline DIR` | The label for the cases' verdicts, under the table and in `comparison.json`, and the gate follows it ([comparing with a baseline](#comparing-with-a-baseline)) |
+| The evals action's [pull-request comment](gate-and-ci.md#compared-with-the-last-result-of-main) | The label against the last result of `main`, and each case that went from pass to fail |
+
+### Comparing with a baseline
+
+`martian evals run evals.yaml --baseline DIR` (`run_suite(path, baseline=DIR)` from
+`martian.evals.runner`) compares a run with an earlier run of the suite, whose output folder is
+`DIR`, from the files alone: no data folder or Evals UI is needed, so CI can keep the earlier
+run's `verdicts.json` and nothing else. `martian.evals.baseline` does the comparison.
+
+```bash
+martian evals run evals.yaml --output results/main             # the baseline, such as main
+martian evals run evals.yaml --output results/pr --baseline results/main
+```
+
+- **Read first.** `DIR/verdicts.json` is read before any case runs. A folder without one, or a
+  file this SDK did not write, stops the run with exit `2`.
+- **Pairs.** A case pairs with the baseline's case of the same id when its inputs and expectations
+  are the same and both runs have a verdict for it. The verdicts compare by the exact McNemar test,
+  as above, so a few changed cases are always within noise. A case new since the baseline, one
+  whose inputs or expectations changed, and one without a verdict in either run are not paired;
+  baseline cases this run did not have are counted as missing. With repeats, a pair is of the
+  cases' combined verdicts.
+- **The gate.** With a baseline the exit code follows the comparison: `1` when the change is
+  worse than noise, or when a case with no pair failed, since there is nothing to compare it
+  with; otherwise `0`, even when cases failed in both runs or a few went from pass to fail. A case
+  without a verdict still exits `2`. Without `--baseline` the run is gated on its own, as before.
+- **What it reports.** The command prints the label, the counts and the p-value under the table,
+  then the cases that went from pass to fail with their failed checks, the cases it could not pair
+  and the failed ones among them. `comparison.json` holds the same: `label`, `significance` (the
+  paired comparison's fields, as `GET /v1/evals/compare` returns them), `regressed` (each case's id
+  and each failed check's reason, `null` when the reason is not kept), `improved`, `new`,
+  `changed`, `unverified`, `missing`, `unpaired_failures`, `checks` (the checks `added`,
+  `removed` and `changed` since the baseline), `attempts` and `gate`.
+- **A changed suite.** A check added, removed or redefined, or a different number of attempts per
+  case, changes what a verdict means, so the label measures that change as well as the system's.
+  The comparison names such changes rather than refusing to compare.
 
 ### OpenAI-compatible endpoints
 
