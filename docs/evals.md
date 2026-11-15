@@ -252,6 +252,11 @@ limits:
   flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
+- **In the Evals UI** the **Run eval** dialog sets the same two limits for a run it launches
+  (`limits` in the launch body of `POST /v1/evals`, [write routes](evals-core.md#write-routes)),
+  and a stopped run shows the limit it reached and a **Resume** action (`POST
+  /v1/evals/{run_id}/resume`, optionally with new limits), which goes on after the cases the run
+  finished. Without limits of its own, a run launched from the UI has the server's.
 - **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
   each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
   output together, as the provider reports them. A provider that reports none leaves the limit
@@ -2208,6 +2213,13 @@ trace) says what it measured.
 | `tool_not_called` | `calls` or `expectation`, `arguments_match`, `source` | The agent made none of the calls | `{type: tool_not_called, calls: [close_account]}` |
 | `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
 | `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
+
+A check of this table can also be applied to the saved outputs of a run, without a suite file: a
+scoring request or a saved suite names it as `{type, name?, options}` with the options above
+([the worker](evals-core.md#deterministic-checks-in-the-worker)), and the Evals UI has a form for
+each check. Its scores are the suite file's for the same outputs; a check that reads the target's
+call (`latency`, `cost`, and the tool-call checks that read the trace) reads what a run's saved
+output has of it.
 
 The same checks in a test, with `evaluate` and `assert_checks`:
 

@@ -9,7 +9,9 @@ it migrates or publishes something the core does not see, and it may number a ru
 that other writers (a CI gate that records runs of its own) share. It gives the record store an
 :class:`RunAdmission` (``SqlRecordStore(..., admission=...)``), which the store consults for each
 new run that a launch records, before it stores the run. The store has no admission by default, and
-a run then keeps the code it was given.
+a run then keeps the code it was given. A run that stopped at one of its limits resumes through the
+store's update, not as a new run, so the resume route asks :meth:`RunAdmission.resume` of the same
+admission before it restarts the run: the same pause holds it, and no code is taken.
 
 The core names nothing of why a server pauses or where its codes come from.
 """
@@ -45,6 +47,15 @@ class RunAdmission(Protocol):
         run id) is not asked about and keeps the code it was stored with. A number taken for a run
         that is then not stored, because the launch fails after it or two requests for the same
         new run race, is not given back."""
+        ...
+
+    async def resume(self, principal: Principal, run: Run) -> None:
+        """Let ``run``, a launched run the store holds that stopped at one of its limits, restart, or
+        refuse it by raising what :meth:`admit` raises for a launch it refuses (a paused
+        organisation's resume is refused as its launch is).
+
+        It numbers nothing: the run keeps the code it was stored with. It is asked once for each
+        resume, before the run is queued again, so a refusal leaves the run stopped."""
         ...
 
 

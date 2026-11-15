@@ -163,7 +163,7 @@ assigning review work to someone else needs `assignReviews`, and changing anothe
 ## Bootstrap response
 
 `GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
-same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3 of
+same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 4 of
 `contracts/evals-api.json` in MartianSecurity/MartianBackend). The local edition answers:
 
 ```json
@@ -220,7 +220,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 The core serves the read routes the Evals UI's Runs, run detail, Compare, Overview, Traces,
 Sessions, Quality issues and Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
-version 3 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
+version 4 of the server's frozen contract (`contracts/evals-api.json` in MartianSecurity/MartianBackend):
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
@@ -416,7 +416,7 @@ routes, and `tests/evals/test_blind_review.py` blind double review: a second rev
 nothing of the first answer through the routes until they answer, the answers given blind, a
 calibration's hidden labels, and the agreement on blind answers.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v4.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 
@@ -479,14 +479,14 @@ that it neither reads nor lists as answering with no run.
 
 The core serves the routes that launch, score and review runs and that edit datasets, suites,
 judges, review queues, projects and saved views. Each is a port of the server's route onto the
-store, the record store and the worker, and each operation is the one in version 3 of the frozen
+store, the record store and the worker, and each operation is the one in version 4 of the frozen
 contract:
 
 | Routes | What they do | Module |
 | --- | --- | --- |
-| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
-| `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
-| `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
+| `POST /v1/evals`, `POST /{run_id}/cancel`, `POST /{run_id}/resume` | Admit a run of a target the worker knows over a published dataset, optionally under its own limits, and hand it to the worker; stop it; go on with a run that stopped at a limit | `launch` |
+| `GET /scorers`, `GET /checks`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; the deterministic checks and their options; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
+| `GET`, `POST /suites` | Saved suites of built-in scorers, deterministic checks with their options, and policies, a new version for each change | `suites` |
 | `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on; `GET` lists a judge graded by a panel with `panel` in its `definition` | `suites` |
 | `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
@@ -538,9 +538,21 @@ All paths are under `/v1/evals`. How the core carries them out:
   [run admission](#run-admission), which may choose the code. The worker runs the
   dataset's active cases up to `max_items`, skips a case with no usable prompt or expected text,
   calls the target once per case with no retry, within the worker's time limit, grades each
-  output by exact match and records a trace per called case. The frozen launch body has no field
-  for a run's limits, so a launched run runs under the worker's
-  ([limits](#limits-stopping-and-resuming)).
+  output by exact match and records a trace per called case. The launch body takes optional
+  `limits` (`max_seconds`, `max_judge_tokens`, each above 0 and each optional): the run keeps them
+  in `provenance.limits`, and without them it runs under the worker's
+  ([limits](#limits-stopping-and-resuming)). The same `request_id` with other `limits` is `409`;
+  one without `limits` is the same request.
+- **Resuming.** `POST /{run_id}/resume` queues a run that stopped at one of its limits again, with
+  the body `{"limits": {...}}` (optional, as is the body itself): new limits replace the run's own,
+  and the worker goes on after the cases it finished ([limits](#limits-stopping-and-resuming)). A
+  run that is not `stopped` is `409` ("Only a run stopped at one of its limits can be resumed"),
+  one the worker did not run (`martian evals run`) `422`, and it is refused as a launch is while
+  the organisation has its `concurrent_runs` in progress, while a dataset is being published and
+  when the record store's [run admission](#run-admission), the seam through which a server pauses
+  new work, refuses it (`RunAdmission.resume`: `409`, or what the admission raises), and for an
+  archived project. The admission is asked once before the run restarts and numbers nothing: the
+  run keeps its code. It needs the `run` capability and answers `202` with the queued run.
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
@@ -565,9 +577,11 @@ All paths are under `/v1/evals`. How the core carries them out:
   is already in progress" at a limit of 1, else "5 scoring jobs are already in progress, as many as
   this organisation may have at once". The count reads the jobs of each completed run, since the
   record store has no query across runs. A job's scores sit beside the run's own, and each scored
-  value is also kept on its case's trace. A request cannot name a
-  [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
-  names, so any other is `422`, and `GET /scorers` does not offer one (MartianSecurity/martian-notes#334).
+  value is also kept on its case's trace. A request may also name
+  [deterministic checks with their options](#deterministic-checks-in-the-worker) (`checks`,
+  version 4 of the contract); it cannot name a [custom Python scorer](#custom-scorers-in-the-worker):
+  the contract's `scorers` are the built-in names, so any other is `422`, and `GET /scorers` does
+  not offer one.
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. That score
@@ -657,7 +671,7 @@ whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
 ### Suite audits
 
 The core adds two routes of its own (`martian.evals.server.audits`), which the server's frozen
-contract does not have, so its version 3 is unchanged. They [audit](evals.md#audit-a-suite) a saved
+contract does not have, so the contract's version is unchanged by them. They [audit](evals.md#audit-a-suite) a saved
 suite version: its scorers grade the replies of the built-in do-nothing and cheating targets in
 place of a target's, and the result is kept with that suite version.
 
@@ -1284,9 +1298,9 @@ conversations, so here it counts judges only.
 - **Whose limits.** A run's own, in `provenance.limits`: those its launch gave, else its suite
   version's (`Suite.settings.limits`). Without either, the worker's (`InProcessWorker(limits=...)`,
   `WorkerServices.limits`), which the run then keeps in `provenance.limits` when it starts. A
-  scoring job runs under its run's limits, else the worker's. The frozen contract's launch body has
-  no field for limits (`additionalProperties: false`), so a run launched through `POST /v1/evals`
-  runs under the worker's: that is the server setting. The local edition's own launch takes them
+  scoring job runs under its run's limits, else the worker's. The contract's launch body takes
+  `limits` (version 4); without them a run launched through `POST /v1/evals` runs under the
+  worker's: that is the server setting. The local edition's own launch takes them too
   ([local runs](#local-runs)).
 - **Stopping.** Before each case, work that has run for `max_seconds` since it started, or whose
   judges have used `max_judge_tokens`, stops. A run is `stopped`, with the limit as a message in
@@ -1310,10 +1324,13 @@ conversations, so here it counts judges only.
   that is not `stopped`, while the organisation has its edition's `concurrent_runs` or
   `concurrent_scoring_jobs` in progress ([editions and entitlements](#editions-and-entitlements))
   or the run another active scoring job, and (`422`) for a run the worker did not run, such as a
-  `martian evals run`, which resumes when its command runs again. The frozen contract has no
-  resume route; the local edition serves one.
+  `martian evals run`, which resumes when its command runs again. The contract's `POST
+  /{run_id}/resume` resumes a stopped run (version 4); a stopped scoring job has no route in the
+  contract, and the local edition's `POST /v1/local/runs/{run_id}/resume` resumes either.
 
-`tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
+`tests/evals/test_run_limits_contract.py` launches a run through the contract with a wall-time
+limit, checks that it stops there and that a resume through the contract calls only the cases
+without a result, and checks the refusals. `tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
 ignores being cancelled, each ending as `item timed out` while the run completes; stops a run at
 its time limit with one case kept, refuses to cancel it, resumes it with a higher limit and checks
 that only the cases without a result are called; stops a scoring job at its judge token limit and
@@ -1446,8 +1463,8 @@ worker = ProcessWorker(worker_services, records, options={...})
   imports the scorers, only in each piece of work's own process. The API process imports the
   setup's module to check its import path, so the setup imports scorer modules inside the
   function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
-  request or suite can name only those, so a job of custom scorers is recorded by the edition's
-  own code until the contract carries them (MartianSecurity/martian-notes#334). A judge request carries
+  request or suite can name only those and the [deterministic checks](#deterministic-checks-in-the-worker),
+  so a job of custom scorers is recorded by the edition's own code. A judge request carries
   only judge scorers. The local edition installs none. What the worker isolates, and what it does
   not, is in [security and data](security-and-data.md#custom-python-scorers).
 - **Scoring jobs only, never a monitor.** A [monitor](#monitors) refuses a scorer of kind `code`
@@ -1457,6 +1474,58 @@ worker = ProcessWorker(worker_services, records, options={...})
 `tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
 values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
 through the core's routes, failing if the process that serves the API imports the scorer file.
+
+### Deterministic checks in the worker
+
+A scoring request or a saved suite may name the [deterministic checks](evals.md#deterministic-checks)
+of a suite file with their options (MartianSecurity/martian-notes#334, version 4 of the contract). `GET /checks` lists them,
+each with its options (`martian.evals.check_options.CATALOGUE`): an option's `name` as the suite
+file writes it, its `kind` for a form (`strings`, `text`, `boolean`, `number`, `integer`, `choice`,
+`choices` or `json`), `label`, `description`, `required` and, for a choice, `choices`.
+
+```json
+{"request_id": "…", "scorers": [], "checks": [
+  {"type": "contains", "name": "names_refund", "options": {"values": ["refund"], "case_sensitive": true}},
+  {"type": "json_schema", "options": {"schema": {"type": "object", "required": ["answer"]}}}]}
+```
+
+- **A check is `{type, name?, options}`.** `type` is one of the suite file's 28 check types (not a
+  judge, `python` or `installed`), `name` its label (its type by default, as in a suite file; lowercase letters, digits and
+  underscores, and no built-in scorer's, judge's or other check's), and `options` the options the
+  suite file gives that type, under the file's names. A request is checked as a suite file is:
+  an option the type does not take, one it cannot read (a pattern that does not compile, a schema
+  with a keyword the check does not support) or lacks (`values` or `expectation` for a text check)
+  is `422` with the file's own reason, before any job is recorded. A request has at most 40 checks, each with options
+  of at most 20,000 characters, and needs at least one criterion of any kind (`scorers`,
+  `judges` or `checks`; the built-in scorers and judges together are at most 7, as before). A
+  check needs no cost acknowledgement and a worker without a judge accepts it: no model is called.
+- **It scores as the suite file does.** A check becomes a scorer of kind `check` (`ScorerVersion`,
+  the `parameters` its options), the same one loading the entry of a suite file makes
+  (`martian.evals.check_options.check_scorer`). The worker builds it as `martian evals run` does
+  (`runner._build_check`) and runs it on each saved output with the case's expectations
+  (`martian.evals.worker.checks`), so the verdict, the reason and the error are the suite file's: a
+  scoring job and a run over the same outputs score alike (`tests/evals/test_scorer_options.py`
+  checks every check, with options that make each read something, against a run of the same file). A
+  check that raises is that score's error, never a pass, and counts as an error in the job. The job
+  keeps the request's `checks` in its `config.checks` and its `definition_digest` names their options,
+  so two jobs with other options do not compare as scored alike.
+- **What a saved output cannot give** is the target's call, as for a suite file whose cases bring
+  their outputs. The tool-call checks read the calls in the saved reply (`source: reply`, the default
+  here); `source: trace` is a score's error, since the worker records one span for a call. `latency`
+  reads the latency the worker recorded for the case, and is the error "the trace records no
+  duration" for a run imported rather than run by the worker. `cost` is the error "the trace records no token usage", since the worker
+  records neither tokens nor cost.
+- **A saved suite keeps its checks.** `POST /suites` takes `checks` beside `scorers` (which may now be
+  empty when there are checks), and the version's `definition` has them as `checks`, ordered by name,
+  with `scorers` still naming every scorer of the suite, checks included, so that a version 3
+  client reads what it did and cannot revise a suite's checks away: it names a check in `scorers`,
+  which it cannot send, and is refused. A version of built-in scorers alone has no `checks` key. Scoring with the suite
+  (`suite_version_id`) names the suite's built-in scorers in `scorers` and its checks in `checks`
+  exactly as saved, or is `422` ("Scoring request differs from its pinned suite version"). A policy names a built-in
+  scorer, so a check has none.
+- **Not here.** The checks need a completed run's saved outputs, so a monitor, which scores live
+  traces, does not take them; and conversation cases, which the worker does not run, have no
+  output to check.
 
 ### Case hooks and installed checks in the worker
 
@@ -3038,6 +3107,7 @@ add to both:
 ```python
 class RunAdmission(Protocol):
     async def admit(self, principal: Principal, run: Run) -> Run: ...
+    async def resume(self, principal: Principal, run: Run) -> None: ...
 ```
 
 - The store calls `admit` for each new run whose `source` is `console` (`LAUNCHED`), the runs the
@@ -3051,6 +3121,14 @@ class RunAdmission(Protocol):
   that handles `StoreError` answer as `409`.
 - A code taken for a run that is then not stored, because the launch fails after it or two
   requests for the same new run race, is not given back.
+- A run that stopped at one of its limits resumes through the store's update, not as a new run,
+  so the store never asks `admit` about it. The resume route (`POST /{run_id}/resume`, and the
+  local edition's) asks `resume` instead, after the edition's `concurrent_runs` and the
+  publication pause and before the run is queued again: an admission that pauses an organisation
+  refuses a resume as it refuses a launch, by raising the same error, and the run stays
+  `stopped`. `resume` returns nothing and numbers nothing, so a numbering admission does not take
+  a second code for a run that has one, and the next launch takes the next number. The store's
+  `admission` attribute is part of `RecordStore` (`None` without one).
 - The store has no admission by default, and the local edition has none: a run keeps the code
   the launch counted. The core names nothing of why a server refuses or where its codes come from.
   A launch's other checks run first, in the launch's order: the edition's `concurrent_runs`, then
@@ -3391,7 +3469,7 @@ place of `POST /v1/evals`, which the local edition also serves, for runs without
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
+| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`, `limits`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
 | `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ..., "limits": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
 | `POST /v1/local/runs/{run_id}/resume` | `{"limits": ...}`: go on with a run that stopped at one of its limits, or whose suite's scoring job did, after what it finished, optionally under new limits. `202` with the run |
 
@@ -4074,7 +4152,7 @@ which each get their own; and covers what a push and the server refuse, and the 
 | The Martian server's queue worker process | MartianSecurity/martian-notes#139, after MartianSecurity/martian-notes#102 |
 | The Martian server's work on the durable queue (`QueueWorker`) with a worker process of its own ([the Martian server](#the-martian-server)) | MartianSecurity/martian-notes#139 |
 | LLM judges of a whole conversation | MartianSecurity/martian-notes#176 |
-| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MartianSecurity/MartianFrontend) | Not filed yet |
+| A resume route for a stopped scoring job in the frozen contract, and the Evals UI's control for it; the contract resumes runs only | Not filed yet |
 | A record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 | Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |

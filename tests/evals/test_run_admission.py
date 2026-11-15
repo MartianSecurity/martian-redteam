@@ -29,7 +29,7 @@ class Numbered:
     and pauses the organisations named in ``paused``."""
 
     def __init__(self, *, paused: tuple[str, ...] = (), refuse_with: Exception | None = None) -> None:
-        self.paused, self.taken, self.asked = set(paused), {}, []
+        self.paused, self.taken, self.asked, self.resumed = set(paused), {}, [], []
         self.refuse_with = refuse_with
 
     async def admit(self, principal, run):
@@ -39,6 +39,11 @@ class Numbered:
         number = self.taken.get(principal.organisation_id, 6) + 1
         self.taken[principal.organisation_id] = number
         return run.model_copy(update={"code": f"N-{number}"})
+
+    async def resume(self, principal, run):
+        self.resumed.append((principal.organisation_id, run.id))
+        if principal.organisation_id in self.paused:
+            raise self.refuse_with or HTTPException(409, "New runs are paused")
 
 
 def run(source="console", *, code="EV-1001") -> Run:
@@ -152,5 +157,38 @@ def test_a_launch_sent_again_while_paused_is_the_run_it_already_made(tmp_path):
             admission.paused.add("org-a")
             again = served.launch(**body)
             assert (again["id"], again["run_code"]) == (first["id"], "N-7")
+    finally:
+        records.close()
+
+
+def test_a_resume_is_refused_while_paused_as_a_launch_is_and_takes_no_second_code(tmp_path):
+    """A stopped run resumes through ``update_run``, which no admission is asked about, so the
+    route asks ``RunAdmission.resume``: a paused organisation's resume is refused with what the
+    admission raises, and the admission numbers nothing, so the run keeps its code and the next
+    launch takes the next number."""
+    admission = Numbered()
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}", admission=admission)
+    try:
+        client, served = serve(MemoryStore(), records, entitlements=lambda _p: ENTERPRISE, principal=ORG_A)
+        with client:
+            launched = served.launch()
+            served.drain()
+            assert launched["run_code"] == "N-7"
+            stored = client.portal.call(records.get_run, ORG_A, DEFAULT_PROJECT, launched["id"])
+            stopped = stored.model_copy(update={"state": "stopped", "error": "Stopped at its time limit"})
+            client.portal.call(lambda: records.update_run(ORG_A, stopped, expected_state="completed"))
+            admission.paused.add("org-a")
+            refused = client.post(f"/v1/evals/{launched['id']}/resume", json={})
+            assert (refused.status_code, refused.json()) == (409, {"detail": "New runs are paused"})
+            assert served.call("GET", f"/v1/evals/{launched['id']}", 200)["state"] == "stopped"
+            admission.paused.discard("org-a")
+            resumed = served.call("POST", f"/v1/evals/{launched['id']}/resume", 202, json={})
+            assert (resumed["state"], resumed["run_code"]) == ("queued", "N-7")
+            served.drain()
+            assert served.call("GET", f"/v1/evals/{launched['id']}", 200)["run_code"] == "N-7"
+            assert served.launch()["run_code"] == "N-8"
+        # The resumes were asked of the admission, the launches only numbered; neither took a code more.
+        assert admission.resumed == [("org-a", launched["id"])] * 2
+        assert [number for _, number in admission.taken.items()] == [8]
     finally:
         records.close()

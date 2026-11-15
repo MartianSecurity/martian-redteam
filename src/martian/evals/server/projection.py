@@ -43,6 +43,7 @@ from martian.evals.model import (
     ReviewQueue,
     Run,
     Score,
+    ScorerVersion,
     ScoringJob,
     Trace,
     TraceState,
@@ -543,6 +544,15 @@ def policy_out(policy: Policy) -> dict[str, Any]:
     }
 
 
+def checks_out(scorers: Sequence[ScorerVersion]) -> dict[str, Any]:
+    """The deterministic checks among ``scorers`` as a request names them, ``{"checks": [...]}``, or nothing
+    when there are none, so that what has no checks is answered as it was before they existed."""
+    from martian.evals.worker.checks import is_check
+
+    found = sorted((scorer for scorer in scorers if is_check(scorer)), key=lambda scorer: scorer.name)
+    return {"checks": [{"type": s.type, "name": s.name, "options": dict(s.parameters)} for s in found]} if found else {}
+
+
 def job_config(job: ScoringJob) -> dict[str, Any]:
     """The server's ``config`` of a scoring job: its scorers by name, the policy judge's guidelines,
     the policies that gate it and the suite version it applies, and a digest of the pinned scorer
@@ -557,6 +567,7 @@ def job_config(job: ScoringJob) -> dict[str, Any]:
         "guidelines": next((str(s.criteria.get("guidelines", "")) for s in job.scorers if s.name == "policy"), ""),
         "policies": [policy_out(policy) for policy in policies],
         "definition_digest": digest(pinned),
+        **checks_out(job.scorers),
     }
     if job.suite_id is not None and job.suite_version is not None:
         config["suite_id"] = job.suite_id

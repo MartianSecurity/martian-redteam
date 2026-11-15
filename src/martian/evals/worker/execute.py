@@ -99,6 +99,8 @@ from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
 from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, TargetReply, Work, Worker
+from martian.evals.worker.checks import check_score, prepare
+from martian.evals.worker.checks import is_check as is_deterministic_check
 from martian.evals.worker.hooks import (
     CaseContext,
     CaseHooks,
@@ -869,6 +871,8 @@ async def _score_results(
             for seat in seats(scorer):
                 by_model.setdefault(seat, []).append(scorer)
     definition = job_config(job)["definition_digest"]
+    # The deterministic checks a request named, built once for every case (martian.evals.worker.checks).
+    checks_built = prepare(job.scorers)
     # The calibration each judge version had when the job started, if it checks the version as the
     # job runs it: on the model the job runs it on, or its panel's members, and as it is defined now.
     calibrations = await latest_calibrations(records, principal, project)
@@ -945,6 +949,8 @@ async def _score_results(
                 value, rationale, error = await _installed_score(checks, scorer, given)
             elif scorer.kind == "code":
                 value, rationale, error = await _custom_score(installed, scorer, result)
+            elif is_deterministic_check(scorer):  # no model: the suite file's check, on the saved output
+                value, rationale, error = await check_score(scorer, checks_built[scorer.name], result)
             elif scorer.kind != "llm_judge":
                 value, rationale = code_score(scorer.name, output, expected)
             elif scorer.panel:

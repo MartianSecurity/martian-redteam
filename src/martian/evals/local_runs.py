@@ -76,13 +76,22 @@ from martian.evals.server.dependencies import (
     WorkerDep,
     require_capability,
 )
-from martian.evals.server.launch import ACTIVE, admit_run, pin_target, resume_run, resume_scoring, run_id_for
+from martian.evals.server.launch import (
+    ACTIVE,
+    admit_run,
+    limits_provenance,
+    pin_target,
+    resume_run,
+    resume_scoring,
+    run_id_for,
+    same_limits,
+)
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
 from martian.evals.server.runs import find_run, lookup_run, project_keys, writable_key, writable_project
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.scoring import find_suite_version, with_models
-from martian.evals.server.write_schemas import EvalRunRequest
+from martian.evals.server.write_schemas import EvalRunRequest, ResumeRequest
 from martian.evals.store import EvalStore, StoreError
 from martian.evals.worker import ProcessWorker, QueueWorker, Work, WorkerServices, dump_work, sdk_judge
 from martian.evals.worker.execute import INTERRUPTED, LIMITS_KEY, interrupt
@@ -429,7 +438,6 @@ async def _cancel_job(
 class LocalRunRequest(EvalRunRequest):
     suite_version_id: uuid.UUID | None = None
     acknowledge_model_cost: bool = False
-    limits: RunLimits | None = None
 
 
 class RunAgainRequest(BaseModel):
@@ -438,17 +446,6 @@ class RunAgainRequest(BaseModel):
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     acknowledge_model_cost: bool = False
     limits: RunLimits | None = None
-
-
-class ResumeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    limits: RunLimits | None = None
-
-
-def _limits(limits: RunLimits | None) -> dict[str, Any]:
-    """The provenance that keeps a run's own limits, when it is given some."""
-    return {} if limits is None else {LIMITS_KEY: limits.model_dump(mode="json")}
 
 
 def _suite_version_id(run: Run) -> str | None:
@@ -464,8 +461,7 @@ def _same_launch(run: Run, body: LocalRunRequest, principal: Principal) -> bool:
         and run.project_id == project_key(body.project_id)
         and run.max_cases == body.max_items
         and _suite_version_id(run) == (str(body.suite_version_id) if body.suite_version_id else None)
-        # Without limits of its own the run has its suite's or the worker's, which the request did not name.
-        and (body.limits is None or run.provenance.get(LIMITS_KEY) == _limits(body.limits)[LIMITS_KEY])
+        and same_limits(run, body.limits)
         and run.requested_by == principal.user_id
         and "repeat_of" not in run.provenance
     )
@@ -520,7 +516,7 @@ async def launch_local_run(
         dataset=dataset,
         max_cases=body.max_items,
         suite=suite,
-        provenance=_limits(body.limits),
+        provenance=limits_provenance(body.limits),
     )
     return run_out(run)
 
@@ -575,7 +571,7 @@ async def run_again(
         dataset=dataset,
         max_cases=original.max_cases,
         suite=suite,
-        provenance={"repeat_of": original.id, **_limits(body.limits or _own_limits(original))},
+        provenance={"repeat_of": original.id, **limits_provenance(body.limits or _own_limits(original))},
     )
     return run_out(run)
 
