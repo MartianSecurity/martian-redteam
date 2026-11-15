@@ -13,7 +13,10 @@
 - Each case graded in the run is a ``CaseResult`` with a ``Score`` per check, mapped from its
   ``results.jsonl`` record by :func:`~martian.evals.model.from_results_record`, and a trace: the one
   MLflow's evaluation harness recorded for the case, with its spans, copied into the store under a
-  new id and carrying the scores.
+  new id and carrying the scores. A judge check's score names no calibration
+  (:data:`~martian.evals.calibration.NO_CALIBRATION`): a suite file's judge is no judge version
+  the core registers, so it has none. A panel check's score names the panel as its source and
+  keeps its votes in its metadata (``martian.panel.*``, :mod:`martian.evals.panel`).
 - A case whose verdict is reused from an earlier run in the same output folder keeps that verdict.
   Its result in this run has no trace: the trace stays with the run that graded the case.
 - When the suite runs each case more than once, the run's ``provenance`` holds the repeats under
@@ -64,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals.calibration import CALIBRATION_KEY, NO_CALIBRATION
 from martian.evals.model import (
     CaseResult,
     CaseStatus,
@@ -81,6 +85,7 @@ from martian.evals.model import (
     TurnResult,
     from_results_record,
 )
+from martian.evals.panel import panel_source
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
@@ -115,6 +120,13 @@ class GradedCase:
 
 def _wait[T](work: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(work)
+
+
+def _judge_source(scorer: ScorerVersion) -> str:
+    """A suite-file judge score's ``source_id``: the judge's model, or its panel's source."""
+    if scorer.panel:
+        return panel_source((member.model, member.endpoint) for member in scorer.panel)
+    return scorer.model or ""
 
 
 class RunRecorder:
@@ -396,7 +408,13 @@ class RunRecorder:
         now = datetime.now(UTC)
         result = result.model_copy(update={"expectations": dict(case.expectations), "finished_at": now})
         judged = [
-            score.model_copy(update={"source_id": scorer.model or "", "created_at": now})
+            score.model_copy(
+                update={
+                    "source_id": _judge_source(scorer),
+                    "created_at": now,
+                    "metadata": {**score.metadata, CALIBRATION_KEY: NO_CALIBRATION},
+                }
+            )
             if (scorer := self._scorers.get(score.scorer)) is not None and scorer.kind == "llm_judge"
             else score.model_copy(update={"created_at": now})
             for score in scores
@@ -530,11 +548,12 @@ class RunRecorder:
             scorer=label,
             scorer_version=scorer.version if scorer else "",
             source="llm_judge" if judge else "code",
-            source_id=(scorer.model or "") if scorer is not None and judge else "",
+            source_id=_judge_source(scorer) if scorer is not None and judge else "",
             value=verdict.passed,
             passed=verdict.passed,
             rationale=verdict.rationale,
             error=verdict.error,
+            metadata={**verdict.metadata, CALIBRATION_KEY: NO_CALIBRATION} if judge else dict(verdict.metadata),
             created_at=result.finished_at,
         )
 

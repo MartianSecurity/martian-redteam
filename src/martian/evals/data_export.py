@@ -20,7 +20,9 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   refers to before the object. The receiving store assigns its own identifiers for what it
   stores (``StoreRef``, dataset version ids, assessment ids), and the import points every
   reference at them. Monitors and schedules come back paused, and a threshold's webhook comes
-  back without its secret, which an export never holds.
+  back without its secret, which an export never holds. A judge calibration's re-check that was
+  queued or running comes back failed (:data:`RECHECK_INTERRUPTED`): nothing works on it in the
+  fresh install.
 - :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
   kind of object of the two interfaces that an export carries, and the files it is in;
   :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
@@ -66,7 +68,9 @@ from martian.evals.model import (
 )
 from martian.evals.records import (
     Alert,
+    CalibrationRecheck,
     DatasetManifest,
+    JudgeCalibration,
     Monitor,
     MonitoredTrace,
     MonitorProgress,
@@ -88,10 +92,11 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 3
+VERSION = 4
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
-alerts. Version 3 added the dataset publications (``manifests.jsonl``)."""
+alerts. Version 3 added the dataset publications (``manifests.jsonl``), and version 4 the judge
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -123,6 +128,8 @@ FILES = (
     "scheduled_runs.jsonl",
     "thresholds.jsonl",
     "alerts.jsonl",
+    "calibrations.jsonl",
+    "rechecks.jsonl",
 )
 """Every file of an export, in the order an import reads them."""
 
@@ -143,6 +150,8 @@ EXPORTED_TABLES = {
     "martian_schedule_runs": "scheduled_runs.jsonl",
     "martian_thresholds": "thresholds.jsonl",
     "martian_threshold_alerts": "alerts.jsonl",
+    "martian_judge_calibrations": "calibrations.jsonl",
+    "martian_calibration_rechecks": "rechecks.jsonl",
 }
 """Each table of the record store (``martian.evals.records.tables``) that an export carries, and
 the file its rows are in."""
@@ -190,6 +199,8 @@ EXPORTED_KINDS = {
     "Threshold": ("thresholds.jsonl",),
     "ThresholdStatus": ("thresholds.jsonl",),
     "Alert": ("alerts.jsonl",),
+    "JudgeCalibration": ("calibrations.jsonl",),
+    "CalibrationRecheck": ("rechecks.jsonl",),
 }
 """Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
 return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
@@ -218,6 +229,13 @@ WRITE_BATCH = 500
 """Case results or scores written per call on import."""
 
 UNFINISHED = ("queued", "running")
+
+RECHECK_INTERRUPTED = (
+    "Interrupted: this re-check was queued or running when its data was exported, and nothing works on it "
+    "in the install it was imported into; ask for it again"
+)
+"""The error of a judge calibration's re-check that an import finishes as failed: exported queued or
+running, it would otherwise stay so, and block the next re-check of its judge version."""
 
 
 class ExportError(Exception):
@@ -444,7 +462,7 @@ async def _project(
     store: EvalStore, records: RecordStore, principal: Principal, files: _Files, project_id: str
 ) -> None:
     """The project and what is defined in it: scorers, questions, suites, drafts, dataset
-    publications and views."""
+    publications and views, and its judges' calibrations and their re-checks, newest first."""
     project = await store.get_project(principal, project_id)
     if project is None:
         raise ExportError(f"project {project_id} is no longer in the store")
@@ -473,6 +491,10 @@ async def _project(
         files.write("manifests.jsonl", _line(project_id, manifest=manifest))
     for view in await records.list_views(principal, project_id):
         files.write("views.jsonl", _line(project_id, view=view))
+    for calibration in await records.list_calibrations(principal, project_id):
+        files.write("calibrations.jsonl", _line(project_id, calibration=calibration))
+    for recheck in await records.list_rechecks(principal, project_id):
+        files.write("rechecks.jsonl", _line(project_id, recheck=recheck))
 
 
 async def _dataset(store: EvalStore, principal: Principal, files: _Files, project_id: str, dataset_id: str) -> None:
@@ -789,6 +811,10 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
             found.append("schedules")
         if await records.list_thresholds(principal, project_id):
             found.append("thresholds")
+        if await records.list_calibrations(principal, project_id):
+            found.append("judge calibrations")
+        if await records.list_rechecks(principal, project_id):
+            found.append("calibration re-checks")
         if project_id in present:
             if await store.list_datasets(principal, project_id):
                 found.append("datasets")
@@ -909,6 +935,7 @@ async def _import(
     paused = await _import_monitors(records, principal, folder, refs)
     paused += await _import_schedules(records, principal, folder, refs)
     needs_secret = await _import_thresholds(records, principal, folder)
+    await _import_calibrations(records, principal, folder)
     for project in projects:
         if project.archived_at is not None:
             await store.archive_project(principal, project.id)
@@ -1090,6 +1117,18 @@ async def _import_thresholds(records: RecordStore, principal: Principal, folder:
     return tuple(needs_secret)
 
 
+async def _import_calibrations(records: RecordStore, principal: Principal, folder: Path) -> None:
+    """Each judge calibration and each re-check as the export holds it, who made it and when
+    included; a re-check that was queued or running is failed (:data:`RECHECK_INTERRUPTED`)."""
+    for project_id, calibration in _objects(folder, "calibrations.jsonl", "calibration", JudgeCalibration):
+        await records.save_calibration(principal, project_id, calibration)
+    for project_id, recheck in _objects(folder, "rechecks.jsonl", "recheck", CalibrationRecheck):
+        if recheck.state in UNFINISHED:
+            changes = {"state": "failed", "error": RECHECK_INTERRUPTED, "finished_at": datetime.now(UTC)}
+            recheck = recheck.model_copy(update=changes)
+        await records.create_recheck(principal, project_id, recheck)
+
+
 # --- the local edition -------------------------------------------------------------------------------
 
 
@@ -1139,6 +1178,7 @@ __all__ = [
     "FORMAT",
     "LEFT_OUT_KINDS",
     "LEFT_OUT_TABLES",
+    "RECHECK_INTERRUPTED",
     "VERSION",
     "ExportError",
     "ExportSummary",

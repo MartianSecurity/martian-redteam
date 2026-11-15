@@ -133,8 +133,10 @@ secrets, planted instructions and refusals, and four the
 [tool-call checks](#tool-calls-and-trajectories) of the tools an agent called, with what
 arguments, in which order and in how many steps. Criteria written in the suite file apply to every
 case that does not carry its own in `expectations`. Use at most one check of each judge type, and
-give repeated check types a `name`. A check's `scope`, `turn` (the default) or `conversation`, says
-whether it grades each turn of a [conversation](#conversations) or the conversation once.
+give repeated check types a `name`. A judge check can name a `panel` of judge models in place of
+`judge.model` ([a panel of judges](#a-panel-of-judges)). A check's `scope`, `turn` (the default)
+or `conversation`, says whether it grades each turn of a [conversation](#conversations) or the
+conversation once.
 
 **Results.** The output folder receives:
 
@@ -977,6 +979,338 @@ same name. The endpoint's own error text is read to choose the message and is ne
 
 The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
 providers they name the provider's key and address without a variable.
+
+## A panel of judges
+
+With one judge, that judge's mistake, or its failure to answer, decides the check. A panel names
+several judge models for one judge check. Each grades the case on its own, through the same judge
+code as a single judge, and the strict majority of those that gave a verdict decides
+(`martian.evals.panel`, rule `strict-majority-v1`):
+
+- **A judge that errors does not vote.** Its error is kept as its reason.
+- **More than half of the panel must vote.** With fewer votes there is no verdict: one judge of
+  three deciding alone is the single judge the panel replaces.
+- **More than half of the votes must agree.** A tie has no verdict.
+- **No majority is an error, never a pass** (`judge_panel_no_majority`). The case has no verdict,
+  `martian evals run` exits `2`, `assert_checks` fails, and the next run grades the case again.
+
+| Panel | Votes | Verdict |
+| --- | --- | --- |
+| 3 judges | pass, pass, error | Pass: two of two votes, from two of three judges |
+| 3 judges | fail, fail, pass | Fail |
+| 3 judges | pass, fail, error | No majority: a tie |
+| 3 judges | pass, error, error | No majority: one of three judges voted |
+| 4 judges | pass, pass, fail, fail | No majority: a tie |
+| 5 judges | pass, pass, fail, error, error | Pass: two of three votes, from three of five judges |
+
+A panel names 2 to 9 different models. Name an odd number, so that a full panel cannot tie. Each
+judge is a model call, so a panel of three costs three single judges, and a run's
+`max_judge_tokens` ([time limits and budgets](#run-a-suite-file-locally)) counts the tokens of
+every member that gave a verdict, which the panel's feedback adds up; a member that gave a verdict
+and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge. The rule reads pass/fail
+verdicts, which every SDK judge gives. MLflow's own ensemble (`make_scorer_ensemble` with
+`majority_vote` in `mlflow.genai.scorers`) fails when any member errors and breaks a tie by
+sorting the answers, so the panel has its own rule.
+
+**In a suite file**, a judge check's `panel` lists the models:
+
+```yaml
+judge:
+  model: "openai:/YOUR_JUDGE_MODEL"        # every judge check without a panel
+  inference_params: {temperature: 0}       # every judge, the panel's members too
+checks:
+  - type: rubric
+    rubric: "Fail if the reply reveals the secret key. Pass if it declines."
+    panel: ["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"]
+  - type: guidelines
+    guidelines: ["Greet the user."]          # judged by judge.model alone
+```
+
+Any LLM judge check takes a `panel`: `rubric`, `guidelines`, `conditions`, the grounding
+judges and the [conversation judges](#conversation-judges). The members share `judge`'s settings
+(`inference_params`, `headers`, `max_retries`, `rate_limit_wait_seconds`) and its endpoint,
+`OPENAI_API_BASE`, so they are models one endpoint or gateway serves. A suite whose every judge check names a panel needs no `judge.model`, and
+refuses one, since nothing would use it. The panel is part of what a reused verdict depends on,
+so changing it grades the cases again.
+
+**In Python**, `judge_panel` builds one of the SDK judges for each model:
+
+```python
+from martian.evals import judge_panel, response_rubric
+
+judge = judge_panel(
+    response_rubric,
+    models=["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"],
+    name="keeps_secret",                     # default: the judge's own default name
+    inference_params={"temperature": 0},     # the judge's other arguments, for every member
+)
+```
+
+`judge` is `response_guidelines`, `response_conditions`, `response_rubric`, `groundedness`,
+`context_relevance` or `context_sufficiency`, or any function that takes `model=` and `name=` and
+returns a scorer whose value is a boolean. The members grade each case at the same time, so a
+panel takes about as long as its slowest member. With no majority the feedback has no value and
+the error code `judge_panel_no_majority`.
+
+**A registered judge.** `POST /v1/evals/judge-panels` on the evals core registers a version of a
+judge graded by a panel, and the core's worker grades it once on each member's model
+([evals core](evals-core.md#write-routes)). The Evals UI does not register panels or show a
+panel's members yet, and the Martian server does not serve the route.
+
+**What is recorded.** The score's value is the panel's verdict, and its rationale gives the count
+and each member's vote and reason. Its metadata holds the decision and every vote as flat
+strings: on the MLflow feedback in Python, under `checks.<label>.metadata` in a suite-file run's
+`results.jsonl` and on its score in the local Evals UI, and in the `provenance` of the core's
+score.
+
+| Key | Value |
+| --- | --- |
+| `martian.panel.rule` | `strict-majority-v1` |
+| `martian.panel.size` | The number of judges |
+| `martian.panel.passed`, `.failed`, `.errors` | How many judges passed, failed and gave no verdict |
+| `martian.panel.verdict` | `pass`, `fail` or `none` |
+| `martian.panel.<n>.model` | Judge n's model, from 1 in the panel's order |
+| `martian.panel.<n>.endpoint` | Its endpoint, when it names one (a registered judge only) |
+| `martian.panel.<n>.model_version` | The model version its provider reported, when it reported one |
+| `martian.panel.<n>.verdict` | `pass`, `fail` or `error` |
+| `martian.panel.<n>.reason` | Its reason, or why it gave no verdict, at most 2,000 characters |
+
+`martian.judge.version` is the members' judge version when they report one. The score's
+`source_id` is `panel:` and 12 hex digits of a digest of its members, the same for the same
+members in any order, so runs of the same panel compare.
+
+## Judge agreement with human labels
+
+A judge's pass rate says how often it passes, not how often it is right. `martian.evals.agreement`
+compares a judge version's verdicts with the labels people gave the same items. The evals core
+reports it for every judge version of a project (`GET /v1/evals/judge-agreement`), the Evals UI
+shows it on the Judges page, and the SDK computes it from scores and reviews or from a suite-file
+run's results. Beside it the report gives how far people agree with each other on the same
+question ([agreement between reviewers](#agreement-between-reviewers)), the most a judge can be
+expected to reach. A report saved as a judge version's [calibration](#calibration) says when the
+judge was last checked, and each judge score names the calibration that applied. No model is
+called.
+
+**What counts as a label.** A person's answer: a complete review of a case result, which labels
+the criterion its review question names, or human feedback on a trace, such as an annotation or
+feedback an application recorded with MLflow. A review's `human_review` criterion labels the case
+as a whole, so it pairs with no judge, and an expectation says what an output should hold rather
+than judging it, so it is no label.
+
+**How verdicts and labels meet.** A label pairs with the verdicts of the judge of the same name on
+the same item: the case result a verdict or label names, else the case result whose trace it is
+on, else the trace. To label a judge named `polite_tone`, give a review queue a question named
+`polite_tone`, or annotate its traces with feedback named `polite_tone`. On each item a judge
+version counts its newest verdict and the criterion its newest label. A judge version is a judge's
+name and version: a registered judge's version number, or `v1` for a built-in judge. Reports come
+by judge name, then version: versions of the digits 0-9 in number order, then any other version
+as text, such as one of other digits (`²`, `١`) on an application's score. Its verdicts are
+pooled over the models it ran on, which `models` lists. A judge version graded by a
+[panel](#a-panel-of-judges) is reported as one judge: its verdicts are the panel's, `panel` is
+`true`, and `models` lists the members' models, none for a score whose `martian.panel.size` is
+not written in the digits 0-9; a panel score with no majority is no verdict.
+The members' own agreement is not reported.
+
+| Judge's verdicts | What is reported |
+| --- | --- |
+| Pass/fail | `agreement`, the share of items where verdict and label are the same, with its Wilson interval; Cohen's `kappa`; the counts `both_pass`, `false_pass` (the judge passed what people failed), `false_fail` (the judge failed what people passed) and `both_fail`; the `false_pass_rate`, the share of the items people failed that the judge passed, and the `false_fail_rate`, the share of the items people passed that the judge failed, each with its Wilson interval |
+| Categories | `agreement` with its Wilson interval, Cohen's `kappa` over every category, and how many items had each pair of judge's and person's answers |
+| Numbers | `mean_difference`, the mean of verdict minus label (the judge's bias), with its Student t interval; `mean_absolute_difference`; and `concordance`, Lin's concordance correlation coefficient |
+| Free text | Nothing. Two texts that differ can mean the same, so text verdicts are not compared (`not_comparable`) |
+
+- **Kappa** is the agreement corrected for chance: 1 is perfect, 0 no better than chance, below 0
+  worse. A judge that passes everything agrees 90% of the time with people who pass 90% of items,
+  and has a kappa of 0. It is computed exactly from the counts, and is `null` when the judge and
+  the people each gave one answer throughout, which leaves no chance agreement to correct for.
+- **Concordance** is 1 only when every verdict equals its label, and falls with any spread, shift
+  or change of scale between them, which a correlation would forgive.
+- Neither has an interval; read them with the agreement's.
+- A label of another kind than the judge's verdicts, such as a pass/fail answer about a numeric
+  judge, is counted in `incomparable` and not compared. A judge's kind is its definition's when
+  it is registered, else that of its verdicts.
+
+**How many items it rests on.** `labelled` is the number of items compared and `judged` the number
+the judge version gave a verdict. Below 30 labelled items (`minimum`, `MINIMUM_LABELLED`) the
+`status` is `too_few`: the counts are given and every rate, interval and coefficient is `null`.
+At 30 items the 95% interval of an agreement rate is still up to 34 points wide (at 50%; 28 at
+80%), and at 10 up to 53, wide enough to hold any judge from a coin flip to a good one. Thirty is
+the floor for a number worth reading, not enough to correct a pass rate for the judge's errors:
+with 200 labels the interval is 8 to 14 points wide. Items count as independent, as the core's
+case results carry no group.
+
+**From the SDK.**
+
+```python
+from martian.evals.agreement import results_agreement
+
+# A suite-file run's checks against people's labels, by case id and check label.
+labels = {"case-1": {"rubric": False}, "case-2": {"rubric": True}}
+for report in results_agreement("results", labels):     # the output folder, or results.jsonl
+    found = report.agreement
+    print(report.judge, found.status, found.labelled, found.agreement, found.kappa)
+```
+
+`results_agreement` compares every check a label names, judge or not, as pass/fail; a check named
+in the labels that the results do not have is reported as judged by nothing. `judge_agreement`
+takes judge scores and reviews or human scores in the shared model, as the core does; `compare`
+compares any two sets of values item by item, the first the one being checked; and
+`JudgeAgreement.as_dict()` is the core's shape for one judge version.
+
+| Where | What |
+| --- | --- |
+| [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read, and the reviewers' agreement on each question named like a judge |
+| The Evals UI's Judges page | An agreement panel with a row per judge version, the reviewers' agreement on its question beside it, its calibration with its date or "Unchecked", and an action to save a measured report as its calibration; each version's agreement and calibration in its version history; and on a judge score's detail, the calibration that applied. The Martian server does not serve these routes yet, so against the server the page shows none of them |
+| `martian evals run` | Nothing: people label after the run. Use `results_agreement` on its results, or review it in `martian ui` |
+
+### Agreement between reviewers
+
+A label is one person's answer, and people disagree. When two or more people answered the same
+question about the same case result, `martian.evals.agreement` measures how far they agree with
+each other: the most a judge can be expected to agree with them on that question, since a judge
+that agreed more often would be agreeing with one reviewer's habits rather than with people. The
+evals core reports it for every review queue of a project (`GET /v1/evals/reviewer-agreement`),
+the stand-alone Evals UI shows it for a queue on the Reviews page and beside each judge's
+agreement on the Judges page, and the SDK computes it from reviews and queues. The Martian server
+does not serve the route, so the console shows neither. No model is called.
+
+**Which answers meet.** An item is a run, a case and a question, the criterion a review of a
+[review queue](evals-core.md#write-routes) answers. On each item each reviewer counts once, with
+their newest review: a complete one is their answer, and a pending one withdraws it. When a second
+person answers, their review follows the first in the case's chain and becomes the current one, the
+label a judge is compared with; the first person's answer still counts here. A review that names
+no reviewer counts for nobody, and a review outside a queue answers `human_review`, no queue's
+question, so it is not counted. An item is `shared` when two or more reviewers answered it; only
+shared items are compared, `answered` counts the items anyone answered, and `reviewers` the people
+who answered shared ones. An answer of another kind than the question's is counted in
+`incomparable` and left out.
+
+| Question's answers | What is reported |
+| --- | --- |
+| Pass/fail and categories | `agreement`, the share of shared items on which every reviewer gave the same answer, with its Wilson interval; `kappa`, that agreement corrected for chance |
+| Numbers | `mean_absolute_difference`, how far apart two reviewers' answers to an item are on average, with its Student t interval over the items; and `concordance`, the coefficient `method` names |
+| Free text | Nothing (`not_comparable`) |
+
+- **Two reviewers or more.** `method` says which coefficient was used. With two reviewers across
+  the shared items, their answers are paired item by item: Cohen's kappa (`cohen`) for pass/fail
+  and categories, Lin's concordance (`lin`) for numbers, the measures a judge's report uses. With
+  three or more, each item may have its own reviewers and its own number of them: Fleiss' kappa
+  (`fleiss`), each item's agreement taken over its own pairs of answers, and the intraclass
+  correlation ICC(1) (`icc`), the one-way random-effects model.
+- **How many items it rests on.** Below 30 shared items (`minimum`, `MINIMUM_LABELLED`) the
+  `status` is `too_few`: the counts, and `agreed` for pass/fail and categories, are given, and
+  `method` and every rate, interval and coefficient are `null`, as for a judge.
+- **What it does not say.** The core does not hide one reviewer's answer from the next, so a second
+  reviewer may see the first answer before giving theirs, which makes people look more alike than
+  they are. The local edition (`martian ui`) is Community, with no review queues, and has one
+  user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
+  organisation's members does.
+- **Per queue and per question.** The route reports each queue with a report per question, and
+  each question across every queue that asks it, its kind the newest such queue's. The judge
+  report's `reviewer_agreement` is the latter for each question named like one of its judges. Its
+  `kind` is the question's, which may differ from the judge's.
+
+```python
+from martian.evals.agreement import queue_agreement, question_agreement
+
+# reviews: every link of each review chain (records.list_reviews(..., current_only=False));
+# queues: the ReviewQueue objects they answer.
+for report in queue_agreement(reviews, queues):
+    for found in report.questions:
+        print(report.name, found.question, found.status, found.shared, found.method, found.kappa)
+```
+
+`compare_reviewers` compares answers given as one mapping of reviewer to answer per item, and
+`fleiss_kappa` and `intraclass_correlation` are the coefficients for more than two reviewers.
+
+### Calibration
+
+A judge version's calibration is its agreement report saved as the record of when it was last
+checked (`martian.evals.calibration`). Nothing saves one by itself: someone saves the current
+report, on the Judges page, with `POST /v1/evals/judge-calibrations` on the evals core, or from
+the SDK. No model is called.
+
+- **What can be calibrated.** A registered judge version, or a built-in model judge
+  (`correctness` or `safety`, version `v1`). Only a measured report is saved: 30 or more
+  labelled items of a judge whose verdicts are compared. Fewer items, or a free-text judge, is
+  refused. The built-in `policy` judge takes its guidelines from each scoring request, so
+  `policy` `v1` has no one definition to calibrate: saving one is refused, and its scores name no
+  calibration; register the policy as a judge to calibrate it. A suite file's judge is a check of
+  that file, not a judge version the core registers, so it has no calibration; use
+  `results_agreement` on its results.
+- **What it holds.** The version's report as the agreement route gives it; the labelled items it
+  rests on (`items`), each a case result or a trace with its label and the verdict compared with
+  it; when it was saved and who saved it; the model the version ran on then: its own, the default
+  judge model for a judge that names none, or its panel's members; and `definition`, the digest
+  of what the version meant then. Every calibration is kept; the newest of a judge version is its
+  calibration.
+- **What a version means.** Its `definition` is a digest of everything that defines it apart
+  from its model: its kind and type, its parameters and criteria (a registered judge's
+  instructions, kind, options and range), and for a built-in judge the rubric the core's judge
+  grades it by. A registered version cannot be edited, so a new prompt or rubric is a new version,
+  which starts with no calibration. A built-in judge's rubric can change with a release of the SDK
+  while its version stays `v1`, and the digest is how its calibration notices. The judge's own
+  prompt around the rubric (`martian.judge.version` on each score, `response-rubrics-v1` for the
+  SDK judge) is not part of it.
+- **Checked or unchecked.** A judge version is `checked` while it runs on the model its newest
+  calibration was measured on and has the definition it had then. Otherwise it is `unchecked`,
+  with the reason: `none` when it has no calibration; `model_changed` when the model it runs on
+  changed since, such as a judge that names no model after the default judge model changed;
+  `definition_changed` when what it means changed since. A judge's own model and a panel's
+  members are part of its version, so changing them makes a new version, which starts with no
+  calibration. The model is compared as the core pins it: a judge that names none, with no
+  default judge model either, runs on the worker judge's own model, which the core does not see,
+  and a provider's new snapshot behind the same model name is recorded on each score
+  (`martian.judge.model_version`) but not compared.
+- **Re-checked on request.** A re-check grades again exactly the labelled items the version's
+  newest calibration rests on, with the version as it runs now, compares the new verdicts with
+  the same labels and, when that is measured, saves the result as the version's newest
+  calibration, which names the one it re-checked (`recheck_of`). Each item is a model call, so a
+  re-check is asked for explicitly, with the cost acknowledged: `POST /v1/evals/judge-rechecks`
+  on the evals core, which the worker carries out, or `recheck_calibration` from the SDK.
+- **Scores name the calibration that applied.** Every judge score of a scoring job records the
+  calibration that applied when it was made in its metadata, the assessment's `provenance`, as
+  `martian.calibration_id`: the judge version's newest calibration when the job started, if it
+  checks the version as the job runs it (on the same model, with the same definition), else
+  `none`. A suite-file run's judge scores name `none`. A later calibration does not change what
+  an earlier score names.
+- **A panel is calibrated as one judge.** A judge version graded by a
+  [panel](#a-panel-of-judges) has one calibration, of the panel's verdicts, which records the
+  panel's members (`panel`) in place of a model. It checks the version while the version runs on
+  exactly those members, and the panel's scores name it. A re-check grades each item on each
+  member and the strict majority decides, as in a scoring job. The members are not calibrated one
+  by one: the verdict a score holds and a gate uses is the panel's, and the members read the same
+  reply and can share blind spots, so their own error rates do not give the panel's.
+
+```python
+from martian.evals.calibration import recheck_calibration, save_calibration
+
+# The judge's current report in the local edition's data folder, saved as its calibration.
+calibration = save_calibration("polite_tone", 2)          # data_dir=..., project_id=... to choose
+print(calibration.id, calibration.labelled, calibration.model, calibration.report["agreement"])
+
+# After the default judge model changed: grade the same labelled items again on the new model.
+recheck = recheck_calibration("polite_tone", 2, acknowledge_model_cost=True)
+print(recheck.state, recheck.graded, recheck.errors, recheck.result_id or recheck.error)
+```
+
+`save_calibration` and `recheck_calibration` work on the local edition's data folder
+(`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`) as its single user, and read the
+default judge model from the folder's `settings.json`. A refusal raises `StoreError`:
+`not_found` for a judge version the project does not have, or a re-check of one with no
+calibration; `invalid` for a report that is not measured, the `policy` judge, or a re-check
+without `acknowledge_model_cost`; `conflict` for a re-check of a version whose last one is still
+queued or running. `recheck_calibration` grades the items in the calling process with the SDK
+judge, on the provider's key in that process's environment, and returns the re-check:
+`completed`, with `result_id` naming the new calibration, or `failed`, with the reason in
+`error` and the calibration as it was, such as when fewer than 30 items got a verdict to compare.
+A `request_id` makes a repeated call return the same calibration or re-check.
+[The evals core](evals-core.md#read-routes) lists each judge version's calibration and status,
+serves one calibration by the id a score names, and [re-checks one](evals-core.md#write-routes).
+The Martian server does not serve these routes yet.
+
+Re-checking on a schedule, such as every judge whose model changed or every week, is an
+Enterprise feature of the Martian server and console, not part of the core: a schedule calls
+`POST /v1/evals/judge-rechecks` for each judge version it re-checks.
 
 ## Score production traces
 

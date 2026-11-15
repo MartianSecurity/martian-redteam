@@ -40,6 +40,10 @@ pass, or at least one passes (``martian.evals.repeats``)."""
 MAX_ATTEMPTS = 100
 """The most attempts a suite runs of each case."""
 
+MIN_PANEL = 2
+MAX_PANEL = 9
+"""The fewest and the most judge models a panel of judges names (``martian.evals.panel``)."""
+
 MAX_TURNS = 100
 """The most user turns one conversation case has."""
 
@@ -253,6 +257,14 @@ class Target(_Object):
         return written
 
 
+class PanelMember(_Object):
+    """One judge model of a panel: an MLflow model URI, and the base address of the
+    OpenAI-compatible endpoint that serves it, or None for the provider's own."""
+
+    model: str = Field(min_length=1, max_length=240)
+    endpoint: str | None = None
+
+
 class ScorerVersion(_Object):
     """One way of scoring a case, pinned to the version that produced the score.
 
@@ -262,6 +274,12 @@ class ScorerVersion(_Object):
     reply, or the conversation once. An unset ``endpoint`` and the default ``scope`` (``turn``) are
     left out when the scorer is written, so a scorer without them has the digest it had before
     the fields existed.
+
+    A judge with a ``panel`` is graded by each of its judge models in turn, and the strict majority
+    of those that give a verdict decides (``martian.evals.panel``). A panel names from
+    :data:`MIN_PANEL` to :data:`MAX_PANEL` different models; the judge then names no ``model`` or
+    ``endpoint`` of its own. An empty panel is left out when the scorer is written, as an unset
+    endpoint is.
     """
 
     name: Identifier
@@ -270,15 +288,32 @@ class ScorerVersion(_Object):
     version: str = ""
     model: str | None = None
     endpoint: str | None = None
+    panel: list[PanelMember] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     criteria: dict[str, Any] = Field(default_factory=dict)
     scope: CheckScope = "turn"
+
+    @model_validator(mode="after")
+    def _a_panel_is_the_judges_models(self) -> ScorerVersion:
+        if not self.panel:
+            return self
+        if self.kind != "llm_judge":
+            raise ValueError("only an llm_judge scorer has a panel of judge models")
+        if self.model is not None or self.endpoint is not None:
+            raise ValueError("a judge with a panel names its models in the panel, not in model or endpoint")
+        if not MIN_PANEL <= len(self.panel) <= MAX_PANEL:
+            raise ValueError(f"a panel names {MIN_PANEL} to {MAX_PANEL} judge models")
+        if len(set(self.panel)) != len(self.panel):
+            raise ValueError("a panel names each judge model once")
+        return self
 
     @model_serializer(mode="wrap")
     def _without_unset_endpoint(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
         if isinstance(written, dict) and written.get("endpoint", "") is None:
             del written["endpoint"]
+        if isinstance(written, dict) and written.get("panel") == []:
+            del written["panel"]
         if isinstance(written, dict) and self.scope == "turn":
             written.pop("scope", None)
         return written
@@ -476,11 +511,21 @@ class Run(_Object):
 
 
 class CheckVerdict(_Object):
-    """One check's verdict on one attempt. ``passed`` is None when there is no verdict."""
+    """One check's verdict on one attempt. ``passed`` is None when there is no verdict.
+    ``metadata`` is what the check recorded beside its verdict, such as a panel's votes; it is
+    left out when empty, so a verdict without any is written as it was before the field existed."""
 
     passed: bool | None = None
     rationale: str = ""
     error: str = ""
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def _without_empty_metadata(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and not self.metadata:
+            written.pop("metadata", None)
+        return written
 
 
 class TurnResult(_Object):
@@ -902,7 +947,10 @@ TURN_RECORD_FIELDS = {
 
 def _verdict(check: dict[str, Any]) -> CheckVerdict:
     return CheckVerdict(
-        passed=check.get("passed"), rationale=check.get("rationale") or "", error=check.get("error") or ""
+        passed=check.get("passed"),
+        rationale=check.get("rationale") or "",
+        error=check.get("error") or "",
+        metadata=dict(check.get("metadata") or {}),
     )
 
 
@@ -941,7 +989,8 @@ def from_results_record(
     ``scorers`` maps a check label to the scorer that produced it, so each score names its
     version and source; a label not in it is recorded as a check. A record's ``attempts`` become
     the result's attempts, and a conversation's ``session_id`` and ``turns`` its own; its scores
-    are the record's own checks: the attempts combined, and a conversation's verdicts.
+    are the record's own checks: the attempts combined, and a conversation's verdicts. A check's
+    ``metadata``, such as a panel's votes, is its score's metadata.
     """
     if unknown := sorted(set(record) - set(RESULTS_RECORD_FIELDS)):
         raise ValueError(f"results record has fields the model does not map: {', '.join(unknown)}")
@@ -973,6 +1022,7 @@ def from_results_record(
                 passed=check.get("passed"),
                 rationale=check.get("rationale") or "",
                 error=check.get("error") or "",
+                metadata=dict(check.get("metadata") or {}),
             )
         )
     return result, scores
@@ -982,7 +1032,9 @@ __all__ = [
     "ATTEMPT_RECORD_FIELDS",
     "HEADER_NAME",
     "MAX_ATTEMPTS",
+    "MAX_PANEL",
     "MAX_TURNS",
+    "MIN_PANEL",
     "MODEL_NAME_LENGTH",
     "MODEL_VERSION",
     "SESSION_TRACE_LIMIT",
@@ -994,6 +1046,7 @@ __all__ = [
     "Repeats",
     "DatasetDraft",
     "Page",
+    "PanelMember",
     "QueueItem",
     "Session",
     "SessionSearch",

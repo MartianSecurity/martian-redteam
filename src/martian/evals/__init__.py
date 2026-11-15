@@ -55,6 +55,7 @@ from martian.evals.judges import (
     response_guidelines,
     response_rubric,
 )
+from martian.evals.panel import judge_panel
 from martian.evals.redteam import assert_redteam
 from martian.evals.scorers import exact_match
 
@@ -80,6 +81,7 @@ __all__ = [
     "groundedness",
     "is_json",
     "json_schema",
+    "judge_panel",
     "knowledge_retention",
     "latency",
     "length",

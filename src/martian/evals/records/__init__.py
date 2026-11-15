@@ -3,11 +3,11 @@
 MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, registered judges
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
-Traces page's saved views, the monitors that score a project's live traces with what each has
-scored, the thresholds on their scores with the alerts they raise, and the schedules that run a
-suite against a target with the slots each has run, and with how far each has watched the model
-behind its target; also what publishing each dataset version wrote, and the outbox of store
-writes not yet delivered.
+Traces page's saved views, each judge version's calibrations and their re-checks, the monitors
+that score a project's live traces with what each has scored, the thresholds on their scores
+with the alerts they raise, and the schedules that run a suite against a target with the slots
+each has run, and with how far each has watched the model behind its target; also what
+publishing each dataset version wrote, and the outbox of store writes not yet delivered.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -33,6 +33,7 @@ from martian.evals.model import (
     Digest,
     Identifier,
     Page,
+    PanelMember,
     Policy,
     Review,
     Run,
@@ -43,6 +44,7 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
     Target,
+    Value,
 )
 from martian.evals.records.events import Event, EventBus, EventsLost, InProcessEvents, Subscription
 from martian.evals.slots import timing
@@ -109,6 +111,99 @@ class Delivery(BaseModel):
     error: str = ""
     created_at: datetime | None = None
     delivered_at: datetime | None = None
+
+
+class LabelledItem(BaseModel):
+    """One labelled item a calibration rests on: a case result (``run_id`` and ``case_id``) or a
+    trace of live traffic (``trace_id``), the label people gave it, and the judge's verdict the
+    calibration compared with that label."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: Identifier | None = None
+    case_id: Identifier | None = None
+    trace_id: Identifier | None = None
+    label: Value
+    verdict: Value
+
+    @model_validator(mode="after")
+    def _a_case_result_or_a_trace(self) -> LabelledItem:
+        case = self.run_id is not None and self.case_id is not None
+        if case == (self.trace_id is not None) or (self.run_id is None) != (self.case_id is None):
+            raise ValueError("a labelled item is a case result (run_id and case_id) or a trace (trace_id)")
+        return self
+
+
+class JudgeCalibration(BaseModel):
+    """A judge version's agreement with people's labels, saved as its calibration
+    (:mod:`martian.evals.calibration`). The core's own record, so it is not part of the shared
+    model.
+
+    ``report`` is the version's item of the agreement report when it was saved, as
+    ``GET /v1/evals/judge-agreement`` gives it, with ``labelled`` the items it rests on, and
+    ``traces_examined`` and ``traces_truncated`` what the report read. ``items`` are those labelled
+    items, each with its label and the verdict compared with it, so that a re-check can grade
+    exactly them again. ``model`` and ``endpoint`` are the model the judge version ran on then: its
+    own, or the default judge model when it names none. For a judge graded by a panel, ``panel`` is
+    its members instead, and the calibration is the panel's, as one judge: its verdicts are the
+    panel's. ``definition`` is the digest of what the version meant then: its prompt or rubric and
+    everything else that defines it but its model (``martian.evals.calibration.judge_definition``).
+    ``recheck_of`` is the calibration whose labelled items a re-check graded again to make this
+    one. A calibration is never changed: a newer one of the same judge version takes its place,
+    and a score names the one that applied when it was made."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    project_id: Identifier
+    judge: Identifier
+    version: str = Field(min_length=1, max_length=40)
+    model: str | None = None
+    endpoint: str | None = None
+    panel: list[PanelMember] = Field(default_factory=list)
+    definition: str | None = None
+    labelled: int = Field(ge=0)
+    items: list[LabelledItem] = Field(default_factory=list)
+    traces_examined: int = Field(default=0, ge=0)
+    traces_truncated: bool = False
+    report: dict[str, Any] = Field(default_factory=dict)
+    recheck_of: Identifier | None = None
+    created_by: Identifier | None = None
+    created_at: datetime | None = None
+
+
+RecheckState = Literal["queued", "running", "completed", "failed"]
+
+
+class CalibrationRecheck(BaseModel):
+    """Grading a calibration's labelled items again with its judge version as the version runs now,
+    to measure its agreement again (:mod:`martian.evals.calibration`). The core's own record.
+
+    ``calibration_id`` is the calibration whose items are graded, and ``scorer`` the judge version
+    pinned, when the re-check was asked for, to the model it runs on now (or its panel's members),
+    with ``definition`` the digest of its definition then. The worker grades each item (``total``):
+    ``graded`` got a verdict, ``errors`` did not. A re-check that measures the version saves a new
+    calibration, ``result_id``, and is ``completed``; one that cannot, such as one with too few
+    verdicts, is ``failed`` with the reason in ``error``, and the calibration stays as it was."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    project_id: Identifier
+    judge: Identifier
+    version: str = Field(min_length=1, max_length=40)
+    calibration_id: Identifier
+    scorer: ScorerVersion
+    definition: str
+    state: RecheckState
+    total: int = Field(default=0, ge=0)
+    graded: int = Field(default=0, ge=0)
+    errors: int = Field(default=0, ge=0)
+    error: str = ""
+    result_id: Identifier | None = None
+    requested_by: Identifier | None = None
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class _Record(BaseModel):
@@ -727,6 +822,52 @@ class RecordStore(Protocol):
         oldest first."""
         ...
 
+    # Judge calibrations: every one is kept, and the newest of a judge version is its calibration.
+    async def save_calibration(
+        self, principal: Principal, project_id: str, calibration: JudgeCalibration
+    ) -> JudgeCalibration:
+        """Record a calibration. Saving the same id again returns the stored one."""
+        ...
+
+    async def get_calibration(
+        self, principal: Principal, project_id: str, calibration_id: str
+    ) -> JudgeCalibration | None: ...
+
+    async def list_calibrations(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[JudgeCalibration]:
+        """Every calibration of the project, or of one judge's versions, newest first."""
+        ...
+
+    # Re-checks of calibrations: queued, then moved on by the worker.
+    async def create_recheck(
+        self, principal: Principal, project_id: str, recheck: CalibrationRecheck
+    ) -> CalibrationRecheck:
+        """Record a re-check. Creating the same id again returns the stored one."""
+        ...
+
+    async def get_recheck(
+        self, principal: Principal, project_id: str, recheck_id: str
+    ) -> CalibrationRecheck | None: ...
+
+    async def update_recheck(
+        self,
+        principal: Principal,
+        project_id: str,
+        recheck: CalibrationRecheck,
+        *,
+        expected_state: RecheckState | None = None,
+    ) -> CalibrationRecheck:
+        """Replace the stored re-check. With ``expected_state``, only while it is still in that
+        state, so two workers cannot both move it on."""
+        ...
+
+    async def list_rechecks(
+        self, principal: Principal, project_id: str, *, judge: str | None = None
+    ) -> list[CalibrationRecheck]:
+        """Every re-check of the project, or of one judge's versions, newest first."""
+        ...
+
     # Monitors: scorers on a project's live traces, and what each has scored.
     async def create_monitor(self, principal: Principal, project_id: str, monitor: Monitor) -> Monitor:
         """Create the monitor, or return the stored one with the same id."""
@@ -937,6 +1078,7 @@ __all__ = [
     "RECORD_METHODS",
     "THRESHOLD_WINDOW_BOUND",
     "Alert",
+    "CalibrationRecheck",
     "DatasetManifest",
     "Delivery",
     "EmailChannel",
@@ -944,6 +1086,8 @@ __all__ = [
     "EventBus",
     "EventsLost",
     "InProcessEvents",
+    "JudgeCalibration",
+    "LabelledItem",
     "ModelChange",
     "ModelWatch",
     "ModelWatchProgress",
@@ -953,6 +1097,7 @@ __all__ = [
     "MonitorScores",
     "MonitoredTrace",
     "Observation",
+    "RecheckState",
     "RecordStore",
     "SavedView",
     "Schedule",
