@@ -133,19 +133,26 @@ def http_services(folder: str) -> WorkerServices:
 class FakeMartianAgents:
     """Registered agents through a stand-in for the Martian server's martian-agents path.
 
-    Admission pins the agent's approved connection, as ``select_eval_target`` does on the server.
-    Each call carries a target lease minted for that run and case, which martian-agents would
-    exchange for the agent's credential; it is appended, with the rest of the chat, to
-    ``chats.jsonl`` and never returned. The agent answers as the write route tests' agent does."""
+    Admission pins the agent's approved connection at its ``revision``, as ``select_eval_target``
+    does on the server. Each call carries a target lease minted for that run and case, which
+    martian-agents would exchange for the agent's credential; it is appended, with the rest of the
+    chat, to ``chats.jsonl`` and never returned. The agent answers as the write route tests' agent
+    does."""
 
-    def __init__(self, folder: Path, agents: tuple[str, ...] = (REGISTERED_AGENT,)) -> None:
+    def __init__(self, folder: Path, agents: tuple[str, ...] = (REGISTERED_AGENT,), revision: int = 1) -> None:
         self._chats = folder / "chats.jsonl"
         self._agents = agents
+        self._revision = revision
 
     async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
         if agent_id not in self._agents:
             raise StoreError("not_found", "Agent not found")
-        return {"kind": "dynamic", "target_id": f"agent-{agent_id}", "connection_id": "connection-1", "revision": 1}
+        return {
+            "kind": "dynamic",
+            "target_id": f"agent-{agent_id}",
+            "connection_id": "connection-1",
+            "revision": self._revision,
+        }
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
         message = prompt_text(case.inputs)

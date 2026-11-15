@@ -38,6 +38,7 @@ runs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
     Index("ix_martian_runs_created", "space", "project_id", "created_at"),
+    Index("ix_martian_runs_state", "space", "state"),
 )
 
 case_results = Table(
@@ -78,6 +79,7 @@ scoring_jobs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
     Index("ix_martian_scoring_jobs_run", "space", "project_id", "run_id"),
+    Index("ix_martian_scoring_jobs_state", "space", "state"),
 )
 
 reviews = Table(
@@ -141,6 +143,25 @@ saved_views = Table(
     Column("record", JSON, nullable=False),
 )
 
+# The worker's queue (``martian.evals.records.queue``): one row per run launch or scoring job that
+# no worker has finished, removed when one does. ``work`` is the work as the worker reads it.
+# ``token`` is the current claim's, and the claim holds the row until ``lease_expires_at``.
+work_queue = Table(
+    "martian_work_queue",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("kind", String(16), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("attempts", Integer, nullable=False),
+    Column("token", String(64), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("work", JSON, nullable=False),
+    Index("ix_martian_work_queue_next", "state", "created_at"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -151,4 +172,5 @@ TABLES = (
     dataset_drafts,
     dataset_draft_cases,
     saved_views,
+    work_queue,
 )
