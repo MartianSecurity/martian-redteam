@@ -110,7 +110,8 @@ def run_limits(run: Run, default: RunLimits | None = None) -> RunLimits:
 
 
 def _detail(error: Exception, fallback: str) -> str:
-    """What a failed record says: a store's refusal as the store gave it, anything else generic."""
+    """What a failed record says: a store's refusal as the store gave it, which names the operation
+    and never a value written, anything else generic."""
     return error.detail if isinstance(error, StoreError) else fallback
 
 
