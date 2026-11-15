@@ -229,8 +229,10 @@ async def test_one_organisation_cannot_starve_another(records: SqlRecordStore, q
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
     # The other organisation's run takes the worker's second place at once, beside the first
-    # organisation's oldest, rather than waiting behind all six; the first's then go oldest first.
-    assert runner.started == ["a0", "b0", "a1", "a2", "a3", "a4", "a5"]
+    # organisation's oldest, rather than waiting behind all six. (Two pieces taken one after the
+    # other may start in either order: each reads its record before it starts.)
+    assert set(runner.started[:2]) == {"a0", "b0"}
+    assert sorted(runner.started[2:]) == ["a1", "a2", "a3", "a4", "a5"]
 
 
 async def test_a_claim_takes_the_oldest_work_of_the_organisation_with_the_fewest_running(
