@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from martian.evals import local_runs
+from martian.evals.local import local_entitlements
 from martian.evals.model import CaseResult, Counts, Project, Run, StoreRef, Target, Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
@@ -19,7 +20,9 @@ from martian.evals.server.launch import run_id_for
 from martian.evals.stats import wilson
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.read_fixture import T0, seed, trace_id
+from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, sample_trace
 from tests.evals.write_fixture import AGENT, Inert
 
 ORG = organisation_principal("user-1", "org-a", frozenset({"member"}), display_name="Ada")
@@ -336,11 +339,15 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
             "provenance": {**pinned, "repeat_of": ci.id},
         }
     )
+    # A console run that stopped at one of its limits, which the local edition resumes.
+    resumable = stopping.model_copy(
+        update={"id": str(uuid.uuid4()), "code": "EV-1004", "state": "stopped", "cancel_requested_at": None}
+    )
     traced = trace_id()
 
     async def record() -> None:
         await store.create_project(SINGLE_USER, Project(id=DEFAULT_PROJECT, name="Default"))
-        for run in (ci, stopping, repeated):
+        for run in (ci, stopping, repeated, resumable):
             await records.create_run(SINGLE_USER, run)
         await store.start_run(SINGLE_USER, ci)
         await store.record_trace(SINGLE_USER, Trace(id=traced, project_id=DEFAULT_PROJECT, state="ok", run_id=ci.id))
@@ -350,7 +357,15 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
         await records.put_results(SINGLE_USER, DEFAULT_PROJECT, [result])
 
     asyncio.run(record())
-    app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=Inert())
+    # Room for the resumed run beside the one still running.
+    entitlements = local_entitlements(concurrency=5)
+    app = create_app(
+        store=store,
+        records=records,
+        principal=lambda: SINGLE_USER,
+        entitlements=lambda _p: entitlements,
+        worker=Inert(),
+    )
     app.include_router(local_runs.router)
     client = TestClient(app)
     replay = {"agent_id": AGENT, "dataset_name": "support-faq", "max_items": 1}
@@ -376,6 +391,7 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
             f"/v1/local/runs/{ci.id}/again",
             {"json": {"request_id": str(again)}},
         ),
+        ("post", "/v1/local/runs/{run_id}/resume", f"/v1/local/runs/{resumable.id}/resume", {"json": {}}),
     ]
     shown = {}
     for method, route, path, options in calls:
@@ -502,6 +518,44 @@ def test_trace_search_in_a_project_that_does_not_exist(served, tmp_path):
     assert empty.post("/v1/evals/sessions/search", json={}).json()["items"] == []
     assert empty.get("/v1/evals/datasets").json() == [] and empty.get("/v1/evals").json() == []
     records.close()
+
+
+@pytest.mark.parametrize("style", STYLES)
+def test_a_trace_in_each_convention_shows_its_model_tokens_tool_calls_and_inputs(served, style):
+    client, seeded = served
+    trace_id = "tr-" + uuid.uuid4().hex
+    sample = sample_trace(style, trace_id).model_copy(update={"request_time": T0 + timedelta(days=3)})
+    asyncio.run(seeded.store.record_trace(SINGLE_USER, sample))
+    (row,) = search(client, session_id="conversation-1")["items"]
+    assert (row["id"], row["model"], row["tokens"], row["user_id"]) == (trace_id, MODEL, 20, "alice")
+    assert QUESTION in row["request"]
+    detail = client.get(f"/v1/evals/traces/{trace_id}").json()
+    assert detail["info"]["trace_metadata"][MAPPING_KEY] == MAPPING_VERSION
+    assert detail["token_usage"] == {"total_tokens": 20}
+    agent, model_call, tool = detail["spans"]
+    assert (agent["type"], model_call["type"], tool["type"]) == (
+        "AGENT",
+        "LLM" if style == "openinference" else "CHAT_MODEL",
+        "TOOL",
+    )
+    assert model_call["model"] == MODEL
+    assert model_call["token_usage"] == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+    assert QUESTION in json.dumps(model_call["inputs"])
+    # The tool call the model asked for is in its output messages, and the call is a tool span.
+    assert "call_1" in json.dumps(model_call["outputs"]) and "order_status" in json.dumps(model_call["outputs"])
+    assert "order_status" in tool["name"] and (tool["inputs"], tool["outputs"]) == (ARGUMENTS, RESULT)
+    assert agent["attributes"]["acme.region"] == "eu-west"
+
+
+def test_a_trace_mapped_with_a_version_this_release_does_not_know_is_refused(served):
+    client, seeded = served
+    trace_id = "tr-" + uuid.uuid4().hex
+    newer = sample_trace("otel_genai", trace_id).model_copy(
+        update={"metadata": {MAPPING_KEY: "martian-trace-mapping-v99"}}
+    )
+    asyncio.run(seeded.store.record_trace(SINGLE_USER, newer))
+    refused = client.get(f"/v1/evals/traces/{trace_id}")
+    assert refused.status_code == 409 and "martian-trace-mapping-v99" in refused.json()["detail"]
 
 
 def test_a_trace_shows_its_info_and_downloads(served):

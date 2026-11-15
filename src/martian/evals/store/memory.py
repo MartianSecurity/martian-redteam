@@ -33,6 +33,7 @@ from martian.evals.model import (
     sessions_from_traces,
 )
 from martian.evals.store import StoreError, StoreStatus, check_session_search, cursor_offset
+from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -232,7 +233,7 @@ class MemoryStore:
         self._project(principal, trace.project_id, writable=True)
         if trace.run_id is not None:
             self._run(principal, trace.project_id, trace.run_id)
-        saved = trace.model_copy(update={"scores": []})
+        saved = map_trace(trace).model_copy(update={"scores": []})
         self._traces[(_space(principal), trace.project_id, trace.id)] = saved
         for score in trace.scores:
             await self.log_score(principal, trace.project_id, trace.id, score)
