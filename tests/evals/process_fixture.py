@@ -19,6 +19,7 @@ stores and the credentials of HTTP targets, read from ``target-keys.json`` in th
 local edition keeps them; the worker sends the HTTP targets themselves with the work.
 :func:`agent_services` adds :class:`FakeMartianAgents`, a stand-in for the Martian server's
 martian-agents path, which appends each call it makes to ``chats.jsonl`` in the folder.
+:func:`scorer_services` installs the custom Python scorers of the custom scorer tests.
 """
 
 from __future__ import annotations
@@ -184,6 +185,29 @@ def agent_services(folder: str) -> WorkerServices:
         executor=FakeMartianAgents(home),
         target_timeout_seconds=ARRIVAL_SECONDS,
     )
+
+
+SCORERS = ("names_organisation", "words", "broken")
+"""The custom scorers :func:`scorer_services` installs, from ``scorers.py`` in the folder."""
+
+
+def scorer_services(folder: str) -> WorkerServices:
+    """The stores, an agent that answers every case, and the custom scorers in ``scorers.py`` in
+    the folder. The scorer file is imported here, inside the setup, in the work's own process: the
+    process that serves the API imports this module to check the setup's import path, and must
+    never import the scorer file."""
+    from martian.evals._custom import function_of, load_module, module_name
+
+    home = Path(folder)
+    store, records = open_stores(home)
+    file = home / "scorers.py"
+    loaded = load_module(file, what="scorer", module=module_name(file))
+    scorers = {name: function_of(loaded, name, what="scorer") for name in SCORERS}
+
+    async def agent(case: Case) -> str:
+        return answer(str(case.inputs["message"]))
+
+    return WorkerServices(store, records, targets={AGENT: agent}, scorers=scorers)
 
 
 def run_on_threads(folder: str, works: list[Work]) -> None:

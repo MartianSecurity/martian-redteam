@@ -32,12 +32,10 @@ import contextvars
 import csv
 import functools
 import hashlib
-import importlib.util
 import inspect
 import json
 import os
 import re
-import sys
 import threading
 import time
 import uuid
@@ -55,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
-from martian.evals import _numeric, _policy
+from martian.evals import _custom, _numeric, _policy, _tool_calls
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 from martian.evals.conversations import (
@@ -109,6 +107,10 @@ CHECKS = (
     "no_secrets",
     "resists_injection",
     "no_refusal",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
+    "step_count",
 )
 # Checks that look for given text, from `values` or from each case's `expectation` key.
 TEXT_CHECKS = (
@@ -129,13 +131,19 @@ NUMERIC_CHECKS = ("number_equals", "sums_to", "reconciles", "table_equals")
 # with a no_refusal check, reports how many of its benign cases were refused (false_refusals).
 REFUSAL_PASSING = ("no_prohibited_phrases", "no_personal_data", "no_secrets", "resists_injection")
 POLICY_CHECKS = (*REFUSAL_PASSING, "no_refusal")
-SECURITY_CHECKS = ("not_contains", "not_matches", *REFUSAL_PASSING)
+# Checks of the agent's tool calls, read from the trace of the target's call or from its reply.
+TOOL_CHECKS = _tool_calls.TOOL_CHECKS
+# A team's own rule: a Python function the suite file names (martian.evals._custom).
+CODE_CHECKS = _custom.CODE_TYPES
+SECURITY_CHECKS = ("not_contains", "not_matches", *REFUSAL_PASSING, "tool_not_called")
 """Check types that fail a reply for holding something it must never hold, such as a leaked secret,
-personal data, a prohibited phrase or an injected instruction's marker. A case's attempts combine by
-``all`` for these unless the check names its own rule, so a leak in one attempt of five is never
-outvoted. ``no_refusal`` is not one: it fails a reply for refusing a benign request, which measures
-over-refusal rather than a leak, so its attempts combine by the suite's rule. A new check type that
-fails a reply for a leak belongs here."""
+personal data, a prohibited phrase or an injected instruction's marker, or an agent for a tool call
+it must never make. A case's attempts combine by ``all`` for these unless the check names its own
+rule, so a leak or a forbidden call in one attempt of five is never outvoted. ``no_refusal`` is not
+one: it fails a reply for refusing a benign request, which measures over-refusal rather than a leak,
+so its attempts combine by the suite's rule. A new check type that fails a reply for a leak belongs
+here. A ``python`` check is not one by its type: it is one when it says so (``security: true``),
+since only its author knows what it guards (:attr:`CheckSpec.security_check`)."""
 
 
 class _Model(BaseModel):
@@ -277,6 +285,11 @@ class CheckSpec(_Model):
         "no_secrets",
         "resists_injection",
         "no_refusal",
+        "tool_called",
+        "tool_not_called",
+        "tool_trajectory",
+        "step_count",
+        "python",
     ]
     name: str | None = None
     # Criteria for an LLM judge, applied to every row that does not carry its own.
@@ -315,6 +328,24 @@ class CheckSpec(_Model):
     # and values that may appear.
     kinds: list[str] | None = None
     allow: list[str] = Field(default_factory=list)
+    # Tool-call checks: the calls (a tool's name, or {name, arguments}) or, for tool_trajectory,
+    # the steps (a call, or a list of the calls one model turn makes), how arguments match, the
+    # order, the bounds, and where the calls are read (the trace, or the reply).
+    calls: list[Any] | None = None
+    arguments_match: str | None = None
+    order: str | None = None
+    source: str | None = None
+    min_calls: int | None = None
+    max_calls: int | None = None
+    min_turns: int | None = None
+    max_turns: int | None = None
+    # A python check: the function `function` in `file` (relative to the suite file), the bounds a
+    # number it returns must keep, and whether it is a security check for repeated attempts.
+    file: str | None = None
+    function: str | None = None
+    min_score: float | None = Field(default=None, allow_inf_nan=False)
+    max_score: float | None = Field(default=None, allow_inf_nan=False)
+    security: bool = False
     # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
     combine: CombineRule | None = None
     # What it grades in a conversation case: each turn's reply, or the whole conversation once.
@@ -328,6 +359,11 @@ class CheckSpec(_Model):
             )
         if self.scope == "conversation" and self.type in CALL_CHECKS:
             raise ValueError(f"a {self.type} check measures one target call; scope: conversation does not apply to it")
+        if self.scope == "conversation" and self.type in TOOL_CHECKS:
+            raise ValueError(
+                f"a {self.type} check reads the tool calls of one target call, so it grades each turn's call "
+                "(scope: turn); scope: conversation does not apply to it"
+            )
         if self.type in ("matches", "not_matches") and not self.pattern:
             raise ValueError(f"a {self.type} check needs a pattern")
         if self.type in TEXT_CHECKS and not self.values and not self.expectation:
@@ -356,7 +392,31 @@ class CheckSpec(_Model):
             _policy.check_values(self.type, self.values)
         if self.type in ("no_personal_data", "no_secrets"):
             _policy.data_options(check=self.type, kinds=self.kinds, allow=self.allow)
+        if self.type in TOOL_CHECKS:
+            self.tool_options()
+        if self.type in CODE_CHECKS:
+            # Only the shape: the file is imported when a run starts, never when the suite loads.
+            if not self.file or not self.function:
+                raise ValueError("a python check needs a file and a function, the scorer to call")
+            if not self.function.isidentifier():
+                raise ValueError("function must be the name of a function in the file")
+            _custom.bounds(self.min_score, self.max_score)
         return self
+
+    def tool_options(self) -> _tool_calls.ToolOptions:
+        """The options of a tool-call check, read as the check reads them, so a bad one is
+        refused when the suite loads."""
+        given: dict[str, Any] = {"source": self.source, "max_calls": self.max_calls}
+        if self.min_calls is not None:
+            given["min_calls"] = self.min_calls
+        if self.type == "step_count":
+            return _tool_calls.tool_options(self.type, min_turns=self.min_turns, max_turns=self.max_turns, **given)
+        given.update(
+            calls=self.calls or (), expectation=self.expectation, arguments_match=self.arguments_match or "subset"
+        )
+        if self.type == "tool_trajectory":
+            given["order"] = self.order or "exact"
+        return _tool_calls.tool_options(self.type, **given)
 
     def _numeric_options(self) -> Any:
         """The options of a numeric or table check, read as the check reads them, so a bad one
@@ -391,9 +451,10 @@ class CheckSpec(_Model):
         return self.name or (f"{self.type}_judge" if self.type in JUDGES else self.type)
 
     @property
-    def security(self) -> bool:
-        """Whether this is a security check, whose attempts combine by ``all`` unless it says otherwise."""
-        return self.type in SECURITY_CHECKS
+    def security_check(self) -> bool:
+        """Whether this is a security check, whose attempts combine by ``all`` unless it says
+        otherwise: a type in :data:`SECURITY_CHECKS`, or a python check that says it is one."""
+        return self.type in SECURITY_CHECKS or (self.type in CODE_CHECKS and self.security)
 
 
 class MlflowConfig(_Model):
@@ -448,6 +509,19 @@ class Suite(_Model):
                 f"{', '.join(calls)} measures the target's call, and a suite without a target grades stored "
                 "outputs, which no call produced; name a target or remove the check"
             )
+        tools = [check for check in self.checks if check.type in TOOL_CHECKS]
+        traced = [check.label for check in tools if check.source == "trace"]
+        if traced and self.target is None:
+            raise ValueError(
+                f"{', '.join(traced)} reads the trace of the target's call, and a suite without a target grades "
+                "stored outputs, which no call produced; read the tool calls in the stored reply (source: reply)"
+            )
+        untraced = [check.label for check in tools if check.source != "reply"]
+        if untraced and self.target is not None and self.target.url is not None:
+            raise ValueError(
+                f"{', '.join(untraced)} reads the tool calls in the trace of the target's call, and a URL target's "
+                "call records none; set source: reply to read them in its response"
+            )
         costs = [check.label for check in self.checks if check.type == "cost"]
         if costs and self.target is not None and self.target.url is not None:
             raise ValueError(
@@ -458,7 +532,7 @@ class Suite(_Model):
 
     def repeat_plan(self) -> dict[str, Any]:
         """The attempts of each case, the suite's rule, and each check's rule and where it came from."""
-        checks = [(check.label, check.combine, check.security) for check in self.checks]
+        checks = [(check.label, check.combine, check.security_check) for check in self.checks]
         return plan(self.repeats, self.combine, checks)
 
 
@@ -805,6 +879,11 @@ def _http_target(reference: TargetRef, input_key: str) -> Callable[..., Any]:
     return call
 
 
+def _relative(path: str, base: Path) -> Path:
+    file = Path(path)
+    return file if file.is_absolute() else base / file
+
+
 def _function_target(function: Callable[..., Any], timeout_seconds: float) -> Callable[..., Any]:
     """Call the target function on a thread of its own and wait for it at most ``timeout_seconds``.
 
@@ -952,27 +1031,42 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
         # A conversation's turn has the same time limit as a case's call.
         timed.converse = _function_target(call.converse, limit)  # type: ignore[attr-defined]
         return timed
-    file = Path(reference.file or "")
-    file = file if file.is_absolute() else (base / file)
-    spec = importlib.util.spec_from_file_location("martian_evals_target", file)
-    if spec is None or spec.loader is None or not file.is_file():
-        raise ConfigError("could not load the target file")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as error:  # noqa: BLE001 - the customer's module may raise anything on import
-        raise ConfigError(f"the target file failed to import: {type(error).__name__}") from None
-    function: Callable[..., Any] | None = getattr(module, reference.function, None)
-    if function is None or not callable(function):
-        raise ConfigError(f"the target file has no function {reference.function!r}")
+    file = _relative(reference.file or "", base)
+    function = _custom.load_function(file, reference.function, what="target", module="martian_evals_target")
     return _function_target(function, reference.timeout_seconds)
 
 
-def _build_scorers(suite: Suite) -> list[Any]:
+def _python_check(check: CheckSpec, base: Path, modules: dict[Path, Any]) -> Any:
+    """A python check's scorer: its function, imported from its file in this process, and checked
+    as ``python_check`` checks it. ``modules`` holds the files this run imported already, so two
+    checks that name one file share one import of it. A conversation check is called once, after
+    the turns, with no target call of its own, so one that reads ``trace`` is refused."""
+    from martian.evals import checks as deterministic
+
+    file = _relative(check.file or "", base).resolve()
+    try:
+        if file not in modules:
+            modules[file] = _custom.load_module(file, what="scorer", module=_custom.module_name(file))
+        function = _custom.function_of(modules[file], check.function or "", what="scorer")
+        if check.scope == "conversation" and "trace" in _custom.arguments(function):
+            raise ValueError(
+                "a conversation check is called once, after the turns, and no target call of its own has a trace; "
+                "read the conversation in inputs['messages'] and outputs, or read each turn's trace (scope: turn)"
+            )
+        return deterministic.python_check(
+            function, name=check.label, min_score=check.min_score, max_score=check.max_score
+        )
+    except ValueError as error:
+        raise ConfigError(f"check {check.label}: {error}") from None
+
+
+def _build_scorers(suite: Suite, base: Path) -> list[Any]:
+    """The scorer of each check. A python check's file is imported here, as the run starts, and
+    never when the suite loads."""
     from martian.evals import grounding, judges
 
     built = []
+    modules: dict[Path, Any] = {}
     judge_headers = {
         name: _from_environment(value, f"judge.headers.{name}")
         for name, value in (suite.judge.headers if suite.judge else {}).items()
@@ -1000,6 +1094,8 @@ def _build_scorers(suite: Suite) -> list[Any]:
                     headers=judge_headers,
                 )
             )
+        elif check.type in CODE_CHECKS:
+            built.append(_python_check(check, base, modules))
         else:
             built.append(_build_check(check))
     return built
@@ -1080,6 +1176,24 @@ def _build_check(check: CheckSpec) -> Any:
             return deterministic.resists_injection(*check.values, expectation=check.expectation, name=name)
         case "no_refusal":
             return deterministic.no_refusal(expectation=check.expectation, name=name)
+    tools: dict[str, Any] = {"source": check.source, "name": name}
+    calls = {"expectation": check.expectation, "arguments_match": check.arguments_match or "subset", **tools}
+    match check.type:
+        case "tool_called":
+            least = 1 if check.min_calls is None else check.min_calls
+            return deterministic.tool_called(*(check.calls or ()), min_calls=least, max_calls=check.max_calls, **calls)
+        case "tool_not_called":
+            return deterministic.tool_not_called(*(check.calls or ()), **calls)
+        case "tool_trajectory":
+            return deterministic.tool_trajectory(*(check.calls or ()), order=check.order or "exact", **calls)
+        case "step_count":
+            return deterministic.step_count(
+                min_turns=check.min_turns,
+                max_turns=check.max_turns,
+                min_calls=check.min_calls,
+                max_calls=check.max_calls,
+                **tools,
+            )
     raise AssertionError(f"{check.type} is not a deterministic check")
 
 
@@ -1110,9 +1224,9 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
     Settings that change how a run is carried out but not what it grades (concurrency, batch size,
     output folder, retries and the rate-limit wait, timeout, the judge's headers, MLflow location)
     are left out, so changing them keeps earlier results. The judge's headers, like its key and
-    address in the environment, say how its endpoint is reached. A function target counts by the
-    contents of its file; modules that file imports and the service behind a URL target cannot be
-    seen from here.
+    address in the environment, say how its endpoint is reached. A function target and a python
+    check count by the contents of their files; modules those files import and the service behind a
+    URL target cannot be seen from here.
 
     With repeats, the attempts per case and the rule each check's attempts combine by count too.
     With one attempt every rule gives the same verdict, so neither counts and the fingerprint is
@@ -1126,12 +1240,15 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
             file = Path(suite.target.file)
             file = file if file.is_absolute() else base / file
             target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
+    checks = []
+    for check in suite.checks:
+        written = check.model_dump(mode="json", exclude={"combine"} | ({"scope"} if check.scope == "turn" else set()))
+        if check.type in CODE_CHECKS:
+            written["file_sha256"] = hashlib.sha256(_relative(check.file or "", base).read_bytes()).hexdigest()
+        checks.append(written)
     definition: dict[str, Any] = {
         "sdk": __version__,
-        "checks": [
-            check.model_dump(mode="json", exclude={"combine"} | ({"scope"} if check.scope == "turn" else set()))
-            for check in suite.checks
-        ],
+        "checks": checks,
         "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds", "headers"})
         if suite.judge
         else None,
@@ -1603,7 +1720,7 @@ def run_suite(
     if limits.max_judge_tokens is not None and not judges:
         raise ConfigError("max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
-    scorers = _build_scorers(suite)
+    scorers = _build_scorers(suite, base)
     labels = [check.label for check in suite.checks]
     scorer_of = dict(zip(labels, scorers, strict=True))
     scopes: dict[str, CheckScope] = {check.label: check.scope for check in suite.checks}
