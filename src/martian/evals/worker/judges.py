@@ -44,6 +44,7 @@ from pydantic import ValidationError
 
 from martian.evals._judge_transport import DEFAULT_RATE_LIMIT_WAIT_SECONDS, MODEL_VERSION_KEY
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION, _response_judge
+from martian.evals.limits import reported_tokens
 from martian.evals.model import ScorerVersion
 from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, Verdict
 from martian.evals.worker.scorers import is_builtin, scorer_source
@@ -194,6 +195,7 @@ def sdk_judge(
             model_version=str(metadata.get(MODEL_VERSION_KEY, "")),
             judge_version=RESPONSE_RUBRICS_VERSION,
             errors=errors,
+            tokens=reported_tokens(metadata),
         )
 
     return judge

@@ -51,7 +51,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from martian.evals.model import Target
+from martian.evals.model import RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.principal import Principal
 from martian.evals.store import EvalStore
@@ -82,8 +82,9 @@ WRONG_WORKSPACE = (
 @dataclass(frozen=True)
 class WorkerServices:
     """What a run's process runs its work with, built in that process by the worker's setup: the
-    store and the record store, the targets it calls itself by id, the judge, if any, the
-    credentials of HTTP targets, and the executor of registered agents, if any."""
+    store and the record store, the targets it calls itself by id, the judge, if any, the time
+    limit of each target call, the credentials of HTTP targets, the executor of registered agents,
+    if any, and the limits of a run that has none of its own."""
 
     store: EvalStore
     records: RecordStore
@@ -92,6 +93,7 @@ class WorkerServices:
     target_timeout_seconds: float = 120.0
     credentials: Credentials | None = None
     executor: AgentExecutor | None = None
+    limits: RunLimits | None = None
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -282,6 +284,7 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         target_timeout_seconds=services.target_timeout_seconds,
         credentials=services.credentials,
         executor=services.executor,
+        limits=services.limits,
     )
     await worker.submit(work)
     await worker.drain()

@@ -171,6 +171,47 @@ def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_resu
     assert {request["headers"]["Authorization"] for request in target.requests} == {f"Bearer {KEY}"}
 
 
+def test_a_run_stopped_at_its_time_limit_resumes_from_the_ui_and_its_suite_then_scores_it(client, home, target):
+    defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
+    suite = save_suite(client, str(uuid.uuid4()))
+    # The target answers the first case 4 seconds after it is asked, past the run's limit of 3.
+    target.gate, target.held = threading.Event(), {"How do I reset my password?"}
+
+    def answer_late() -> None:
+        deadline = time.monotonic() + 120
+        while not target.requests and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(4)
+        assert target.gate is not None
+        target.gate.set()
+
+    threading.Thread(target=answer_late, daemon=True).start()
+    queued = launch(client, defined["id"], suite, limits={"max_seconds": 3})
+    assert queued["provenance"]["limits"] == {"max_seconds": 3.0, "max_judge_tokens": None}
+    drain(client)
+
+    run, work = results(client, queued["id"])
+    assert run["state"] == "stopped" and run["error"].startswith("Stopped at its time limit (max_seconds 3) after ")
+    assert {item["dataset_item_id"]: item["status"] for item in run["items"]} == {"faq-1": "passed"}
+    # The suite's scoring job waits for the run to resume and complete.
+    assert [job["state"] for job in work["jobs"]] == ["queued"]
+
+    resumed = call(client, "POST", f"{RUNS}/{queued['id']}/resume", 202, json={"limits": {"max_seconds": 120}})
+    assert (resumed["state"], resumed["provenance"]["limits"]["max_seconds"]) == ("queued", 120)
+    drain(client)
+    run, work = results(client, queued["id"])
+    assert (run["state"], run["passed"], run["failed"], run["skipped"]) == ("completed", 1, 1, 1)
+    assert [job["state"] for job in work["jobs"]] == ["partial"]
+    # Resumed in a process of its own, the run called only the case it had not finished.
+    assert [request["body"]["message"] for request in target.requests] == [
+        "How do I reset my password?",
+        "Can I change my username?",
+    ]
+    assert call(client, "POST", f"{RUNS}/{queued['id']}/resume", 409, json={})["detail"] == (
+        "Only a run, or its suite's scoring, stopped at one of its limits can be resumed"
+    )
+
+
 def test_run_again_repeats_a_finished_run_with_its_saved_settings(client, home, target):
     defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
     suite = save_suite(client, str(uuid.uuid4()))

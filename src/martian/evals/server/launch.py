@@ -16,6 +16,12 @@ read, and submits it to the worker. The worker calls the target later; the reque
 :func:`admit_run` is the admission itself, which the local edition's launch and run again share
 (:mod:`martian.evals.local_runs`).
 
+A run, or a scoring job, that stopped at one of its limits (``stopped``) is resumed by
+:func:`resume_run` or :func:`resume_scoring`: queued again, optionally under new limits, so that
+the worker goes on after the cases it finished (``execute_run``'s checkpoints). The frozen contract
+has no route for either and its launch body no field for limits, so a launch through it runs under
+the worker's limits; the local edition's routes take both (:mod:`martian.evals.local_runs`).
+
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
 """
@@ -30,7 +36,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from martian.evals.model import DatasetVersion, Run, RunState, StoreRef, Suite, Target
+from martian.evals.model import DatasetVersion, Run, RunLimits, RunState, ScoringJob, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.dependencies import (
     OptionalWorkerDep,
@@ -115,9 +121,13 @@ async def admit_run(
     A launch admits every run this way. The local edition's launch also names a saved ``suite``
     version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
     ``provenance.suite``, which says whether the suite has a model judge), and adds its own
-    ``provenance``."""
+    ``provenance``. The run's limits, ``provenance.limits``, are the ones ``provenance`` gives,
+    else the suite's (``Suite.settings.limits``); without either, the worker's apply."""
     if await _active(store, records, principal):
         raise HTTPException(409, "An eval run is already in progress")
+    provenance = dict(provenance or {})
+    if suite is not None and suite.settings.limits is not None and execute.LIMITS_KEY not in provenance:
+        provenance[execute.LIMITS_KEY] = suite.settings.limits.model_dump(mode="json")
     admitted: dict[str, Any] = {
         "dataset": {"id": dataset.id, "digest": dataset.digest, "content_sha256": None},
         "agent": {"id": target.agent_id, "artifact_revision": None, "revision_source": "unavailable"},
@@ -148,7 +158,7 @@ async def admit_run(
         target=target,
         scorers=[builtin_scorer("exact_match")],
         max_cases=max_cases,
-        provenance={**admitted, **(provenance or {})},
+        provenance={**admitted, **provenance},
         requested_by=principal.user_id,
         created_at=_now(),
         store=StoreRef(dataset_id=dataset.id),
@@ -188,6 +198,73 @@ async def request_run(
         max_cases=body.max_items,
     )
     return run_out(run)
+
+
+NOT_STOPPED = "Only a run stopped at one of its limits can be resumed"
+JOB_NOT_STOPPED = "Only a scoring job stopped at one of its limits can be resumed"
+NOT_THE_WORKERS = (
+    "This run was not run by the worker, so the worker cannot resume it; a martian evals run resumes when the "
+    "same command runs again"
+)
+
+
+async def resume_run(
+    store: EvalStore, records: RecordStore, worker: Worker, principal: Principal, run: Run, *, limits: RunLimits | None
+) -> Run:
+    """Queue ``run``, which stopped at one of its limits, again and submit it to the worker, which
+    resumes it after the cases it finished: their target is not called again. ``limits`` replace
+    the run's own when given, and the run keeps them. One run at a time per organisation, as for a
+    launch (``409``); a run that is not ``stopped`` is ``409`` too, and one the worker did not run,
+    such as a ``martian evals run``, ``422``."""
+    if run.state != "stopped":
+        raise HTTPException(409, NOT_STOPPED)
+    if run.source != "console":  # recorded by the process that ran it, such as martian evals run
+        raise HTTPException(422, NOT_THE_WORKERS)
+    if await _active(store, records, principal):
+        raise HTTPException(409, "An eval run is already in progress")
+    provenance = {key: value for key, value in run.provenance.items() if key != execute.STOPPED_KEY}
+    if limits is not None:
+        provenance[execute.LIMITS_KEY] = limits.model_dump(mode="json")
+    changes = {"state": "queued", "error": "", "finished_at": None, "cancel_requested_at": None}
+    try:
+        queued = await records.update_run(
+            principal, run.model_copy(update={**changes, "provenance": provenance}), expected_state="stopped"
+        )
+    except StoreError as error:
+        if error.kind != "conflict":
+            raise
+        raise HTTPException(409, NOT_STOPPED) from None
+    work = Work(kind="run", principal=principal, project_id=run.project_id, run_id=run.id)
+    await execute.submit_or_fail(worker, records, work)
+    return queued
+
+
+async def resume_scoring(
+    records: RecordStore, worker: Worker, principal: Principal, run: Run, job: ScoringJob, *, limits: RunLimits | None
+) -> ScoringJob:
+    """Queue ``job``, a scoring job of ``run`` that stopped at one of its limits, again and submit
+    it to the worker, which resumes it after the cases it scored: their judges are not asked
+    again. A job runs under its run's limits, so ``limits``, when given, replace the run's. One
+    active scoring job per run (``409``); a job that is not ``stopped`` is ``409`` too."""
+    if job.state != "stopped":
+        raise HTTPException(409, JOB_NOT_STOPPED)
+    if any(other.state in ACTIVE for other in await records.list_scoring_jobs(principal, run.project_id, run.id)):
+        raise HTTPException(409, "A scoring job is already active for this run")
+    if limits is not None:
+        provenance = {**run.provenance, execute.LIMITS_KEY: limits.model_dump(mode="json")}
+        await records.update_run(principal, run.model_copy(update={"provenance": provenance}), expected_state=run.state)
+    changes = {"state": "queued", "error": "", "finished_at": None, "cancel_requested_at": None}
+    try:
+        queued = await records.update_scoring_job(
+            principal, run.project_id, job.model_copy(update=changes), expected_state="stopped"
+        )
+    except StoreError as error:
+        if error.kind != "conflict":
+            raise
+        raise HTTPException(409, JOB_NOT_STOPPED) from None
+    work = Work(kind="scoring", principal=principal, project_id=run.project_id, run_id=run.id, job_id=job.id)
+    await execute.submit_or_fail(worker, records, work)
+    return queued
 
 
 async def _cancel_interrupted(worker: Worker | None, principal: Principal, run: Run) -> Run | None:
@@ -232,4 +309,4 @@ async def cancel_eval(
     raise HTTPException(409, "The run changed while stopping it; try again")
 
 
-__all__ = ["ACTIVE", "admit_run", "router", "run_id_for"]
+__all__ = ["ACTIVE", "admit_run", "resume_run", "resume_scoring", "router", "run_id_for"]

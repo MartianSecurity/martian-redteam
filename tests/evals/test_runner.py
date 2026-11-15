@@ -2,6 +2,8 @@
 
 import json
 import random
+import re
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1340,3 +1342,238 @@ def test_a_benign_case_without_a_verdict_counts_under_errors_not_in_the_rate(tmp
     )
     marked = {**summary["false_refusals"], "benign": 0, "refused": 0, "errors": 0, "rate": None}
     assert runner.false_refusal_line(marked) == "False refusals: not measured. No case is marked benign."
+
+
+# ---------- limits: a target's time limit, and the run's time and judge token limits ----------
+
+
+def write_cases(folder, count, **case):
+    expectations = {"secret": "piano"}
+    rows = [{"id": f"c{i}", "input": f"question {i}", "expectations": expectations, **case} for i in range(count)]
+    (folder / "cases.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def calls_of(folder):
+    calls = folder / "calls"
+    return calls.read_text(encoding="utf-8").split() if calls.exists() else []
+
+
+# Each call is noted in `calls`; `question 0` takes SECONDS to answer.
+COUNTED_AGENT = """
+import pathlib
+import time
+
+SECONDS = {seconds}
+
+
+def target(message):
+    with (pathlib.Path(__file__).parent / "calls").open("a", encoding="utf-8") as calls:
+        calls.write(message.replace(" ", "-") + "\\n")
+    if message == "question 0":
+        time.sleep(SECONDS)
+    return "I cannot share it."
+"""
+
+
+def test_a_hung_function_target_is_a_timed_out_case_and_the_run_finishes(tmp_path):
+    write_cases(tmp_path, 2)
+    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=20), encoding="utf-8")
+    suite = write_suite(tmp_path, extra="target:\n  file: agent.py\n  timeout_seconds: 1\n")
+    started = time.monotonic()
+    summary = run_suite(suite)
+    elapsed = time.monotonic() - started
+    # The hung call ends at its limit as the case's error; the other case and the run finish.
+    assert (summary["cases"], summary["passed"], summary["errors"], summary["not_run"]) == (2, 1, 1, 0)
+    assert summary["target_errors"] == {runner.TIMED_OUT: 1}
+    records = {r["id"]: r for r in map(json.loads, (tmp_path / "results/results.jsonl").read_text().splitlines())}
+    assert (records["c0"]["passed"], records["c0"]["error"]) == (None, runner.TIMED_OUT)
+    assert elapsed < 15, elapsed
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["errored"]) == ("completed", 1)
+
+
+def test_a_run_stops_at_its_time_limit_keeps_its_finished_cases_and_resumes(tmp_path, monkeypatch):
+    import martian.evals.limits
+
+    # The run's clock runs an hour on once the first case's call has started, so its time is up
+    # while that case is in flight, however long the evaluation harness takes to start.
+    real = time.monotonic
+    monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * bool(calls_of(tmp_path)))
+    write_cases(tmp_path, 3)
+    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
+    result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
+    # The case in flight finished, and the run stopped before the next one.
+    assert result.exit_code == 2, result.output
+    stopped_at = re.compile(r"Stopped at its time limit \(max_seconds 60\) after 36\d\d seconds")
+    assert stopped_at.search(result.output), result.output
+    assert "2 case(s) not run. Run the same command again to resume after the cases it finished." in result.output
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    assert (summary["cases"], summary["passed"], summary["not_run"]) == (1, 1, 2)
+    assert (summary["stopped"]["limit"], summary["stopped"]["value"]) == ("max_seconds", 60)
+    junit = ET.parse(tmp_path / "results/junit.xml").getroot()
+    assert (junit.get("tests"), junit.get("errors")) == ("3", "2")
+    assert calls_of(tmp_path) == ["question-0"]
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["planned_count"], run["passed"]) == ("stopped", 3, 1)
+    assert stopped_at.fullmatch(run["error"])
+    assert run["provenance"]["limits"] == {"max_seconds": 60.0, "max_judge_tokens": None}
+    assert run["provenance"]["stopped"]["limit"] == "max_seconds"
+    # The UI's resume is for its own runs: this one resumes when the command runs again.
+    refused = local_ui(tmp_path).post(f"/v1/local/runs/{run['id']}/resume", json={})
+    assert refused.status_code == 422 and "the same command runs again" in refused.json()["detail"]
+
+    # Run again without the limit, it resumes after the case it finished.
+    messages = []
+    again = run_suite(suite, progress=messages.append)
+    assert messages[0] == "3 cases, 1 already done"
+    assert (again["cases"], again["passed"], again["not_run"], again["stopped"]) == (3, 3, 0, None)
+    assert calls_of(tmp_path) == ["question-0", "question-1", "question-2"]
+    # A token limit needs a judge to count.
+    refused = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-judge-tokens", "10"])
+    assert refused.exit_code == 2 and "max_judge_tokens counts the tokens of LLM judge checks" in refused.output
+
+
+def rubric_reply(message):
+    """A judge's chat completion that passes the rubric and reports 10 + 5 tokens."""
+    verdict = {"rubric_index": 1, "reason": "It keeps the key.", "verdict": "pass", "evidence_ids": []}
+    return {
+        "id": "chatcmpl-fixture",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "fixture",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": json.dumps({"result": [verdict]})}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+def test_a_run_stops_at_its_judge_token_limit_and_resumes_with_a_higher_one(tmp_path, agent_server, monkeypatch):
+    agent_server["behaviour"]["reply"] = rubric_reply
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("OPENAI_API_BASE", agent_server["url"].removesuffix("/chat") + "/v1")
+    write_cases(tmp_path, 3, output="I cannot share it.")
+    (tmp_path / "evals.yaml").write_text(
+        "data: cases.jsonl\njudge:\n  model: openai:/fixture\nbatch: 1\nconcurrency: 1\n"
+        "limits:\n  max_judge_tokens: 20\nchecks:\n  - type: rubric\n    rubric: Do not reveal the key.\n",
+        encoding="utf-8",
+    )
+    summary = run_suite(tmp_path / "evals.yaml")
+    # Each judgment reported 15 tokens: the second took the run past 20, so it stopped there.
+    assert (summary["cases"], summary["passed"], summary["not_run"]) == (2, 2, 1)
+    assert summary["stopped"] == {
+        "limit": "max_judge_tokens",
+        "value": 20,
+        "used": 30,
+        "message": "Stopped at its judge token limit (max_judge_tokens 20) after 30 tokens",
+    }
+    assert len(agent_server["seen"]) == 2
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["error"]) == ("stopped", summary["stopped"]["message"])
+
+    again = run_suite(tmp_path / "evals.yaml", max_judge_tokens=1000)
+    assert (again["cases"], again["passed"], again["not_run"], again["stopped"]) == (3, 3, 0, None)
+    assert len(agent_server["seen"]) == 3  # the finished cases were not judged again
+
+
+def test_a_repeated_run_stopped_in_the_middle_of_a_cases_attempts_runs_them_all_again(tmp_path, monkeypatch):
+    import martian.evals.limits
+
+    # The run's time is up once four calls have started: the first case's three attempts and the
+    # second case's first, so the run stops in the middle of the second case's attempts.
+    real = time.monotonic
+    monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * (len(calls_of(tmp_path)) >= 4))
+    write_cases(tmp_path, 3)
+    (tmp_path / "agent.py").write_text(COUNTED_AGENT.format(seconds=0), encoding="utf-8")
+    extra = "  - type: no_secrets\ntarget:\n  file: agent.py\nrepeats: 3\nbatch: 1\nconcurrency: 1\n"
+    suite = write_suite(tmp_path, extra=extra)
+    result = CliRunner().invoke(app, ["evals", "run", str(suite), "--max-seconds", "60"])
+    assert result.exit_code == 2, result.output
+    assert calls_of(tmp_path) == ["question-0"] * 3 + ["question-1"]
+    # The case with one attempt of three is not run: no verdict combines fewer attempts than asked.
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    assert (summary["cases"], summary["passed"], summary["not_run"]) == (1, 1, 2)
+    assert summary["stopped"]["limit"] == "max_seconds"
+    assert summary["attempts"] == {"total": 3, "passed": 3, "failed": 0, "errors": 0}
+    assert (summary["reliability"]["passed"], summary["reliability"]["flaky"]) == (1, [])
+    assert summary["false_refusals"]["checks"] == []
+    records = [json.loads(line) for line in (tmp_path / "results/results.jsonl").read_text().splitlines()]
+    assert [(record["id"], len(record["attempts"])) for record in records] == [("c0", 3)]
+    # The table, the reliability and false-refusal lines, and the limit, together.
+    output = " ".join(result.output.split())
+    assert "evals.yaml: 1 cases, 3 attempts each, 2 not run" in output
+    assert "Reliability" in output and "No flaky cases" in output and "False refusals: not measured" in output
+    assert (
+        "2 case(s) not run. Run the same command again to resume after the cases it finished. A case the run "
+        "stopped in the middle of runs all of its attempts again."
+    ) in output
+    (run,) = local_ui(tmp_path).get("/v1/evals").json()
+    assert (run["state"], run["planned_count"], run["passed"]) == ("stopped", 3, 1)
+    assert run["provenance"]["repeats"]["attempts"] == 3 and run["provenance"]["stopped"]["limit"] == "max_seconds"
+
+    # Run again without the limit: the finished case is reused, the other two run every attempt.
+    monkeypatch.setattr(martian.evals.limits, "monotonic", real)
+    messages = []
+    again = run_suite(suite, progress=messages.append)
+    assert messages[0] == "3 cases of 3 attempts each, 1 already done"
+    assert (again["cases"], again["passed"], again["not_run"], again["stopped"]) == (3, 3, 0, None)
+    assert calls_of(tmp_path) == ["question-0"] * 3 + ["question-1"] * 4 + ["question-2"] * 3
+    assert again["attempts"]["total"] == 9
+
+
+def test_cancelling_a_command_line_run_in_the_ui_stops_it_and_keeps_its_finished_cases(tmp_path):
+    import threading
+
+    write_cases(tmp_path, 4)
+    agent = COUNTED_AGENT.format(seconds=0).replace("return ", "time.sleep(1)\n    return ")
+    (tmp_path / "agent.py").write_text(agent, encoding="utf-8")
+    suite = write_suite(tmp_path, extra="target:\n  file: agent.py\nbatch: 1\nconcurrency: 1\n")
+    ended: dict = {}
+    running = threading.Thread(target=lambda: ended.setdefault("summary", run_suite(suite)))
+    running.start()
+    deadline = time.monotonic() + 60
+    while not calls_of(tmp_path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    client = local_ui(tmp_path)
+    (run,) = client.get("/v1/evals").json()
+    # The process recording the run holds it, so cancelling asks that process to stop.
+    asked = client.post(f"/v1/evals/{run['id']}/cancel")
+    assert (asked.status_code, asked.json()["state"]) == (202, "running")
+    running.join(60)
+    summary = ended["summary"]
+    assert summary["cancelled"] is True and summary["not_run"] >= 1
+    assert summary["cases"] + summary["not_run"] == 4 and summary["cases"] >= 1
+    assert len(calls_of(tmp_path)) == summary["cases"]
+    cancelled = client.get(f"/v1/evals/{run['id']}").json()
+    assert (cancelled["state"], cancelled["passed"]) == ("cancelled", summary["cases"])
+    assert cancelled["cancel_requested_at"]
+
+
+def test_a_url_target_that_sends_its_reply_a_little_at_a_time_is_timed_out(tmp_path, monkeypatch):
+    import socket
+    import threading
+
+    # The client's timeout bounds each read, and a byte arrives every half second, so only the
+    # call's total limit ends it.
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def drip() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(65536)
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n")
+            for _ in range(100):
+                time.sleep(0.5)
+                try:
+                    connection.sendall(b"x")
+                except OSError:
+                    return
+
+    threading.Thread(target=drip, daemon=True).start()
+    monkeypatch.setenv("AGENT_KEY", "k")
+    write_inputs(tmp_path, ["hi"])
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/chat"
+    started = time.monotonic()
+    summary = run_suite(write_suite(tmp_path, extra=url_target(url, response_path="", extra="  timeout_seconds: 1\n")))
+    assert summary["target_errors"] == {runner.TIMED_OUT: 1}
+    assert time.monotonic() - started < 15
+    listener.close()

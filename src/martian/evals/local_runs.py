@@ -14,12 +14,18 @@ contract:
   The suite's model judges run on the SDK judge (:func:`~martian.evals.worker.sdk_judge`), each on
   its own model or the default judge model, pinned when the job is recorded.
 - ``POST /v1/local/runs/{run_id}/again``: a new run of a finished run with its saved settings: the
-  same target, the same dataset version, the same suite version and the same case limit. The new
-  run names the one it repeats in ``provenance.repeat_of``.
+  same target, the same dataset version, the same suite version, the same case limit and the same
+  limits, unless the request gives others. The new run names the one it repeats in
+  ``provenance.repeat_of``.
+- ``POST /v1/local/runs/{run_id}/resume``: go on with a run that stopped at one of its limits, or
+  whose suite's scoring job did, after the cases it finished, optionally under new ``limits``
+  (:func:`~martian.evals.server.launch.resume_run`, :func:`~martian.evals.server.launch.resume_scoring`).
 
-Both take a ``request_id`` and are idempotent by it, as the launch is. A suite with a model judge
-needs ``acknowledge_model_cost``, in both, as a scoring request does: each judged case is a model
-call on the user's own key.
+The first two take a ``request_id`` and are idempotent by it, as the launch is, and ``limits``
+(:class:`~martian.evals.model.RunLimits`: ``max_seconds`` and ``max_judge_tokens``), which the run
+keeps in ``provenance.limits`` and its suite's scoring job runs under too; the frozen launch has no
+such field. A suite with a model judge needs ``acknowledge_model_cost``, in both, as a scoring
+request does: each judged case is a model call on the user's own key.
 
 The worker calls a local target itself, as an HTTP target of the worker
 (:meth:`~martian.evals.local_targets.LocalTargets.http_targets`, :mod:`martian.evals.worker.targets`),
@@ -59,11 +65,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.local_targets import LocalTargets
-from martian.evals.model import Run, RunState, ScoringJob, Suite, Target
+from martian.evals.model import Run, RunLimits, RunState, ScoringJob, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, WorkerDep, require_capability
-from martian.evals.server.launch import ACTIVE, admit_run, run_id_for
+from martian.evals.server.launch import ACTIVE, admit_run, resume_run, resume_scoring, run_id_for
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
 from martian.evals.server.runs import find_run, lookup_run, project_keys, writable_key, writable_project
@@ -72,7 +78,7 @@ from martian.evals.server.scoring import find_suite_version, with_models
 from martian.evals.server.write_schemas import EvalRunRequest
 from martian.evals.store import EvalStore, StoreError
 from martian.evals.worker import ProcessWorker, QueueWorker, Work, WorkerServices, dump_work, sdk_judge
-from martian.evals.worker.execute import INTERRUPTED, interrupt
+from martian.evals.worker.execute import INTERRUPTED, LIMITS_KEY, interrupt
 from martian.evals.worker.queue import entry_id
 from martian.evals.worker.targets import http_pin
 
@@ -246,7 +252,8 @@ class LocalWorker:
     the run is submitted, so the UI shows it from the start, with each judge that names no model
     pinned to the default judge model then (``judge_settings``). Once the run's process ends, the
     job is queued if the run completed, and cancelled otherwise, before the run leaves the queue,
-    so a ``martian ui`` that stops in between does neither twice nor never.
+    so a ``martian ui`` that stops in between does neither twice nor never. A run that stopped at
+    one of its limits leaves its job queued, for the run to resume and complete.
     """
 
     def __init__(
@@ -332,6 +339,11 @@ class LocalWorker:
         run = await records.get_run(principal, work.project_id, work.run_id)
         if run is None or run.suite_id is None or run.suite_version is None:
             return
+        if any(
+            job.id == _suite_job_id(run.id)
+            for job in await records.list_scoring_jobs(principal, run.project_id, run.id)
+        ):
+            return  # a resumed run: its job was recorded when it was first submitted
         suite = await records.get_suite(principal, DEFAULT_PROJECT, run.suite_id, version=run.suite_version)
         if suite is None:
             raise StoreError("not_found", "Suite version not found")
@@ -356,8 +368,8 @@ class LocalWorker:
         cancel the job if it did not. A job that is no longer queued is left alone."""
         records, principal, job_id = self._records, work.principal, _suite_job_id(work.run_id)
         run = await records.get_run(principal, work.project_id, work.run_id)
-        if run is None or run.suite_id is None:
-            return
+        if run is None or run.suite_id is None or run.state == "stopped":
+            return  # a stopped run's job waits for the run to resume and complete
         if run.state != "completed":
             await _cancel_job(records, principal, work.project_id, work.run_id, job_id)
             return
@@ -396,6 +408,7 @@ async def _cancel_job(
 class LocalRunRequest(EvalRunRequest):
     suite_version_id: uuid.UUID | None = None
     acknowledge_model_cost: bool = False
+    limits: RunLimits | None = None
 
 
 class RunAgainRequest(BaseModel):
@@ -403,6 +416,18 @@ class RunAgainRequest(BaseModel):
 
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     acknowledge_model_cost: bool = False
+    limits: RunLimits | None = None
+
+
+class ResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limits: RunLimits | None = None
+
+
+def _limits(limits: RunLimits | None) -> dict[str, Any]:
+    """The provenance that keeps a run's own limits, when it is given some."""
+    return {} if limits is None else {LIMITS_KEY: limits.model_dump(mode="json")}
 
 
 def _suite_version_id(run: Run) -> str | None:
@@ -418,6 +443,8 @@ def _same_launch(run: Run, body: LocalRunRequest, principal: Principal) -> bool:
         and run.project_id == project_key(body.project_id)
         and run.max_cases == body.max_items
         and _suite_version_id(run) == (str(body.suite_version_id) if body.suite_version_id else None)
+        # Without limits of its own the run has its suite's or the worker's, which the request did not name.
+        and (body.limits is None or run.provenance.get(LIMITS_KEY) == _limits(body.limits)[LIMITS_KEY])
         and run.requested_by == principal.user_id
         and "repeat_of" not in run.provenance
     )
@@ -466,6 +493,7 @@ async def launch_local_run(
         dataset=dataset,
         max_cases=body.max_items,
         suite=suite,
+        provenance=_limits(body.limits),
     )
     return run_out(run)
 
@@ -518,9 +546,40 @@ async def run_again(
         dataset=dataset,
         max_cases=original.max_cases,
         suite=suite,
-        provenance={"repeat_of": original.id},
+        provenance={"repeat_of": original.id, **_limits(body.limits or _own_limits(original))},
     )
     return run_out(run)
+
+
+def _own_limits(run: Run) -> RunLimits | None:
+    own = run.provenance.get(LIMITS_KEY)
+    return RunLimits.model_validate(own) if isinstance(own, dict) else None
+
+
+@router.post(
+    "/{run_id:uuid}/resume",
+    response_model=EvalRunOut,
+    status_code=202,
+    dependencies=[Depends(require_capability("run"))],
+)
+async def resume_local_run(
+    run_id: uuid.UUID,
+    body: ResumeRequest,
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
+) -> EvalRunOut:
+    run = await find_run(store, records, principal, run_id)
+    if run.state == "stopped":
+        return run_out(await resume_run(store, records, worker, principal, run, limits=body.limits))
+    jobs = await records.list_scoring_jobs(principal, run.project_id, run.id)
+    job = next((job for job in jobs if job.id == _suite_job_id(run.id) and job.state == "stopped"), None)
+    if run.state != "completed" or job is None:
+        raise HTTPException(409, "Only a run, or its suite's scoring, stopped at one of its limits can be resumed")
+    await resume_scoring(records, worker, principal, run, job, limits=body.limits)
+    found = await lookup_run(store, records, principal, run.id)
+    return run_out(found or run)
 
 
 __all__ = [
@@ -529,6 +588,7 @@ __all__ = [
     "TARGET_TIMEOUT_SECONDS",
     "LocalRunRequest",
     "LocalWorker",
+    "ResumeRequest",
     "RunAgainRequest",
     "RunHold",
     "finish_interrupted",
