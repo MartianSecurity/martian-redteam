@@ -398,7 +398,11 @@ no registered agent, so an install with no martian-agents service runs functions
   target.url`, `HTTP 400` or `422; check target.body`. So are an unreachable endpoint (`the target
   could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
   These errors never repeat the address, a header or the response. A call that outlasts the
-  worker's `target_timeout_seconds` is `item timed out`.
+  worker's `target_timeout_seconds` is `item timed out`. A `response_path` step of digits other
+  than 0-9, such as `²`, is refused as in a suite file, with a `ValueError` naming
+  `targets['ID'].response_path`. Both workers refuse it each time a check or a run names the
+  target, so a launch of it fails before any run is made, and one wrong target never stops the
+  others.
 - **Credentials.** `${NAME}` in an HTTP target's `url` or a header value is filled in by the
   worker's `Credentials`, a function `(principal, target_id, name) -> str | None` asked in the
   process that calls the target, each time it calls it. Neither the launch request nor a record

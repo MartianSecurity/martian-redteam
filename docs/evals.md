@@ -73,7 +73,7 @@ target:
 | `url` | Yes | An `http` or `https` address. The runner sends one JSON `POST` per case |
 | `body` | Yes | The JSON body, with placeholders in its string values |
 | `headers` | No | Request headers |
-| `response_path` | No | Dotted path to the reply in a JSON response; numbers index lists. Without it, the response text is the reply |
+| `response_path` | No | Dotted path to the reply in a JSON response; a step of the digits 0-9 indexes a list, and a step of other digits, such as `²`, is refused when the suite loads. Without it, the response text is the reply |
 | `timeout_seconds` | No | Per-request limit, 1 to 600; default 120 |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
