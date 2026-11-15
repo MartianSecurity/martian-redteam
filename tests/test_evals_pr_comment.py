@@ -110,6 +110,40 @@ def test_a_repeated_run_says_how_often_each_case_ran_each_checks_rule_and_its_re
     assert "Each case ran" not in plain and "Reliability" not in plain and "Flaky" not in plain
 
 
+def test_a_conversation_suite_counts_its_turns_and_names_the_turn_that_failed(tmp_path, monkeypatch):
+    for name in ("MARTIAN_API_URL", "MARTIAN_API_TOKEN", "MARTIAN_AGENT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
+    monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
+    old_uri = mlflow.get_tracking_uri()
+    STATE.reset()
+    folder = tmp_path / "results"
+    suite = "examples/evals/conversation/evals.yaml"
+    try:
+        result = CliRunner().invoke(app, ["evals", "run", str(ROOT / suite), "--output", str(folder)])
+    finally:
+        STATE.reset()
+        mlflow.set_tracking_uri(old_uri)
+    assert result.exit_code == 1
+    assert "Turns" in result.output and "2 of the cases are conversations" in " ".join(result.output.split())
+    body = comment.render(comment.load_outcome(folder, result.exit_code), suite=suite, key=suite)
+    rows = body.splitlines()
+    assert rows[rows.index("| **All checks** | 1 | 1 | 0 | 50% (9–91%) |") + 1] == (
+        "| **Turns** (of conversations) | 5 | 1 | 0 | — |"
+    )
+    assert (
+        "2 cases are conversations of 6 turns in all. A conversation counts once: it passes when each turn "
+        "check passed every turn it grades and each conversation check passed the whole conversation."
+    ) in body
+    assert "| `cancel-later` | `answers` (failed turn 3) |" in rows
+    # Turn numbers, never the conversation's text.
+    assert "order number" not in body and "A-1002" not in body
+    errored = {"id": "chat", "passed": None, "checks": {}, "error": "the target returned HTTP 500"}
+    errored["turns"] = [{"number": 1, "error": None}, {"number": 2, "error": "the target returned HTTP 500"}]
+    assert comment._reason(errored) == "Turn 2: `the target returned HTTP 500`"
+
+
 def test_a_policy_suite_says_how_many_benign_cases_were_refused_under_the_headline():
     from martian.evals.runner import false_refusal_line
 

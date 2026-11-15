@@ -5,8 +5,8 @@ output folder, writes the report to the job summary, and on a pull request edits
 that carries this suite's hidden marker, creating it only when there is none. Standard library
 only, so it runs on the action's Python without further installs.
 
-The comment holds counts, pass rates with their intervals, check names and case ids, never
-inputs, replies or judge reasons.
+The comment holds counts, pass rates with their intervals, check names, case ids and turn
+numbers, never inputs, replies or judge reasons.
 """
 
 from __future__ import annotations
@@ -137,6 +137,12 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
                 f"| **Reliability** (every attempt) | {reliable['passed']} | {reliable['failed']} | "
                 f"{reliable['errors']} | {rate(reliable)} |"
             )
+        # With conversation cases, their turns' own verdicts, which count turns, not cases.
+        if talks := summary.get("conversations"):
+            turns = talks["turns"]
+            lines.append(
+                f"| **Turns** (of conversations) | {turns['passed']} | {turns['failed']} | {turns['errors']} | — |"
+            )
         if len(checks) > MAX_ROWS:
             lines.append(f"\n{len(checks) - MAX_ROWS} more checks are in summary.json.")
         if summary["groups"]:
@@ -144,6 +150,8 @@ def render(outcome: Outcome, *, suite: str, key: str, sha: str | None = None, ru
             lines.append(f"\nIntervals allow for {summary['groups']} case {plural}.")
         if repeats := summary.get("repeats"):
             lines.append(f"\n{_repeats(repeats)}")
+        if talks:
+            lines.append(f"\n{_conversations(talks)}")
         if reliable:
             lines.append(f"\n{_flaky(reliable['flaky'])}")
         lines.append("")
@@ -203,6 +211,15 @@ def _repeats(repeats: Mapping[str, Any]) -> str:
     )
 
 
+def _conversations(talks: Mapping[str, Any]) -> str:
+    """How many cases are conversations, and what their verdict means."""
+    cases = "1 case is a conversation" if talks["cases"] == 1 else f"{talks['cases']} cases are conversations"
+    return (
+        f"{cases} of {talks['turns']['total']} turns in all. A conversation counts once: it passes when each "
+        "turn check passed every turn it grades and each conversation check passed the whole conversation."
+    )
+
+
 def _flaky(names: list[str]) -> str:
     """What reliability counts, and the cases whose verdict changed between attempts."""
     meaning = "Reliability counts the cases that passed every attempt."
@@ -218,15 +235,24 @@ def _names(names: list[str], *, cell: bool = True) -> str:
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
+def _turns(numbers: list[int]) -> str:
+    return ("turn " if len(numbers) == 1 else "turns ") + ", ".join(str(number) for number in numbers[:10])
+
+
 def _failed_checks(case: dict[str, Any]) -> str:
-    return _names([name for name, check in case["checks"].items() if check.get("passed") is False])
+    shown = _names([name for name, check in case["checks"].items() if check.get("passed") is False])
+    # A conversation also says which of its turns failed.
+    if failed := [turn["number"] for turn in case.get("turns", []) if turn.get("passed") is False]:
+        shown += f" (failed {_turns(failed)})"
+    return shown
 
 
 def _reason(case: dict[str, Any]) -> str:
     # The case error is the SDK's own wording (the target failed, and how). A check's error can
     # hold judge or scorer text, so only the check's name is shown.
     if case.get("error"):
-        return code(case["error"], 120)
+        failed = [turn["number"] for turn in case.get("turns", []) if turn.get("error")]
+        return (f"{_turns(failed[:1]).capitalize()}: " if failed else "") + code(case["error"], 120)
     return "No verdict from " + _names([name for name, check in case["checks"].items() if check.get("passed") is None])
 
 

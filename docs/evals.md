@@ -53,9 +53,10 @@ run is recorded in the data folder of the
 to the target as keyword arguments), and optional `id`, `output`, `expectations` and `group`.
 `group` is a string that names a set of related cases, such as paraphrases of one attack or turns
 of one conversation, so the summary's intervals allow for them
-([pass rates and intervals](#pass-rates-and-confidence-intervals)). CSV takes the columns `input`,
-optional `id` and `output`; every other column becomes an expectation of that name, so a CSV case
-has no group. There is no row limit.
+([pass rates and intervals](#pass-rates-and-confidence-intervals)). A JSONL case with `turns` in
+place of `input` is a [conversation](#conversations) of several user turns. CSV takes the columns
+`input`, optional `id` and `output`; every other column becomes an expectation of that name, so a
+CSV case has no group and no turns. There is no row limit.
 
 **URL target.** When the agent is behind an HTTP endpoint, name the endpoint instead of a
 Python file:
@@ -80,9 +81,12 @@ target:
 | `timeout_seconds` | No | Per-request limit, 1 to 600; default 120 |
 
 - **Placeholders** are filled into `body` for each case: `{{input}}` is the case's `input`,
-  `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID, for
-  agents that keep a conversation per session. A value that is only a placeholder keeps its
-  type, so a number stays a number. The body must use `{{input}}` or `{{inputs.NAME}}`.
+  `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID.
+  `{{session_id}}`, `{{history}}` and `{{messages}}` carry a [conversation](#conversations): its
+  id, its earlier turns, and those turns with this one's user message; in a case of one input they
+  are a new ID, an empty list and that one message. A value that is only a placeholder keeps its
+  type, so a number stays a number and `{{messages}}` a list. The body must use `{{input}}`,
+  `{{inputs.NAME}}` or `{{messages}}`.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -123,14 +127,15 @@ graded by your criteria, and `groundedness`, `context_relevance` and `context_su
 the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
 instructions and refusals. Criteria written in the suite file apply to every case that does not
 carry its own in `expectations`. Use at most one check of each judge type, and give repeated check
-types a `name`.
+types a `name`. A check's `scope`, `turn` (the default) or `conversation`, says whether it grades
+each turn of a [conversation](#conversations) or the conversation once.
 
 **Results.** The output folder receives:
 
 | File | Content |
 | --- | --- |
-| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability` |
+| `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); and how many earlier results were discarded (`invalidated`). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations` |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -156,7 +161,8 @@ comment on the pull request with the result, still with no Martian account. See
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), and the SDK version. A function target counts by the
+combine by ([repeated attempts](#repeated-attempts)), a conversation's turns and each check's
+scope ([conversations](#conversations)), and the SDK version. A function target counts by the
 contents of its file. When any of these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, the judge's key and address
@@ -329,6 +335,134 @@ another failed. `martian.evals.repeats` computes both from the attempts' own ver
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
 | [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
 | The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
+
+## Conversations
+
+An agent that answers each question well can still forget, three turns in, the order number the
+customer gave at the start, and no single-turn case shows it. A conversation case sends several
+user turns in order, in one conversation, to a target that keeps it, and grades each turn's reply
+and the conversation as a whole:
+
+```json
+{"id": "cancel-later",
+ "turns": [{"input": "My order number is A-1002.", "checks": ["short"]},
+           {"input": "Is it in stock yet?", "expectations": {"reply": "waiting for stock"}},
+           {"input": "Then please cancel it.", "expectations": {"reply": ["A-1002", "cancelled"]}}],
+ "expectations": {"other_orders": ["A-1001"]}}
+```
+
+(one line in the data file), with a suite file such as:
+
+```yaml
+target:
+  file: agent.py
+  function: reply          # reply(message="...", history=[...]) for each turn
+checks:
+  - type: contains         # each turn's reply says what that turn expects
+    name: answers
+    expectation: reply
+  - type: length           # each turn that lists no checks, and each that lists it
+    name: short
+    max_length: 200
+  - type: not_contains     # once, over every reply of the conversation
+    name: no_other_orders
+    expectation: other_orders
+    scope: conversation
+```
+
+[`examples/evals/conversation`](../examples/evals/conversation/evals.yaml) is this suite, with an
+assistant that forgets what was said three turns ago. It needs no model key: one conversation
+passes, and the other fails on turn 3.
+
+**The data.** A JSONL case with `turns` is a conversation. Each turn has `input` (a string) or
+`inputs` (an object), and optional `expectations` and `checks` (the names of the turn checks that
+grade it). The case has no `input` or `output` of its own, and always runs against a target. Its
+own `expectations` are the conversation's, for the conversation checks; `id` and `group` are as
+for any case. A conversation has at most 100 turns, and a turn's inputs cannot be named
+`session_id` or `history`, which each turn is given.
+
+**How the target keeps the conversation.** The runner starts a new conversation, with a new
+`session_id`, for each conversation case, and for each attempt of one with
+[repeats](#repeated-attempts). It sends the turns in order, each one after the reply to the one
+before:
+
+| Target | Each turn is |
+| --- | --- |
+| A function | Called with the turn's inputs as keyword arguments, and whichever of `history` and `session_id` the function takes (both, when it takes `**kwargs`). `history` is the earlier turns as messages, `[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]`, empty on the first turn. A function that takes neither is refused before any turn |
+| A URL target | One `POST` with the body's placeholders filled in: `{{session_id}}` the conversation's id, the same in every turn; `{{history}}` the earlier turns as messages; `{{messages}}` the history and then this turn's user message, as a chat-completions request takes them. A body that uses none of the three is refused before any turn |
+
+A user message is the turn's input under `input_key`, or its inputs as JSON when that is not
+text; an assistant message is the reply as text. A target that keeps the conversation on its side
+needs only the session id. One that keeps nothing, such as a chat-completions endpoint, needs the
+history:
+
+```yaml
+target:
+  url: "${OPENAI_API_BASE}/chat/completions"
+  headers:
+    Authorization: "Bearer ${OPENAI_API_KEY}"
+  body:
+    model: your-model
+    messages: "{{messages}}"     # the whole list: the conversation so far and this turn
+  response_path: choices.0.message.content
+```
+
+In a case of one input these placeholders are a new ID, an empty list and that one message, so
+one body serves both kinds of case. A function target is called for a case of one input as before,
+with the case's inputs only, so a function that serves both gives `history` a default.
+
+**What each check grades.** A check's `scope` is `turn`, the default, or `conversation`:
+
+- A **turn check** grades each turn's reply against that turn's `expectations`, with the criteria
+  written in the suite file filled in as for any case. A turn that lists `checks` is graded by
+  those turn checks only, and by none when the list is empty; a turn with no list, by every turn
+  check. The check's verdict on the conversation passes when it passed every turn it grades, and
+  fails when it failed one; a turn without a verdict otherwise leaves it open. Its rationale says
+  how the turns went, such as `1 of 2 turns passed, failed on turn 3`.
+- A **conversation check** grades the conversation once: the target's replies, in order, joined
+  by a blank line, against the case's own `expectations`. It is a deterministic check: an LLM
+  judge grades one turn's reply against that turn's input, and `latency` and `cost` measure one
+  call, so they take no `scope: conversation`.
+- **A conversation passes** when every check, so combined, passes it. A turn that no check grades
+  passes when the target answered. A case of one input is graded by every check, whatever its
+  scope.
+
+Loading refuses a turn that names a check the suite does not have or a conversation check, a
+conversation that no check grades, and a conversation in a suite without a target.
+
+**False refusals.** A conversation counts once in [`false_refusals`](#false-refusals). A turn
+`no_refusal` check with an expectation key reads each turn's own flag, so a conversation is benign
+for it when a turn it grades is benign, and refused when the check failed the conversation.
+
+**When a turn fails.** A target call that fails, or a turn MLflow recorded no result for, ends the
+conversation: the later turns are not sent, no check has a verdict on the conversation, the case's
+`error` is why the failed call failed, and the run exits `2`. The next run sends the whole conversation
+again. A turn that a judge gave no verdict does not end the conversation.
+
+**Repeats and limits.** A conversation is one case. `--limit` counts it once, and each attempt is
+a whole conversation of its own, with its own session id, combined as any case's attempts are.
+Counts and pass rates are of cases. The turns are counted beside them, without an interval, since
+the turns of one conversation are related.
+
+**Resume.** A conversation's turns are part of what its verdict depends on, so changing a turn's
+input, expectations or checks, or a check's scope, grades it again.
+
+**Suite-file runs only.** The pytest gate evaluates one input per row, and the evals core's worker
+sends one prompt per case: it skips a conversation case, saying so. Its HTTP targets fill in
+`{{session_id}}`, `{{history}}` and `{{messages}}` as for a case of one input. LLM judges of a
+whole conversation and simulated users are not built yet.
+
+Every turn is recorded:
+
+| Where | What |
+| --- | --- |
+| `results.jsonl` | The case's `passed` and `checks` are the conversation's verdicts. `session_id` is its conversation's id, and `turns` lists every turn sent: its `number`, `inputs`, `passed`, `checks` (each check that grades it, with its verdict, rationale and error), `output` and `error`. The case's `output` is the conversation as messages, and it has no `inputs`. With repeats, each attempt has its own `session_id` and `turns`, and the case's are those of the attempt that shows its reply |
+| `summary.json` | `conversations`: the conversation cases (`cases`, `passed`, `failed`, `errors`) and their turns (`turns`: `total`, `passed`, `failed`, `errors`, over every attempt with repeats). Each check has its `scope`, and a turn check its turns' counts under `turns`. A check's own counts leave out the conversations it grades nothing in |
+| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Turns** row under **All checks**, a line saying how many cases are conversations and what their verdict means, and, for a failed conversation, the turns that failed |
+| The local Evals UI's data folder | A trace per turn, named `<run> <case> turn <n>` (`<run> <case> attempt <a> turn <n>` with repeats), tagged `martian.turn` and carrying that turn's verdicts and the conversation's session id, so **Sessions** shows each conversation as one session. The case result holds the session id and every turn; its trace is that of its first turn with the conversation's verdict, else of its first turn, and its latency the turns' added up. Its scores, the conversation's verdicts, are on no trace. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) returns each conversation with its verdict on each check, its session id and its turns |
+
+A run without conversation cases writes and records exactly what it did before: no `session_id`,
+`turns`, `conversations` or `scope`.
 
 ## Pass rates and confidence intervals
 
