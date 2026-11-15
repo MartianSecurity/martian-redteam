@@ -20,14 +20,14 @@ Hosted features also need the SDK APIs enabled for the organisation.
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment, WAF
-9. [Security and data](security-and-data.md) — origin isolation and what leaves the customer network
+9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off
 10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
 11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line
 
 ## SDK release
 
 - [Architecture](architecture.md): execution, scoring and trust boundaries
-- [Release preparation](releasing.md): distributions, clean installs, the local edition's image and publishing
+- [Release preparation](releasing.md): distributions, clean installs, the local edition's image, bills of materials and the licence check, and publishing
 - [Validation](validation.md): reproducible package checks and running-service release gates
 
 ## Repository

@@ -1205,7 +1205,6 @@ def run_suite(
         previous_env = {name: os.environ.get(name) for name in restored}
         os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(concurrency or suite.concurrency)
         os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "true"  # otherwise the first case runs twice
-        os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
         started = time.monotonic()
         try:
             mlflow.set_tracking_uri(suite.mlflow.tracking_uri or f"sqlite:///{folder.resolve() / 'mlflow.db'}")

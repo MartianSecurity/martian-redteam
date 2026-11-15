@@ -512,8 +512,9 @@ evaluation. `MlflowStore`'s own calls are not affected: each sets the workspace 
 `ProcessWorker.submit` starts `python -m martian.evals.worker` with `MLFLOW_WORKSPACE` set to the
 work's organisation's workspace (`workspace_name(principal)` in `martian.evals.store.mlflow_local`:
 `org-` and a hash of the organisation id, or `local`) and without `MLFLOW_EXPERIMENT_ID` or
-`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's. The new
-process:
+`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's, so
+MLflow's telemetry is off there as it is in the API process ([telemetry](security-and-data.md#telemetry)).
+The new process:
 
 1. reads the work as JSON on its standard input (`dump_work` and `load_work`), so a principal's
    details never appear on a command line;
@@ -937,6 +938,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   [below](#the-local-edition-in-a-container).
 - If the UI folder holds no `index.html`, because an install has lost the packaged UI or
   `--ui-dir` names another folder, the command stops with exit code `2` and says so.
+- It sends nothing off the machine: MLflow's telemetry is off unless `MLFLOW_DISABLE_TELEMETRY`
+  says otherwise, the UI loads nothing from another host, and no other library it bundles has
+  telemetry ([telemetry](security-and-data.md#telemetry); `tests/evals/test_no_outbound.py`).
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
@@ -1294,7 +1298,7 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
-`test_worker_process.py`, `test_worker_targets.py`, `test_worker_judges.py` and the store and
+`test_worker_process.py`, `test_worker_targets.py`, `test_no_outbound.py`, `test_worker_judges.py` and the store and
 record tests run the core
 without the backend. The `Evals core`
 job in CI runs them with the model tests, on Postgres as well as SQLite.

@@ -85,6 +85,9 @@ jobs:
           uv build
           uv run --all-extras twine check --strict dist/*
           uv run --all-extras python scripts/check_release.py --install
+      # A licence outside scripts/licence-policy.json stops the release here, before the image is built.
+      - name: Bill of materials and licence check for the wheel
+        run: uv run --all-extras python scripts/sbom.py wheel --out-dir release-sbom
       # The image installs the wheel just checked from dist/; the Dockerfile cannot build the package.
       - name: Build the local edition's image from the wheel
         run: |
@@ -102,6 +105,11 @@ jobs:
           docker save --output release-image/martian-evals.tar "${IMAGE}:${RELEASE_TAG#v}"
           jq -r '"Image: \(.image) \(.id), Evals UI \(.evals_ui.version) \(.evals_ui.digest)"' \
             release-image/image-release.json >> "${GITHUB_STEP_SUMMARY}"
+      - name: Bill of materials and licence check for the image
+        run: |
+          set -euo pipefail
+          uv run --all-extras python scripts/sbom.py image --image "${IMAGE}:${RELEASE_TAG#v}" --out-dir release-sbom
+          ls release-sbom | sed 's/^/Bill of materials: /' >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-distributions
@@ -116,6 +124,11 @@ jobs:
         with:
           name: evals-image
           path: release-image/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sbom
+          path: release-sbom/
           if-no-files-found: error
 
   publish:
