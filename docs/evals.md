@@ -168,7 +168,8 @@ Run evals-3 is in the local Evals UI: martian ui
 The run is in **Runs**, named after the suite file and numbered among that suite's runs, as a
 **Local run** of the data file's dataset. Its detail shows each case's verdict, reply and check
 reasons, and each case's trace with your target's own spans. **Compare** pairs two runs of the
-same data case by case, and **Traces** lists every case's trace. A case reused from an earlier
+same data case by case and labels the change better, worse or within noise
+([comparing two runs](#comparing-two-runs)), and **Traces** lists every case's trace. A case reused from an earlier
 run keeps its verdict but not its trace, which stays with the run that graded it. A run that
 stops early shows as failed, or cancelled when interrupted. How a run maps onto the Evals
 objects is in [command-line runs](evals-core.md#command-line-runs).
@@ -259,6 +260,55 @@ rather than the ungrouped `50% (21–79%)`.
 Case results do not carry a case's group, so the core and the Evals UI treat every case as
 independent; only the command line's summary allows for groups. The Evals UI's Overview counts
 traces, which can share a session, as independent too.
+
+### Comparing two runs
+
+Two runs of the same data compare case by case: each case is a pair, one result from each run,
+so how much cases differ from each other does not count as noise. The evals core labels a
+comparison **better**, **worse** or **within noise** with a paired test (`martian.evals.stats`):
+
+| Measure | Test | p-value |
+| --- | --- | --- |
+| Pass/fail: the exact-match verdict, or a boolean scorer | Exact McNemar | Only the pairs that changed carry evidence. With b improved and c regressed, p = 2 × P(X ≤ min(b, c)) for X ~ Binomial(b + c, ½), at most 1, computed exactly |
+| Scores: a numeric scorer | Paired t | t = mean(d) / (s_d / √n) on n − 1 degrees of freedom, where d is each case's candidate score minus its baseline score. p < 0.05 exactly when the 95% t interval of the mean difference leaves out 0 |
+
+A text scorer has no direction, so it gets no label.
+
+**The label.** The significance level is 5%, two-sided, which matches the 95% intervals. A
+comparison is **better** or **worse** when p < 0.05 *and* at least six pairs changed, in the
+direction the change went. A scorer's policy `direction` says whether higher or lower is better.
+Otherwise it is **within noise**. Six is the fewest changed pairs an exact test can tell from
+chance at 5%: six regressions and no improvement give p = 2 × 0.5⁶ = 0.031, while five give
+0.0625. The paired t test has to meet the same count. So a comparison of a handful of cases is
+always within noise, whatever moved, and does not flip between better and worse from one run to
+the next.
+
+Within noise does not mean nothing changed. It means the change is too small for this comparison
+to tell apart from chance. Each label carries its **minimum detectable effect**, the smallest
+change in the measure that this comparison could label:
+
+- **A pass rate:** six cases all moving one way, out of the n compared pairs, so 6 / n. That is
+  15 points with 40 pairs and 1.5 points with 400. With fewer than six pairs there is none.
+- **A mean score:** the half-width of the mean difference's 95% t interval,
+  t(0.975, n − 1) × s_d / √n. At the spread observed, a smaller mean change is within noise.
+  With fewer than six pairs, or differences that do not vary, there is none.
+
+Forty cases where the same deterministic system runs twice give no changed pair: p = 1, within
+noise. A candidate that breaks 12 of those answers and fixes 2 gives p = 2 × (1 + 14 + 91) / 2¹⁴
+= 0.013, labelled worse, with the pass rate down 25 points against a minimum detectable effect
+of 15.
+
+**Grouped cases.** A comparison counts every pair as independent. It pairs case results, which
+carry no group (see above), and the exact McNemar test has no grouped form. If many cases share
+a group, such as paraphrases of one attack, the label can overstate the evidence.
+
+**Where the label appears.**
+
+| Where | What |
+| --- | --- |
+| `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
+| The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
+| `martian evals run` | Nothing. No command compares two runs; open them in `martian ui` and use Compare |
 
 ### OpenAI-compatible endpoints
 

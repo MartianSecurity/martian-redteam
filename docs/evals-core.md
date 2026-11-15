@@ -173,7 +173,7 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
-| `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
+| `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
 | `POST /v1/evals/sessions/search` | The sessions among the first 1,000 matching traces ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
@@ -218,6 +218,25 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   (`null` for fewer than two values), which the server's scorecard does not have yet
   ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)). Both treat the
   run's cases as independent.
+- **Comparisons.** A comparison carries `significance`, the paired test of the exact-match
+  verdicts over the pairs that are not `not_comparable`. With both scoring jobs it also carries
+  `criteria_significance`, the same for each scorer, in its policy's direction: the exact
+  McNemar test for boolean values, the paired t test for numbers, and `null` for text. Each is
+  `null` when no pair compared, as in an incompatible comparison. The server's comparison does
+  not have either yet. The method and the label are in
+  [comparing two runs](evals.md#comparing-two-runs).
+
+  | Field | Value |
+  | --- | --- |
+  | `label` | `better`, `worse` or `within_noise` |
+  | `test` | `mcnemar_exact` or `paired_t` |
+  | `p_value` | The two-sided p-value |
+  | `alpha` | The significance level, `0.05` |
+  | `compared` | Pairs with a verdict or a score in both runs |
+  | `changed`, `improved`, `regressed` | The pairs that changed, then those that moved the better way and the worse way |
+  | `baseline`, `candidate` | The pass rate or the mean over the compared pairs |
+  | `effect` | `candidate` minus `baseline` |
+  | `minimum_detectable_effect` | The smallest change the comparison could label, or `null` when it could label none |
 - **Members and queues.** The workbench's `members` is the requesting principal only: the core
   knows no organisation membership. Its `queues` are the run's review queues, newest first, at most
   100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
@@ -1030,8 +1049,9 @@ default project:
 
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
-trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
-cannot be opened.
+trace search, Compare of two runs with its label (within noise for the same deterministic
+system twice, worse for a seeded regression), a resumed run, a run that stops early, and a data
+folder that cannot be opened.
 
 ## Not built yet
 

@@ -22,19 +22,44 @@ Eval samples are small and often grouped, so the methods are chosen for that:
 
 Every interval is two-sided at ``CONFIDENCE`` (95%) unless another level is given. A group label of
 None is a case's own group.
+
+Two runs of the same cases compare case by case, with a paired test and a label:
+
+- **Pass/fail pairs** use the exact McNemar test: only the pairs that changed carry evidence, and
+  under no change each is as likely to have improved as regressed, so the p-value is the two-sided
+  binomial tail at one half.
+- **Paired scores** use the paired t test on each case's difference, the same Student t as the
+  mean interval, so a difference is significant exactly when its 95% interval leaves out 0.
+- **The label** is better or worse when p < ``SIGNIFICANCE`` (5%, two-sided) and at least
+  ``MINIMUM_CHANGED`` pairs changed, and within noise otherwise. Six all one way is the fewest
+  changed pairs an exact test can tell from chance at 5%, so a handful of cases is always within
+  noise, whatever moved, rather than better on one run and worse on the next.
+- **Grouped cases** are not allowed for: every pair counts as independent. The comparison pairs
+  case results, which carry no group, and the exact McNemar test has no grouped form.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Hashable, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from statistics import NormalDist, fmean
+from typing import Literal
 
 CONFIDENCE = 0.95
 """The confidence level of every interval the SDK, the core and the Evals UI report."""
 
+SIGNIFICANCE = 0.05
+"""The two-sided significance level of a paired comparison's label: the complement of ``CONFIDENCE``."""
+
+MINIMUM_CHANGED = 6
+"""The fewest changed pairs a comparison labels better or worse. Six all one way give an exact
+two-sided p of 2 × 0.5⁶ = 0.031 and five 0.0625, so the exact test never labels fewer than six; the
+paired t test is held to the same count."""
+
 Interval = tuple[float, float]
+Label = Literal["better", "worse", "within_noise"]
 
 
 def _z(confidence: float) -> float:
@@ -183,6 +208,134 @@ def mean_interval(
     return (centre - half, centre + half)
 
 
+# --- paired comparison ----------------------------------------------------------------------
+
+
+def mcnemar_exact(improved: int, regressed: int) -> float:
+    """The two-sided exact McNemar p-value: the binomial test that a changed pair is as likely to
+    have ``improved`` as ``regressed``, twice the smaller tail and at most 1. 1 when no pair
+    changed. Exact integer arithmetic; only the final division rounds."""
+    if improved < 0 or regressed < 0:
+        raise ValueError("counts must not be negative")
+    changed = improved + regressed
+    term = tail = 1  # C(changed, 0), then the sum of C(changed, i) for i up to the smaller count
+    for i in range(1, min(improved, regressed) + 1):
+        term = term * (changed - i + 1) // i
+        tail += term
+    return min(1.0, 2 * tail / (1 << changed))
+
+
+def paired_t(differences: Sequence[float]) -> float | None:
+    """The two-sided p-value of the paired t test that the mean of ``differences`` is 0, on n − 1
+    degrees of freedom. None for fewer than two differences. With no spread it is 1 when every
+    difference is 0 and 0 when they are equal and not 0."""
+    n = len(differences)
+    if n < 2:
+        return None
+    if len(set(differences)) == 1:
+        return 1.0 if differences[0] == 0 else 0.0
+    centre = fmean(differences)
+    variance = math.fsum((d - centre) ** 2 for d in differences) / (n - 1)
+    t = centre / math.sqrt(variance / n)
+    df = n - 1
+    return _incomplete_beta(df / 2, 0.5, df / (df + t * t))
+
+
+@dataclass(frozen=True)
+class PairedComparison:
+    """Two runs compared case by case on one measure: a pass rate or a mean score.
+
+    ``baseline`` and ``candidate`` are the measure over the compared pairs, and ``effect`` the
+    candidate's minus the baseline's. ``improved`` and ``regressed`` count the pairs that moved
+    the better or the worse way. ``minimum_detectable_effect`` is the smallest change of the
+    measure that this comparison could label: for a pass rate, six cases all one way over the
+    compared pairs; for a mean, the half-width of the difference's 95% t interval. None when no
+    change could be labelled: fewer than six pairs, or differences with no spread."""
+
+    label: Label
+    test: Literal["mcnemar_exact", "paired_t"]
+    p_value: float | None
+    alpha: float
+    compared: int
+    changed: int
+    improved: int
+    regressed: int
+    baseline: float
+    candidate: float
+    effect: float
+    minimum_detectable_effect: float | None
+
+
+def _label(p_value: float | None, changed: int, gain: float) -> Label:
+    if p_value is None or p_value >= SIGNIFICANCE or changed < MINIMUM_CHANGED:
+        return "within_noise"
+    return "better" if gain > 0 else "worse"
+
+
+def compare_outcomes(
+    baseline: Sequence[bool], candidate: Sequence[bool], *, higher_is_better: bool = True
+) -> PairedComparison | None:
+    """Pass/fail outcomes of the same cases, paired by position, by the exact McNemar test.
+    ``higher_is_better`` False makes True the worse outcome. None for no pairs."""
+    if len(baseline) != len(candidate):
+        raise ValueError("give one candidate outcome per baseline outcome")
+    n = len(baseline)
+    if n == 0:
+        return None
+    sign = 1 if higher_is_better else -1
+    moves = [sign * (bool(after) - bool(before)) for before, after in zip(baseline, candidate, strict=True)]
+    improved, regressed = moves.count(1), moves.count(-1)
+    p_value = mcnemar_exact(improved, regressed)
+    before, after = sum(map(bool, baseline)) / n, sum(map(bool, candidate)) / n
+    return PairedComparison(
+        label=_label(p_value, improved + regressed, improved - regressed),
+        test="mcnemar_exact",
+        p_value=p_value,
+        alpha=SIGNIFICANCE,
+        compared=n,
+        changed=improved + regressed,
+        improved=improved,
+        regressed=regressed,
+        baseline=before,
+        candidate=after,
+        effect=after - before,
+        minimum_detectable_effect=MINIMUM_CHANGED / n if n >= MINIMUM_CHANGED else None,
+    )
+
+
+def compare_scores(
+    baseline: Sequence[float], candidate: Sequence[float], *, higher_is_better: bool = True
+) -> PairedComparison | None:
+    """Scores of the same cases, paired by position, by the paired t test on candidate minus
+    baseline. ``higher_is_better`` False makes a lower score the better one. None for no pairs."""
+    if len(baseline) != len(candidate):
+        raise ValueError("give one candidate score per baseline score")
+    n = len(baseline)
+    if n == 0:
+        return None
+    differences = [float(after) - float(before) for before, after in zip(baseline, candidate, strict=True)]
+    sign = 1 if higher_is_better else -1
+    improved = sum(sign * d > 0 for d in differences)
+    regressed = sum(sign * d < 0 for d in differences)
+    effect = fmean(differences)
+    p_value = paired_t(differences)
+    found = mean_interval(differences) if len(set(differences)) > 1 else None
+    return PairedComparison(
+        label=_label(p_value, improved + regressed, sign * effect),
+        test="paired_t",
+        p_value=p_value,
+        alpha=SIGNIFICANCE,
+        compared=n,
+        changed=improved + regressed,
+        improved=improved,
+        regressed=regressed,
+        baseline=fmean(map(float, baseline)),
+        candidate=fmean(map(float, candidate)),
+        effect=effect,
+        minimum_detectable_effect=(found[1] - found[0]) / 2 if found and n >= MINIMUM_CHANGED else None,
+    )
+
+
 def rate_text(rate: float | None, interval: Sequence[float] | None) -> str:
     """A rate and its interval as the SDK and the Evals UI write them: ``62% (48–75%)``. The rate is
     rounded to the nearest whole percent and the bounds outward, so the written interval holds the
@@ -195,9 +348,17 @@ def rate_text(rate: float | None, interval: Sequence[float] | None) -> str:
 
 __all__ = [
     "CONFIDENCE",
+    "MINIMUM_CHANGED",
+    "SIGNIFICANCE",
     "Interval",
+    "Label",
+    "PairedComparison",
+    "compare_outcomes",
+    "compare_scores",
     "design_effect",
+    "mcnemar_exact",
     "mean_interval",
+    "paired_t",
     "proportion_interval",
     "rate_text",
     "t_quantile",
