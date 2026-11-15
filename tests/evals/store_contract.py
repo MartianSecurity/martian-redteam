@@ -690,6 +690,44 @@ class StoreContract:
         await refused("not_found", store.queue_items(ORG_A, "p1", "missing"))
         assert await store.get_queue(ORG_A, "p1", "missing") is None
 
+    async def test_traces_are_deleted_by_id_and_before_a_cutoff_with_their_scores_and_queue_items(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        span = Span(id="s1", name="model call", kind="LLM", status="ok", inputs={"q": 1}, outputs="a")
+        for number in range(1, 6):
+            await store.record_trace(ORG_A, trace(f"t{number}", minutes=number, spans=[span]))
+        await store.log_score(ORG_A, "p1", "t1", Score(scorer="rubric_judge", source="llm_judge", value=True))
+        question = ReviewQuestion(name="correct", instruction="Is the answer correct?")
+        await store.save_question(ORG_A, "p1", question)
+        queue = ReviewQueue(id="q1", run_id="r1", name="Check answers", questions=[question], case_ids=["c1", "c2"])
+        await store.create_queue(ORG_A, "p1", queue, ["t1", "t5"])
+
+        # By id: each trace the project holds, once; an id it does not hold is left out.
+        assert await store.delete_traces(ORG_A, "p1", ["t5", "missing", "t5"]) == ["t5"]
+        assert await store.get_trace(ORG_A, "p1", "t5") is None
+        assert [item.trace_id for item in await store.queue_items(ORG_A, "p1", "q1")] == ["t1"]
+        assert await store.delete_traces(ORG_A, "p1", []) == []
+        # Before a cutoff: the oldest first, at most the limit a call. t4 is at the cutoff.
+        cutoff = T0 + timedelta(minutes=4)
+        assert await store.delete_traces_before(ORG_A, "p1", cutoff, limit=2) == ["t1", "t2"]
+        assert await store.delete_traces_before(ORG_A, "p1", cutoff, limit=2) == ["t3"]
+        assert await store.delete_traces_before(ORG_A, "p1", cutoff) == []
+        assert [t.id for t in (await store.search_traces(ORG_A, TraceQuery(project_id="p1"))).items] == ["t4"]
+        # Nothing of a deleted trace reads back: not its spans, scores or place in a queue.
+        assert await store.get_trace(ORG_A, "p1", "t1") is None
+        await refused("not_found", store.list_scores(ORG_A, "p1", "t1"))
+        await refused("not_found", store.log_score(ORG_A, "p1", "t1", Score(scorer="s", source="human")))
+        assert await store.queue_items(ORG_A, "p1", "q1") == []
+        assert (await store.get_trace(ORG_A, "p1", "t4")).spans == [span]  # type: ignore[union-attr]
+        # Another organisation's project of the same id reaches none of this one's traces.
+        await store.create_project(ORG_B, Project(id="p1", name="Someone else's"))
+        assert await store.delete_traces(ORG_B, "p1", ["t4"]) == []
+        assert await store.delete_traces_before(ORG_B, "p1", T0 + timedelta(days=1)) == []
+        assert await store.get_trace(ORG_A, "p1", "t4") is not None
+        await refused("not_found", store.delete_traces(ORG_A, "missing", ["t4"]))
+        await refused("invalid", store.delete_traces_before(ORG_A, "p1", cutoff, limit=0))
+        await refused("invalid", store.delete_traces(ORG_A, "p1", [f"t{n}" for n in range(1001)]))
+
     async def test_run_artifacts(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
         await store.put_artifact(ORG_A, "p1", "r1", "reports/summary.json", b'{"passed": 2}')

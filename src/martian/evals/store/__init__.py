@@ -106,6 +106,19 @@ def check_session_search(query: TraceQuery, max_traces: int) -> None:
 CURSOR_DIGITS = 18
 """The most digits an offset cursor has, so that it fits SQL's 64-bit ``OFFSET``."""
 
+TRACE_DELETE_LIMIT = 1000
+"""The most traces one call deletes (``EvalStore.delete_traces`` and ``delete_traces_before``) or
+forgets (``RecordStore.forget_traces``)."""
+
+
+def check_trace_deletion(*, trace_ids: list[str] | None = None, limit: int | None = None) -> None:
+    """Refuse a trace deletion no binding takes: more than :data:`TRACE_DELETE_LIMIT` ids, or a
+    limit outside 1 to :data:`TRACE_DELETE_LIMIT`."""
+    if trace_ids is not None and len(trace_ids) > TRACE_DELETE_LIMIT:
+        raise StoreError("invalid", f"name at most {TRACE_DELETE_LIMIT} traces a call")
+    if limit is not None and not 1 <= limit <= TRACE_DELETE_LIMIT:
+        raise StoreError("invalid", f"limit must be between 1 and {TRACE_DELETE_LIMIT}")
+
 
 def cursor_offset(cursor: str | None) -> int:
     """The offset an offset cursor names: 0 without one, else the digits 0-9 a ``next_cursor``
@@ -235,6 +248,23 @@ class EvalStore(Protocol):
         """Make these traces part of the run."""
         ...
 
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        """Delete these traces of the project for good, at most :data:`TRACE_DELETE_LIMIT` a call:
+        each one, its spans, its scores and its items in review queues, so none of it reads back.
+        An id the project does not hold is left out. Returns the ids it deleted, in the order
+        given. The records that name a deleted trace are the record store's to forget
+        (``RecordStore.forget_traces``)."""
+        ...
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        """Delete for good, as :meth:`delete_traces` does, the project's oldest traces whose request
+        time is before ``before``, at most ``limit`` (1 to :data:`TRACE_DELETE_LIMIT`) of them.
+        Returns their ids, oldest first; a caller deletes until a call returns fewer than
+        ``limit``."""
+        ...
+
     # Scores: judge, check and human verdicts on a trace.
     async def log_score(self, principal: Principal, project_id: str, trace_id: str, score: Score) -> Score:
         """Fills ``store.assessment_id``."""
@@ -344,6 +374,7 @@ __all__ = [
     "RESPONSE_PREVIEW_TRUNCATED",
     "STORE_METHODS",
     "TEXT_SEARCH_REACH",
+    "TRACE_DELETE_LIMIT",
     "EvalStore",
     "MemoryStore",
     "StoreError",
@@ -352,6 +383,7 @@ __all__ = [
     "check_imported_prompt",
     "check_prompt",
     "check_session_search",
+    "check_trace_deletion",
     "cursor_offset",
     "text_matches",
 ]
