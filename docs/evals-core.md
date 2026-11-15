@@ -1452,14 +1452,17 @@ WorkerServices(store, records, hooks=(Prepared(),), checks={"final_state": final
   installed check grades a conversation's saved result as a custom scorer does, its `outputs` the
   conversation's messages, with `state=None`.
 
-`tests/evals/test_case_hooks.py` installs a test edition's hooks and checks: the hooks open a ledger
-for each case, which the agent writes to, and run around every case in order, also when the target
-raises or times out, when a setup or teardown raises, and when the work is cancelled during a case;
-an installed check grades each case from its open ledger; a conversation case is skipped with no
-hook or check; a scoring job's check gets no state; a monitor refuses an installed check; and
-`ProcessWorker` runs the setup's hooks and checks in each run's own process. It also loads and
-writes a suite file with an installed check, and shows that `martian evals run` refuses one, in a
-conversation suite too, and an audit lists it as not audited.
+`tests/evals/test_case_hooks.py` installs a test edition's hooks and checks: the hooks open a
+ledger for each case, which the agent writes to, and run around every case in order, also when the
+target raises or times out, when a setup or teardown raises, and when the work is cancelled during
+a case; an installed check grades each case from its open ledger; a conversation case is skipped
+with no hook or check; a scoring job's check gets no state, beside a panel judge, with nothing of
+the panel's or a calibration's (`tests/evals/test_judge_panel.py`); a monitor refuses an installed
+check, and its pass runs no hook and takes no trace of a hooked run; a schedule's turn runs no
+hook, the run it admits runs them around each case, and its suite job grades the suite's installed
+check with no state; and `ProcessWorker` runs the setup's hooks and checks in each run's own
+process. It also loads and writes a suite file with an installed check, and shows that `martian
+evals run` refuses one, in a conversation suite too, and an audit lists it as not audited.
 
 ## Judge models
 
