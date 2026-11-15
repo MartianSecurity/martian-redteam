@@ -1,10 +1,17 @@
-"""The targets a worker calls: functions in its process, HTTP targets it calls itself, and registered
-agents it calls through martian-agents.
+"""The targets a worker calls: functions, HTTP targets it calls itself, and registered agents it calls
+through martian-agents.
 
 A run names its target by id, the launch request's ``agent_id``, and the worker knows each id as
 one of these:
 
-- a ``TargetCall``, a function in the worker's process;
+- a function target, the shared model's ``Target(kind="function")``: a function in a Python file,
+  which the worker runs in a process of its own for each run (:class:`FunctionProcessCall`, through
+  :class:`martian.evals.isolation.TargetProcess`). It is called with the case's inputs as keyword
+  arguments, as a suite file's function target is, and the worker's private paths
+  (``WorkerServices.private_paths``), such as its stores' files, are hidden from it on Linux. The
+  worker pins it by the target as written and the contents of its file;
+- a ``TargetCall``, a function in the worker's own process, for tests and code the installation
+  trusts with everything the work's process holds: nothing isolates it;
 - an HTTP target, the shared model's ``Target(kind="http")``. The worker POSTs each case to its
   ``url`` itself, so a run needs no martian-agents service. The rules are a suite file's URL
   target's (:func:`martian.evals.runner._http_target`, whose pieces this reuses): one request per
@@ -18,6 +25,11 @@ one of these:
   leased credentials and runs through martian-agents. The worker asks the executor only for ids
   it does not know itself.
 
+Whatever the target, it is given only the case's id and inputs (:func:`sent_case`): never its
+expectations, a stored output, its tags or its metadata. An HTTP target's body placeholders name
+only the case's inputs, and one that names anything else, such as ``{{expectations.answer}}``, is
+refused when the worker checks the target, before any run calls it.
+
 ``${NAME}`` in an HTTP target's url or a header value is filled in from the worker's
 :class:`~martian.evals.worker.Credentials`, asked with the principal, the target's id and NAME in
 the process that calls the target, each time it calls it. Neither the launch request nor a record
@@ -29,13 +41,15 @@ A run calls only the target it was admitted with. Before it calls its target, on
 and on every resume, the worker pins the target as it has it now (:func:`target_pin`), in the
 process that calls it, and a pin that differs from the run's fails the run, naming the target,
 before any call (:func:`changed_target`). So an HTTP target is compared by its digest, as written;
-a function by its id and kind only, since the installation's own code has nothing to digest; and
-a registered agent by the pin its executor gives. A credential's value is not part of any pin.
+a function target by its digest and its file's contents; a ``TargetCall`` by its id and kind only,
+since the installation's own code has nothing to digest; and a registered agent by the pin its
+executor gives. A credential's value is not part of any pin.
 
 Every call has the worker's time limit, ``target_timeout_seconds``, whatever the target: a call
 that outlasts it is the case's error, ``item timed out``. An HTTP target's client and a registered
-agent's executor stop their own calls, but a function is the installation's own code, which may
-block its event loop or never return. So a function runs on an event loop of a thread of its own
+agent's executor stop their own calls. A function target's process runs each call on a thread of
+its own, and ends with the run. A ``TargetCall`` is the installation's own code, which may block
+its event loop or never return. So it runs on an event loop of a thread of its own
 (:class:`FunctionTargets`), and the worker's loop waits for it with the deadline: a function that
 outlasts it ends its case, and the run goes on. Python cannot stop a thread, so a function that
 does not end once it is cancelled keeps its thread until the process ends, and the next function
@@ -47,12 +61,15 @@ does (:class:`~martian.evals.worker.ProcessWorker`), which ends such a thread to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from martian.evals.isolation import TargetProcess, TargetRaised
 from martian.evals.model import Case, Run, Target, digest
 from martian.evals.runner import (
     TargetCallError,
@@ -63,6 +80,7 @@ from martian.evals.runner import (
     _reply,
     _response_steps,
     _unreachable,
+    check_body,
 )
 from martian.evals.server.projection import prompt_text
 from martian.evals.store import StoreError
@@ -145,24 +163,86 @@ FUNCTIONS = FunctionTargets()
 """The function targets' thread, one for the process."""
 
 
+def sent_case(case: Case) -> Case:
+    """What a target is given of ``case``: its id and its inputs. Never its expectations, a stored
+    output, its tags or its metadata, which grade it or describe it to the grader."""
+    return Case(id=case.id, inputs=dict(case.inputs))
+
+
 def http_target(target: Target) -> Target:
     """``target``, which must be an HTTP target."""
     if target.kind != "http":
-        raise ValueError("the worker calls a Target itself only when it is an http target")
+        raise ValueError("the worker calls a Target over HTTP only when it is an http target")
+    return target
+
+
+def own_target(target: Target) -> Target:
+    """``target``, which must be a target the worker calls itself: an HTTP or a function target."""
+    if target.kind not in ("http", "function"):
+        raise ValueError("the worker calls a Target itself only when it is an http or a function target")
     return target
 
 
 def _steps(target_id: str, target: Target) -> list[str]:
     """The steps of the HTTP target ``target_id``'s ``response_path``, refused as a suite file's
-    are but naming the worker's setting, ``targets[target_id].response_path``. It is checked each
-    time a check or a run names the target, so one wrong target never stops the others."""
-    return _response_steps(http_target(target).response_path, f"targets[{target_id!r}].response_path")
+    are but naming the worker's setting, ``targets[target_id].response_path``, after its body's
+    placeholders, refused as a suite file's are. Both are checked each time a check or a run names
+    the target, so one wrong target never stops the others."""
+    check_body(http_target(target).body, f"targets[{target_id!r}].body")
+    return _response_steps(target.response_path, f"targets[{target_id!r}].response_path")
 
 
 def http_pin(target_id: str, target: Target) -> dict[str, Any]:
     """What pins a run of an HTTP target: its id and a digest of it as written, never a value."""
     _steps(target_id, target)
     return {"kind": "http", "agent_id": target_id, "digest": digest(target.model_dump(mode="json"))}
+
+
+def function_pin(target_id: str, target: Target) -> dict[str, Any]:
+    """What pins a run of a function target: its id and a digest of it as written and of its
+    file's contents, so a run never calls code that changed since it was admitted."""
+    try:
+        contents = hashlib.sha256(Path(target.file or "").read_bytes()).hexdigest()
+    except OSError:
+        contents = None
+    written = target.model_dump(mode="json")
+    return {"kind": "function", "agent_id": target_id, "digest": digest({"target": written, "file": contents})}
+
+
+class FunctionProcessCall:
+    """A function target's call for one run: the target in a process of its own
+    (:class:`~martian.evals.isolation.TargetProcess`), which cannot reach ``private`` on Linux,
+    started by :meth:`ready` before the run's first case and ended by :meth:`close` after its last.
+    Each call sends the case's inputs as keyword arguments and returns the function's reply. One
+    that raised is the case's error, ``the target raised <its type>``; the exception's own text is
+    not kept, since it may hold anything."""
+
+    def __init__(self, target: Target, *, private: Iterable[str | Path], timeout_seconds: float) -> None:
+        self._target = target
+        self._private = list(private)
+        self._timeout = timeout_seconds + CLIENT_SLACK_SECONDS
+        self._process: TargetProcess | None = None
+
+    async def ready(self) -> None:
+        """Start the target's process and wait until it has imported the target. A target it
+        cannot import is a ``ConfigError`` naming why."""
+        process = TargetProcess(
+            Path(self._target.file or ""), self._target.function or "", private=self._private, trace=False
+        )
+        self._process = process
+        await asyncio.to_thread(process.ready)
+
+    async def __call__(self, case: Case) -> Any:
+        assert self._process is not None, "ready() starts the target's process"
+        try:
+            value, _ = await asyncio.to_thread(self._process.call, dict(case.inputs), self._timeout)
+        except TargetRaised as raised:
+            raise TargetCallError(f"the target raised {raised}") from None
+        return value
+
+    def close(self) -> None:
+        if self._process is not None:
+            self._process.close()
 
 
 def http_call(
@@ -212,16 +292,18 @@ async def target_pin(
     target: Target | None,
     *,
     calls: Collection[str],
-    http: Mapping[str, Target],
+    own: Mapping[str, Target],
     executor: AgentExecutor | None,
 ) -> dict[str, Any]:
-    """What pins a run of ``target``: an HTTP target's :func:`http_pin`, a function's id, or the
-    executor's pin of a registered agent. An id the worker does not know is ``not_found``."""
+    """What pins a run of ``target``: an HTTP target's :func:`http_pin` or a function target's
+    :func:`function_pin`, for the targets the worker calls itself (``own``), a ``TargetCall``'s id,
+    or the executor's pin of a registered agent. An id the worker does not know is ``not_found``."""
     agent_id = target.agent_id if target is not None and target.kind == "agent" else None
     if agent_id is None:
         raise StoreError("not_found", NOT_FOUND)
-    if agent_id in http:
-        return http_pin(agent_id, http[agent_id])
+    if agent_id in own:
+        found = own_target(own[agent_id])
+        return function_pin(agent_id, found) if found.kind == "function" else http_pin(agent_id, found)
     if agent_id in calls:
         return {"kind": "agent", "agent_id": agent_id}
     if executor is not None:
@@ -252,13 +334,18 @@ def target_call(
     credentials: Credentials | None,
     executor: AgentExecutor | None,
     timeout_seconds: float,
+    private: Iterable[str | Path] = (),
 ) -> TargetCall | None:
-    """The call for ``run``'s target, or None when the worker cannot call it. A function runs on
-    the function targets' thread (:data:`FUNCTIONS`)."""
+    """The call for ``run``'s target, or None when the worker cannot call it. A function target
+    runs in a process of its own that cannot reach ``private`` (:class:`FunctionProcessCall`, which
+    the run readies and closes); a ``TargetCall`` on the function targets' thread
+    (:data:`FUNCTIONS`). The call is given the case as :func:`sent_case` leaves it."""
     target = run.target
     if target is None or target.kind != "agent" or target.agent_id is None:
         return None
     found = targets.get(target.agent_id)
+    if isinstance(found, Target) and found.kind == "function":
+        return FunctionProcessCall(found, private=private, timeout_seconds=timeout_seconds)
     if isinstance(found, Target):
         return http_call(principal, target.agent_id, found, credentials=credentials, timeout_seconds=timeout_seconds)
     if found is not None:
@@ -279,11 +366,15 @@ __all__ = [
     "GRACE_SECONDS",
     "PIN_KEY",
     "TARGET_CHANGED",
+    "FunctionProcessCall",
     "FunctionTargets",
     "changed_target",
+    "function_pin",
     "http_call",
     "http_pin",
     "http_target",
+    "own_target",
+    "sent_case",
     "target_call",
     "target_pin",
 ]

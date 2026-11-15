@@ -34,7 +34,8 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 Martian. Its outbound calls are the ones the suite file names:
 
 - **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
-  suite repeats its cases, carrying that case's input.
+  suite repeats its cases, carrying that case's inputs and never its expectations
+  ([the target and the grader](#the-target-and-the-grader)).
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -81,6 +82,36 @@ case's inputs and outputs, traces with their spans, scores, reasons and reviews,
 artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
 keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
 
+## The target and the grader
+
+An agent under test that can reach its grader can read its answers or change its results. So the
+SDK sends a target each case's inputs and nothing else, and keeps what grades it, the expectations,
+the checks and their criteria, custom scorers' code, the results and the stores, where the target
+cannot reach them. How far that goes depends on the kind of target:
+
+| Target | Given | Runs | Cannot reach | Can still reach |
+| --- | --- | --- | --- | --- |
+| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments | In a process of its own, started with the run (`python -P`), which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri` and the local Evals UI's data folder: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
+| A suite file's URL target | One JSON `POST` per case, its body filled from the case's inputs and `{{uuid}}`; a placeholder that names anything else is refused when the suite loads | Wherever the endpoint runs | Nothing of the run's process: it receives the request and nothing else | Whatever its own host lets it. An endpoint on this machine that runs as your user can read the suite's files |
+| A function in the pytest gate (`evaluate`, `predict_fn`) | The case's inputs, as keyword arguments | In the test's own process | Nothing is hidden from it | The test's memory, which holds the dataset's expected values, and its files |
+| A function target in the evals core's worker (`Target(kind="function")`) | The case's inputs, as keyword arguments | In a process of its own for each run, started before its first case | The work's process, which holds the stores and every case's expectations. On Linux with Landlock, the worker's private paths (`WorkerServices.private_paths`), which the setup names: its stores' files | As a suite file's function target. A store on a server, such as Postgres, is reachable over the network by anything that has its address and credentials, which the target's process is not given unless they are in a variable it keeps |
+| A function in the worker's own process (`TargetCall`) | A `Case` with the case's id and inputs only | In the work's process | Nothing is hidden from it: for tests and for code the installation trusts with its stores | The stores, the work's memory and its files |
+| An HTTP target of the worker | As a suite file's URL target; a placeholder that names anything else is refused when the worker checks the target | Wherever the endpoint runs | As a suite file's URL target | As a suite file's URL target |
+| A registered agent | A `Case` with the case's id and inputs only, to the `AgentExecutor` | Through martian-agents | The worker's process and stores | What its own sandbox lets it |
+
+Scorers run after the target replies, in the process that grades: the command's process for a suite
+file, and the work's process in the worker. A judge is given the input, the reply and its
+criteria, and never calls the target.
+
+`tests/evals/test_grader_isolation.py` proves the function targets' part. Its target looks for the
+answers everywhere it can: in its arguments, in the suite file, the data file, the scorer's file,
+the results folder, MLflow's store and the local Evals UI's data folder, in its environment, in its
+own memory and in the memory of the process that started it. Each answer is a random value placed
+in the data file, the suite file and the scorer, and the test checks that the files and stores hold
+them. The target finds none, in a suite file run and in the worker, though it finds a control value
+in a file beside it and another in its environment, and it can neither change the results and the
+stores nor plant a file beside them.
+
 ## Custom Python scorers
 
 A [custom Python check](evals.md#custom-python-checks) is code, and it is **not sandboxed**. It
@@ -93,7 +124,7 @@ how long it runs or how much memory it takes.
 
 | Where | Who adds it | Where the code runs |
 | --- | --- | --- |
-| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
+| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts, where the run's function target cannot reach it ([above](#the-target-and-the-grader)). Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
 | The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
 | The local edition (`martian ui`) | Nobody: it installs none | — |

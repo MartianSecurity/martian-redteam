@@ -4,25 +4,28 @@
 
 The suite names a data file (JSONL or CSV), the checks to apply, and optionally the target under
 test: a Python function, or an HTTP endpoint. Nothing here contacts the Martian platform: a
-function target runs in this process, a URL target is called from it, LLM judges call the model
-you configure, and MLflow's evaluation harness uses a local store in the output folder unless you
-point it at your own server. The run, its case results, scores and traces are also recorded in the
+function target runs in a process of its own, given each case's inputs only, which cannot reach
+the expectations, checks, scorers or results (:mod:`martian.evals.isolation`); a URL target is
+called from this process with a body filled from the inputs; LLM judges call the model you
+configure, and MLflow's evaluation harness uses a local store in the output folder unless you point
+it at your own server. The run, its case results, scores and traces are also recorded in the
 local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
 a finished case is skipped while nothing that produced its verdict has changed. A suite can run each
 case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`).
 Use ``martian ci`` when a result must be recorded on the platform.
 
 Every target call has a time limit, ``target.timeout_seconds``: a URL target's client stops the
-call, and a function runs on a thread of its own, which the run stops waiting for at the limit. A
-run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``): once it reaches one, it
-calls no more targets, records the cases it finished, and ends ``stopped``; running it again
-resumes after them. A case is the unit a run stops at and resumes from: with repeats, a case whose
+call, and a function target's process runs each call on a thread of its own, which the run stops
+waiting for at the limit. A run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``):
+once it reaches one, it calls no more targets, records the cases it finished, and ends ``stopped``;
+running it again resumes after them. A case is the unit a run stops at and resumes from: with repeats, a case whose
 attempts did not all run has no result, and running again runs all of its attempts. Cancelling the
 run in ``martian ui`` stops it the same way, as ``cancelled``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import csv
 import functools
@@ -130,6 +133,8 @@ class _Model(BaseModel):
 # In a URL target's body: {{input}}, {{inputs.NAME}} and {{uuid}} are filled in for each case.
 _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _PLACEHOLDER_NAME = re.compile(r"input|uuid|inputs\.[A-Za-z_][A-Za-z0-9_]*")
+# Placeholders that name what grades the target rather than what it is given.
+_GRADER_PLACEHOLDER = re.compile(r"expect|output", re.IGNORECASE)
 # In a URL target's url and header values: ${NAME} is read from the environment.
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -143,6 +148,23 @@ def _placeholders(value: Any) -> list[str]:
     if isinstance(value, list):
         return [name for item in value for name in _placeholders(item)]
     return []
+
+
+def check_body(body: Any, setting: str) -> None:
+    """Refuse a body template whose placeholders name anything but the case's inputs: a name that
+    starts like ``expectations``, ``expected`` or ``outputs`` because a target is never sent the
+    answers it is graded against, any other unknown name because nothing would fill it in. Raises
+    ``ValueError`` naming ``setting``, before any case is sent."""
+    names = _placeholders(body)
+    allowed = "{{input}}, {{inputs.NAME}} or {{uuid}}"
+    unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
+    if graded := [name for name in unknown if _GRADER_PLACEHOLDER.match(name)]:
+        raise ValueError(
+            f"{setting} placeholder(s) {', '.join(graded)} name the case's expectations or outputs, which are never "
+            f"sent to the target; use {allowed}"
+        )
+    if unknown:
+        raise ValueError(f"unknown {setting} placeholder(s) {', '.join(unknown)}; use {allowed}")
 
 
 DEFAULT_TARGET_TIMEOUT_SECONDS = 120
@@ -206,11 +228,8 @@ class TargetRef(_Model):
         _response_steps(self.response_path, "target.response_path")
         if not self.body:
             raise ValueError("a url target needs a body, with {{input}} where the case's input goes")
+        check_body(self.body, "body")
         names = _placeholders(self.body)
-        unknown = sorted({name for name in names if not _PLACEHOLDER_NAME.fullmatch(name)})
-        if unknown:
-            allowed = "{{input}}, {{inputs.NAME}} or {{uuid}}"
-            raise ValueError(f"unknown body placeholder(s) {', '.join(unknown)}; use {allowed}")
         if not any(name != "uuid" for name in names):
             raise ValueError("a url target's body must use {{input}} or {{inputs.NAME}}, or every case sends the same")
         return self
@@ -788,13 +807,94 @@ class _Calls:
             return found.pop(0) if found else None
 
 
-def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -> Callable[..., Any]:
-    """The target's call, which never takes much longer than ``timeout_seconds``, whatever it is."""
+class _ProcessTarget:
+    """A function target as MLflow's evaluation harness calls it, in a process of its own
+    (:class:`martian.evals.isolation.TargetProcess`), started at once. Each call opens the case's
+    span here, named after the function, with the case's inputs, sends the inputs, the only part of
+    the case the target is given, and adds the spans the target recorded under it. A call that
+    outlasts ``timeout_seconds`` is the case's error (``TIMED_OUT``) and the run goes on. The
+    target is never imported in this process, which holds the run's expectations and scorers."""
+
+    def __init__(self, reference: TargetRef, base: Path, private: list[Path]) -> None:
+        from martian.evals.isolation import TargetProcess
+
+        self.__name__ = self.__qualname__ = reference.function
+        self.__mlflow_traced__ = True  # it opens the case's span itself
+        self._timeout = reference.timeout_seconds
+        self._process = TargetProcess(
+            _relative(reference.file or "", base), reference.function, private=private, trace=True
+        )
+
+    def ready(self) -> str | None:
+        """Wait for the target's process; None when the private paths are hidden from it, or why not."""
+        return self._process.ready()
+
+    def __call__(self, **inputs: Any) -> Any:
+        import mlflow
+
+        from martian.evals.isolation import TargetRaised
+
+        with mlflow.start_span(name=self.__name__) as span:
+            span.set_inputs(inputs)
+            try:
+                value, trace = self._process.call(inputs, self._timeout)
+            except TargetRaised as raised:
+                if raised.trace is not None:
+                    mlflow.add_trace(raised.trace, target=span)
+                raise
+            if trace is not None:
+                mlflow.add_trace(trace, target=span)
+            span.set_outputs(value)
+            return value
+
+    def close(self) -> None:
+        self._process.close()
+
+
+def _private_paths(suite: Suite, suite_file: Path, base: Path, output: Path, home: Path) -> list[Path]:
+    """What a function target must not reach, because it grades the target or holds what grading
+    found: the suite file, which holds the checks and their criteria; the data file, which holds the
+    expectations; each python check's file and the compiled copies beside it; the output folder,
+    with the results and MLflow's local store; MLflow's store when the suite names a local SQLite
+    or file one; and the local Evals UI's data folder. A target whose own file is among them cannot
+    be run, and is a ``ConfigError`` naming the setting that holds it."""
+    named: list[tuple[str, Path]] = [
+        ("the suite file", suite_file),
+        ("data", _relative(suite.data, base)),
+        ("the output folder", output),
+        ("the local Evals UI's data folder", home),
+    ]
+    for check in suite.checks:
+        if check.type in CODE_CHECKS:
+            scorer = _relative(check.file or "", base)
+            named += [(f"check {check.label}", scorer), (f"check {check.label}", scorer.parent / "__pycache__")]
+    uri = suite.mlflow.tracking_uri or ""
+    if uri.startswith("sqlite:///"):
+        named.append(("mlflow.tracking_uri", Path(uri.removeprefix("sqlite:///"))))
+    elif uri.startswith("file://"):
+        named.append(("mlflow.tracking_uri", Path(urlsplit(uri).path)))
+    elif uri and "://" not in uri:  # a folder, which MLflow reads as a file store
+        named.append(("mlflow.tracking_uri", Path(uri)))
+    assert suite.target is not None and suite.target.file is not None
+    target = os.path.realpath(_relative(suite.target.file, base))
+    for setting, path in named:
+        found = os.path.realpath(path)
+        if target == found or target.startswith(found.rstrip(os.sep) + os.sep):
+            raise ConfigError(
+                f"target.file is inside {setting}, which the target may not read; keep the target's file elsewhere"
+            )
+    return [path for _, path in named]
+
+
+def _load_target(
+    reference: TargetRef, base: Path, input_key: str = "message", private: list[Path] | None = None
+) -> Callable[..., Any]:
+    """The target's call, which never takes much longer than ``timeout_seconds``, whatever it is. A
+    function target is a :class:`_ProcessTarget`, in a process of its own that cannot reach
+    ``private``; the caller waits for it with ``ready()`` and ends it with ``close()``."""
     if reference.url is not None:
         return _function_target(_http_target(reference, input_key), reference.timeout_seconds + CLIENT_SLACK_SECONDS)
-    file = _relative(reference.file or "", base)
-    function = _custom.load_function(file, reference.function, what="target", module="martian_evals_target")
-    return _function_target(function, reference.timeout_seconds)
+    return _ProcessTarget(reference, base, private or [])
 
 
 def _python_check(check: CheckSpec, base: Path, modules: dict[Path, Any]) -> Any:
@@ -1355,13 +1455,31 @@ def run_suite(
     judges = {check.label for check in suite.checks if check.type in JUDGES}
     if limits.max_judge_tokens is not None and not judges:
         raise ConfigError("max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
-    target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
-    scorers = _build_scorers(suite, base)
+    folder = Path(output) if output is not None else base / suite.output
+    home_folder = data_folder(home)
+    target: Callable[..., Any] | None = None
+    if suite.target is not None:
+        private = _private_paths(suite, Path(path).resolve(), base, folder, home_folder) if suite.target.file else None
+        target = _load_target(suite.target, base, suite.input_key, private)
+    process = target if isinstance(target, _ProcessTarget) else None
+    say = progress or (lambda message: None)
+    try:
+        scorers = _build_scorers(suite, base)
+        hidden = process.ready() if process is not None else None
+    except BaseException:
+        if process is not None:
+            process.close()
+        raise
+    isolation = None if process is None else {"files_hidden": hidden is None, "reason": hidden}
+    if hidden is not None:
+        say(f"{hidden}: the target can read the suite file, its data and its results")
     labels = [check.label for check in suite.checks]
 
-    folder = Path(output) if output is not None else base / suite.output
     # Opened before the output folder changes, so a data folder that cannot be opened stops here.
-    with RunRecorder(data_folder(home), model, limits=limits) as recorder:
+    with (
+        contextlib.closing(process) if process else contextlib.nullcontext(),
+        RunRecorder(home_folder, model, limits=limits) as recorder,
+    ):
         results = Results(folder, resume=resume)
         suite_print = _suite_fingerprint(suite, base)
         prints = {case["id"]: _case_fingerprint(suite_print, case) for case in cases}
@@ -1371,7 +1489,6 @@ def run_suite(
         done = {i for i, r in finished.items() if r.get("fingerprint") == prints[i]}
         invalidated = len(finished) - len(done)
         todo = [case for case in cases if case["id"] not in done]
-        say = progress or (lambda message: None)
         each = f" of {suite.repeats} attempts each" if repeated else ""
         message = f"{len(cases)} cases{each}, {len(cases) - len(todo)} already done"
         if invalidated:
@@ -1572,6 +1689,7 @@ def run_suite(
             stopped=stopped,
         )
         summary["output"] = str(folder)
+        summary["target_isolation"] = isolation
         if not_run and cancelled.is_set():
             summary["cancelled"] = True
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
