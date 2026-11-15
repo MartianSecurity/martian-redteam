@@ -1,4 +1,4 @@
-"""Conversation judges (MorningHQ/martian-notes#176): task completion, policy adherence across turns
+"""Conversation judges (MartianSecurity/martian-notes#176): task completion, policy adherence across turns
 and knowledge retention, each reading a whole conversation through the shared judge engine with a
 flat verdict whose turns and quotes the SDK checks; in the suite file at scope: conversation, on
 scripted and simulated conversations, and in every place a run's results show. A fake provider
