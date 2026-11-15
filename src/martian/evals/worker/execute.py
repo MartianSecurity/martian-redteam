@@ -6,7 +6,9 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
 - A run reads the active cases of its published dataset (the default project's dataset version it
   was admitted with) up to its case limit, calls the target once per case with no retry, and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
+  with its exact-match score; a case with no usable prompt or expected text is skipped, and so is a
+  conversation case (``Case.turns``, or a ``Case.simulated_user`` whose turns a simulator writes),
+  which ``martian evals run`` runs turn by turn. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
   the setting to check, anything else with its type.
 - A target that reports the model that answered (a :class:`~martian.evals.worker.TargetReply`)
@@ -89,6 +91,7 @@ MAX_SCORED_RESULTS = 1000
 EXACT_MATCH_SCORER = "exact_match"
 STOPPED = "Stopped before this target request"
 UNUSABLE = "item is missing a usable prompt or expected output"
+CONVERSATION = "item is a conversation, which martian evals run runs turn by turn; the worker sends one prompt per item"
 NO_OUTPUT = "No successful saved target output"
 NO_JUDGE = "Judge unavailable; no automatic model retry"
 JUDGE_MODEL_KEY = "martian.judge.model"
@@ -375,6 +378,8 @@ async def _run_case(
 ) -> tuple[CaseResult, Score | None, str | None]:
     """Call the target with one case and record its trace, with the model the target reported,
     if any. Returns the case's result, its exact-match score and that model."""
+    if case.turns or case.simulated_user is not None:
+        return _skipped(run, position, case, CONVERSATION), None, None
     prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
     if not prompt or not expected:
         return _skipped(run, position, case, UNUSABLE), None, None

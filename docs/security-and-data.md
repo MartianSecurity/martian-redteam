@@ -76,10 +76,12 @@ password is not printed or stored: the report and each copied run's provenance k
 without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
 See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
-`martian evals export` writes everything the data folder holds into the folder it names: every
-case's inputs and outputs, traces with their spans, scores, reasons and reviews, and run
-artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
-keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
+`martian evals export` writes everything the data folder's store and record store hold into the
+folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
+reviews, and run artifacts. It holds no credentials: the local targets and their keys
+(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
+`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+data folder. See [data export](data-export.md).
 
 ## Custom Python scorers
 

@@ -44,8 +44,12 @@ local user), and nothing of another organisation's: every project the store list
 - its traces, oldest first, each with its spans and its scores: judges' and checks' verdicts and
   people's annotations.
 
-It leaves out what the interfaces cannot list or the model does not describe:
+It leaves out what is not durable data, what the interfaces cannot list or the model does not
+describe, and what the two stores do not hold:
 
+- The worker's queue (the record store's `martian_work_queue` table): the runs and scoring jobs no
+  worker has finished. It is transient; a run exported queued or running is finished as
+  interrupted in the fresh install (see Exporting and resuming).
 - A review queue that no review names (the store cannot list queues; creating one through the
   core adds a pending review per case and question), and a run in the store that the record store
   does not hold.
@@ -61,6 +65,18 @@ It leaves out what the interfaces cannot list or the model does not describe:
 - Schedules, their progress and their history of slots ([schedules](evals-core.md#schedules)), and
   the thresholds on their gate results; exporting them is not built yet. The runs they started,
   and their scoring jobs, are exported.
+- The local edition's files beside the stores: its targets and their keys (`targets.json`,
+  `target-keys.json`) and its settings (`settings.json`, the default judge model). An export holds
+  no credentials; define the targets and the default judge model again in the fresh data folder.
+
+`martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
+store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store
+and the record store take or return to its files; `LEFT_OUT_TABLES` and `LEFT_OUT_KINDS` give
+the rest, each with why. Every table but the worker's queue is exported, and every kind of
+object; the model classes left out are not data of their own (the store's status, a trace search
+and the sessions it groups, a page of a listing, a run's counts). A table or a kind added to
+either store fails `tests/evals/test_data_export.py` until the export carries it, in a new file
+of a new format version, or names it as left out and why.
 
 ## The format
 
@@ -116,8 +132,8 @@ when there is nothing of its kind. An import reads them in this order:
 ```
 
 `files` has an entry for every file in the table. `organisation_id` is the organisation's id, or
-`null` for the single local user. `version` is the format's version (`VERSION`): a change to a
-file or a line's shape is a new version, and an import reads only its own.
+`null` for the single local user. `version` is the format's version (`VERSION`, here `1`): a new
+file, or a change to a file or a line's shape, is a new version, and an import reads only its own.
 
 ## Exporting and resuming
 
@@ -183,7 +199,9 @@ imports it into a fresh install and exports that again, and compares the two exp
 field with only the fields above set aside: on the in-memory store, on the local edition's data
 folder (with Inspect AI logs imported into it, and with the Evals UI's routes answering the same
 for every run and review, but for the store's own ids and the moment a run exported queued was
-finished as interrupted), and on a data folder that `martian evals import mlflow` filled. It
-interrupts an export inside a run's step and on a page of traces, resumes it and compares the
-files byte for byte with an uninterrupted export, and covers what an export and an import refuse
-and both commands.
+finished as interrupted), and on a data folder that `martian evals import mlflow` filled. On the
+first two it also checks that every table the export carries holds rows in the source and as many
+in the fresh install. It checks that every table of the record store and every kind of object of
+the two interfaces is exported or left out with a reason. It interrupts an export inside a run's
+step and on a page of traces, resumes it and compares the files byte for byte with an
+uninterrupted export, and covers what an export and an import refuse and both commands.
