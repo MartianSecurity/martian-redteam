@@ -373,6 +373,23 @@ def test_same_named_scores_of_different_sources_link_to_their_own_assessments(tm
     assert {stored[a["native_id"]] for a in scores} == {("CODE", 1), ("LLM_JUDGE", 3)}
 
 
+def test_two_scores_of_one_name_and_source_on_a_sample_refuse_the_log_before_anything_is_written(tmp_path):
+    # tool_use's dict entry `calls` is the code score tool_use/calls; a scorer of that very name
+    # that grades without a model is a second code score of the same name on the same sample.
+    def change(log):
+        sample = next(s for s in log["samples"] if s["id"] == "sum")
+        sample["scores"]["tool_use/calls"] = {"value": 3, "explanation": "three calls"}
+
+    path = write_log(tmp_path, change)
+    with pytest.raises(
+        InspectLogError,
+        match=r"sample sum has two code scores named tool_use/calls: the entry calls of the scorer tool_use and "
+        r"the scorer tool_use/calls; a case holds one score of a name and source",
+    ):
+        import_inspect_log(path, tmp_path / "evals-home")
+    assert not (tmp_path / "evals-home").exists()
+
+
 def eval_archive(folder: Path, entries: dict[str, object], name="log.eval") -> Path:
     """An .eval log as older Inspect versions wrote it, with Deflate entries."""
     path = folder / name

@@ -43,6 +43,7 @@ from martian.config import ConfigError
 from martian.evals import runner
 from martian.evals.conversations import graded_turns
 from martian.evals.model import (
+    CacheSettings,
     Case,
     PanelMember,
     Repeats,
@@ -130,6 +131,7 @@ SUITE_FILE_FIELDS = {
     "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
+    "matrix": "Suite.matrix, as written: each axis a list of values or a mapping of names to values",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -140,6 +142,10 @@ SUITE_FILE_FIELDS = {
     "limits": "RunSettings.limits",
     "limits.max_seconds": "RunSettings.limits.max_seconds (RunLimits)",
     "limits.max_judge_tokens": "RunSettings.limits.max_judge_tokens (RunLimits)",
+    "cache": "RunSettings.cache; a cache block, even an empty one, turns the cache of model calls on",
+    "cache.folder": "RunSettings.cache.folder, as written",
+    "cache.ttl_seconds": "RunSettings.cache.ttl_seconds",
+    "cache.functions": "RunSettings.cache.functions (function target only)",
     "simulator": "Suite.simulator, the model that plays the data's simulated users",
     "simulator.model": "Simulator.model",
     "simulator.inference_params": "Simulator.parameters",
@@ -409,6 +415,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
                 combine=file_suite.combine,
                 checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
             ),
+            "matrix": dict(file_suite.matrix),
             "simulator": None
             if file_suite.simulator is None
             else Simulator(model=file_suite.simulator.model, parameters=dict(file_suite.simulator.inference_params)),
@@ -480,6 +487,8 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
     if limits := {name: getattr(file_suite.limits, name) for name in file_suite.limits.model_fields_set}:
         values["limits"] = RunLimits(**limits)
+    if (cache := file_suite.cache) is not None:
+        values["cache"] = CacheSettings(**{name: getattr(cache, name) for name in cache.model_fields_set})
     simulator = file_suite.simulator
     for name in ("max_retries", "rate_limit_wait_seconds", "headers"):
         if simulator is not None and name in simulator.model_fields_set:
@@ -562,6 +571,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     file: dict[str, Any] = {"data": suite.dataset_location}
     if (target := _target_file(suite.target, settings)) is not None:
         file["target"] = target
+    if suite.matrix:
+        file["matrix"] = dict(suite.matrix)
     repeats = suite.repeats
     checks = [
         _check_file(position, scorer, repeats.checks.get(scorer.name)) for position, scorer in enumerate(suite.scorers)
@@ -589,6 +600,8 @@ def _file(suite: Suite) -> dict[str, Any]:
         file["mlflow"] = mlflow
     if settings.limits is not None:
         file["limits"] = settings.limits.model_dump(exclude_none=True)
+    if settings.cache is not None:
+        file["cache"] = {name: value for name, value in settings.cache.model_dump().items() if value is not None}
     return file
 
 

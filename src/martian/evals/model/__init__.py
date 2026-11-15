@@ -16,6 +16,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
+from martian.evals.matrix import MatrixAxis, combinations
+
 MODEL_VERSION = "martian-eval-model-v1"
 
 Identifier = Annotated[str, Field(min_length=1, max_length=200)]
@@ -319,6 +321,52 @@ class ScorerVersion(_Object):
         return written
 
 
+PROMPT_NAME = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+"""A prompt's name: 1 to 64 letters, digits and ``. _ -``, starting with a letter or a digit. A
+name MLflow's prompt registry takes, and one a URL path holds as written."""
+
+MAX_PROMPT_LENGTH = 100_000
+"""The longest a prompt version's text is, in characters: the most MLflow's prompt registry keeps."""
+
+PromptName = Annotated[str, Field(pattern=PROMPT_NAME)]
+
+
+def prompt_digest(text: str) -> str:
+    """The content digest of a prompt's text: SHA-256 of the text as UTF-8, exactly as written. A
+    run's prompt is matched to a registered version by it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class Prompt(_Object):
+    """A named prompt whose text changes over time, each change an immutable ``PromptVersion``. A
+    prompt belongs to an organisation, not a project. In MLflow, a prompt of its prompt registry."""
+
+    name: PromptName
+    description: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+
+class PromptVersion(_Object):
+    """One version of a prompt: its text, the digest of the text (:func:`prompt_digest`), the
+    commit message that came with it, and who added it when. ``version`` counts up from 1 in each
+    prompt and is assigned when the version is added; a version never changes."""
+
+    name: PromptName
+    version: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
+    digest: Digest
+    message: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+    @model_validator(mode="after")
+    def digest_is_the_texts(self) -> PromptVersion:
+        if self.digest != prompt_digest(self.text):
+            raise ValueError("digest is not the digest of the text")
+        return self
+
+
 class Policy(_Object):
     """When a scorer's results pass the suite."""
 
@@ -326,6 +374,16 @@ class Policy(_Object):
     direction: Literal["higher", "lower"] = "higher"
     threshold: float | None = Field(default=None, allow_inf_nan=False)
     minimum_coverage: float = Field(default=1, ge=0, le=1)
+
+
+class CacheSettings(_Object):
+    """The cache of model calls a run replays replies from (:mod:`martian.evals.cache`): its
+    ``folder`` as the suite file writes it, the ``ttl_seconds`` of an entry, and whether a function
+    target's calls are cached (``functions``). ``None`` leaves the runner's default."""
+
+    folder: str | None = None
+    ttl_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    functions: bool | None = None
 
 
 class RunLimits(_Object):
@@ -361,14 +419,21 @@ class RunLimits(_Object):
         return {"limit": limit, "value": value, "used": used, "message": message}
 
 
-_UNSET_LEFT_OUT = ("limits", "simulator_max_retries", "simulator_rate_limit_wait_seconds", "simulator_headers")
+_UNSET_LEFT_OUT = (
+    "limits",
+    "cache",
+    "simulator_max_retries",
+    "simulator_rate_limit_wait_seconds",
+    "simulator_headers",
+)
 
 
 class RunSettings(_Object):
     """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
     default. A case result's fingerprint leaves these out, so changing one keeps earlier results.
     Unset ``limits`` and simulator settings are left out when the settings are written, so a suite
-    without them keeps the digest it had before those fields existed."""
+    without them keeps the digest it had before those fields existed. ``cache`` is set when the
+    suite file turns the cache of model calls on, and left out when unset in the same way."""
 
     concurrency: int | None = Field(default=None, ge=1)
     batch: int | None = Field(default=None, ge=1)
@@ -381,6 +446,7 @@ class RunSettings(_Object):
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
     limits: RunLimits | None = None
+    cache: CacheSettings | None = None
     simulator_max_retries: int | None = Field(default=None, ge=0)
     simulator_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Headers added to every simulator request, values as written with ${NAME} unexpanded.
@@ -425,6 +491,12 @@ class Suite(_Object):
     there. ``input_key`` names the input that judges grade against and that a plain-text case
     input fills. ``repeats`` is left out when it is the default (one attempt, rule ``all``, no
     check rules), so a suite without repeats has the digest it had before the field existed.
+
+    ``matrix`` holds the suite's axes as its suite file writes them, each a list of values or a
+    mapping of names to values (:mod:`martian.evals.matrix`): the suite runs once per combination,
+    each run with that combination in its ``provenance``. It is left out when empty, so a suite
+    without one keeps its digest too.
+
     ``simulator`` is the model that plays its cases' simulated users, left out when there is none.
     """
 
@@ -440,6 +512,7 @@ class Suite(_Object):
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
     repeats: Repeats = Repeats()
+    matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
     simulator: Simulator | None = None
     digest: Digest
     created_at: datetime | None = None
@@ -454,15 +527,19 @@ class Suite(_Object):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
         if unknown := sorted(set(self.repeats.checks) - set(names)):
             raise ValueError(f"repeats name scorers the suite does not have: {', '.join(unknown)}")
+        combinations(self.matrix)  # raises for a matrix that cannot run
         return self
 
     @model_serializer(mode="wrap")
-    def _without_default_repeats(self, handler: SerializerFunctionWrapHandler) -> Any:
+    def _without_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
-        if isinstance(written, dict) and self.repeats == Repeats():
-            written.pop("repeats", None)
-        if isinstance(written, dict) and self.simulator is None:
-            written.pop("simulator", None)
+        if isinstance(written, dict):
+            if self.repeats == Repeats():
+                written.pop("repeats", None)
+            if not self.matrix:
+                written.pop("matrix", None)
+            if self.simulator is None:
+                written.pop("simulator", None)
         return written
 
 
@@ -1033,10 +1110,12 @@ __all__ = [
     "HEADER_NAME",
     "MAX_ATTEMPTS",
     "MAX_PANEL",
+    "MAX_PROMPT_LENGTH",
     "MAX_TURNS",
     "MIN_PANEL",
     "MODEL_NAME_LENGTH",
     "MODEL_VERSION",
+    "PROMPT_NAME",
     "SESSION_TRACE_LIMIT",
     "TURN_RECORD_FIELDS",
     "Attempt",
@@ -1057,6 +1136,7 @@ __all__ = [
     "TraceQuery",
     "TraceState",
     "RESULTS_RECORD_FIELDS",
+    "CacheSettings",
     "Case",
     "CaseResult",
     "CaseStatus",
@@ -1064,6 +1144,8 @@ __all__ = [
     "DatasetVersion",
     "Policy",
     "Project",
+    "Prompt",
+    "PromptVersion",
     "Review",
     "ReviewQuestion",
     "ReviewQueue",
@@ -1084,6 +1166,7 @@ __all__ = [
     "digest",
     "from_results_record",
     "is_expectation",
+    "prompt_digest",
     "query_keeps",
     "query_order",
     "sessions_from_traces",

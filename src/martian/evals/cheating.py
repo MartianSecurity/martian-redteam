@@ -203,8 +203,9 @@ def protected_for_run(run: Run) -> Protected:
 def protected_for_suite(suite_file: str | Path, *, output: str | Path | None = None, home: Path) -> Protected:
     """What ``martian evals run`` hides from the suite's function target (the suite file, the data
     file, each ``python`` check's file and the ``__pycache__`` beside it, the output folder, a local
-    MLflow store the suite names and the local Evals UI's data folder ``home``), by path, the
-    files also by name, and the MLflow server the suite names, if any."""
+    MLflow store the suite names, the local Evals UI's data folder ``home`` and a suite file's own
+    ``cache.folder``), by path, the files also by name, and the MLflow server the suite names, if
+    any."""
     from martian.evals.runner import CODE_CHECKS, _relative, load_suite
 
     suite, base = load_suite(suite_file)
@@ -216,6 +217,10 @@ def protected_for_suite(suite_file: str | Path, *, output: str | Path | None = N
             scorer = _relative(check.file, base)
             paths += [scorer, scorer.parent / "__pycache__"]
             names.append(scorer.name)
+    # The cache of model calls, which holds the judges' stored judgments; its default folder is in
+    # the data folder already. Hidden whether or not a run turns the cache on with --cache.
+    if suite.cache is not None and suite.cache.folder is not None:
+        paths.append(_relative(suite.cache.folder, base))
     uri = suite.mlflow.tracking_uri or ""
     endpoints: list[str] = []
     if uri.startswith(("http://", "https://")):
