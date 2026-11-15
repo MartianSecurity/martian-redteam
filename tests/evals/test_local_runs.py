@@ -1,6 +1,7 @@
 """Run and run again from the local UI (MorningHQ/martian-notes#116): a launch from `martian ui` runs
 in a process of its own against a local target, with a saved suite, and runs again with the same
-settings. The target is a loopback HTTP endpoint the test starts; nothing calls a model."""
+settings. The target is a loopback HTTP endpoint the test starts, and the judge's model a loopback
+OpenAI-compatible endpoint; nothing calls a real model."""
 
 from __future__ import annotations
 
@@ -14,12 +15,15 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from martian.evals.judges import RESPONSE_RUBRICS_VERSION
 from martian.evals.local import create_local_app, open_stores
 from martian.evals.local_runs import LocalWorker
 from martian.evals.local_targets import LocalTargets
-from martian.evals.model import Case, Run, Target
+from martian.evals.model import Case, Run, Target, digest
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from tests.evals.local_fixture import DATASET, SUITE_SCORERS, FakeTarget, publish, save_suite
+from tests.evals.test_worker_judges import KEY as JUDGE_KEY
+from tests.evals.test_worker_judges import REPORTED, Loopback, model_answer
 
 LOCAL = "http://127.0.0.1:7600"
 RUNS = "/v1/local/runs"
@@ -100,7 +104,7 @@ def settings(run: dict[str, Any]) -> tuple[Any, ...]:
     return run["agent_id"], run["dataset_id"], suite.get("version_id"), run["max_items"]
 
 
-def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_results(client, target):
+def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_results(client, home, target):
     defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
     suite = save_suite(client, str(uuid.uuid4()))
 
@@ -119,18 +123,23 @@ def test_a_run_started_in_the_ui_runs_in_its_own_process_and_completes_with_resu
         "faq-3": ("skipped", ""),
     }
     assert all(item["evals_trace_id"] for item in run["items"] if item["status"] != "skipped")
-    # The run pins the target by its definition, with the key as a reference, and the suite.
-    pinned = run["provenance"]["target"]
-    assert (pinned["name"], pinned["endpoint"]["headers"]) == (
-        "Support agent",
-        {"Authorization": "Bearer ${MARTIAN_TARGET_KEY}"},
-    )
+    # The run pins the target as the worker pins an HTTP target, by a digest of it as written, with
+    # the key as a reference, and by its name; and it pins the suite.
+    written = LocalTargets.model_target(LocalTargets(home), LocalTargets(home).get(defined["id"]))
+    assert written.headers == {"Authorization": "Bearer ${MARTIAN_TARGET_KEY}"}
+    assert run["provenance"]["target"] == {
+        "kind": "http",
+        "agent_id": defined["id"],
+        "digest": digest(written.model_dump(mode="json")),
+        "name": "Support agent",
+    }
     assert run["provenance"]["suite"] == {
         "id": suite["suite_id"],
         "version": 1,
         "version_id": suite["id"],
         "name": "Deterministic checks",
         "digest": suite["digest"],
+        "model_judges": False,
     }
     # Once the run completed, its suite scored it in a process of its own: each scorer for each
     # case, and an error for the skipped case, which has no output.
@@ -200,9 +209,10 @@ def test_a_launch_names_a_known_target_dataset_and_suite_and_is_idempotent(clien
     ]
     for sent, status, detail in refusals:
         assert call(client, "POST", RUNS, status, json={**sent, "request_id": str(uuid.uuid4())}) == {"detail": detail}
+    # A suite with a model judge calls a model for each judged case: only with the cost acknowledged.
     judged = save_suite(client, str(uuid.uuid4()), ["correctness"])
     assert call(client, "POST", RUNS, 422, json={**body, "suite_version_id": judged["id"]}) == {
-        "detail": "Model judges require a judge configured for this installation's worker"
+        "detail": "Model scoring requires cost acknowledgement"
     }
 
     request_id = str(uuid.uuid4())
@@ -296,5 +306,58 @@ def test_a_case_the_target_refuses_is_an_error_that_names_no_key(client, target)
     run, _ = results(client, queued["id"])
     assert (run["state"], run["errored"]) == ("completed", 2)
     errors = {item["error"] for item in run["items"] if item["status"] == "error"}
-    assert errors == {"TargetCallError: the target returned HTTP 401"}
+    assert errors == {"the target returned HTTP 401; check the credentials in target.headers"}
     assert {request["headers"]["Authorization"] for request in target.requests} == {f"Bearer {KEY}"}
+
+
+@pytest.fixture
+def judge_model(monkeypatch) -> Iterator[Loopback]:
+    """A loopback OpenAI-compatible endpoint for the judge's model. Its key is in the environment
+    `martian ui` runs in, which each run's process inherits; the judge reads it there."""
+    monkeypatch.setenv("OPENAI_API_KEY", JUDGE_KEY)
+    monkeypatch.setenv("OPENAI_API_BASE", "http://127.0.0.1:9/v1")  # the judge must use the endpoint asked
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    server = Loopback(model_answer)
+    yield server
+    server.close()
+
+
+def test_a_suite_with_a_model_judge_runs_on_the_sdk_judge_and_again(client, target, judge_model):
+    defined = call(client, "POST", "/v1/local/targets", 201, json=target.definition())
+    default = {"model": "openai:/fixture-judge", "endpoint": f"{judge_model.origin}/v1"}
+    call(client, "PUT", "/v1/evals/judge-model", 200, json=default)
+    suite = save_suite(client, str(uuid.uuid4()), ["correctness", "exact_match"])
+    queued = launch(client, defined["id"], suite, acknowledge_model_cost=True)
+    assert queued["provenance"]["suite"]["model_judges"] is True
+    drain(client)
+
+    run, work = results(client, queued["id"])
+    [job] = work["jobs"]
+    assert (run["state"], run["passed"], run["failed"], job["state"]) == ("completed", 1, 1, "partial")
+    judged = [row for row in work["assessments"] if row["name"] == "correctness"]
+    # Two cases had outputs and the loopback model passed both; the skipped case has none.
+    assert sorted(repr(row["value"]) for row in judged) == ["None", "True", "True"]
+    assert {row["source_id"] for row in judged if row["value"] is not None} == {f"openai:/fixture-judge@{REPORTED}"}
+    assert {row["provenance"].get("martian.judge.model_version") for row in judged if row["value"]} == {REPORTED}
+    assert {row["provenance"].get("martian.judge.version") for row in judged if row["value"]} == {
+        RESPONSE_RUBRICS_VERSION
+    }
+    # The judge's model was called from the scoring job's process, once per judged case, at the
+    # endpoint the default names, with the provider's key from the environment.
+    assert [request["path"] for request in judge_model.requests] == ["/v1/chat/completions"] * 2
+    assert {request["headers"]["authorization"] for request in judge_model.requests} == {f"Bearer {JUDGE_KEY}"}
+
+    # Run again repeats it, model judges included, once the cost is acknowledged again.
+    refused = {"detail": "Model scoring requires cost acknowledgement"}
+    assert again(client, queued["id"], 422) == refused
+    repeated = call(
+        client,
+        "POST",
+        f"{RUNS}/{queued['id']}/again",
+        202,
+        json={"request_id": str(uuid.uuid4()), "acknowledge_model_cost": True},
+    )
+    drain(client)
+    _, work = results(client, repeated["id"])
+    assert [job["state"] for job in work["jobs"]] == ["partial"]
+    assert len(judge_model.requests) == 4

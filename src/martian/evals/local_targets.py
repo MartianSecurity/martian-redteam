@@ -16,12 +16,12 @@ Either may carry the user's key for the endpoint. The data folder keeps them in 
   it. On Windows the file has the permissions of the data folder.
 
 A key enters with the request that defines its target and leaves only through
-:meth:`LocalTargets.key`, for the worker that calls the target. No route answers with it, nothing
-logs it, and ``martian.db`` and ``mlflow.db`` never hold it: as the shared model's
-:class:`~martian.evals.model.Target`, a local target names its key as ``${MARTIAN_TARGET_KEY}`` in
-a header (:meth:`LocalTargets.model_target`), filled in only when the target is called, as a suite
-file's ``${NAME}`` is filled from the environment. A target's addresses cannot hold ``${...}``, so
-the key only ever goes in that header.
+:meth:`LocalTargets.key`, for the worker that calls the target (:meth:`LocalTargets.credential`).
+No route answers with it, nothing logs it, and ``martian.db`` and ``mlflow.db`` never hold it: as
+the shared model's :class:`~martian.evals.model.Target`, a local target names its key as
+``${MARTIAN_TARGET_KEY}`` in a header (:meth:`LocalTargets.model_target`), filled in only when
+the target is called, as a suite file's ``${NAME}`` is filled from the environment. A target's
+addresses cannot hold ``${...}``, so the key only ever goes in that header.
 
 The routes are the local edition's, outside the frozen ``/v1/evals`` contract:
 
@@ -34,8 +34,10 @@ never with the values sent: FastAPI's own answer repeats them, and a target's va
 
 A launch from the local UI names a local target by its id in the launch request's ``agent_id``,
 the frozen contract's one target field, which a target's id fits. The local edition's worker
-(:class:`martian.evals.local_runs.LocalWorker`) resolves it with :meth:`LocalTargets.get`, and
-each run's process calls it through :meth:`LocalTargets.call`, which reads the key there.
+(:class:`martian.evals.local_runs.LocalWorker`) knows every target as an HTTP target of the worker
+(:meth:`LocalTargets.http_targets`), which the worker calls itself
+(:mod:`martian.evals.worker.targets`), and fills in its key from :meth:`LocalTargets.credential`,
+the worker's ``Credentials``, in the run's process.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
@@ -47,13 +49,12 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
@@ -69,12 +70,10 @@ from pydantic import (
 )
 
 from martian.evals import runner
-from martian.evals.model import Case, Target
-from martian.evals.server.principal import SINGLE_USER, Principal
-from martian.evals.server.projection import prompt_text
+from martian.evals.model import Target
 
 if TYPE_CHECKING:
-    from martian.evals.worker import TargetCall
+    from martian.evals.server.principal import Principal
 
 DEFINITIONS_FILE = "targets.json"
 KEYS_FILE = "target-keys.json"
@@ -87,14 +86,10 @@ target always does. In ``Authorization`` the key goes as ``Bearer <key>``; in an
 
 MODEL_RESPONSE_PATH = "choices.0.message.content"
 
-_PROMPT = "\x00prompt"
-"""Where a call keeps the case's prompt for ``{{input}}``: a name no ``{{inputs.NAME}}`` can give."""
-
 TargetKind = Literal["http", "model"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}")
-_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FIELDS: dict[str, frozenset[str]] = {
     "http": frozenset({"url", "body", "response_path", "key_header"}),
@@ -328,70 +323,33 @@ class LocalTargets:
 
     def credential(self, principal: Principal, target_id: str, name: str, /) -> str | None:
         """The value of ``${name}`` in the target ``target_id``'s header: its key when ``name`` is
-        ``MARTIAN_TARGET_KEY``, read with :meth:`key`; ``None`` otherwise. It has the signature of
-        the worker's ``Credentials`` (MorningHQ/martian-notes#137), and the single local user is
-        the only principal."""
+        ``MARTIAN_TARGET_KEY``, read with :meth:`key`; ``None`` otherwise. It is the worker's
+        :class:`~martian.evals.worker.Credentials`, called in the process that calls the target,
+        and the single local user is the only principal."""
         return self.key(target_id) if name == KEY_REFERENCE else None
 
-    def call(self, target: LocalTarget, *, timeout_seconds: float) -> TargetCall:
-        """The worker's call of ``target`` (:meth:`model_target`): one JSON ``POST`` per case, with
-        no retry, no redirect and no proxy from the environment. ``body`` is filled in as a suite
-        file's URL target's, except that ``{{input}}`` is the case's prompt, the text a registered
-        agent is sent. Each ``${NAME}`` in a header is filled in from :meth:`credential` each time
-        the target is called, in the process that calls it, so the key is read only there. A
-        failed call raises :class:`~martian.evals.runner.TargetCallError` in the SDK's own words,
-        which never hold the address, a header, the key or anything the target sent back."""
-        endpoint = self.model_target(target)
-        url, template = str(endpoint.url), endpoint.body
-        steps = [part for part in (endpoint.response_path or "").split(".") if part]
-
-        def filled(header: str, value: str) -> str:
-            def credential(match: re.Match[str]) -> str:
-                found = self.credential(SINGLE_USER, target.id, match[1])
-                if not found:
-                    raise runner.TargetCallError(f"the target's {header} header needs its key; define the target again")
-                return found
-
-            return _REFERENCE.sub(credential, value)
-
-        async def send(case: Case) -> Any:
-            headers = {name: filled(name, value) for name, value in endpoint.headers.items()}
-            body = runner._fill(template, {**case.inputs, _PROMPT: prompt_text(case.inputs)}, _PROMPT)
-            try:
-                async with httpx.AsyncClient(
-                    timeout=timeout_seconds, follow_redirects=False, trust_env=False
-                ) as client:
-                    response = await client.post(url, headers=headers, json=body)
-            except Exception as error:  # noqa: BLE001 - its text could hold the address or the key
-                raise runner.TargetCallError(f"the target could not be reached: {type(error).__name__}") from None
-            if not response.is_success:
-                raise runner.TargetCallError(f"the target returned HTTP {response.status_code}")
-            if not steps:
-                return response.text
-            try:
-                reply = response.json()
-            except ValueError:
-                raise runner.TargetCallError(
-                    "the target's response is not JSON, so response_path cannot be read"
-                ) from None
-            return _reply_at(reply, steps)
-
-        return send
+    def http_targets(self) -> Mapping[str, Target]:
+        """Every target by its id as the shared model's ``http`` target (:meth:`model_target`),
+        read from the data folder each time it is used, so a target defined while ``martian ui``
+        runs is known at once: the HTTP targets of the local edition's worker."""
+        return _HttpTargets(self)
 
 
-def _reply_at(reply: Any, steps: list[str]) -> Any:
-    """The value at ``response_path`` in a target's JSON response, as a suite file's URL target
-    reads it."""
-    for step in steps:
-        if isinstance(reply, dict) and step in reply:
-            reply = reply[step]
-        elif isinstance(reply, list) and step.isdigit() and int(step) < len(reply):
-            reply = reply[int(step)]
-        else:
-            raise runner.TargetCallError("the target's response has no value at response_path")
-    if reply is None:
-        raise runner.TargetCallError("the target's response has no value at response_path")
-    return reply
+class _HttpTargets(Mapping[str, Target]):
+    def __init__(self, targets: LocalTargets) -> None:
+        self._targets = targets
+
+    def _now(self) -> dict[str, Target]:
+        return {target.id: self._targets.model_target(target) for target in self._targets.defined()}
+
+    def __getitem__(self, target_id: str) -> Target:
+        return self._now()[target_id]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._now())
+
+    def __len__(self) -> int:
+        return len(self._now())
 
 
 class _WithoutValues(APIRoute):

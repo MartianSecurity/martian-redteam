@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from mlflow.entities import Feedback
@@ -406,6 +407,7 @@ def response_guidelines(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
 ) -> Scorer:
     """Create a response-only MLflow-compatible scorer for expectations.guidelines.
 
@@ -414,7 +416,9 @@ def response_guidelines(
     ``outputs`` must be nonempty text; ``expectations.guidelines`` a nonempty list
     of nonempty strings. No policy or provider is silently selected.
 
-    Provider routing/authentication uses MLflow's pinned model-URI adapter. No
+    Provider routing/authentication uses MLflow's pinned model-URI adapter; ``headers``
+    are added to every request, after the provider's own, as MLflow's ``extra_headers``
+    are (a gateway's key or routing header). They are never recorded. No
     semantic retry or verdict repair is performed. Only provider replies that carry no
     judgment are retried. Rate limits (HTTP 429 and 529) are retried for up to
     ``rate_limit_wait_seconds`` (default 300, 0 to disable), waiting as long as the
@@ -438,6 +442,7 @@ def response_guidelines(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
     )
 
 
@@ -451,6 +456,7 @@ def response_conditions(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
 ) -> Scorer:
     """Judge expectations.conditions with explicit, caller-controlled polarity.
 
@@ -475,6 +481,7 @@ def response_conditions(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
     )
 
 
@@ -489,6 +496,7 @@ def response_rubric(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
 ) -> Scorer:
     """Judge expectations.rubric / expectations.rubrics with direct pass/fail verdicts.
 
@@ -507,6 +515,7 @@ def response_rubric(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
     )
 
 
@@ -522,7 +531,12 @@ def _response_judge(
     verify: bool,
     max_retries: int,
     rate_limit_wait_seconds: float,
+    headers: Mapping[str, str] | None,
+    endpoint: str | None = None,
 ) -> Scorer:
+    """The three judges' shared implementation. ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to."""
     if type(verify) is not bool:
         raise ValueError("verify must be a boolean")
     if type(max_retries) is not int or not 0 <= max_retries <= 10:
@@ -539,6 +553,14 @@ def _response_judge(
         raise ValueError("name and input_key must be nonempty")
     if context_key is not None and (not isinstance(context_key, str) or not context_key.strip()):
         raise ValueError("context_key must be None or a nonempty string")
+    if headers is not None and not isinstance(headers, Mapping):
+        raise ValueError("headers must map header names to values")
+    extra_headers = dict(headers or {})
+    for header, value in extra_headers.items():
+        if not isinstance(header, str) or not header.strip() or not isinstance(value, str):
+            raise ValueError("headers must map nonempty header names to string values")
+        if any(character in header + value for character in "\r\n"):
+            raise ValueError("A judge header name or value must not contain a line break")
     params = dict(inference_params or {})
     for key, value in params.items():
         if key not in {"temperature", "top_p", "max_tokens", "seed"}:
@@ -648,6 +670,8 @@ def _response_judge(
             stage="draft",
             max_retries=max_retries,
             rate_limit_wait_seconds=rate_limit_wait_seconds,
+            headers=extra_headers,
+            endpoint=endpoint,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -677,6 +701,8 @@ def _response_judge(
                 stage="review",
                 max_retries=max_retries,
                 rate_limit_wait_seconds=rate_limit_wait_seconds,
+                headers=extra_headers,
+                endpoint=endpoint,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
