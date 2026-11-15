@@ -30,6 +30,7 @@ from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import SINGLE_USER, Principal, create_app
 from martian.evals.store import MemoryStore
 from martian.evals.worker import Credentials, InProcessWorker, ProcessWorker
+from martian.evals.worker.targets import http_call
 from tests.evals.process_fixture import (
     HTTP_TARGET,
     KEY_NAME,
@@ -280,6 +281,20 @@ async def test_a_worker_calls_a_target_itself_only_when_it_is_an_http_target(rec
     assert pinned["kind"] == "http" and KEY_NAME not in json.dumps(pinned)
     registered = await worker.check_target(principal, Target(kind="agent", agent_id=REGISTERED_AGENT))
     assert registered["target_id"] == f"agent-{REGISTERED_AGENT}"
+
+
+async def test_a_worker_refuses_a_response_path_that_indexes_a_list_with_other_digits(records):
+    wrong = http_target("http://127.0.0.1:9/chat").model_copy(update={"response_path": "choices.².text"})
+    problem = rf"targets\['{HTTP_TARGET}'\]\.response_path indexes lists with the digits 0-9 only; step 2"
+    # Refused each time a check or a run names the target, so one wrong target never stops the others.
+    for worker in (
+        InProcessWorker(MemoryStore(), records, targets={HTTP_TARGET: wrong}),
+        ProcessWorker(http_services, records, targets={HTTP_TARGET: wrong}),
+    ):
+        with pytest.raises(ValueError, match=problem):
+            await worker.check_target(SINGLE_USER, Target(kind="agent", agent_id=HTTP_TARGET))
+    with pytest.raises(ValueError, match=problem):
+        http_call(SINGLE_USER, HTTP_TARGET, wrong, credentials=None, timeout_seconds=1)
 
 
 # --- one process per run ------------------------------------------------------------------------
