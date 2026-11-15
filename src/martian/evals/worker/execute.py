@@ -9,6 +9,9 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
   the setting to check, anything else with its type.
+- Before a run calls its target, on its first start and on every resume, the worker pins the
+  target as it has it now; a pin that is not the run's (``provenance["target"]``) fails the run,
+  naming the target, so one run never mixes two systems.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
   scorers: code scorers here, judge scorers through the worker's judge, one request per model the
   job's judges are pinned to. Each judge score records the model and version that produced it.
@@ -37,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -66,6 +69,7 @@ from martian.evals.store import EvalStore, StoreError
 # The package defines these before it imports this module.
 from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work, Worker
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
+from martian.evals.worker.targets import changed_target
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -129,12 +133,15 @@ async def execute_run(
     work: Work,
     *,
     call_for: Callable[[Run], TargetCall | None],
+    pin_for: Callable[[Run], Awaitable[dict[str, Any]]],
     timeout_seconds: float,
     limits: RunLimits | None = None,
 ) -> None:
     """Run a queued run. ``call_for`` gives the call for the run's target, or ``None`` when the
-    worker cannot call it, which fails the run. ``timeout_seconds`` bounds each target call, and
-    ``limits`` are the worker's, for a run that has none of its own."""
+    worker cannot call it, which fails the run. ``pin_for`` pins the run's target as the worker has
+    it now, as ``Worker.check_target`` does; a pin that is not the run's fails the run before any
+    call (:func:`~martian.evals.worker.targets.changed_target`). ``timeout_seconds`` bounds each
+    target call, and ``limits`` are the worker's, for a run that has none of its own."""
     principal = work.principal
     run = await records.get_run(principal, work.project_id, work.run_id)
     if run is None or run.state != "queued":
@@ -153,7 +160,7 @@ async def execute_run(
     except StoreError:
         return  # another worker took it, or it was cancelled meanwhile
     try:
-        await _run_cases(store, records, principal, run, call_for(run), timeout_seconds, limits)
+        await _run_cases(store, records, principal, run, call_for(run), pin_for, timeout_seconds, limits)
     except Exception as error:  # noqa: BLE001 - a run never stays running after its worker fails
         log.exception("Eval run %s failed", run.id)
         await _fail_run(records, principal, run, _detail(error, "runner crashed"))
@@ -210,11 +217,16 @@ async def _run_cases(
     principal: Principal,
     run: Run,
     call: TargetCall | None,
+    pin_for: Callable[[Run], Awaitable[dict[str, Any]]],
     timeout_seconds: float,
     default_limits: RunLimits | None,
 ) -> None:
     if call is None:
         await _fail_run(records, principal, run, "The worker cannot call this run's target")
+        return
+    # Every start, a resume included, calls only the target the run was admitted with.
+    if (changed := changed_target(run, await pin_for(run))) is not None:
+        await _fail_run(records, principal, run, changed)
         return
     limits = run_limits(run, default_limits)
     budget = Budget(limits)

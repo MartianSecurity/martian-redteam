@@ -7,6 +7,10 @@ target itself, once, with no retry, and fills in the target's credential from it
 registered agent still runs through the worker's ``AgentExecutor``, the martian-agents path,
 and never over the direct HTTP path. The targets here are a tiny HTTP server on loopback and a
 fake martian-agents; nothing calls a model.
+
+A run calls only the target it was admitted with: before it calls its target, on its first start
+and on every resume, a worker that now has another target under the run's id fails the run
+without calling it (MorningHQ/martian-notes#344).
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -25,12 +29,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from martian.evals.model import Target, digest
+from martian.evals.model import Case, Run, RunLimits, Target, digest
 from martian.evals.records.queue import SqlWorkQueue
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import SINGLE_USER, Principal, create_app
-from martian.evals.store import MemoryStore
-from martian.evals.worker import Credentials, InProcessWorker, ProcessWorker, QueueWorker
+from martian.evals.server import COMMUNITY, DEFAULT_PROJECT, SINGLE_USER, Principal, create_app
+from martian.evals.server.launch import admit_run, resume_run
+from martian.evals.store import EvalStore, MemoryStore
+from martian.evals.store.mlflow_local import MlflowStore
+from martian.evals.worker import Credentials, InProcessWorker, ProcessWorker, QueueWorker, Runner, Worker
 from tests.evals.process_fixture import (
     HTTP_TARGET,
     KEY_NAME,
@@ -42,7 +48,7 @@ from tests.evals.process_fixture import (
     member,
     open_stores,
 )
-from tests.evals.write_fixture import ANSWERS, Served, publish, request_id, serve
+from tests.evals.write_fixture import ANSWERS, Served, agent, publish, request_id, serve
 
 KEY = "test-target-key-5f1c0e"
 CALLED_CASES = 2  # support-faq's third case has no expected text and is skipped before any call
@@ -52,11 +58,13 @@ UNKNOWN_AGENT = str(uuid.UUID(int=10))
 class Endpoint:
     """A tiny HTTP target on loopback. It answers a POST that carries the key with ``status`` and
     the write route tests' agent's answer under ``reply``, after ``delay`` seconds, and one that
-    does not with 401. It keeps every request it was sent."""
+    does not with 401. A request whose message is ``hold`` waits until :meth:`release`. It keeps
+    every request it was sent."""
 
-    def __init__(self, *, status: int = 200, delay: float = 0.0) -> None:
-        self.status, self.delay = status, delay
+    def __init__(self, *, status: int = 200, delay: float = 0.0, hold: str | None = None) -> None:
+        self.status, self.delay, self.hold = status, delay, hold
         self.requests: list[dict[str, Any]] = []
+        self._released = threading.Event()
         endpoint = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -65,6 +73,8 @@ class Endpoint:
                 endpoint.requests.append(
                     {"path": self.path, "authorization": self.headers.get("Authorization"), "body": body}
                 )
+                if endpoint.hold is not None and body.get("message") == endpoint.hold:
+                    endpoint._released.wait(60)
                 time.sleep(endpoint.delay)
                 status = endpoint.status if self.headers.get("Authorization") == f"Bearer {KEY}" else 401
                 reply = json.dumps({"reply": ANSWERS.get(body.get("message"), "I am not sure.")}).encode()
@@ -91,7 +101,12 @@ class Endpoint:
         host, port = self._server.server_address[:2]
         return f"http://{host!s}:{port}/chat"
 
+    def release(self) -> None:
+        """Answer the held requests, and every later one at once."""
+        self._released.set()
+
     def close(self) -> None:
+        self.release()
         self._server.shutdown()
         self._server.server_close()
 
@@ -359,3 +374,229 @@ def test_registered_agents_still_run_through_martian_agents_in_their_own_process
     assert [chat["organisation"] for chat in chats] == ["org-a"] * CALLED_CASES
     assert endpoint.requests == []
     assert LEASE_PREFIX.encode() not in stored
+
+
+# --- a target that changed since the run started ---------------------------------------------------
+
+FIRST_PROMPT, SECOND_PROMPT = "How do I reset my password?", "Can I change my username?"
+
+
+def changed_since_it_started(label: str) -> str:
+    """The error of a run whose target changed since it started, naming the target."""
+    return (
+        f"The target {label} changed since this run started; the run did not call the changed target. "
+        "Start a new run to evaluate it as it is now"
+    )
+
+
+async def until(check: Callable[[], bool], seconds: float = 60) -> None:
+    deadline = time.monotonic() + seconds
+    while not check():
+        if time.monotonic() > deadline:
+            raise TimeoutError("the condition never held")
+        await asyncio.sleep(0.05)
+
+
+async def admitted(
+    store: EvalStore,
+    records: SqlRecordStore,
+    worker: Worker,
+    agent_id: str = HTTP_TARGET,
+    pinned_by: Worker | None = None,
+) -> Run:
+    """A run of ``agent_id`` over support-faq, admitted as a launch admits it and submitted to
+    ``worker``, with the pin of the target ``pinned_by`` (``worker`` unless given) has now."""
+    target = Target(kind="agent", agent_id=agent_id)
+    dataset = await store.find_dataset(SINGLE_USER, DEFAULT_PROJECT, "support-faq")
+    assert dataset is not None
+    pin = await (pinned_by or worker).check_target(SINGLE_USER, target)
+    return await admit_run(
+        store,
+        records,
+        worker,
+        SINGLE_USER,
+        entitlements=COMMUNITY,
+        run_id=str(uuid.uuid4()),
+        project=DEFAULT_PROJECT,
+        target=target,
+        pin=pin,
+        dataset=dataset,
+        max_cases=100,
+    )
+
+
+def going_on(runner: str, store: EvalStore, records: SqlRecordStore, folder: Path, target: Target) -> Any:
+    """The worker that goes on with a run, knowing ``HTTP_TARGET`` as ``target``: in this process,
+    or with each piece of work in a process of its own, which receives the target with the work."""
+    if runner == "in-process":
+        return InProcessWorker(
+            store, records, targets={HTTP_TARGET: target}, credentials=keys([]), target_timeout_seconds=30
+        )
+    return ProcessWorker(http_services, records, targets={HTTP_TARGET: target}, options={"folder": str(folder)})
+
+
+def queued(queue: SqlWorkQueue, runner: Runner, records: SqlRecordStore) -> QueueWorker:
+    return QueueWorker(queue, runner, records, in_process=True, lease_seconds=60, poll_seconds=0.05)
+
+
+@pytest.fixture
+def stores(tmp_path: Path) -> Iterator[tuple[MlflowStore, SqlRecordStore]]:
+    """Stores in files, which a run's process opens too, and the HTTP target's key where
+    :func:`http_services` reads it."""
+    store, records = open_stores(tmp_path)
+    (tmp_path / "target-keys.json").write_text(json.dumps({"version": 1, "keys": {HTTP_TARGET: KEY}}))
+    yield store, records
+    records.close()
+
+
+@pytest.mark.parametrize("changed", [True, False], ids=["changed", "unchanged"])
+@pytest.mark.parametrize("runner", ["in-process", "processes"])
+async def test_a_run_taken_over_after_its_worker_stopped_calls_only_the_target_it_started_with(
+    tmp_path, stores, runner, changed
+):
+    """The run's worker stops while its second case is in flight, as one whose process dies does,
+    and the target under the run's id changes meanwhile, or does not. The next worker takes the run
+    over: it fails the run without calling the changed target, or goes on as before."""
+    store, records = stores
+    first, other = Endpoint(hold=SECOND_PROMPT), Endpoint()
+    queue = SqlWorkQueue(f"sqlite:///{tmp_path / 'martian.db'}")
+    try:
+        await publish(store)
+        started = InProcessWorker(store, records, targets={HTTP_TARGET: http_target(first.url)}, credentials=keys([]))
+        starting = queued(queue, started, records)
+        run = await admitted(store, records, starting)
+        await starting.start()
+        await until(lambda: len(first.requests) == 2)  # faq-1 answered, faq-2 in flight
+        await starting.stop()  # the run stays running, in the queue for the next worker
+        first.release()
+        taking = queued(
+            queue, going_on(runner, store, records, tmp_path, http_target((other if changed else first).url)), records
+        )
+        await taking.start()
+        try:
+            await taking.drain()
+        finally:
+            await taking.stop()
+        finished = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
+        kept = await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)
+    finally:
+        queue.close()
+        first.close()
+        other.close()
+    assert finished is not None
+    if changed:
+        assert (finished.state, finished.error) == ("failed", changed_since_it_started(HTTP_TARGET))
+        assert other.requests == []  # the changed target was called for no case
+        assert [(result.case_id, result.status) for result in kept.items] == [("faq-1", "passed")]
+    else:
+        assert (finished.state, finished.error, finished.counts.passed, finished.counts.failed) == (
+            "completed",
+            "",
+            1,
+            1,
+        )
+        # faq-1 had finished and is not called again; faq-2 was in flight and is.
+        assert [request["body"]["message"] for request in first.requests] == [
+            FIRST_PROMPT,
+            SECOND_PROMPT,
+            SECOND_PROMPT,
+        ]
+
+
+@pytest.mark.parametrize("changed", [True, False], ids=["changed", "unchanged"])
+@pytest.mark.parametrize("runner", ["in-process", "processes"])
+async def test_a_run_resumed_after_it_stopped_calls_only_the_target_it_started_with(
+    tmp_path, stores, monkeypatch, runner, changed
+):
+    """The run stops at its time limit after its first case, and the target under its id changes
+    before ``resume_run``, or does not. Resumed, the run fails without calling the changed target,
+    or goes on as before."""
+    import martian.evals.limits
+
+    store, records = stores
+    first, other = Endpoint(), Endpoint()
+    real = time.monotonic
+    # The run's clock runs an hour on once its first case was sent, so it stops before its second.
+    monkeypatch.setattr(martian.evals.limits, "monotonic", lambda: real() + 3600 * bool(first.requests))
+    try:
+        await publish(store)
+        started = InProcessWorker(
+            store,
+            records,
+            targets={HTTP_TARGET: http_target(first.url)},
+            credentials=keys([]),
+            limits=RunLimits(max_seconds=60),
+        )
+        run = await admitted(store, records, started)
+        await started.drain()
+        stopped = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
+        assert stopped is not None and stopped.state == "stopped"
+        monkeypatch.undo()
+        worker = going_on(runner, store, records, tmp_path, http_target((other if changed else first).url))
+        await resume_run(
+            store, records, worker, SINGLE_USER, stopped, entitlements=COMMUNITY, limits=RunLimits(max_seconds=600)
+        )
+        await worker.drain()
+        finished = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
+        kept = await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)
+    finally:
+        first.close()
+        other.close()
+    assert finished is not None
+    if changed:
+        assert (finished.state, finished.error) == ("failed", changed_since_it_started(HTTP_TARGET))
+        assert other.requests == []
+        assert [(result.case_id, result.status) for result in kept.items] == [("faq-1", "passed")]
+    else:
+        assert (finished.state, finished.error, finished.counts.passed, finished.counts.failed) == (
+            "completed",
+            "",
+            1,
+            1,
+        )
+        assert [request["body"]["message"] for request in first.requests] == [FIRST_PROMPT, SECOND_PROMPT]
+
+
+@pytest.mark.parametrize("change", ["http-target", "function-to-http", "http-to-function", "registered-agent"])
+async def test_a_run_whose_target_changed_before_its_first_start_fails_and_calls_it_for_no_case(
+    records, tmp_path, change
+):
+    """Every kind of target is compared by its pin: an HTTP target by its digest, a function and an
+    HTTP target by their kind, and a registered agent by the pin its executor gives."""
+    endpoint = Endpoint()
+    called: list[str] = []
+
+    async def function(case: Case) -> Any:
+        called.append(case.id)
+        return await agent(case)
+
+    http, moved = http_target(endpoint.url), http_target(endpoint.url + "/v2")
+    before, after = {
+        "http-target": ({HTTP_TARGET: http}, {HTTP_TARGET: moved}),
+        "function-to-http": ({HTTP_TARGET: function}, {HTTP_TARGET: http}),
+        "http-to-function": ({HTTP_TARGET: http}, {HTTP_TARGET: function}),
+        "registered-agent": ({}, {}),
+    }[change]
+    agent_id = REGISTERED_AGENT if change == "registered-agent" else HTTP_TARGET
+    revision = 2 if change == "registered-agent" else 1
+    store = MemoryStore()
+    try:
+        await publish(store)
+        admitting = InProcessWorker(store, records, targets=before, executor=FakeMartianAgents(tmp_path))
+        running = InProcessWorker(
+            store,
+            records,
+            targets=after,
+            credentials=keys([]),
+            executor=FakeMartianAgents(tmp_path, revision=revision),
+        )
+        run = await admitted(store, records, running, agent_id, pinned_by=admitting)
+        await running.drain()
+        finished = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, run.id)
+        kept = await records.list_results(SINGLE_USER, DEFAULT_PROJECT, run.id)
+    finally:
+        endpoint.close()
+    assert finished is not None
+    assert (finished.state, finished.error) == ("failed", changed_since_it_started(agent_id))
+    assert endpoint.requests == [] and called == [] and FakeMartianAgents(tmp_path).chats() == []
+    assert kept.items == []

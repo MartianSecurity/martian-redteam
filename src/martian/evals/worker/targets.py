@@ -25,6 +25,13 @@ carries a credential: the run keeps the target's id, and its pin keeps a digest 
 written, with ``${NAME}`` unexpanded. A reference with no value fails the case with the setting
 that holds it.
 
+A run calls only the target it was admitted with. Before it calls its target, on its first start
+and on every resume, the worker pins the target as it has it now (:func:`target_pin`), in the
+process that calls it, and a pin that differs from the run's fails the run, naming the target,
+before any call (:func:`changed_target`). So an HTTP target is compared by its digest, as written;
+a function by its id and kind only, since the installation's own code has nothing to digest; and
+a registered agent by the pin its executor gives. A credential's value is not part of any pin.
+
 Every call has the worker's time limit, ``target_timeout_seconds``, whatever the target: a call
 that outlasts it is the case's error, ``item timed out``. An HTTP target's client and a registered
 agent's executor stop their own calls, but a function is the installation's own code, which may
@@ -60,6 +67,15 @@ CLIENT_SLACK_SECONDS = 5.0
 ends a slow call first, as ``item timed out``."""
 
 NOT_FOUND = "Agent not found"
+
+PIN_KEY = "target"
+"""``Run.provenance`` key of the pin of the target a run was admitted with."""
+
+TARGET_CHANGED = (
+    "The target {target} changed since this run started; the run did not call the changed target. "
+    "Start a new run to evaluate it as it is now"
+)
+"""The error of a run whose target is not the one it was admitted with (:func:`changed_target`)."""
 
 GRACE_SECONDS = 1.0
 """How long a function whose call timed out has to end once it is cancelled. One that does not is
@@ -177,7 +193,7 @@ def http_call(
 
 async def target_pin(
     principal: Principal,
-    target: Target,
+    target: Target | None,
     *,
     calls: Collection[str],
     http: Mapping[str, Target],
@@ -185,7 +201,7 @@ async def target_pin(
 ) -> dict[str, Any]:
     """What pins a run of ``target``: an HTTP target's :func:`http_pin`, a function's id, or the
     executor's pin of a registered agent. An id the worker does not know is ``not_found``."""
-    agent_id = target.agent_id if target.kind == "agent" else None
+    agent_id = target.agent_id if target is not None and target.kind == "agent" else None
     if agent_id is None:
         raise StoreError("not_found", NOT_FOUND)
     if agent_id in http:
@@ -195,6 +211,21 @@ async def target_pin(
     if executor is not None:
         return await executor.check(principal, agent_id)
     raise StoreError("not_found", NOT_FOUND)
+
+
+def changed_target(run: Run, live: Mapping[str, Any]) -> str | None:
+    """Why ``run`` must not call its target, when the target is not the one it was admitted with,
+    or None when it is. ``live`` is the target's pin now (:func:`target_pin`), in the process that
+    is about to call it, and the run's own is ``provenance["target"]``: every field of the live pin
+    must have the value the run was pinned with. A field only admission added, such as the local
+    edition's ``name``, is not compared, and a run with no pin, which no launch records, has
+    changed. The reason names the target, by its name when its pin has one, and its id."""
+    pinned = run.provenance.get(PIN_KEY)
+    if isinstance(pinned, Mapping) and all(pinned.get(key) == value for key, value in live.items()):
+        return None
+    name = pinned.get("name") if isinstance(pinned, Mapping) else None
+    agent_id = run.target.agent_id if run.target is not None else None
+    return TARGET_CHANGED.format(target=f'"{name}" ({agent_id})' if isinstance(name, str) and name else agent_id)
 
 
 def target_call(
@@ -230,7 +261,10 @@ __all__ = [
     "CLIENT_SLACK_SECONDS",
     "FUNCTIONS",
     "GRACE_SECONDS",
+    "PIN_KEY",
+    "TARGET_CHANGED",
     "FunctionTargets",
+    "changed_target",
     "http_call",
     "http_pin",
     "http_target",
