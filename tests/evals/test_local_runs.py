@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +26,10 @@ from fastapi.testclient import TestClient
 
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION
 from martian.evals.local import create_local_app, open_stores
-from martian.evals.local_runs import INTERRUPTED, LocalWorker, held, open_queue
+from martian.evals.local_runs import INTERRUPTED, LEASE_SECONDS, LocalWorker, held, open_queue
 from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Case, Run, Suite, Target, digest
+from martian.evals.records import queue as queue_module
 from martian.evals.run_record import RunRecorder
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.worker.scorers import builtin_scorer
@@ -551,7 +552,11 @@ def test_a_run_whose_martian_ui_was_stopped_is_taken_again_when_it_starts_again(
     ]
 
 
-def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_is_gone(home, ui, target):
+def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_is_gone(home, ui, target, monkeypatch):
+    # This process reads the queue's leases on a clock the test moves past the holder's lease once
+    # the holder is gone, instead of waiting for that lease to run out.
+    ahead = {"by": timedelta(0)}
+    monkeypatch.setattr(queue_module, "_now", lambda: datetime.now(UTC) + ahead["by"])
     publish(home)
     # A run `martian evals run` is recording into the same data folder, from a process of its own.
     recorded = _run(kind="http", url=target.url, body={"message": "{{input}}"}, state="running")
@@ -574,14 +579,21 @@ def test_a_run_another_live_process_holds_is_left_alone_until_cancelled_once_it_
             assert (asked["state"], asked["error"], asked["cancel_requested_at"] is not None) == ("running", "", True)
 
             # Once that process is gone and its lease ran out, cancelling the run again finishes it,
-            # if the UI's worker has not finished it first, and a new run is admitted.
+            # and a new run is admitted. The UI's worker stops serving the queue meanwhile: it would
+            # otherwise take the run whose lease ran out and finish it itself, as it does when no one
+            # cancels it (test_worker_queue), and a cancel while it does so would only ask again.
+            worker = client.app.state.martian_evals_worker  # type: ignore[attr-defined]
+            assert client.portal is not None
+            client.portal.call(worker.stop)
             holder.kill()
             holder.wait(30)
-            _until(lambda: not held(home, recorded.id), "the recording's lease to run out", timeout=30)
+            ahead["by"] = timedelta(seconds=LEASE_SECONDS + 1)  # past the end of its last renewal's lease
+            assert not held(home, recorded.id)
             stopped = call(client, "POST", f"/v1/evals/{recorded.id}/cancel", 202, json={})
             assert (stopped["state"], stopped["error"]) == ("cancelled", INTERRUPTED)
             assert stopped["finished_at"] is not None
             assert stopped["cancel_requested_at"] == asked["cancel_requested_at"]
+            client.portal.call(worker.start)
             launch(client, defined["id"])
             drain(client)
     finally:

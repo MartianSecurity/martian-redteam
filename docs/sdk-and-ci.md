@@ -99,7 +99,8 @@ Without explicit config, only these canonical process variables are read:
 Create one API key under the console's **API Keys** settings (admin/owner),
 select only the needed capabilities and applicable restrictions, and save the
 once-shown token in your secret manager. Evals dataset reads need `evals:read`;
-redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities.
+redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities;
+`martian evals push` needs `evals:write`.
 The key neither grants model entitlement nor administers the console. An
 agent-bound key supplies its immutable agent binding automatically; explicit
 `Client(agent_id=...)` attribution must match that grant. This labels/access-binds
@@ -145,6 +146,8 @@ martian evals import mlflow ./mlflow.db
 # All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):
 martian evals export ./evals-export
 martian evals import martian ./evals-export --data-dir ./new-data
+# That UI's finished runs pushed to a Martian server, signed in as below (see the eval guide):
+martian evals push
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml

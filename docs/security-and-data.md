@@ -138,6 +138,14 @@ the run is given `--cache`. With it on, `martian evals run` stores model replies
   older than `cache.ttl_seconds` is not used, but stays on disk until a successful call replaces
   it or the folder is deleted.
 
+`martian evals push` is the one command that sends the data folder's content off the machine, and
+only when it is run: each finished run's case inputs and outputs, scores, reasons, scoring jobs and
+traces with their spans go to the server `MARTIAN_API_URL` names, signed in with the API key in
+`MARTIAN_API_TOKEN` over HTTPS (HTTP only to this machine), as the platform connection above.
+Reviews, artifacts, datasets, local targets and their keys, and `settings.json` are not sent; a
+run's target goes as the run keeps it, with `${NAME}` references unexpanded. The command never
+prints the server's answers, only their status. See [pushed runs](evals-core.md#pushed-runs).
+
 ## The target and the grader
 
 An agent under test that can reach its grader can read its answers or change its results. So the

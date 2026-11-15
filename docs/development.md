@@ -185,6 +185,13 @@ so a test keeps its state to itself:
 - The MLflow tracking URI and active experiment, `martian.evals.state.STATE` and environment
   variables are process-wide, so each worker has its own. Fixtures that change them restore them
   afterwards.
+- A busy machine runs every test slower, so a test does not sleep for a lease to run out or a
+  retry to come due in its own process: it moves the clock the code reads (`_now` in
+  `martian.evals.records.queue`, `martian.evals.alerts` and the other modules that have one). It
+  waits for the event it asserts rather than sleeping a fixed time, and holds a hung target until
+  the run has ended rather than bounding how long the run took. Waiting on the wall clock is left
+  to what only it can show, such as another process's lease or a monitor's scoring delay, with a
+  wide margin.
 
 For debugging (`--pdb`, `-s`) or a failure that appears only in parallel, run serially by leaving
 out `-n auto` or passing `-n 0`. Each worker imports MLflow, and some tests start further pytest

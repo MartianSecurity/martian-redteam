@@ -2,7 +2,8 @@
 principal may do, and whether the store is ready.
 
 The shape is ``EvalsBootstrapOut`` in the server's frozen evals contract (``contracts/evals-api.json``
-in MartianSecurity/MartianBackend); both servers answer ``GET /v1/evals/bootstrap`` with it.
+in MartianSecurity/MartianBackend); both servers answer ``GET /v1/evals/bootstrap`` with it. The core's
+capabilities also carry ``hostedRoutes``, which the contract does not name and its schema allows.
 """
 
 from __future__ import annotations
@@ -53,7 +54,10 @@ class BootstrapEntitlements(_Out):
 
 
 class EvalCapabilities(_Out):
-    """Whether the principal's role and edition allow each action. The names are the Evals UI's."""
+    """Whether the principal's role and edition allow each action. The names are the Evals UI's.
+    ``hostedRoutes`` is not one: it says whether the server serves the Martian server's own routes
+    the Evals UI calls (CI sessions, API keys and the traces export), and the core serves none of
+    them. The Martian server answers the contract's capabilities, which have no such key."""
 
     run: bool
     score: bool
@@ -69,6 +73,7 @@ class EvalCapabilities(_Out):
     retryCiExport: bool
     manageProjects: bool
     manageJudges: bool
+    hostedRoutes: bool
 
 
 class Bootstrap(_Out):
@@ -101,6 +106,6 @@ def build_bootstrap(principal: Principal, entitlements: Entitlements, status: St
         principal=principal_out(principal),
         edition=BootstrapEdition(key=entitlements.edition, name=EDITION_NAMES[entitlements.edition]),
         entitlements=BootstrapEntitlements(features=sorted(entitlements.features), limits=dict(entitlements.limits)),
-        capabilities=EvalCapabilities(**capabilities_for(role, entitlements)),
+        capabilities=EvalCapabilities(**capabilities_for(role, entitlements), hostedRoutes=False),
         status=status,
     )

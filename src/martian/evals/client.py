@@ -138,3 +138,17 @@ class Backend:
         from uuid import UUID
 
         return self._send("GET", f"/v1/evals/ci/sessions/{UUID(session_id)}", attempts=3)
+
+    # A push (martian.evals.push) is idempotent on the server, so each request may be sent again.
+    def push_target(self) -> dict[str, Any]:
+        return self._send("GET", "/v1/push", attempts=3)
+
+    def push_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from uuid import UUID
+
+        return self._send("PUT", f"/v1/push/runs/{UUID(run_id)}", json=payload, attempts=3)
+
+    def push_cases(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from uuid import UUID
+
+        return self._send("POST", f"/v1/push/runs/{UUID(run_id)}/cases", json=payload, attempts=3)
