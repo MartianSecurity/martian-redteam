@@ -49,7 +49,7 @@ from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_
 from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
-from martian.evals.worker import Judge, JudgeRequest, JudgeResult, TargetCall, Work
+from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
 
 if TYPE_CHECKING:
@@ -67,6 +67,8 @@ NO_JUDGE = "Judge unavailable; no automatic model retry"
 JUDGE_MODEL_KEY = "martian.judge.model"
 JUDGE_MODEL_VERSION_KEY = "martian.judge.model_version"
 JUDGE_ENDPOINT_KEY = "martian.judge.endpoint"
+JUDGE_VERSION_KEY = "martian.judge.version"
+JUDGE_ERROR_LENGTH = 500
 
 
 def _now() -> datetime:
@@ -412,22 +414,29 @@ def model_source(answer: JudgeResult) -> str:
 
 def _judge_metadata(scorer: ScorerVersion, answer: JudgeResult | None) -> dict[str, Any]:
     """What a judge score records of its model: the model that answered (or the one the judge is
-    pinned to, when none did), the version the provider reported, and the endpoint it was asked at."""
+    pinned to, when none did), the version the provider reported, the judge's own version, and
+    the endpoint it was asked at."""
     found: dict[str, Any] = {}
     if model := answer.model if answer is not None else scorer.model:
         found[JUDGE_MODEL_KEY] = model
     if answer is not None and answer.model_version:
         found[JUDGE_MODEL_VERSION_KEY] = answer.model_version
+    if answer is not None and answer.judge_version:
+        found[JUDGE_VERSION_KEY] = answer.judge_version
     if scorer.endpoint:
         found[JUDGE_ENDPOINT_KEY] = scorer.endpoint
     return found
 
 
 async def _judged(judge: Judge, request: JudgeRequest, what: str) -> JudgeResult | str | None:
-    """The judge's answer to one request, an error for each of its scores when the judge answered
-    from another model than the request names, or None when the judge failed."""
+    """The judge's answer to one request, an error for each of its scores when the judge refused
+    or failed with a message it can show (``JudgeError``) or answered from another model than the
+    request names, or None when the judge failed otherwise."""
     try:
         answer = await judge(request)
+    except JudgeError as error:
+        log.warning("Judge gave no verdict for %s: %s", what, error)
+        return str(error)[:JUDGE_ERROR_LENGTH] or NO_JUDGE
     except Exception:  # noqa: BLE001 - a judge failure is each judge score's error
         log.exception("Judge failed for %s", what)
         return None
@@ -502,6 +511,7 @@ async def _score_results(
                         scorers=tuple(scorers),
                         model=model,
                         endpoint=endpoint,
+                        job_id=job.id,
                     ),
                     f"case {result.case_id} of run {run.id}",
                 )
@@ -526,6 +536,8 @@ async def _score_results(
             elif answer is not None and scorer.name in answer.verdicts:
                 verdict = answer.verdicts[scorer.name]
                 value, rationale, source_id = verdict.value, verdict.rationale, model_source(answer)
+            elif answer is not None and scorer.name in answer.errors:
+                error = answer.errors[scorer.name][:JUDGE_ERROR_LENGTH] or NO_JUDGE
             else:
                 error = NO_JUDGE
             score = Score(

@@ -532,7 +532,11 @@ def _response_judge(
     max_retries: int,
     rate_limit_wait_seconds: float,
     headers: Mapping[str, str] | None,
+    endpoint: str | None = None,
 ) -> Scorer:
+    """The three judges' shared implementation. ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to."""
     if type(verify) is not bool:
         raise ValueError("verify must be a boolean")
     if type(max_retries) is not int or not 0 <= max_retries <= 10:
@@ -667,6 +671,7 @@ def _response_judge(
             max_retries=max_retries,
             rate_limit_wait_seconds=rate_limit_wait_seconds,
             headers=extra_headers,
+            endpoint=endpoint,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -697,6 +702,7 @@ def _response_judge(
                 max_retries=max_retries,
                 rate_limit_wait_seconds=rate_limit_wait_seconds,
                 headers=extra_headers,
+                endpoint=endpoint,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)

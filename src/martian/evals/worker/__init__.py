@@ -18,8 +18,9 @@ their own worker without changing the routes:
   and it runs the work inside each of ``ProcessWorker``'s processes.
 - A durable queue (MorningHQ/martian-notes#139) implements ``submit`` by enqueueing, and hands
   each ``Work`` to a process of its own.
-- Running the SDK judge in the worker (#133) is a judge given to the worker; the routes do not
-  change.
+- The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
+  :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
+  routes do not change.
 
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
@@ -112,7 +113,8 @@ class JudgeRequest:
     ``openai:/gpt-4o-mini``, served at ``endpoint``, the base address of an OpenAI-compatible
     endpoint, or at the provider's own address when it is None. ``model`` is None when neither the
     judges nor the default judge model name one; the judge then uses its own. The request never
-    carries a key: the judge reads the provider's key from its own environment."""
+    carries a key: the judge reads the provider's key from its own environment. ``job_id`` is the
+    scoring job the request belongs to."""
 
     principal: Principal
     prompt: str
@@ -121,6 +123,7 @@ class JudgeRequest:
     scorers: tuple[ScorerVersion, ...]
     model: str | None = None
     endpoint: str | None = None
+    job_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -135,11 +138,22 @@ class JudgeResult:
     ``model`` when it names one, or the judge's own. ``model_version`` is the version the provider
     reported for the call (an OpenAI-compatible endpoint's ``model`` in its reply), or empty when
     it reports none. Every score the verdicts make records both, and its ``source_id`` is
-    ``model@model_version``, or ``model`` alone without a version."""
+    ``model@model_version``, or ``model`` alone without a version. ``judge_version`` names the
+    judge's own prompt and rules (``response-rubrics-v1`` for the SDK judge), recorded on each
+    score. ``errors`` holds, by scorer name, why the judge gave a scorer of the request no verdict,
+    such as a judge kind it cannot grade."""
 
     model: str
     verdicts: Mapping[str, Verdict] = field(default_factory=dict)
     model_version: str = ""
+    judge_version: str = ""
+    errors: Mapping[str, str] = field(default_factory=dict)
+
+
+class JudgeError(Exception):
+    """A judge's failure or refusal whose message is safe to show: it becomes the error of every
+    score of the request. It never holds the provider's own error text, a key, or the graded
+    text. Any other exception is logged, and its scores get a fixed error."""
 
 
 Judge = Callable[[JudgeRequest], Awaitable[JudgeResult]]
@@ -170,13 +184,16 @@ class Worker(Protocol):
 
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
+from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 
 __all__ = [
     "AgentExecutor",
+    "AgentsConnection",
     "Credentials",
     "InProcessWorker",
     "Judge",
+    "JudgeError",
     "JudgeRequest",
     "JudgeResult",
     "ProcessWorker",
@@ -185,9 +202,11 @@ __all__ = [
     "Work",
     "Worker",
     "WorkerServices",
+    "agents_judge",
     "dump_work",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",
     "load_work",
+    "sdk_judge",
 ]
