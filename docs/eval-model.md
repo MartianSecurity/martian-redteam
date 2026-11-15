@@ -42,8 +42,8 @@ rejects unknown fields.
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`. Never a key | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
 | `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder and the MLflow location. Unset means the runner's default | none |
-| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
-| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it | Run |
+| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Its `matrix` holds the axes of values the suite runs every combination of, each a list of values or a mapping of names to values, as the suite file writes them ([a matrix](evals.md#a-matrix-of-prompts-and-models)); it is left out when empty, so a suite without one keeps its digest too. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
+| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it. A run of one combination of a suite's matrix has it in `provenance.matrix` | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint`. A case its suite runs more than once has every attempt in `attempts` (`Attempt`: `number`, `status`, `checks` with one `CheckVerdict` per check, `output`, `error`, `latency_ms`, `trace_id`); its own `status` and scores are the attempts combined ([repeated attempts](evals.md#repeated-attempts)). `attempts` is left out when empty | Trace; each attempt's own trace too |
 | `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `source_id`, `trace_id`, `metadata`. A judge score made by the evals core's worker has the model and version that produced it as `source_id` (`model@version`) and in `metadata` (`martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint`), with the judge's own version in `martian.judge.version` | Assessment (feedback) |
 | `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them. A job that applies a saved suite names it (`suite_id`, `suite_version`) and carries its `policies`; `cancel_requested_at` as for a run. A policy judge's guidelines are in its scorer's `criteria` | none |
@@ -83,6 +83,7 @@ and its data give them again on the next load.
 | Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`). A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
 | `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
+| `matrix` | `Suite.matrix`, as written: each axis a list of values or a mapping of names to values. `martian.evals.matrix.combinations` expands it; the URL target's `{{matrix.NAME}}` stays in `Target.body` unfilled |
 | `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
 | `judge.max_retries`, `judge.rate_limit_wait_seconds`, `judge.headers` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written) |
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
@@ -121,6 +122,15 @@ any case runs, and records the run through the model: a `Run` of the loaded `Sui
 `CaseResult` and `Score`s for each `results.jsonl` record
 ([command-line runs](evals-core.md#command-line-runs)).
 
+A suite with a matrix is recorded as one `Run` per combination, each with the same suite id and
+digest and its combination in `provenance.matrix`: `id` (such as `model=gpt-4o-mini,prompt=terse`,
+each axis's `axis=name` in the axes' alphabetical order), `values` (each axis's value name),
+`axes` (each axis's `name` and its values' names, in the file's order) and `invocation` (an id
+the runs of one `martian evals run` share). A run per combination, rather than one run with a
+combination on each case result, keeps every combination a run as the model and the evals
+core's typed run responses already have it, with its own counts, resume, repeats and baseline;
+a `CaseResult` has no field for a combination, and the contract's item responses none either.
+
 ## Local results
 
 Every field of a `results.jsonl` record has a place. `martian.evals.model.RESULTS_RECORD_FIELDS`
@@ -148,6 +158,11 @@ the cases' `no_refusal` verdicts, with repeats their attempts combined
 ([false refusals](evals.md#false-refusals)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
+
+A matrix run's `matrix.json` is derived too: each entry of `combinations` is one combination's
+run, its `id` and `values` that run's `provenance.matrix`, its `summary` that run's
+`summary.json`, and its `gate` follows from its counts and its comparison; `axes` is every run's
+`provenance.matrix.axes` ([what a matrix run writes](evals.md#a-matrix-of-prompts-and-models)).
 
 ## The server's evals tables
 

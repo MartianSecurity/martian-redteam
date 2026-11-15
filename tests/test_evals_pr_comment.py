@@ -24,6 +24,7 @@ RUN_URL = "https://github.com/example/agent/actions/runs/1"
 TOKEN = "test-token"
 BOT = "github-actions[bot]"
 SUITE = "examples/github-action/failing/evals.yaml"
+MATRIX_SUITE = "examples/evals/matrix/evals.yaml"
 
 _spec = importlib.util.spec_from_file_location("evals_pr_comment", ROOT / "scripts/evals_pr_comment.py")
 assert _spec is not None and _spec.loader is not None
@@ -36,7 +37,8 @@ _spec.loader.exec_module(comment)
 def sample_runs(tmp_path_factory):
     """Run both sample suites once through the CLI, with no Martian setting, as the action does,
     and the failing one again with the passing one's output folder as its baseline, as a pull
-    request that broke two of the passing suite's cases would be compared with main."""
+    request that broke two of the passing suite's cases would be compared with main; then the
+    matrix example, once and again with that run as its baseline."""
     runs = {}
     with pytest.MonkeyPatch.context() as patch:
         for name in ("MARTIAN_API_URL", "MARTIAN_API_TOKEN", "MARTIAN_AGENT_ID"):
@@ -48,13 +50,14 @@ def sample_runs(tmp_path_factory):
         old_uri = mlflow.get_tracking_uri()
         for name, suite, baseline in (("passing", "passing", None), ("failing", "failing", None)) + (
             ("compared", "failing", "passing"),
+            ("matrix", MATRIX_SUITE, None),
+            ("matrix-compared", MATRIX_SUITE, "matrix"),
         ):
             STATE.reset()
             folder = tmp_path_factory.mktemp(name) / "results"
             extra = ["--baseline", str(runs[baseline][0])] if baseline else []
-            result = CliRunner().invoke(
-                app, ["evals", "run", str(SAMPLE / suite / "evals.yaml"), "--output", str(folder), *extra]
-            )
+            path = ROOT / suite if suite == MATRIX_SUITE else SAMPLE / suite / "evals.yaml"
+            result = CliRunner().invoke(app, ["evals", "run", str(path), "--output", str(folder), *extra])
             runs[name] = (folder, result.exit_code)
         STATE.reset()
         mlflow.set_tracking_uri(old_uri)
@@ -113,6 +116,84 @@ def test_without_a_baseline_yet_the_comment_says_so_and_the_run_is_gated_on_its_
     ) in body
     # Without the action's baseline branch nothing is said about a baseline.
     assert "baseline" not in comment.render(comment.load_outcome(folder, code), suite=SUITE, key=SUITE)
+
+
+def test_a_matrix_suite_shows_one_row_per_combination(sample_runs):
+    folder, code = sample_runs["matrix"]
+    assert code == 1
+    outcome = comment.load_outcome(folder, code)
+    assert [one.id for one in outcome.combinations] == [
+        "model=small-model,prompt=terse",
+        "model=small-model,prompt=friendly",
+        "model=large-model,prompt=terse",
+        "model=large-model,prompt=friendly",
+    ]
+    body = comment.render(outcome, suite=MATRIX_SUITE, key=MATRIX_SUITE, sha=SHA, run_url=RUN_URL)
+    assert body == (SAMPLE / "comments" / "matrix.md").read_text(encoding="utf-8")
+
+
+def test_each_combination_is_compared_with_the_same_combination_of_main(sample_runs):
+    """The matrix example against a result of itself: each combination has the failures it had on
+    main, which do not fail the gate, and its failed cases are still named."""
+    folder, code = sample_runs["matrix-compared"]
+    assert code == 0
+    body = comment.render(
+        comment.load_outcome(folder, code), suite=MATRIX_SUITE, key=MATRIX_SUITE, baseline=comment.Baseline("main")
+    )
+    lines = body.splitlines()
+    assert lines[1] == "### Martian evals passed against `main`"
+    assert lines[3].endswith("4 combinations of `model` and `prompt`, 6 cases each; 4 passed.")
+    assert "**Compared with `main`:** each combination is compared with the same combination there" in body
+    assert "| Combination | Passed | Failed | Errors | Pass rate (95% CI) | Compared with `main` | Result |" in lines
+    assert "| `model=small-model,prompt=friendly` | 3 | 3 | 0 | 50% (18–82%) | within noise | passed |" in lines
+    assert "Failed cases: `warranty` (`states_the_fact`), `payment` (`states_the_fact`)." in lines
+
+
+def test_a_matrix_comment_shows_repeats_false_refusals_regressions_and_a_combination_without_a_baseline():
+    counts = {"passed": 7, "failed": 1, "errors": 0, "pass_rate": 0.875, "confidence_95": [0.53, 0.98]}
+    repeats = {"attempts": 3, "combine": "all", "checks": {"no_refusal": {"combine": "all", "from": "suite"}}}
+    refusals = {"checks": ["no_refusal"], "benign": 4, "refused": 1, "errors": 0, "rate": 0.25}
+    summary = {
+        "cases": 8,
+        **counts,
+        "groups": None,
+        "checks": {"no_refusal": counts},
+        "repeats": repeats,
+        "reliability": {**counts, "passed": 6, "failed": 2, "pass_rate": 0.75, "flaky": ["q2"]},
+        "false_refusals": refusals,
+    }
+    regressed = {
+        "label": "within_noise",
+        "regressed": [{"id": "q1", "checks": {"no_refusal": None}}],
+        "unpaired_failures": [],
+        "gate": "passed",
+    }
+    cases = [{"id": "q1", "passed": False, "checks": {"no_refusal": {"passed": False}}}]
+    outcome = comment.Outcome(
+        0,
+        None,
+        axes=[{"name": "model", "values": ["a", "b"]}],
+        combinations=[
+            comment.Combination("model=a", "passed", summary, regressed, cases),
+            comment.Combination("model=b", "failed", summary, None, cases),
+        ],
+    )
+    body = comment.render(outcome, suite=MATRIX_SUITE, key=MATRIX_SUITE, baseline=comment.Baseline("main"))
+    lines = body.splitlines()
+    assert (
+        "| Combination | Passed | Failed | Errors | Pass rate (95% CI) | Reliability (95% CI) | False refusals "
+        "| Compared with `main` | Result |"
+    ) in lines
+    assert "| `model=a` | 7 | 1 | 0 | 88% (53–98%) | 75% (53–98%) | 1 of 4 (25.0%) | within noise | passed |" in lines
+    assert (
+        "| `model=b` | 7 | 1 | 0 | 88% (53–98%) | 75% (53–98%) | 1 of 4 (25.0%) | no baseline yet | failed |" in lines
+    )
+    assert "A combination with no result on `main` is gated on its own." in body
+    assert "Each case ran 3 times" in body and "False refusals count the benign cases that were refused." in body
+    # A case that went from pass to fail is not named again among the failed cases.
+    section = lines[lines.index("#### `model=a`") + 2]
+    assert section.startswith("From pass to fail: `q1` (`no_refusal`). Reliability counts") and "Failed" not in section
+    assert lines[lines.index("#### `model=b`") + 2].startswith("Failed cases: `q1` (`no_refusal`).")
 
 
 def test_a_comparison_says_what_fails_the_gate_and_what_it_could_not_pair():

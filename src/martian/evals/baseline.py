@@ -23,6 +23,13 @@ labels the change with :func:`martian.evals.stats.compare_outcomes`, and writes
   went under its rule. An LLM judge's reason, and a numeric, table or schema check's, which
   quote the reply's figures or keys, are left out. A case's error is the SDK's own wording of
   how the target failed, as in the pull-request comment.
+- **A matrix.** A suite with a matrix (:mod:`martian.evals.matrix`) writes each combination's
+  verdicts.json in its own folder, and at the top of the output folder a verdicts.json of format
+  :data:`MATRIX_FORMAT` that holds them all by combination id (:func:`matrix_verdicts`). Each
+  combination is compared with the baseline's result of the same id (:func:`result`). A
+  combination the baseline has no result of, such as a new one, or every combination when the
+  baseline is a run without a matrix, is not compared: it is gated on its own, as a run without a
+  baseline is. So is a suite without a matrix whose baseline is a matrix's.
 """
 
 from __future__ import annotations
@@ -43,6 +50,9 @@ COMPARISON = "comparison.json"
 """A run compared with its baseline, written by a run given one."""
 
 FORMAT = "martian-evals-verdicts/1"
+
+MATRIX_FORMAT = "martian-evals-matrix-verdicts/1"
+"""A matrix run's verdicts.json: each combination's verdicts file under ``combinations``, by id."""
 
 PLAIN_REASONS = frozenset(
     {
@@ -74,6 +84,37 @@ out until it is added."""
 
 class BaselineError(ValueError):
     """The baseline cannot be read: no verdicts.json in the folder, or not one this SDK wrote."""
+
+
+def matrix_verdicts(combinations: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """The verdicts file of a matrix run: each combination's :func:`verdicts`, by its id."""
+    return {"format": MATRIX_FORMAT, "combinations": {key: dict(found) for key, found in combinations.items()}}
+
+
+def result(found: Mapping[str, Any], combination: str | None) -> dict[str, Any] | None:
+    """The verdicts in a loaded baseline (:func:`load`) of the combination ``combination``, or of a
+    suite without a matrix when None; None when the baseline has no result of it."""
+    if found["format"] == FORMAT:
+        return dict(found) if combination is None else None
+    held = found["combinations"].get(combination) if combination is not None else None
+    return None if held is None else dict(held)
+
+
+def _readable(found: Any) -> bool:
+    cases = found.get("cases") if isinstance(found, dict) else None
+    return (
+        isinstance(cases, list)
+        and found.get("format") == FORMAT
+        and isinstance(found.get("checks"), dict)
+        and all(
+            isinstance(case, dict)
+            and isinstance(case.get("id"), str)
+            and isinstance(case.get("digest"), str)
+            and case.get("passed") in (True, False, None)
+            and isinstance(case.get("checks"), dict)
+            for case in cases
+        )
+    )
 
 
 def digest(value: Any) -> str:
@@ -118,7 +159,8 @@ def verdicts(
 
 
 def load(folder: str | Path) -> dict[str, Any]:
-    """The verdicts file in ``folder``, an earlier run's output folder. Raises :class:`BaselineError`."""
+    """The verdicts file in ``folder``, an earlier run's output folder: a run's, or a matrix run's
+    (:data:`MATRIX_FORMAT`). Raises :class:`BaselineError`."""
     path = Path(folder) / VERDICTS
     if not path.is_file():
         raise BaselineError(
@@ -128,23 +170,14 @@ def load(folder: str | Path) -> dict[str, Any]:
         found = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise BaselineError(f"the baseline's {VERDICTS} could not be read") from None
-    if not isinstance(found, dict) or found.get("format") != FORMAT:
+    if isinstance(found, dict) and found.get("format") == MATRIX_FORMAT:
+        held = found.get("combinations")
+        if not isinstance(held, dict) or not all(_readable(one) for one in held.values()):
+            raise BaselineError(f"the baseline's {VERDICTS} is not a {MATRIX_FORMAT} file")
+        return found
+    if not _readable(found):
         raise BaselineError(f"the baseline's {VERDICTS} is not a {FORMAT} file")
-    cases = found.get("cases")
-    if (
-        not isinstance(cases, list)
-        or not isinstance(found.get("checks"), dict)
-        or not all(
-            isinstance(case, dict)
-            and isinstance(case.get("id"), str)
-            and isinstance(case.get("digest"), str)
-            and case.get("passed") in (True, False, None)
-            and isinstance(case.get("checks"), dict)
-            for case in cases
-        )
-    ):
-        raise BaselineError(f"the baseline's {VERDICTS} is not a {FORMAT} file")
-    return found
+    return dict(found)
 
 
 def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source: str = "") -> dict[str, Any]:
@@ -213,11 +246,14 @@ def compare(baseline: Mapping[str, Any], candidate: Mapping[str, Any], *, source
 __all__ = [
     "COMPARISON",
     "FORMAT",
+    "MATRIX_FORMAT",
     "PLAIN_REASONS",
     "VERDICTS",
     "BaselineError",
     "case_digest",
     "compare",
     "load",
+    "matrix_verdicts",
+    "result",
     "verdicts",
 ]

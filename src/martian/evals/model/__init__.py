@@ -16,6 +16,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
+from martian.evals.matrix import MatrixAxis, combinations
+
 MODEL_VERSION = "martian-eval-model-v1"
 
 Identifier = Annotated[str, Field(min_length=1, max_length=200)]
@@ -221,6 +223,11 @@ class Suite(_Object):
     there. ``input_key`` names the input that judges grade against and that a plain-text case
     input fills. ``repeats`` is left out when it is the default (one attempt, rule ``all``, no
     check rules), so a suite without repeats has the digest it had before the field existed.
+
+    ``matrix`` holds the suite's axes as its suite file writes them, each a list of values or a
+    mapping of names to values (:mod:`martian.evals.matrix`): the suite runs once per combination,
+    each run with that combination in its ``provenance``. It is left out when empty, so a suite
+    without one keeps its digest too.
     """
 
     id: Identifier
@@ -235,6 +242,7 @@ class Suite(_Object):
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
     repeats: Repeats = Repeats()
+    matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
     digest: Digest
     created_at: datetime | None = None
     created_by: str | None = None
@@ -248,13 +256,17 @@ class Suite(_Object):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
         if unknown := sorted(set(self.repeats.checks) - set(names)):
             raise ValueError(f"repeats name scorers the suite does not have: {', '.join(unknown)}")
+        combinations(self.matrix)  # raises for a matrix that cannot run
         return self
 
     @model_serializer(mode="wrap")
-    def _without_default_repeats(self, handler: SerializerFunctionWrapHandler) -> Any:
+    def _without_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
         written = handler(self)
-        if isinstance(written, dict) and self.repeats == Repeats():
-            written.pop("repeats", None)
+        if isinstance(written, dict):
+            if self.repeats == Repeats():
+                written.pop("repeats", None)
+            if not self.matrix:
+                written.pop("matrix", None)
         return written
 
 

@@ -38,9 +38,19 @@ EVERY_FIELD_URL = {
     "target": {
         "url": "https://agent.example/api/chat",
         "headers": {"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
-        "body": {"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        "body": {
+            "message": "{{input}}",
+            "session": "{{uuid}}",
+            "lang": "{{inputs.lang}}",
+            "model": "{{matrix.model}}",
+            "system": "{{matrix.prompt}}",
+        },
         "response_path": "choices.0.message.content",
         "timeout_seconds": 30.5,
+    },
+    "matrix": {
+        "model": ["small", "large"],
+        "prompt": {"terse": "Answer in one line.", "friendly": "Greet, then answer."},
     },
     "judge": {
         "model": "openai:/judge-model",
@@ -147,7 +157,7 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows")
+            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows", "matrix")
             if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
@@ -222,9 +232,20 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         kind="http",
         url="https://agent.example/api/chat",
         headers={"Authorization": "Bearer ${AGENT_API_KEY}", "X-Tenant": "demo"},
-        body={"message": "{{input}}", "session": "{{uuid}}", "lang": "{{inputs.lang}}"},
+        body={
+            "message": "{{input}}",
+            "session": "{{uuid}}",
+            "lang": "{{inputs.lang}}",
+            "model": "{{matrix.model}}",
+            "system": "{{matrix.prompt}}",
+        },
         response_path="choices.0.message.content",
     )
+    # The matrix keeps the form it was written in: a list, and a mapping of names to values.
+    assert suite.matrix == {
+        "model": ["small", "large"],
+        "prompt": {"terse": "Answer in one line.", "friendly": "Greet, then answer."},
+    }
     rubric, guidelines, conditions, contains, *_ = suite.scorers
     assert rubric == ScorerVersion(
         name="keeps_secret",
