@@ -81,10 +81,14 @@ password is not printed or stored: the report and each copied run's provenance k
 without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
 See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
-`martian evals export` writes everything the data folder holds into the folder it names: every
-case's inputs and outputs, traces with their spans, scores, reasons and reviews, and run
-artifacts. It holds no credentials: a target's `${NAME}` references stay unexpanded, as the store
-keeps them. Treat an export as you treat the data folder. See [data export](data-export.md).
+`martian evals export` writes everything the data folder's store and record store hold into the
+folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
+reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
+and webhook URLs and email recipients among them). It holds no credentials: the local targets and
+their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
+threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the
+data folder. See [data export](data-export.md).
 
 ## The target and the grader
 
@@ -95,7 +99,7 @@ cannot reach them. How far that goes depends on the kind of target:
 
 | Target | Given | Runs | Cannot reach | Can still reach |
 | --- | --- | --- | --- | --- |
-| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments | In a process of its own, started with the run (`python -P`), which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri` and the local Evals UI's data folder: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
+| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments; in a conversation's turn also its history and session id, as far as its parameters take them | In a process of its own, started with the run (`python -P`), which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri` and the local Evals UI's data folder: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
 | A suite file's URL target | One JSON `POST` per case, its body filled from the case's inputs and `{{uuid}}`; a placeholder that names anything else is refused when the suite loads | Wherever the endpoint runs | Nothing of the run's process: it receives the request and nothing else | Whatever its own host lets it. An endpoint on this machine that runs as your user can read the suite's files |
 | A function in the pytest gate (`evaluate`, `predict_fn`) | The case's inputs, as keyword arguments | In the test's own process | Nothing is hidden from it | The test's memory, which holds the dataset's expected values, and its files |
 | A function target in the evals core's worker (`Target(kind="function")`) | The case's inputs, as keyword arguments | In a process of its own for each run, started before its first case | The work's process, which holds the stores and every case's expectations. On Linux with Landlock, the worker's private paths (`WorkerServices.private_paths`), which the setup names: its stores' files | As a suite file's function target. A store on a server, such as Postgres, is reachable over the network by anything that has its address and credentials, which the target's process is not given unless they are in a variable it keeps |
@@ -140,7 +144,7 @@ how long it runs or how much memory it takes.
 | --- | --- | --- |
 | A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts, where the run's function target cannot reach it ([above](#the-target-and-the-grader)), and in the `martian evals audit` process, which runs it on the [audit's replies](evals.md#audit-a-suite). Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process, on a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so a custom scorer never sees a project's production traces: the `Monitor` record refuses a scorer of kind `code` |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -203,6 +207,7 @@ What each part sends without a setting of yours:
 | FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
 | The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
 | Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+| Threshold alerts | Nothing | A threshold's webhook URL and the SMTP server, once the worker's alert settings name them ([below](#threshold-alerts)) |
 
 `tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
 deterministic check, `martian ui` serving the UI and that run, and the core with a process
@@ -211,6 +216,58 @@ which MLflow turns its telemetry off by itself, and no telemetry settings) with 
 and name lookup for an address other than loopback refused. It fails on any such attempt and on
 MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
 loads nothing from another host.
+
+## Threshold alerts
+
+The alerts of [thresholds](evals-core.md#thresholds-and-alerts) on monitor scores are the evals
+core's own outbound calls. An installation makes none until its operator configures them: the
+worker's `AlertSettings` (`martian.evals.alerts`) send no webhook and no email by default, the
+routes refuse a threshold with a channel the worker does not send, and so an on-premises install
+sends nothing for alerts unless it is set up to (`test_no_outbound.py` runs without alert
+settings and still sees no outbound attempt).
+
+What leaves once a channel is configured:
+
+- **A webhook** is one `POST` per alert, and per retry, to the URL a threshold names, which any
+  member with the `score` capability chooses. It carries the threshold's definition and name, the
+  monitor's id, the scorer, and the window's count, estimate and interval: no trace, prompt,
+  response, rationale or user. The URL is `https`, or `http` only to `localhost`; redirects are not
+  followed and proxy settings from the environment are not used. Before each attempt the host is
+  resolved, and a loopback, private, link-local or reserved address is refused unless the
+  installation sets `WebhookSettings(private_addresses=True)`, so on an installation that does not,
+  a member cannot aim alerts at the worker's own network. A name that resolves to another address
+  between that check and the connection is not caught; where that matters, run the worker where it
+  cannot reach internal services.
+- **An email** carries the same content as plain text to the threshold's recipients, through the
+  SMTP server the operator names, with STARTTLS by default.
+
+Secrets:
+
+- **The webhook secret** is given once, by the member who creates the threshold, and signs each
+  request (HMAC-SHA256 over the timestamp and the body; the receiver's check is in
+  [sending alerts](evals-core.md#sending-alerts)). The record store keeps it in a column of its own
+  (`martian_thresholds.secret`), not in the threshold's record, and only `threshold_secret`, which
+  the worker calls to sign, reads it back. No route returns it (a threshold shows
+  `"signed": true`), an alert's stored record and payload do not hold it, no log line holds it, and
+  `martian evals export` exports the threshold without it: a threshold imported into a fresh
+  install shows `"signed": false` and sends no signed webhook until a member gives it a secret
+  again (`POST /v1/evals/thresholds/{id}/secret`, once, for a webhook with none). It is stored as
+  given, not encrypted: whoever can read the record-store database can read it, as they can every
+  record there, and on Postgres row-level security keeps it to its organisation. To change it,
+  delete the threshold and create another.
+- **The SMTP password** is part of the worker's settings, given by the operator in code from their
+  own secret store. No record holds it, so no export does, and the settings' repr and the log
+  lines leave it out.
+- **Logs and errors.** A failed attempt is logged, and kept as the alert's `last_error`, as a status
+  or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`): never the URL, a header, the body,
+  the secret, the password or a recipient. The HTTP client's own request log (HTTPX at `INFO`),
+  if an installation turns it on, names the URL, so a webhook URL holds no credential: the
+  signature authenticates an alert, and a URL with a user name or password is refused.
+
+`tests/evals/test_thresholds.py` checks that the default settings send nothing and open no
+connection, that the loopback receiver is refused without `private_addresses`, that no route
+answer, log line or alert holds the secret, and that failures are logged without the address.
+`tests/evals/test_data_export.py` checks that no file of an export holds a threshold's secret.
 
 ## The local edition has no login
 

@@ -56,6 +56,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from martian.evals.alerts import AlertSettings
 from martian.evals.model import RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.principal import Principal
@@ -64,6 +65,7 @@ from martian.evals.store.mlflow_local import workspace_name
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import InstalledScorers, fail_unfinished
 from martian.evals.worker.inprocess import InProcessWorker
+from martian.evals.worker.monitor import SETTLE_SECONDS
 from martian.evals.worker.targets import own_target, target_pin
 
 log = logging.getLogger("martian.evals.worker")
@@ -90,9 +92,11 @@ class WorkerServices:
     store and the record store, the targets it calls itself by id, the judge, if any, the time
     limit of each target call, the credentials of HTTP targets, the executor of registered agents,
     if any, the custom Python scorers it runs, by name, imported by the setup in this process, the
-    limits of a run that has none of its own, and the private paths a function target's process
+    limits of a run that has none of its own, the private paths a function target's process
     cannot reach on Linux: the files and folders of the stores, which hold every case's
-    expectations and every result (:mod:`martian.evals.isolation`)."""
+    expectations and every result (:mod:`martian.evals.isolation`), how long after its request
+    time a monitor first reads a trace, and how the alerts of thresholds on monitors' scores are
+    delivered, none by default (:class:`~martian.evals.alerts.AlertSettings`)."""
 
     store: EvalStore
     records: RecordStore
@@ -104,6 +108,8 @@ class WorkerServices:
     scorers: InstalledScorers = field(default_factory=dict)
     limits: RunLimits | None = None
     private_paths: tuple[str, ...] = ()
+    monitor_settle_seconds: float = SETTLE_SECONDS
+    alerts: AlertSettings | None = None
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -115,6 +121,8 @@ def dump_work(work: Work) -> dict[str, Any]:
         "project_id": work.project_id,
         "run_id": work.run_id,
         "job_id": work.job_id,
+        "monitor_id": work.monitor_id,
+        "schedule_id": work.schedule_id,
     }
 
 
@@ -127,6 +135,8 @@ def load_work(data: Mapping[str, Any]) -> Work:
         project_id=data["project_id"],
         run_id=data["run_id"],
         job_id=data["job_id"],
+        monitor_id=data.get("monitor_id"),
+        schedule_id=data.get("schedule_id"),
     )
 
 
@@ -158,10 +168,11 @@ class ProcessWorker:
     """Runs each piece of work in a new process of its own, which ends with it.
 
     ``setup`` builds the :class:`WorkerServices` in each process from ``options``. ``agents`` are
-    the ids of the functions its targets call, which :meth:`check_target` accepts, and ``judges``
-    says whether it gives a judge. ``targets`` are the HTTP and function targets the worker calls
-    itself, by id; they are read at each check and each run, so they may be a live view, and each
-    run's process receives the one its run names with its work. ``executor`` admits the registered agents, which each
+    the ids of the functions its targets call, which :meth:`check_target` accepts, ``judges``
+    says whether it gives a judge, and ``alert_channels`` which alert channels its setup's
+    ``alerts`` send. ``targets`` are the HTTP and function targets the worker calls itself, by
+    id; they are read at each check and each run, so they may be a live view, and each run's
+    process receives the one its run names with its work. ``executor`` admits the registered agents, which each
     run's process calls through its setup's executor. ``records`` is this process's record store,
     used to find the target a run names and to mark work failed when its process exits with an
     error.
@@ -177,6 +188,7 @@ class ProcessWorker:
         options: Mapping[str, Any] | None = None,
         targets: Mapping[str, Target] | None = None,
         executor: AgentExecutor | None = None,
+        alert_channels: Iterable[str] = (),
     ) -> None:
         self._setup = _import_path(setup)
         self._options = dict(options or {})
@@ -188,11 +200,19 @@ class ProcessWorker:
             raise ValueError(f"{', '.join(both)} cannot be both an agent and an http target")
         self._executor = executor
         self._judges = judges
+        self._alert_channels = frozenset(alert_channels)
+        if unknown := sorted(self._alert_channels - {"webhook", "email"}):
+            raise ValueError(f"unknown alert channels: {', '.join(unknown)}")
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
     def judges(self) -> bool:
         return self._judges
+
+    @property
+    def alert_channels(self) -> frozenset[str]:
+        """The channels its processes send thresholds' alerts on, as it was told (``SendsAlerts``)."""
+        return self._alert_channels
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         return await target_pin(principal, target, calls=self._agents, own=self._targets, executor=self._executor)
@@ -297,6 +317,8 @@ async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Tar
         scorers=services.scorers,
         limits=services.limits,
         private_paths=services.private_paths,
+        monitor_settle_seconds=services.monitor_settle_seconds,
+        alerts=services.alerts,
     )
     await worker.submit(work)
     await worker.drain()

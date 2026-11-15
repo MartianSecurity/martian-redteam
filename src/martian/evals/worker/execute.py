@@ -7,9 +7,15 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   was admitted with) up to its case limit, calls the target once per case with no retry, giving it
   the case's id and inputs and nothing else (:func:`~martian.evals.worker.targets.sent_case`), and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped. A failed
+  with its exact-match score; a case with no usable prompt or expected text is skipped, and so is a
+  conversation case (``Case.turns``, or a ``Case.simulated_user`` whose turns a simulator writes),
+  which ``martian evals run`` runs turn by turn. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
   the setting to check, anything else with its type.
+- A target that reports the model that answered (a :class:`~martian.evals.worker.TargetReply`)
+  has it recorded as the case's trace's ``model`` and its target span's ``gen_ai.response.model``,
+  and counted in the run's ``provenance["model"]``: ``name``, the model of the latest case that
+  reported one, and ``cases``, how many cases each model answered.
 - Before a run calls its target, on its first start and on every resume, the worker pins the
   target as it has it now; a pin that is not the run's (``provenance["target"]``) fails the run,
   naming the target, so one run never mixes two systems.
@@ -73,9 +79,9 @@ from martian.evals.server.projection import DEFAULT_PROJECT, expected_text, job_
 from martian.evals.store import EvalStore, StoreError
 
 # The package defines these before it imports this module.
-from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, Work, Worker
+from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, TargetCall, TargetReply, Work, Worker
 from martian.evals.worker.scorers import code_score, exact_match, scorer_source
-from martian.evals.worker.targets import FunctionProcessCall, changed_target, sent_case
+from martian.evals.worker.targets import FunctionProcessCall, changed_target, reported_model, sent_case
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -87,6 +93,7 @@ MAX_SCORED_RESULTS = 1000
 EXACT_MATCH_SCORER = "exact_match"
 STOPPED = "Stopped before this target request"
 UNUSABLE = "item is missing a usable prompt or expected output"
+CONVERSATION = "item is a conversation, which martian evals run runs turn by turn; the worker sends one prompt per item"
 NO_OUTPUT = "No successful saved target output"
 NO_JUDGE = "Judge unavailable; no automatic model retry"
 JUDGE_MODEL_KEY = "martian.judge.model"
@@ -100,6 +107,13 @@ LIMITS_KEY = "limits"
 """``Run.provenance`` key of the limits a run, and its scoring jobs, run under."""
 STOPPED_KEY = "stopped"
 """``Run.provenance`` key of the limit a stopped run reached (``RunLimits.stop``)."""
+MODEL_KEY = "model"
+"""``Run.provenance`` key of the model its target reported: ``name``, the model the latest case
+that reported one named, and ``cases``, how many cases each model answered."""
+MODELS_KEPT = 20
+"""The most distinct models a run counts; a case that reports another is not counted."""
+MODEL_ATTRIBUTE = "gen_ai.response.model"
+"""The span attribute a case's target span records the reported model in, OpenTelemetry's name."""
 
 InstalledScorers = Mapping[str, Callable[..., Any]]
 """The custom Python scorers a worker runs, by name: functions its setup imports in the work's own
@@ -130,6 +144,21 @@ def _detail(error: Exception, fallback: str) -> str:
 def trace_id() -> str:
     """A trace id in MLflow's form, which the contract's trace routes take."""
     return "tr-" + uuid.uuid4().hex
+
+
+def run_model(run: Run) -> str | None:
+    """The model ``run``'s target last reported, or None when it reported none."""
+    found = run.provenance.get(MODEL_KEY)
+    return reported_model(found.get("name")) if isinstance(found, dict) else None
+
+
+def with_model(provenance: dict[str, Any], model: str) -> dict[str, Any]:
+    """``provenance`` with one more case answered by ``model``."""
+    found = provenance.get(MODEL_KEY)
+    cases = dict(found.get("cases", {})) if isinstance(found, dict) else {}
+    if model in cases or len(cases) < MODELS_KEPT:
+        cases[model] = int(cases.get(model, 0)) + 1
+    return {**provenance, MODEL_KEY: {"name": model, "cases": cases}}
 
 
 def is_active(case: Case) -> bool:
@@ -194,12 +223,17 @@ async def _move_run(
         return None
 
 
-async def _advance_run(records: RecordStore, principal: Principal, run: Run, changes: dict[str, Any]) -> Run | None:
-    """Apply ``changes`` to the run as it is stored now, while it is still running. The run is read
-    again first: a cancel request made while a case ran must not be written over."""
+async def _advance_run(
+    records: RecordStore, principal: Principal, run: Run, changes: dict[str, Any], *, model: str | None = None
+) -> Run | None:
+    """Apply ``changes`` to the run as it is stored now, while it is still running, and count
+    ``model``, the one the case just finished reported, in its provenance. The run is read again
+    first: a cancel request made while a case ran must not be written over."""
     current = await records.get_run(principal, run.project_id, run.id)
     if current is None or current.state != "running":
         return None
+    if model is not None:
+        changes = {**changes, "provenance": with_model(current.provenance, model)}
     return await _move_run(records, principal, current, changes, "running")
 
 
@@ -303,11 +337,11 @@ async def _run_cases(
             }
             await _move_run(records, principal, current, stop, "running")
             return
-        result, score = await _run_case(store, principal, run, position, case, call, timeout_seconds)
+        result, score, model = await _run_case(store, principal, run, position, case, call, timeout_seconds)
         # The case's checkpoint: its result and its score in one transaction, before the next case.
         await records.put_results(principal, run.project_id, [result], scores=[score] if score else [])
         counts = _counted(counts, result.status)
-        if await _advance_run(records, principal, run, {"counts": counts}) is None:
+        if await _advance_run(records, principal, run, {"counts": counts}, model=model) is None:
             return
     current = await records.get_run(principal, run.project_id, run.id)
     if current is None or current.state != "running":
@@ -354,15 +388,22 @@ async def _run_case(
     case: Case,
     call: TargetCall,
     timeout_seconds: float,
-) -> tuple[CaseResult, Score | None]:
+) -> tuple[CaseResult, Score | None, str | None]:
+    """Call the target with one case and record its trace, with the model the target reported,
+    if any. Returns the case's result, its exact-match score and that model."""
+    if case.turns or case.simulated_user is not None:
+        return _skipped(run, position, case, CONVERSATION), None, None
     prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
     if not prompt or not expected:
-        return _skipped(run, position, case, UNUSABLE), None
+        return _skipped(run, position, case, UNUSABLE), None, None
     started, clock = _now(), perf_counter()
     output: Any = None
+    model: str | None = None
     error = ""
     try:
         output = await asyncio.wait_for(call(sent_case(case)), timeout=timeout_seconds)
+        if isinstance(output, TargetReply):
+            output, model = output.output, reported_model(output.model)
     except TimeoutError:
         error = "item timed out"
     except TargetCallError as failure:  # the target's own words, which name the setting to check
@@ -404,6 +445,7 @@ async def _run_case(
             request=prompt,
             response=text,
             run_id=run.id,
+            model=model,
             scores=scores,
             spans=[
                 Span(
@@ -415,7 +457,7 @@ async def _run_case(
                     end_ms=start_ms + latency,
                     inputs=case.inputs,
                     outputs=output,
-                    attributes={"martian.case_id": case.id},
+                    attributes={"martian.case_id": case.id, **({MODEL_ATTRIBUTE: model} if model else {})},
                 )
             ],
         ),
@@ -440,7 +482,7 @@ async def _run_case(
         ),
     )
     score = scores[0].model_copy(update={"store": logged.store}) if logged else None
-    return result, score
+    return result, score, model
 
 
 # --- scoring jobs ---------------------------------------------------------------------------
@@ -756,8 +798,12 @@ async def take_over(records: RecordStore, work: Work) -> None:
     scored again. The case that was in flight has neither, so it runs again.
 
     Only the queue's worker calls it, while its claim holds the work, so no other worker is on it.
-    A finished or queued record is left alone."""
+    A finished or queued record is left alone. A monitor's pass has no record to queue again: the
+    next pass goes on from the monitor's watermark and takes over the traces it had taken. Nor
+    has a schedule's turn: the next turn looks at the same due slot again."""
     principal, project = work.principal, work.project_id
+    if work.kind in ("monitor", "schedule"):
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state == "running":
@@ -794,9 +840,22 @@ async def submit_or_fail(worker: Worker, records: RecordStore, work: Work) -> No
 async def fail_unfinished(records: RecordStore, work: Work, detail: str) -> None:
     """Mark ``work`` failed with ``detail`` when whatever ran it stopped before finishing it, such
     as a run's process that exited early: a run or scoring job still queued or running becomes
-    ``failed``. A finished record is left alone."""
+    ``failed``. A finished record is left alone. A monitor, which has no end, keeps ``detail`` as
+    its progress's ``error`` and runs again at its next pass; so does a schedule, at its next turn."""
     principal, project = work.principal, work.project_id
     changes: dict[str, Any] = {"state": "failed", "error": detail, "finished_at": _now()}
+    if work.kind == "monitor":
+        progress = await records.monitor_progress(principal, project, work.monitor_id or "")
+        if progress is not None:
+            failed = progress.model_copy(update={"error": detail, "last_pass_at": _now()})
+            await records.set_monitor_progress(principal, project, work.monitor_id or "", failed)
+        return
+    if work.kind == "schedule":
+        found = await records.schedule_progress(principal, project, work.schedule_id or "")
+        if found is not None:
+            stuck = found.model_copy(update={"error": detail, "last_turn_at": _now()})
+            await records.set_schedule_progress(principal, project, work.schedule_id or "", stuck)
+        return
     if work.kind == "run":
         run = await records.get_run(principal, project, work.run_id)
         if run is not None and run.state in ("queued", "running"):

@@ -1,0 +1,22 @@
+# Run with:  martian evals run examples/evals/conversation/evals.yaml
+# Each case is a conversation of three turns, sent in order to one function that is given the
+# earlier turns (history). Each turn is graded by its own checks, and the whole conversation once.
+# No model key is needed. shipped-order passes. cancel-later fails on turn 3: the customer gave the
+# order number in turn 1, and the assistant has forgotten it by then, which no single turn shows.
+data: cases.jsonl
+
+target:
+  file: agent.py
+  function: reply          # called as reply(message="...", history=[...]) for each turn
+
+checks:
+  - type: contains         # each turn's reply says what that turn expects
+    name: answers
+    expectation: reply
+  - type: length           # every turn that lists no checks, and those that list it
+    name: short
+    max_length: 200
+  - type: not_contains     # once, over every reply: no other customer's order
+    name: no_other_orders
+    expectation: other_orders
+    scope: conversation

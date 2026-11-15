@@ -105,6 +105,27 @@ def test_an_invalid_suite_and_one_with_nothing_to_audit_exit_2(tmp_path):
     assert "Not audited: rubric_judge (rubric)" in result.output and "--run-judges" in result.output
 
 
+def test_conversation_cases_are_left_out_of_an_audit(tmp_path):
+    # An audit grades one reply per case, so a conversation's turns are not audited, and a suite
+    # of conversations alone has nothing to audit.
+    talk = {"id": "talk", "turns": [{"input": "Hi", "expectations": {"answer": "Hello"}}]}
+    one = {"id": "one", "input": "Is Paris the capital of France?", "expectations": {"answer": "Paris"}}
+    folder = tmp_path / "suite"
+    folder.mkdir()
+    (folder / "agent.py").write_text("def reply(message, history):\n    return message\n", encoding="utf-8")
+    (folder / "cases.jsonl").write_text(json.dumps(talk) + "\n" + json.dumps(one) + "\n", encoding="utf-8")
+    suite = {"data": "cases.jsonl", "target": {"file": "agent.py", "function": "reply"}}
+    suite["checks"] = [{"type": "contains", "expectation": "answer"}]
+    (folder / "evals.yaml").write_text(yaml.safe_dump(suite), encoding="utf-8")
+    audit = audit_suite(folder / "evals.yaml", output=tmp_path / "out")
+    assert (audit["cases"], audit["skipped"]) == (1, 1)
+    assert json.loads((tmp_path / "out" / "audit.json").read_text(encoding="utf-8"))["skipped"] == 1
+    (folder / "cases.jsonl").write_text(json.dumps(talk) + "\n", encoding="utf-8")
+    result = CliRunner().invoke(app, ["evals", "audit", str(folder / "evals.yaml"), "--output", str(tmp_path / "o2")])
+    assert result.exit_code == 2, result.output
+    assert "Not audited: 1 conversation case(s)" in result.output and "No case of this suite" in result.output
+
+
 # --- each target, and the check it gets through -----------------------------------------------------
 
 

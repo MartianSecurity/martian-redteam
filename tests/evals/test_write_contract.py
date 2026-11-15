@@ -65,8 +65,9 @@ WRITE_OPERATIONS = [
 # (tests/evals/test_otlp.py). CI gate sessions and tokens stay with the server's CI gate, and the
 # explorer's overview, quality issues, trace export and capabilities are not ported yet.
 OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post", "/v1/traces")}
-# The core's own route, which the server's contract does not have (MorningHQ/martian-notes#180).
-OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts")}
+# The core's own routes, which the server's contract does not have (MorningHQ/martian-notes#180,
+# MorningHQ/martian-notes#191).
+OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
 # The core's suite audits (MorningHQ/martian-notes#214).
 OWN_NAMES |= {
     ("get", "/v1/evals/suites/{suite_version_id}/audit"),
@@ -74,6 +75,37 @@ OWN_NAMES |= {
 }
 # The core's inspection of a run for cheating (MorningHQ/martian-notes#217).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/cheating"), ("post", "/v1/evals/{run_id}/cheating/review-queue")}
+# The core's own monitor routes, which the contract does not have either (MorningHQ/martian-notes#196).
+OWN_NAMES |= {
+    ("get", "/v1/evals/monitors"),
+    ("post", "/v1/evals/monitors"),
+    ("get", "/v1/evals/monitors/{monitor_id}"),
+    ("post", "/v1/evals/monitors/{monitor_id}/pause"),
+    ("post", "/v1/evals/monitors/{monitor_id}/resume"),
+    ("delete", "/v1/evals/monitors/{monitor_id}"),
+}
+# And its monitors' score trends (MorningHQ/martian-notes#199).
+OWN_NAMES |= {("get", "/v1/evals/monitors/{monitor_id}/trends")}
+# And its threshold routes (MorningHQ/martian-notes#198).
+OWN_NAMES |= {
+    ("get", "/v1/evals/thresholds"),
+    ("post", "/v1/evals/thresholds"),
+    ("get", "/v1/evals/thresholds/{threshold_id}"),
+    ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
+    ("delete", "/v1/evals/thresholds/{threshold_id}"),
+}
+# And the route that gives an imported threshold's webhook its secret again (MorningHQ/martian-notes#361).
+OWN_NAMES |= {("post", "/v1/evals/thresholds/{threshold_id}/secret")}
+# And its schedule routes (MorningHQ/martian-notes#197).
+OWN_NAMES |= {
+    ("get", "/v1/evals/schedules"),
+    ("post", "/v1/evals/schedules"),
+    ("get", "/v1/evals/schedules/{schedule_id}"),
+    ("get", "/v1/evals/schedules/{schedule_id}/runs"),
+    ("post", "/v1/evals/schedules/{schedule_id}/pause"),
+    ("post", "/v1/evals/schedules/{schedule_id}/resume"),
+    ("delete", "/v1/evals/schedules/{schedule_id}"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),
