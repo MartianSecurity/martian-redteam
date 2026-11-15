@@ -78,7 +78,7 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/evals/` | Dataset/MLflow adapters, gates, Backend uploads |
 | `src/martian/evals/model/` | The shared eval data model; see [eval model](eval-model.md) |
 | `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |
-| `src/martian/evals/records/` | The evals core's own records on SQLite or Postgres, their migrations and change events |
+| `src/martian/evals/records/` | The evals core's own records on SQLite or Postgres, their migrations and change events, and the worker's queue |
 | `src/martian/_privacy.py`, `result.py` | Scoped redaction and safe atomic receipts |
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
 | `src/martian_evals_kit/` | Evals import compatibility |
@@ -106,6 +106,11 @@ for up to `rate_limit_wait_seconds` as the provider's `Retry-After` asks, or a s
 or connection failure, up to `max_retries` times with backoff.
 Invalid or uncertain stages fail closed. Review may change a correct draft to an
 incorrect answer; it requires model-specific validation before adoption.
+The grounding judges (`groundedness`, `context_relevance`, `context_sufficiency`,
+`martian.evals.grounding`) reuse that transport and option checking with one call each and a
+flat verdict of strings. Their quotes are copied by the model and must be passages of a named
+text (the documents, the response, the request or the expected response) up to whitespace;
+a quote that is not, a missing quote or `uncertain` is a scorer error, never repaired.
 The SDK is not a model host and does not bundle another vendor's prompt corpus.
 Package version is `src/martian/_version.py`; catalog version
 is independent (`CATALOG_VERSION`); graph/policy revisions come from the service.
@@ -124,15 +129,21 @@ next to each one creates it.
 
 | Path | Holds | Status |
 | --- | --- | --- |
-| `src/martian/evals/` | SDK: suite runner, suite file to and from the model, judges, checks, gate | Exists |
+| `src/martian/evals/` | SDK: suite runner (conversations, and [simulated users](evals.md#simulated-users) with personas from real conversations and a [fidelity report](evals.md#simulator-fidelity)), suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
-| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes and the OpenTelemetry traces endpoint |
 | `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
-| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views), portable to SQLite and Postgres | Exists |
+| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views) and the worker's queue, portable to SQLite and Postgres | Exists |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
+| `src/martian/evals/local_targets.py` | The local edition's targets in place of an Agents registry: an HTTP endpoint or an OpenAI-compatible model, with the user's key in a file only the user can read, and their `/v1/local/targets` routes ([local targets](evals-core.md#local-targets)) | Exists |
+| `src/martian/evals/local_runs.py` | The local edition's worker, which runs each run started in the UI in a process of its own against a local target and scores it with its suite, the `/v1/local/runs` launch and run again ([local runs](evals-core.md#local-runs)), its runs and scoring jobs queued durably in the data folder, and the holds that let `martian ui` take again a run whose `martian ui` stopped, or finish one whose `martian evals run` stopped ([runs whose process stopped](evals-core.md#runs-whose-process-stopped)) | Exists |
 | `src/martian/evals/run_record.py` | `martian evals run` recording each suite-file run through the store and the record store, so `martian ui` shows it ([command-line runs](evals-core.md#command-line-runs)) | Exists |
-| `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; publishing it from a tagged release is MorningHQ/martian-notes#223 |
-| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists with an in-process worker; a durable queue is MorningHQ/martian-notes#139, one process per run #140 |
+| `src/martian/evals/inspect_import.py` | `martian evals import inspect` reading Inspect AI logs and recording each as a run the same way ([imported Inspect logs](evals-core.md#imported-inspect-logs)) | Exists |
+| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | `martian evals import promptfoo` reading promptfoo results and recording each provider as a run the same way, and `martian evals convert promptfoo` writing a promptfoo config as suite files, listing what does not convert ([promptfoo results and configs](evals-core.md#promptfoo-results-and-configs)) | Exists for results of version 3 and the assertions the checks on main decide |
+| `src/martian/evals/mlflow_import.py` | `martian evals import mlflow` checking an MLflow tracking store's schema revision, reading it over a connection that cannot write, and copying its experiments, traces, datasets, assessments and evaluation runs through the store and the record store ([copied MLflow stores](evals-core.md#copied-mlflow-stores)) | Exists for SQLite and Postgres stores; the hosted MLflow server's REST API is not read |
+| `src/martian/evals/data_export.py` | `martian evals export` and `martian evals import martian`: an organisation's data written as JSON Lines files with a manifest, resumable step by step, and imported into a fresh install, through the store and the record store ([data export](data-export.md)) | Exists, for the local edition's data folder and for installs that call it with their own stores |
+| `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; a release builds it from the wheel it publishes and pushes it to GitHub Container Registry ([releasing](releasing.md#the-local-editions-image)) |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; HTTP targets called by the worker itself, with credentials from its own process, and registered agents through a martian-agents executor interface; and a durable queue in the record store's database (`QueueWorker`), whose worker serves beside the app or in a process of its own, so that a restart loses no queued or running run. The Martian server's worker process is MorningHQ/martian-notes#139's backend part |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MorningHQ/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
 
 ## CI and scoring

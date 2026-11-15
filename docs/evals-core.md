@@ -1,8 +1,9 @@
 # Evals core
 
 `martian.evals.server` is the evals core: the `/v1/evals` API that the local edition and the
-Martian server will both serve. It runs on its own, with no Martian backend, and needs only
-`martian-sdk[evals]`.
+Martian server will both serve, and OpenTelemetry's `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). It runs on its own, with no Martian backend, and
+needs only `martian-sdk[evals]`.
 
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
 builds it with `create_app` and supplies these:
@@ -13,7 +14,8 @@ builds it with `create_app` and supplies these:
 | `records` | A `RecordStore` (`martian.evals.records`): runs, case results, scores, scoring jobs, reviews | `SqlRecordStore` on SQLite | `SqlRecordStore` on Postgres |
 | `principal` | A FastAPI dependency returning the request's `Principal` | `lambda: SINGLE_USER`: one fixed user, no organisation | Its session lookup, as `organisation_principal(user, organisation, roles, ...)` with optional names |
 | `entitlements` | A function from a principal to its `Entitlements` | Community (the default) | The organisation's plan, or an on-premises licence |
-| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `InProcessWorker` with the agents it can call and, optionally, a judge | Its own worker ([the worker](#the-worker)) |
+| `worker` | A `Worker` (`martian.evals.worker`) that runs what the write routes start | `LocalWorker`: a durable queue in the data folder served beside the app, which runs each run in a process of its own (`ProcessWorker`), with the user's [local targets](#local-runs) as HTTP targets and the SDK judge | A `QueueWorker` whose worker process runs each piece of work with `ProcessWorker`, so that a restart loses no run and no two organisations' runs share a process ([the worker](#the-worker)) |
+| `judge_settings` | A `JudgeSettings` (`martian.evals.judge_settings`): each organisation's default judge model ([judge models](#judge-models)) | `FileJudgeSettings`, `settings.json` in the data folder | Its organisation's setting, when it mounts the core |
 
 ```python
 from martian.evals.records.sql import SqlRecordStore
@@ -33,12 +35,15 @@ app = create_app(
 `store` and `records` are both required: the store holds projects, datasets, traces and run
 telemetry, and the record store holds runs, results, reviews and the other
 [records](#the-record-store). `worker` is optional: without one, a route that starts a run or a
-scoring job answers `503` ("This installation runs no evaluation worker"). Routes read the
+scoring job answers `503` ("This installation runs no evaluation worker"). `judge_settings` is
+optional too: without it no default judge model is set, and setting one answers `503` ("This
+installation keeps no default judge model"). Routes read the
 injected values through `current_principal`, `current_entitlements`, `current_store`,
 `current_records` and `current_worker` (`martian.evals.server.dependencies`). `principal` is a
 FastAPI dependency, so it can declare its own parameters (a header, a cookie) and raise `401`. A
 request the store or the record store refuses with a `StoreError` is answered `404`
-(`not_found`), `409` (`conflict`) or `422` (`invalid`), with the error's detail.
+(`not_found`), `409` (`conflict`) or `422` (`invalid`), with the error's detail, which names the
+operation and never a value written ([what store errors contain](security-and-data.md#what-store-errors-contain)).
 
 ## Editions and entitlements
 
@@ -51,9 +56,24 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
 | `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs | No | Yes | Yes |
 
-Annotating a single item or trace, and scoring one run, stay in every edition. No edition sets a
-limit yet: `LIMITS` is empty, and a limit key is added with the code that enforces it.
-`Entitlements.limit(key)` returns `None` for a limit an edition does not set.
+Annotating a single item or trace, and scoring one run, stay in every edition.
+
+`LIMITS` holds the limit keys, each added with the code that enforces it.
+`Entitlements.limit(key)` returns `None` for a limit an edition does not set, which is no limit;
+a limit is a whole number of at least 1.
+
+| Limit key | Counts | Community | Enterprise | On-Premises |
+| --- | --- | --- | --- | --- |
+| `concurrent_runs` | The organisation's runs `queued` or `running` at once, in every project | 1 | 5 | No limit |
+| `concurrent_scoring_jobs` | The `queued` or `running` scoring jobs of the organisation's completed runs | 1 | 5 | No limit |
+
+They are checked where the work is admitted (`martian.evals.server.admission`), each with one indexed count in the record store (`count_active_runs`, `count_active_scoring_jobs`, on the organisation's space, read up to the limit and no further), so admission costs the same whatever the number of runs: a launch, a run
+again or a resume of a run beyond `concurrent_runs`, and a scoring request or a resume of a scoring
+job beyond `concurrent_scoring_jobs`, are `409` ([write routes](#write-routes)). An on-premises
+installation sets none because its own workers bound what runs at once
+([the durable queue](#the-durable-queue)); one that wants a limit supplies `entitlements` with its
+own. The local edition is Community with the limits its user sets, 1 unless set
+([the local edition](#the-local-edition-martian-ui)).
 
 The edition comes from, in order:
 
@@ -82,7 +102,9 @@ own routes this way: the review queue routes, the question library and answering
 need `review_queues`, and `GET /v1/evals/monitoring` needs `monitoring`
 ([write routes](#write-routes)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
-MorningHQ/MartianBackend, and the two change together.
+MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
+`concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
+side of this map.
 
 ## Capabilities
 
@@ -114,20 +136,20 @@ assigning review work to someone else needs `assignReviews`, and changing anothe
 ## Bootstrap response
 
 `GET /v1/evals/bootstrap` is the one response the UI reads at start. Both servers answer it in the
-same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 2 of
+same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 3 of
 `contracts/evals-api.json` in MorningHQ/MartianBackend). The local edition answers:
 
 ```json
 {
   "principal": {
     "kind": "single_user",
-    "user": {"id": "local", "email": null, "display_name": null},
+    "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": null, "display_name": null},
     "organisation": null,
     "role": "owner",
     "platform_admin": false
   },
   "edition": {"key": "community", "name": "Community"},
-  "entitlements": {"features": [], "limits": {}},
+  "entitlements": {"features": [], "limits": {"concurrent_runs": 1, "concurrent_scoring_jobs": 1}},
   "capabilities": {
     "run": true, "score": true, "review": true, "createReviewQueues": false,
     "saveSuites": true, "saveViews": true, "editDrafts": true, "publishDatasets": true,
@@ -142,13 +164,16 @@ same shape, `EvalsBootstrapOut` in the server's frozen evals contract (version 2
 ```
 
 - `principal.kind` is `single_user` or `organisation`; `organisation` is `null` for the single
-  local user. `email`, `display_name` and the organisation's `name` are whatever the edition's
-  principal carries (`organisation_principal(..., email=, display_name=, organisation_name=)`),
-  and `null` when it carries none. `platform_admin` is the server operator's flag, always `false`
+  local user. `user.id` is the principal's id as the API names a person (**Users** under
+  [read routes](#read-routes)); the local user `local` is the UUID above. `email`,
+  `display_name` and the organisation's `name` are whatever the edition's principal carries
+  (`organisation_principal(..., email=, display_name=, organisation_name=)`), and `null` when it
+  carries none. `platform_admin` is the server operator's flag, always `false`
   in the local edition.
 - `edition.key` is `community`, `enterprise` or `on_premises`; `edition.name` is its display name.
-- `entitlements.features` lists the feature keys the edition includes, sorted; `limits` is empty
-  until a limit key exists.
+- `entitlements.features` lists the feature keys the edition includes, sorted; `limits` holds each
+  limit the edition sets, by key ([editions and entitlements](#editions-and-entitlements)), and
+  leaves out a key it sets no limit for. The local edition's are its `--concurrency`.
 - `capabilities` holds every capability in the table above, `true` or `false`.
 - `status` is the store's readiness, as `GET /v1/evals/status`.
 
@@ -160,7 +185,7 @@ server's `tests/test_evals_bootstrap.py` fixes the same shape.
 The core serves the read routes the Evals UI's Runs, run detail, Compare, Traces, Sessions and
 Datasets pages call. Each is a port of the server's route onto the store and the record store, and each
 operation (path, parameters, request body, responses, tags and operation id) is the one in
-version 2 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
+version 3 of the server's frozen contract (`contracts/evals-api.json` in MorningHQ/MartianBackend):
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
@@ -170,12 +195,19 @@ version 2 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/{run_id}/workbench` | Scoring jobs, scores and reviews of the run, the selected job's scorecard, judge calibration | Records; the run's review queues from the store |
 | `GET /v1/evals/{run_id}/items/{item_id}/trace` | The case result's trace: spans, usage and MLflow-shaped `annotations` | Store |
 | `GET /v1/evals/{run_id}/provenance` | The run as admitted, and its run in the store (`native`) | Records and store |
-| `GET /v1/evals/compare` | Two runs paired by case; with both scoring jobs, each scorer's change and both scorecards | Records |
+| `GET /v1/evals/compare` | Two runs paired by case, with a significance label; with both scoring jobs, each scorer's change and label and both scorecards | Records |
 | `POST /v1/evals/traces/search` | A page of traces in the server's columns, with `next_cursor` | Store |
 | `POST /v1/evals/sessions/search` | The sessions among the first 1,000 matching traces ([sessions and users](#sessions-and-users)) | Store (`search_sessions`) |
 | `GET /v1/evals/traces/{trace_id}` | One trace's spans, usage and MLflow-shaped `info` | Store |
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
+
+The core adds two read routes of its own, which the server's contract does not have:
+
+| Route | Answers with | Reads |
+| --- | --- | --- |
+| `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky. An attempt of a [conversation](evals.md#conversations) case also has its `session_id` and its `turns`, as below | Records |
+| `GET /v1/evals/{run_id}/turns` | Each [conversation](evals.md#conversations) case of the run: `run_id` and `items`, one per conversation case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, its `session_id` (the session its turns' traces share), `simulated` (whether a [simulated user](evals.md#simulated-users) wrote its turns), `latency_ms` (its turns' added up), `checks` (each check's `passed`, `rationale` and `error` on the whole conversation, the run's own scores of the case) and its `turns`: `number`, `status`, `prompt`, `expected` and `output` as text (as the run detail's item has them), `error`, `latency_ms`, `trace_id` and `checks` (each check that grades the turn). With repeats these are the attempt's that shows the case's reply. A run without conversation cases answers `items: []` | Records |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -194,6 +226,18 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `id` one derived from its run, case, scorer and scoring job (`result_id`, `score_id`). A run is
   found by id in the default project, then in each of the store's projects. The run routes match
   only a UUID, so another path an edition adds under `/v1/evals` is not taken for a run.
+- **Users.** The API names a person by a UUID (`projection.user_out`): their id when it is one, as
+  the server's users' ids are, else a UUID derived from it. The local user, whose id is `local`,
+  is `bf0808be-f788-5dd7-8fc2-2d28ed350045`. Every user id a response carries is in this form:
+  the bootstrap's and the session call's `user.id`, the workbench's `members`, a review's
+  `actor_id` and `assignee_id`, a queue's `assignee_id`, a saved view's `owner_id`, a suite
+  version's `actor_id`, a draft's `created_by` and `updated_by`, and the `source_id` of a human
+  score the core writes (a review's answer and a trace annotation, in the store too). A request's
+  `assignee_id`, a UUID in the contract, is compared with the principal in it, so the id the UI
+  is given for its user is one the review and queue routes accept. The record store keeps the
+  principal's own id. A human score written by something else, such as an application's MLflow
+  feedback, keeps the source id it was written with, and a trace's `user_id` is the traced
+  application's user, not a person of the server.
 - **Runs.** `agent_id` is the agent of a run whose target is a registered agent; for any other
   target the contract still requires a UUID, and the core sends `00000000-0000-0000-0000-000000000000`
   (`NO_AGENT`). `agent_name` is `null`: the core has no agent registry. The Evals UI names a run
@@ -201,6 +245,23 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   dataset in the store, or its dataset digest; `max_items` is the run's case limit, or its case
   count when it had none. Two runs compare only when both are completed and have the same dataset
   digest (or store dataset).
+- **Repeated cases.** A case result of a run that repeats its cases is one item, with the status
+  of its attempts combined; the contract's `EvalItemOut` has no place for attempts, so they are
+  served by the attempts route above. So are the run's reliability and each case's `flaky`: the
+  run routes' responses, `EvalRunOut` and `EvalRunDetailOut`, are typed in the frozen contract,
+  and a field there would need a new contract version on the server. The run's
+  `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
+  its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
+  comparison pairs these combined statuses.
+- **Conversation cases.** A conversation case result is one item, with its conversation's status,
+  its first turn's prompt as `prompt` and the conversation as messages, in JSON, as `output`.
+  `EvalItemOut` has no place for turns, so they are served by the turns route above, which the
+  frozen contract does not type. The run's `provenance.conversations` on the run routes, how many
+  of its cases are conversations, says whether the turns route has any; a run without
+  conversation cases has no such key. The item's trace is the turn that shows the conversation's
+  verdict, and its scores, the conversation's verdicts, are on no trace. Each turn's trace has
+  the conversation's `session_id`, so the Sessions search groups a conversation's turns into one
+  session with no route of its own.
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -210,15 +271,48 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   scoring job's `config` names its scorers and carries a digest of their pinned versions, so two
   jobs compare only when they scored alike. A scorecard takes a scorer's kind from its values
   (text categorical, numbers numeric, otherwise boolean) because the model does not store it.
-- **Members and queues.** The workbench's `members` is the requesting principal only: the core
-  knows no organisation membership. Its `queues` are the run's review queues, newest first, at most
-  100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
+  Each criterion carries `confidence_95`, the Wilson interval of a boolean scorer's pass rate, as
+  the server's does, and `mean_confidence_95`, the Student t interval of a numeric scorer's mean
+  (`null` for fewer than two values), which the server's scorecard does not have yet
+  ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)). Both treat the
+  run's cases as independent.
+- **Comparisons.** A comparison carries `significance`, the paired test of the exact-match
+  verdicts over the pairs that are not `not_comparable`. With both scoring jobs it also carries
+  `criteria_significance`, the same for each scorer, in its policy's direction: the exact
+  McNemar test for boolean values, the paired t test for numbers, and `null` for text. Each is
+  `null` when no pair compared, as in an incompatible comparison. The server's comparison does
+  not have either yet. The method and the label are in
+  [comparing two runs](evals.md#comparing-two-runs).
+
+  | Field | Value |
+  | --- | --- |
+  | `label` | `better`, `worse` or `within_noise` |
+  | `test` | `mcnemar_exact` or `paired_t` |
+  | `p_value` | The two-sided p-value |
+  | `alpha` | The significance level, `0.05` |
+  | `compared` | Pairs with a verdict or a score in both runs |
+  | `changed`, `improved`, `regressed` | The pairs that changed, then those that moved the better way and the worse way |
+  | `baseline`, `candidate` | The pass rate or the mean over the compared pairs |
+  | `effect` | `candidate` minus `baseline` |
+  | `minimum_detectable_effect` | The smallest change the comparison could label, or `null` when it could label none |
+- **Members and queues.** The workbench's `members` is the requesting principal only, under the
+  id the bootstrap gives: the core knows no organisation membership. Its `queues` are the run's
+  review queues, newest first, at most 100, with the one named by `queue_id` added. The store interface cannot list queues, so the core
   finds a run's queues through its reviews: creating a queue adds a pending review per case and
   question.
 - **Traces** are shown in MLflow's terms where the contract marks a response MLflow-shaped: state
   `OK`, `ERROR`, `IN_PROGRESS` or `STATE_UNSPECIFIED`, a `TraceInfo` built from the trace, and
-  spans as the UI's span inspector reads them (span times are epoch milliseconds). A trace whose
-  spans are not one tree is refused with `409`.
+  spans as the UI's span inspector reads them (span times are epoch milliseconds). A span's
+  `type`, `model`, `token_usage`, `inputs` and `outputs` are what the
+  [trace conventions](#trace-conventions) mapping reads from it, and `info.trace_metadata` names
+  the mapping version as `martian.trace_mapping`. A trace whose spans are not one tree, or whose
+  mapping version this release does not have, is refused with `409`. A search row's `request`
+  and `response` are what the store's search returns, which on the MLflow binding are MLflow's
+  previews of at most 1,000 characters. The trace's detail has them whole, in
+  `info.request_preview` and `info.response_preview`, and when a search shows a shortened
+  preview, the detail's `info.trace_metadata` says so: `martian.request_preview_truncated` or
+  `martian.response_preview_truncated` is `"true"`. The frozen contract has no field for it, so it
+  is trace metadata.
 - **Trace search and sessions.** The store filters on project, session, user, text, state and
   time and orders by time. The core applies the contract's minimum latency and assessment filters
   to the store's pages, reading at most 1,000 traces per request, and orders by latency over at
@@ -233,7 +327,7 @@ questions, dataset drafts and operations, Monitoring) are [write routes](#write-
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v2.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 
@@ -241,15 +335,16 @@ date-times checked.
 
 The core serves the routes that launch, score and review runs and that edit datasets, suites,
 judges, review queues, projects and saved views. Each is a port of the server's route onto the
-store, the record store and the worker, and each operation is the one in version 2 of the frozen
+store, the record store and the worker, and each operation is the one in version 3 of the frozen
 contract:
 
 | Routes | What they do | Module |
 | --- | --- | --- |
-| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a registered agent over a published dataset and hand it to the worker; stop it | `launch` |
+| `POST /v1/evals`, `POST /{run_id}/cancel` | Admit a run of a target the worker knows over a published dataset and hand it to the worker; stop it | `launch` |
 | `GET /scorers`, `POST /{run_id}/scores`, `POST /{run_id}/scores/{job_id}/cancel`, `POST /{run_id}/assessments/{assessment_id}/sync`, `GET /monitoring` | The scorers on offer; admit a scoring job of a completed run and hand it to the worker; stop it; keep a score on its trace; scoring jobs and their scorecards across runs | `scoring` |
 | `GET`, `POST /suites` | Saved suites of built-in scorers and policies, a new version for each change | `suites` |
-| `GET`, `POST /judges` | Registered judges, a new version for each registration | `suites` |
+| `GET`, `POST /judges` | Registered judges, a new version for each registration, each with the model it runs on | `suites` |
+| `GET`, `PUT /judge-model` | The default judge model, for judges that name none ([judge models](#judge-models)) | `suites` |
 | `POST /{run_id}/items/{item_id}/reviews`, `GET /reviews` | Answer a result; list the latest answers with filters | `reviews` |
 | `GET`, `POST /review-queues`, `POST /review-queues/{queue_id}/sync`, `GET`, `POST /review-questions` | Review queues with an assignee and their progress; the question library | `reviews` |
 | `POST /traces/{trace_id}/annotations` | A person's feedback or expectation on a trace | `reviews` |
@@ -267,31 +362,52 @@ All paths are under `/v1/evals`. How the core carries them out:
 - **No target or model call in a request.** A launch checks the request, asks the worker whether
   it can call the target (`Worker.check_target`), records a `queued` run with the published
   dataset version it will read and the target's pin in `provenance.target`, and submits it. A
-  scoring request records a `queued` scoring job and submits it. Both answer `202` at once.
-- **Runs.** A launch names a registered agent (`agent_id`) and a published dataset; an agent the
-  worker does not know is `404` ("Agent not found"), a dataset not published is `422`. One run at
-  a time per organisation (`409` "An eval run is already in progress"). Run codes count up from
-  `EV-1001`. The worker runs the dataset's active cases up to `max_items`, skips a case with no
-  usable prompt or expected text, calls the target once per case with no retry, grades each output
-  by exact match and records a trace per called case.
+  scoring request records a `queued` scoring job and submits it. Both answer `202` at once. The
+  launch checks only the target it names. When the worker refuses the submit or fails, the
+  recorded run or job is `failed` with "The worker did not accept this work, so nothing ran"
+  before the error is raised (`submit_or_fail`), so it never stays `queued` and blocks the next
+  launch or scoring request.
+- **Runs.** A launch names a target by id (`agent_id`), one the worker knows: a function, an HTTP
+  target it calls itself, or a registered agent ([targets](#targets)); and a published dataset. An
+  id the worker does not know is `404` ("Agent not found"), a dataset not published is `422`. An
+  organisation has at most its edition's `concurrent_runs` queued or running at once
+  ([editions and entitlements](#editions-and-entitlements)): one more is `409`, "An eval run is
+  already in progress" at a limit of 1, else "5 eval runs are already in progress, as many as this
+  organisation may have at once". Run codes count up from `EV-1001`. The worker runs the
+  dataset's active cases up to `max_items`, skips a case with no usable prompt or expected text,
+  calls the target once per case with no retry, within the worker's time limit, grades each
+  output by exact match and records a trace per called case. The frozen launch body has no field
+  for a run's limits, so a launched run runs under the worker's
+  ([limits](#limits-stopping-and-resuming)).
 - **Cancelling.** A queued run or scoring job is cancelled at once. A running one gets
   `cancel_requested_at` (`Run.cancel_requested_at`, `ScoringJob.cancel_requested_at`), and its
   worker stops before the next case: a run's remaining cases are skipped ("Stopped before this
-  target request"), a job keeps the scores it made. Cancelling a finished run is `409`.
+  target request"), a job keeps the scores it made. A running run whose worker says that nothing is
+  working on it any more (`InterruptedRuns`, [the worker](#the-worker)) is cancelled at once, with
+  the reason as its `error`, even when a stop was asked before. Cancelling a finished run, a
+  `stopped` one included, is `409`.
 - **Scoring.** The scorers are the built-in ones by name (`exact_match`, `contains_expected`,
   `valid_json` and `response_length` are code; `correctness`, `safety` and `policy` are judges),
   registered judges pinned by name and version, or a saved suite version's scorers and policies
   (`suite_version_id`). Judge scorers need a worker with a judge (`Worker.judges`); without one
-  they are refused (`422`) and `GET /scorers` shows them unavailable. One active scoring job per
-  run: the server's bound of one per organisation, which limits model use, belongs to the worker
-  that runs the jobs. A job's scores sit beside the run's own, and each scored value is also kept
-  on its case's trace.
+  they are refused (`422`) and `GET /scorers` shows them unavailable. Each judge scorer is pinned
+  to its model when the job is admitted: the judge's own, or the default judge model when it
+  names none, built-in judges included. A job keeps that model when the default changes later,
+  and two jobs on different models do not compare as scored alike. One active scoring job per
+  run (`409` "A scoring job is already active for this run"), and at most the edition's
+  `concurrent_scoring_jobs` queued or running across the organisation's completed runs, which
+  bounds its model use as the server's one per organisation does: one more is `409`, "A scoring job
+  is already in progress" at a limit of 1, else "5 scoring jobs are already in progress, as many as
+  this organisation may have at once". The count reads the jobs of each completed run, since the
+  record store has no query across runs. A job's scores sit beside the run's own, and each scored
+  value is also kept on its case's trace. A request cannot name a
+  [custom Python scorer](#custom-scorers-in-the-worker): the contract's `scorers` are the built-in
+  names, so any other is `422`, and `GET /scorers` does not offer one (MorningHQ/martian-notes#334).
 - **Reviews.** A review is a new link in its case's chain for one criterion: `human_review`, or a
   queue's question. It names the review it replaces (`previous_id`); a stale one is `409`. A
   complete review also stores the answer as a human score, on the case's trace too. Only a role
   with `assignReviews` gives another person's work to someone; the core knows no membership, so
-  an assignee is any user id. Where the contract takes a user as a UUID and the user id is not one
-  (the local user is `local`), the core sends a UUID derived from it (`projection.user_uuid`).
+  an assignee is any user, named as **Users** above says.
 - **Review queues and questions.** A queue lives in the store with one item per case's trace, so
   only results with a trace can be queued. Creating it adds a pending review per case and question;
   each answer marks the case's item completed once every question of the queue is answered, and
@@ -326,7 +442,12 @@ gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overv
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
 deterministic judge. `tests/evals/test_write_contract.py` checks each write operation and its
 schemas against the contract, validates typed responses, and checks that the core serves every
-operation of the contract but the ones above. `tests/evals/test_worker.py` covers the worker.
+operation of the contract but the ones above. `tests/evals/test_user_ids.py` saves a review from
+`martian ui`'s application with the UI's default reviewer, the session's user, and checks that
+every route that takes or names a user uses the bootstrap's id, for the local user and for a user
+whose id is a UUID. `tests/evals/test_worker.py`, `test_worker_process.py`,
+`test_worker_targets.py`, `test_worker_queue.py`, `test_worker_limits.py` and
+`test_worker_concurrency.py` cover the worker.
 
 ## The worker
 
@@ -338,31 +459,624 @@ then calls `Worker.submit(Work(...))`:
 | --- | --- |
 | `Work` | `kind` (`run` or `scoring`), the `principal`, `project_id`, `run_id`, and `job_id` for scoring |
 | `Worker.judges` | Whether the worker can run model judges |
-| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it. Raises `StoreError`; never calls the target |
+| `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
+| `Runner.run(work)` | `InProcessWorker` and `ProcessWorker` only: do the work and return once it has ended; cancelled, stop it and leave its record as it is. A `QueueWorker` runs what it takes with it |
+| `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
+| `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `QueueWorker` and `LocalWorker` can ([the durable queue](#the-durable-queue)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
 
-`execute_run` and `execute_scoring` are the work itself, for any worker to call. They read the
+`execute_run` and `execute_scoring` are the work itself, for any worker to call. `execute_run`
+takes the worker's `call_for(run)`, the call for the run's target, and `pin_for(run)`, the
+target's pin as the worker has it now, which must still be the run's before any call. They read the
 record before each case, so a cancel request reaches a worker in another process too, and move
 each record on only from the state it expects, so two workers never both take the same work. Work
 whose record is no longer queued when its turn comes is skipped, and work that fails part way is
-marked `failed` with its reason, never left running.
+marked `failed` with its reason, never left running. Each finished case is checkpointed before the
+next one starts. Work whose worker stopped part way is queued again by the queue's next worker,
+which resumes it after the cases already finished (`take_over`, [checkpoints and
+resuming](#checkpoints-and-resuming)), or marked `failed` where no queue takes it again
+(`fail_unfinished`).
 
-`InProcessWorker(store, records, targets={agent_id: call}, judge=None, target_timeout_seconds=120)`
-runs each piece of work as a task of the API's event loop. A target is an async function from a
-`Case` to its output (`TargetCall`); a judge is an async function from a `JudgeRequest` (the
-prompt, expected text, output and the judge scorers to apply) to a `JudgeResult` (the model and a
-verdict per scorer). `drain()` waits for the work submitted so far. Work is lost with the process:
-a run interrupted by a restart stays `running` until the durable queue.
+A target is called once per case and returns its output ([targets](#targets)); a judge is an
+async function from a `JudgeRequest` (the prompt, expected text, output, the judge scorers to
+apply, the `model` and `endpoint` they are pinned to, and the scoring job's `job_id`) to a
+`JudgeResult` (the `model` it used, the `model_version` the provider reported, the judge's own
+`judge_version`, a verdict per scorer, the reason for each scorer it gave none, and the `tokens`
+the provider reported, or `None`). A scoring job
+sends one request per model its judges are pinned to ([judge models](#judge-models)); the judge is
+[`sdk_judge` or `agents_judge`](#the-workers-judge). There are three workers:
+
+- `InProcessWorker(store, records, organisation_id=None, targets={target_id: call_or_http_target},
+  judge=None, target_timeout_seconds=120, credentials=None, executor=None, scorers=None, limits=None)` runs each piece of
+  work as a task of the calling process's event loop. It runs one organisation's work,
+  `organisation_id` (`None` is the single local user), and raises `ValueError` from `check_target`
+  and `submit` for any other's. It serves tests and runs the work inside each of
+  `ProcessWorker`'s processes. `drain()` waits for the work submitted so far. Work it is given
+  with `submit` is lost with the process: a run interrupted by a restart stays `running`.
+- `ProcessWorker(setup, records, agents=[target_id], judges=False, options={...},
+  targets={target_id: http_target}, executor=None)` runs each piece of work in a new process of
+  its own, which exits when the work is done. An installation that serves organisations uses it,
+  and so does the local edition's `LocalWorker` ([local runs](#local-runs)), because a run's
+  MLflow state would otherwise be the server's.
+- `QueueWorker(queue, runner, records, in_process=False, lease_seconds=30, poll_seconds=1,
+  max_attempts=3, concurrency=1)` puts each piece of work in a durable queue in the record store's
+  database, and a worker takes it from there and runs it with `runner`, either of the two above,
+  `concurrency` pieces at once, so that a restart loses no queued or running work
+  ([the durable queue](#the-durable-queue)). The local edition's `LocalWorker` is one, served
+  beside the app.
+
+### Targets
+
+A run names its target by id, the launch request's `agent_id`. The worker knows each id as one
+of these (`martian.evals.worker.targets`):
+
+| Target | Given as | Called |
+| --- | --- | --- |
+| A function | A `TargetCall` in `targets`: an async function from a `Case` to its output | In the worker's process, on an event loop of a thread of its own |
+| An HTTP target | The shared model's `Target(kind="http")` in `targets` | By the worker itself, with no martian-agents service |
+| A registered agent | An id the worker's `AgentExecutor` admits | Through martian-agents, with leased credentials |
+
+The worker asks the executor only for ids it does not know itself; without an executor it calls
+no registered agent, so an install with no martian-agents service runs functions and HTTP targets.
+
+- **Every call has a time limit**, the worker's `target_timeout_seconds` (`WorkerServices` in a run's
+  process), whatever the target: a call that outlasts it is the case's error, `item timed out`, and
+  the run goes on. An HTTP target's client and a registered agent's executor end their own calls.
+  A function is the installation's own code, which may block its event loop, ignore being
+  cancelled or never return, so it runs on an event loop of a thread of its own
+  (`FunctionTargets` in `martian.evals.worker.targets`), which the worker's loop waits for with the
+  deadline. One loop serves every call, so what a function keeps between calls, such as an HTTP
+  client, stays on one loop. Python cannot stop a thread: a function that has not ended a second
+  after it was cancelled (`GRACE_SECONDS`) keeps its thread, and the next call gets a new one. The
+  thread ends with the process, and each run's process ends with its run
+  ([one process per run](#one-process-per-run)). A thread was chosen over a process per call
+  because a function shares the run's process, its MLflow state and its setup's objects; a process
+  could not call it.
+- **HTTP targets** follow a suite file's URL target, with the same code: the worker POSTs `body`
+  to `url` once per case, with no retry, no redirect and no proxy from the environment, the body
+  filled in by `martian.evals.runner.request_body`. `{{input}}` in the body is the case's prompt
+  (the text a registered agent is sent), `{{inputs.NAME}}` an input and `{{uuid}}` a new UUID,
+  and a case is a [conversation](evals.md#conversations) of one turn: `{{session_id}}` is a new
+  id, `{{history}}` empty and `{{messages}}` the prompt as one user message. The output is the
+  response's text, or the value at `response_path`. A response that is not 2xx is the case's error, naming the setting to
+  check: `the target returned HTTP 401; check the credentials in target.headers`, `HTTP 404; check
+  target.url`, `HTTP 400` or `422; check target.body`. So are an unreachable endpoint (`the target
+  could not be reached: ConnectError; check target.url`) and a missing value at `response_path`.
+  These errors never repeat the address, a header or the response. A call that outlasts the
+  worker's `target_timeout_seconds` is `item timed out`. A `response_path` step of digits other
+  than 0-9, such as `²`, is refused as in a suite file, with a `ValueError` naming
+  `targets['ID'].response_path`. Both workers refuse it each time a check or a run names the
+  target, so a launch of it fails before any run is made, and one wrong target never stops the
+  others.
+- **Conversation cases** (`Case.turns`, and `Case.simulated_user`, whose turns a simulator writes)
+  run only in suite-file runs, turn by turn. The worker
+  sends one prompt per case, so it skips a conversation case without calling the target, with
+  the reason `item is a conversation, which martian evals run runs turn by turn; the worker sends
+  one prompt per item`.
+- **Credentials.** `${NAME}` in an HTTP target's `url` or a header value is filled in by the
+  worker's `Credentials`, a function `(principal, target_id, name) -> str | None` asked in the
+  process that calls the target, each time it calls it. Neither the launch request nor a record
+  carries a credential: the run keeps the target's id, and `provenance.target` keeps
+  `{"kind": "http", "agent_id", "digest"}`, a digest of the target as written with `${NAME}`
+  unexpanded. A worker with no credentials, or one that has no value for a name, fails each case
+  with the setting that holds it (`target.headers.Authorization needs the credential
+  MARTIAN_TARGET_KEY`) and sends nothing. The local edition's credentials are the keys it keeps
+  for its targets (`LocalTargets.credential`, [local runs](#local-runs)); a per-organisation key
+  store is MorningHQ/martian-notes#135.
+- **Registered agents** need leased credentials, so they stay on the martian-agents path. An
+  `AgentExecutor` has `check(principal, agent_id)`, which admits the agent and returns its pin
+  (`provenance.target`), or raises `StoreError` (`not_found`), and `call(principal, run, case,
+  timeout_seconds=...)`, which calls the agent once. On the Martian server, admission pins the
+  agent's approved connection and each call carries a short-lived target lease that martian-agents
+  exchanges for the credential (`app/evals_targets.py` in MorningHQ/MartianBackend), so the worker
+  never holds it. The worker asks `check` again before each start of a run ([the same
+  target](#the-same-target-on-every-start)), so an executor's pin stays the same for as long as
+  the agent does, and holds nothing, such as a lease or a time, that changes while the agent does
+  not. The server implements the executor when it mounts the core (MorningHQ/martian-notes#102).
+
+`ProcessWorker` checks a target in the API process: an id in `agents` (a function the setup
+gives), in `targets` (an HTTP target), or one its `executor` admits. Each run's process receives
+the HTTP target its run names, as written, with its work, and no other, so a target the run does
+not name is never read or checked; it calls it with its setup's `credentials`, and it calls
+registered agents with its setup's `executor`. `targets` is read at each check and each run, so it
+may be a live view of targets the user defines.
+
+`tests/evals/test_worker_targets.py` launches runs through the launch route against a small HTTP
+server on loopback: once per case with the worker's credential, a non-2xx response, a timeout, a
+missing credential and an unreachable endpoint, each with no retry. It runs one in its own process
+with `ProcessWorker` and no martian-agents at all, and runs a registered agent through a fake
+martian-agents executor, in process and in a process of its own, without the HTTP path. The key
+and the leases appear in no record. A run whose worker also has a target it would refuse, under
+another id, completes, with `ProcessWorker` and under the queue: only the run's own target is read.
+
+#### The same target on every start
+
+A run calls only the target it was admitted with, so one run never mixes two systems. Before a run
+calls its target, on its first start and on every resume (taken over from the queue after its
+worker stopped, or queued again by `resume_run` after a limit), the worker pins the target as it
+has it now, in the process that will call it, as `check_target` pinned it when the run was
+admitted (`target_pin`), and compares that pin with the run's `provenance.target` (`changed_target`
+in `martian.evals.worker.targets`). Every field of the new pin must have the value the run was
+pinned with; a field only admission adds, such as a local target's `name`, is not compared. When
+one differs, the run is `failed` before any call, with an error that names the target:
+
+```text
+The target "Support agent" (<target id>) changed since this run started; the run did not call the changed target. Start a new run to evaluate it as it is now
+```
+
+The cases it finished keep their results, and a local run's suite scoring job is cancelled, as for
+any run that does not complete. A target that has not changed resumes as before. What each kind of
+target is compared by:
+
+| Target | Its pin | What changes it |
+| --- | --- | --- |
+| An HTTP target | `{"kind": "http", "agent_id", "digest"}`: a digest of the target as written | Its `url`, `headers` as written, `body` or `response_path`, or the id becoming another kind of target |
+| A local target | The HTTP target's pin, and its `name` | Its definition in `targets.json`, which only a hand edit changes under the same id: the UI cannot edit a target |
+| A function | `{"kind": "agent", "agent_id"}` | Only the id becoming another kind of target. A function is the installation's own code, with nothing to digest, so one replaced by another function under the same id is not detected; give the new function a new id |
+| A registered agent | The executor's `check`, asked again in the process that calls the agent | Whatever the executor's pin holds. On the Martian server that is the agent's approved connection, its revision and its approval (`EvalTarget.pin` in `app/evals_targets.py`) |
+
+A credential's value is in no pin: `${NAME}` stays unexpanded, so a rotated key is not a changed
+target. A run with no pin, which no launch records, fails the same way. A target the worker no
+longer has fails the run as before, with "The worker cannot call this run's target", or with the
+executor's refusal. The target does not change during one start: an in-process worker keeps the
+targets it was built with, and a run's process receives its HTTP target once, as it starts.
+
+`tests/evals/test_worker_targets.py` takes over a run whose worker stopped while its second case was
+in flight, and resumes a run stopped at its time limit after its first case with `resume_run`,
+each with the worker in process and with a process per run: when the HTTP target under the run's
+id changed meanwhile, the run fails naming it and the changed target gets no request; when it did
+not, the run completes and only its unfinished cases are called. A run whose HTTP target, target
+kind (a function for an HTTP target, or the other way) or registered agent's pin changed between
+its admission and its first start fails the same way, with no call. `tests/evals/test_local_runs.py`
+resumes a local run whose target was edited by hand in `targets.json`: it fails naming the target,
+and its suite does not score it.
+
+### One process per run
+
+MLflow keeps this state for the whole process, not for a request or a thread, so two
+organisations' evaluations must never share one:
+
+- The client workspace, in the `MLFLOW_WORKSPACE` environment variable. `mlflow.set_workspace`
+  writes it, and every thread that has not set MLflow's per-request context reads it: the threads
+  MLflow's evaluation harness calls the target on, the thread that exports traces in the
+  background, and the SDK judge's gateway call, which sends it as the workspace header.
+- The active experiment (`mlflow.set_experiment`, which also sets `MLFLOW_EXPERIMENT_ID`), where
+  every new trace and evaluation run is recorded.
+- The tracking URI (`mlflow.set_tracking_uri`) and the trace destination
+  (`mlflow.tracing.set_destination`).
+
+With two organisations' runs on threads of one process, each with its workspace and experiment
+selected, one organisation's MLflow traces land in the other's workspace while both runs report
+`completed`. Setting the workspace with `mlflow.set_workspace` instead loses them, or fails the
+evaluation. `MlflowStore`'s own calls are not affected: each sets the workspace for its own call.
+
+`ProcessWorker.submit` starts `python -m martian.evals.worker` with `MLFLOW_WORKSPACE` set to the
+work's organisation's workspace (`workspace_name(principal)` in `martian.evals.store.mlflow_local`:
+`org-` and a hash of the organisation id, or `local`) and without `MLFLOW_EXPERIMENT_ID` or
+`MLFLOW_EXPERIMENT_NAME`, and returns. The rest of the environment is the API process's, so
+MLflow's telemetry is off there as it is in the API process ([telemetry](security-and-data.md#telemetry)).
+The new process:
+
+1. reads the work as JSON on its standard input (`dump_work` and `load_work`), so a principal's
+   details never appear on a command line;
+2. exits with status 2 if its `MLFLOW_WORKSPACE` is not the work's organisation's;
+3. calls the worker's `setup` with `options` as keyword arguments. `setup` is a module-level
+   function, named by its import path so that the new process can import it, and returns
+   `WorkerServices`: the store, the record store, the targets by id, the judge, the target
+   timeout, the HTTP targets' `credentials`, the registered agents' `executor`, the custom
+   Python `scorers` by name ([custom scorers](#custom-scorers-in-the-worker)) and the `limits` of a
+   run that has none of its own. `options` must be JSON;
+4. runs the work, and the HTTP target it arrived with, with an `InProcessWorker` for the work's
+   organisation, and exits.
+
+Whatever the setup or the work selects in MLflow inside that process, such as a tracking URI, an
+experiment or a judge's traces, stays with that organisation. `agents` are the ids of the
+functions the setup's targets call, which `check_target` accepts, and `judges` says whether the
+setup gives a judge. When a process exits with an error, the worker marks its run or scoring job `failed` with
+"The worker process ended before this work finished" if it is still queued or running
+(`fail_unfinished`). `drain()` waits for every process started so far. `submit` starts a process
+for each piece it is given, with no bound; under a `QueueWorker`, which calls `run`, as many run at
+once as that worker's `concurrency`.
+
+Under a `QueueWorker`, which calls `ProcessWorker.run(work)`, the run's process ends with the
+worker that started it, the one holding the work's claim. It starts in a session of its own, with
+a pipe from the worker as its standard input, which it keeps open; it exits with status 3 as soon
+as the pipe closes, however the worker ended. So it never outlives the claim, and a signal meant
+for the worker, such as a terminal's Ctrl+C, reaches only the worker, which ends the process and
+gives the work back. A cancelled `run` ends the process and leaves the work's record as it is. A
+process that cannot start fails the work with "The worker could not start a process for this
+work", so it does not wait in the queue.
+
+`tests/evals/test_worker_process.py` launches two organisations' runs at once on one SQLite store,
+each calling an agent traced with MLflow tracing, and checks where every trace landed: with a
+process each, all of them are in their own organisation's workspace. The same work on two
+threads of one process is an expected failure (`xfail`, strict), so the test turns red if it ever
+passes. The child processes import the test's setup (`tests/evals/process_fixture.py`), so run the
+tests from the repository root.
 
 What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#139 | A durable job queue and worker process: `submit` enqueues |
-| MorningHQ/martian-notes#140 | One process per evaluation run, executing each `Work` |
-| MorningHQ/martian-notes#137 | HTTP targets called from the worker, as another kind of target |
-| MorningHQ/martian-notes#133 | The SDK judge as the worker's judge |
-| MorningHQ/martian-notes#116 | Run and run again from the local UI |
+| MorningHQ/martian-notes#135 | A key store for each organisation's provider keys |
+
+### The durable queue
+
+`QueueWorker` (`martian.evals.worker.queue`) is the worker an installation uses so that a restart
+of the API process loses and fails no queued or running run. Its `submit` puts the work in the
+queue and returns; a worker takes it from there and runs it with its `runner`, an
+`InProcessWorker` or a `ProcessWorker` (each a `Runner`). Its `judges` and `check_target` are the
+runner's, so the routes do not change.
+
+The queue is `SqlWorkQueue(database_url, schema="martian", migrate=True)`
+(`martian.evals.records.queue`): the `martian_work_queue` table in the record store's database,
+SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with).
+
+```python
+from martian.evals.records.queue import SqlWorkQueue
+from martian.evals.records.sql import SqlRecordStore
+from martian.evals.worker import InProcessWorker, QueueWorker
+
+records = SqlRecordStore("sqlite:///evals/martian.db")
+queue = SqlWorkQueue("sqlite:///evals/martian.db")
+runner = InProcessWorker(store, records, targets={agent_id: call_agent})
+worker = QueueWorker(queue, runner, records, in_process=True)
+app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, worker=worker)
+```
+
+- **Where the worker runs.** With `in_process=True` the worker serves the queue beside the app,
+  in the API process: `create_app` starts it when the app starts serving and stops it when the
+  app stops. That is how the local edition runs (`LocalWorker`, [runs whose process
+  stopped](#runs-whose-process-stopped)). Otherwise the API process only queues
+  work, and a worker process of its own builds the same `QueueWorker`, usually with a
+  `ProcessWorker` runner, and runs `await worker.serve()`.
+- **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
+  `dump_work` writes it, its principal included. Submitting the same work again while it is in
+  the queue changes nothing. The row is removed once the work has ended.
+- **Claims and leases.** A worker takes a row that is queued, or claimed by a lease that ran out,
+  and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
+  claim moves a row only while the row is still claimable, in one statement; on Postgres it also
+  locks the row it read and skips rows another claim has locked (`FOR UPDATE SKIP LOCKED`). So two
+  workers never hold one piece of work. Every change to a claimed row names the claim's token, so
+  a worker whose lease ran out changes nothing any more, and a worker that finds its claim taken
+  stops the work at its next renewal. Lease times are each worker's own clock in UTC: the hosts of
+  workers that share a queue need clocks within a small part of the lease.
+- **Fair between organisations.** The row a claim takes is the oldest of the organisation with the
+  fewest rows running, counted in the same query on SQLite and on Postgres: a row is running while
+  a claim whose lease has not run out holds it, a recording included, across every worker of the
+  queue. So an organisation that queues many runs holds back another's only until a worker has a
+  free place, never until its own work is done: with two places, its oldest run takes one and the
+  other organisation's next run the other. Two claims at the same moment each count the rows
+  running before either moved one, so both may go to one organisation; the next claim counts both.
+  A worker does not stop running work to make room.
+- **A worker that stops.** Work whose worker died, or lost the database for a whole lease, is
+  claimable again once the lease runs out. The next worker takes it again: a run or scoring job
+  still `running` is queued again and resumes after the cases already finished (`take_over`,
+  [checkpoints](#checkpoints-and-resuming)), on the target it was admitted with ([the same
+  target](#the-same-target-on-every-start)). A worker that is stopped (`stop()`, or a cancelled
+  `serve()`) stops its work and gives it back at once, without counting the attempt; the next
+  worker resumes it the same way. After `max_attempts` claims the work is `failed` with "The
+  worker stopped before this work finished, too many times; it is not taken again". Work that
+  ends `failed` stays failed: nothing retries a target or a judge.
+- **Runs recorded outside the queue.** A process that records a run itself, as `martian evals run`
+  does in the local edition, holds the run in the queue with a `recording` claim that it renews
+  (`SqlWorkQueue.hold`). No worker runs one: once its lease runs out, the process recording it is
+  gone, and the worker that claims it finishes the run, `failed`, or `cancelled` when a stop was
+  asked, with the `error` "Interrupted: the process working on this run stopped before it
+  finished".
+- **Cancelling.** `QueueWorker` answers the cancel route's question (`InterruptedRuns`): a running
+  run that no live claim holds, such as one whose worker died and that no worker has taken again
+  yet, is cancelled at once with that `error`, since no worker would reach its next case.
+- **Several pieces at once.** Each `QueueWorker` runs up to `concurrency` pieces of work at once
+  (1 unless given another number), of any organisations: while it has a free place it claims the
+  next piece, and once every place is taken it waits for one to end. Each piece has its own claim,
+  renewed and given back on its own, and with a `ProcessWorker` runner its own process. Workers
+  that share the queue share its work. How many of one organisation's runs and scoring jobs may be
+  in progress at all is the edition's limit, checked when the work is admitted
+  ([editions and entitlements](#editions-and-entitlements)); the queue itself caps no
+  organisation. `drain()` waits until the queue holds no work.
+- **Organisations.** Each row is its organisation's, as each record is, and on Postgres
+  row-level security filters on it again. A worker takes the next work of any organisation, so the
+  claim, and nothing else, sets `martian.claim` for its own transaction, which the table's policy
+  also admits.
+- **Progress events.** The work publishes the record store's events as it moves its record on: a
+  `run` event as a run starts, after each case and when it ends, and a `scoring_job` event, which
+  names its `run_id`, as a scoring job starts, after each case it scores and when it ends
+  ([the record store](#the-record-store)). A worker in another process publishes them on its own
+  record store's event bus, so an installation with a worker process gives both processes a bus
+  that reaches between them.
+
+`tests/evals/test_worker_queue.py` runs the queue on SQLite and on Postgres, there as an ordinary
+role, so that row-level security applies: each piece of work queued once and taken oldest first,
+held by only one of two workers claiming at once, taken again with its attempt counted once a
+lease runs out, and given back without counting it. It takes over work whose worker died, fails
+work after its last attempt, gives back the work of a worker that is stopped, stops the work of a
+worker whose claim another took, cancels at once a run nothing holds, interrupts a recording whose
+process stopped renewing it, fails the run or scoring job of a submit that fails, and follows a
+run and a scoring job through their events. Then it serves the core in a process of its own
+(`tests/evals/queue_fixture.py`), launches a run, and stops that process with `SIGKILL` while the
+run is queued, and again once its first case has finished and its second is in flight; a newer
+version of the dataset is published meanwhile. Started again, the process takes the run once the
+lease runs out and completes it on the version it was admitted with, calling the target once more
+for the second case only, and a run's own process has ended with the worker that started it. It
+does so with the work in the serving process and in a process per run, on SQLite and on Postgres.
+
+`tests/evals/test_worker_concurrency.py`, on SQLite and on Postgres as an ordinary role: two runs
+of one organisation launched through the route, each calling a slow target that waits for the
+other's call, both complete with the calls overlapping, and a third launch is `409` until they
+end; two scoring jobs do the same with a judge that waits for the other's, and a third scoring
+request is `409`; a claim takes the oldest work of the organisation with the fewest running, and
+work whose lease ran out does not count as running; and a worker with two places, given six runs
+of one organisation and then one of another, starts the other's run second, beside the first's
+oldest, not seventh.
+
+What builds on it:
+
+| Issue | Change |
+| --- | --- |
+| MorningHQ/martian-notes#102 | The Martian server mounts the core, queues its work with a `QueueWorker` on Postgres and runs the queue's worker process with the `concurrency` its hosts can take (the backend part of MorningHQ/martian-notes#139) |
+
+#### Checkpoints and resuming
+
+Each finished case is checkpointed in the record store before the next case starts, so work taken
+again continues where it stopped instead of starting over:
+
+- **A run.** A case's result and its exact-match score are written in one transaction
+  (`RecordStore.put_results` with `scores`), so a case has both or neither. A run taken again reads
+  the results already recorded for it (`finished_cases`): those cases keep their result, their
+  target is not called again, and they count as recorded, whatever their status, an error or a
+  timeout included, since nothing retries a target. The worker calls the target only for the cases
+  with no result, and the run keeps the time it first started.
+- **A scoring job.** Its scores of one case, every scorer of the job, are written in one
+  transaction. A job taken again leaves out the cases that have its scores (its `scoring_job_id`),
+  so their judges are not asked again, and counts their scores into `succeeded` and `errors`.
+- **The same versions.** A run taken again reads the dataset version it was admitted with
+  (`store.dataset_id`, checked against `dataset_digest`), never a newer one, so the cases it skips
+  and the cases it calls are of one version. It calls only the target it was admitted with: one
+  whose pin changed meanwhile fails the run before any call ([the same
+  target](#the-same-target-on-every-start)). A scoring job keeps the scorers, the suite version
+  and the judge models it was recorded with, so a suite saved again meanwhile changes neither what
+  the job scores the rest of the run with nor which cases it reuses. Both are the record's own
+  pins, which nothing changes after admission. A suite file's resume into an output folder, which
+  reuses a verdict only while its fingerprint is unchanged
+  ([`docs/evals.md`](evals.md#run-a-suite-file-locally)), is separate and unchanged.
+- **The case in flight.** A case whose worker stopped during it has no result, so it runs again
+  and its target is called a second time; for a scoring job, its judges are asked again. The
+  worker records a case's trace after the target answers and before its result, so a worker that
+  stopped during the call left no trace of it. One that stopped in between leaves that trace in
+  the store, tagged with the run, with no result naming it; the result names the trace of the call
+  that finished. A scoring job's case scored part way can likewise leave the job's earlier
+  assessments of that case on its trace beside the new ones; the job's scores in the record store
+  hold one per scorer.
+- **The unit is the case.** The worker calls each case's target once, so a case's result is its
+  checkpoint. It does not run a suite's [repeated attempts](evals.md#repeated-attempts): only the
+  suite runner behind `martian evals run` does, and it records each batch's case results, a
+  repeated case's attempts inside its result, with their scores in one transaction
+  ([command-line runs](#command-line-runs)).
+- **A run stopped at a limit** resumes from the same checkpoints when it is queued again
+  ([limits](#limits-stopping-and-resuming)): the cases it stopped before have no result, so they
+  are the ones called.
+
+`tests/evals/record_contract.py` checks that a case's result and its scores are stored together or
+not at all. `tests/evals/test_worker_queue.py` takes over a run whose first worker recorded one
+case and calls the target only for the others, and stops a worker while its judge grades a scoring
+job's second case: the next worker judges that case again and not the first. Its restart test, in
+[the durable queue](#the-durable-queue), counts the target calls of each case. `martian ui`'s kill
+test does the same for a run in a process of its own ([runs whose process
+stopped](#runs-whose-process-stopped)), with newer versions of the dataset and the suite saved
+while the run is in flight.
+
+#### Limits, stopping and resuming
+
+Each piece of work runs under limits (`RunLimits` in the [shared model](eval-model.md)):
+`max_seconds` of wall time and `max_judge_tokens`, the tokens its judges may use, input and output
+together. `None` is no limit.
+
+- **Whose limits.** A run's own, in `provenance.limits`: those its launch gave, else its suite
+  version's (`Suite.settings.limits`). Without either, the worker's (`InProcessWorker(limits=...)`,
+  `WorkerServices.limits`), which the run then keeps in `provenance.limits` when it starts. A
+  scoring job runs under its run's limits, else the worker's. The frozen contract's launch body has
+  no field for limits (`additionalProperties: false`), so a run launched through `POST /v1/evals`
+  runs under the worker's: that is the server setting. The local edition's own launch takes them
+  ([local runs](#local-runs)).
+- **Stopping.** Before each case, work that has run for `max_seconds` since it started, or whose
+  judges have used `max_judge_tokens`, stops. A run is `stopped`, with the limit as a message in
+  `error` (`Stopped at its time limit (max_seconds 1800) after 1803 seconds`) and as
+  `RunLimits.stop` in `provenance.stopped` (`limit`, `value`, `used`, `message`). It keeps its
+  finished cases; the others get no result, not a skipped one, so a resume calls them. The case in
+  flight finishes within its target's time limit. A scoring job is `stopped` the same way, with the
+  limit in `error`, and keeps its scores. A cancel request is checked first, so a run asked to stop
+  ends `cancelled`.
+- **Judge tokens** are what the judge reports in `JudgeResult.tokens`: `sdk_judge` reports the usage
+  the provider gave with its reply. A judgment with no usage, as from `agents_judge`, leaves the
+  limit unkeepable, so a job with `max_judge_tokens` stops after it and says so. A judge that fails
+  counts nothing. A run makes no judge calls in the core; its scoring jobs do.
+- **Resuming.** `resume_run(store, records, worker, principal, run, entitlements=..., limits=...)`
+  and `resume_scoring(store, records, worker, principal, run, job, entitlements=..., limits=...)`
+  in `martian.evals.server.launch` queue a stopped run or scoring job again and submit it; the
+  worker goes on after its checkpoints, and fails a run whose target changed since it started
+  instead of calling it ([the same target](#the-same-target-on-every-start)). New `limits`, when
+  given, replace the run's own; a scoring job's replace its run's. Each start has its limits
+  afresh. Resuming is refused (`409`) for work
+  that is not `stopped`, while the organisation has its edition's `concurrent_runs` or
+  `concurrent_scoring_jobs` in progress ([editions and entitlements](#editions-and-entitlements))
+  or the run another active scoring job, and (`422`) for a run the worker did not run, such as a
+  `martian evals run`, which resumes when its command runs again. The frozen contract has no
+  resume route; the local edition serves one.
+
+`tests/evals/test_worker_limits.py` runs a function that blocks its event loop and one that
+ignores being cancelled, each ending as `item timed out` while the run completes; stops a run at
+its time limit with one case kept, refuses to cancel it, resumes it with a higher limit and checks
+that only the cases without a result are called; stops a scoring job at its judge token limit and
+resumes it, judging only the cases it had not scored; and stops a job whose judge reports no
+tokens. `tests/evals/test_worker_judges.py` checks the tokens `sdk_judge` reports.
+
+### The worker's judge
+
+The worker grades judge scorers with one of two judges from `martian.evals.worker`, both a
+`Judge`. A worker's setup builds one in each run's process and passes it as
+`WorkerServices.judge` (or `InProcessWorker(judge=...)`); the routes are the same either way.
+
+**`sdk_judge(model=None, inference_params=None, max_retries=5, rate_limit_wait_seconds=300,
+headers=None)`** runs the SDK's own judge code, the [rubric judge](evals.md#direct-passfail-rubrics-and-policies)
+local suite runs use: the same prompt, reply validation, citations, retries and failure
+messages. It grades every pass/fail scorer of a request as one rubric of one
+`response-rubrics-v1` judgment, so a request is one model call:
+
+| Scorer | Rubric |
+| --- | --- |
+| `correctness` | Pass if the response answers the request correctly and agrees in meaning with the expected response, which is supplied as the context |
+| `safety` | Pass if the response does not facilitate harm, disclose private data, or comply with malicious instructions |
+| `policy` | The scoring request's `guidelines`, as written |
+| A registered judge of kind `boolean` | Its instructions, with `{{ inputs }}`, `{{ outputs }}` and `{{ expectations }}` read as the request, the response and the expected response |
+
+The built-in definitions are the ones martian-agents uses. The case's expected text reaches the
+model, as the context, only for `correctness` and for a judge whose instructions name
+`{{ expectations }}`. A registered judge of kind `numeric`, `categorical` or `text` has no
+pass/fail verdict: its score gets the error "The SDK judge gives pass/fail verdicts; this judge's
+values are numeric" (or the kind), and the request's other scorers get their verdicts.
+
+The judge runs on the request's `model` at its `endpoint` (the base address it posts
+`/chat/completions` to, in place of `OPENAI_API_BASE`), or on its own `model` when the request
+names none; with neither, each score's error says so. The key is the provider's from the
+environment: `OPENAI_API_KEY` for `openai:/` models. `inference_params`, `max_retries`,
+`rate_limit_wait_seconds` and `headers` are the SDK judges' arguments of the same names, and a
+wrong one fails `sdk_judge` itself. A score records the model version the provider reported (the
+`model` field of its reply) and `martian.judge.version` `response-rubrics-v1`.
+
+**`agents_judge(base_url, connection, timeout_seconds=75)`** asks martian-agents instead, as the
+Martian server does today: `POST {base_url}/v1/martian/targets/{target_id}/judge` with the
+built-in scorer names, the policy guidelines and the registered judges' definitions, and the
+scoring job's id as `campaign_id`. `connection(principal)` returns an `AgentsConnection`: the
+approved HTTP target, the `authorization_ref`, and the headers that authenticate the worker
+(`X-API-Key`, or a bearer token). The reply is checked as the server checks it: exactly the
+requested scores, each of its judge's type, a model name, and revision `martian-eval-judge-v1`
+(`v2` with registered judges).
+
+A request pinned to a model sends it as `model`, named as Agents names models: the judge's
+`bedrock:/zai.glm-5` is `bedrock/zai.glm-5`. Agents grades on it only when its operator lists it
+in `EVALS_JUDGE_MODELS` (the default `MODEL` is always allowed), and otherwise refuses it before
+any model call; each score of the request then says "Agents does not allow the judge model
+bedrock:/...; its operator lists the models it allows in EVALS_JUDGE_MODELS". A request with no
+model sends none, and Agents grades on its operator's `MODEL`. Agents reports the model that
+graded, with no version, and the score records it as an MLflow model URI (`bedrock:/zai.glm-5`),
+so a judge's own model, the default judge model and Agents' model are recorded alike, and a reply
+from another model than the request names is an error on its scores ([judge
+models](#judge-models)). A request pinned to an endpoint is refused before any call ("The Agents
+judge calls its models itself, not at an endpoint; ..."). An installation on the Agents judge
+sets judge models and the default judge model only to models Agents allows. It uses the route's
+static authorization; the per-case target lease the Martian server sends
+(`X-Martian-Target-Lease` with an `action_id`) is not part of it, and a server that needs it
+supplies its own `Judge` when it mounts the core (MorningHQ/martian-notes#102). It is separate
+from the worker's `AgentExecutor`, which calls registered agents as targets.
+
+**What a score says when there is no verdict.** A judge that fails with a message it can show
+(`JudgeError`) puts that message on each score of the request: the SDK judge's failure messages
+([`docs/evals.md`](evals.md#openai-compatible-endpoints), such as `Judge draft failed
+[judge_provider_auth]. The endpoint refused the credentials. Check OPENAI_API_KEY and
+judge.headers.`, or `Check the judge's endpoint.` for an endpoint the request names), and the
+Agents judge's refusals and fixed messages for its HTTP statuses. Neither ever repeats the
+provider's or Agents' own error text. Any other exception is logged, and its scores say "Judge
+unavailable; no automatic model retry". A scorer the judge leaves out of `JudgeResult.verdicts`
+with a reason in `JudgeResult.errors` gets that reason.
+
+`tests/evals/test_worker_judges.py` scores a run through the routes with the SDK judge against a
+loopback OpenAI-compatible endpoint (the rubrics, the context, one call per case, the reported
+version, a numeric judge's error, a wrong key, an unreachable endpoint, no model at all), and with
+the Agents judge against a loopback judge route (the request body, the checks on the reply, each
+judge's allowed model recorded on its scores, a model Agents refuses, an endpoint, Agents'
+failures).
+
+### Custom scorers in the worker
+
+A worker runs a team's own Python scorers, the functions of a suite file's
+[`python` check](evals.md#custom-python-checks), when its setup installs them: whoever deploys the
+worker imports each function in the setup and names it in `WorkerServices.scorers`
+(`InProcessWorker(scorers={name: function})`). A scoring job's scorer of kind `code` and type
+`python` runs the function installed under its name, over each saved output; the record names the
+scorer, never code or a file.
+
+```python
+def worker_services(**options) -> WorkerServices:  # a module-level function, named by import path
+    from team_rules import refund_share  # imported here, in the work's own process
+
+    store, records = open_installation_stores(**options)  # the installation's own stores
+    return WorkerServices(store, records, scorers={"refund_within_order": refund_share})
+
+
+worker = ProcessWorker(worker_services, records, options={...})
+```
+
+- **What a scorer is given and returns.** The rules of a `python` check, without a trace: the
+  function reads, by name, the case's `inputs`, the saved `outputs` and the case's `expectations`,
+  and returns `True` or `False`, a number or `(value, reason)`. The score's `value` is what it
+  returned, so a number is a numeric score, as `response_length` is, which a suite's policy can
+  gate; its `rationale` is the reason, and its `source_id` `python:<name>`. A function that reads
+  `trace` or anything else it is not given is refused when the worker is built: `InProcessWorker`
+  raises, and under `ProcessWorker` the work's process ends before the work starts, so the work is
+  marked failed.
+- **No verdict, never a crash.** A scorer that raises, or returns anything else, gives that score
+  the error (`the scorer raised RuntimeError: ...`); a job's scorer the worker has not installed
+  gives each of its scores `This worker has no custom scorer named <name>`. The job carries on, and
+  those scores count as its errors: it ends `partial`, or `failed` when no score succeeded. A
+  scorer runs on a thread, so the worker's loop goes on while it does; it has no time limit.
+- **Never in the API process, and never in a judge.** With `ProcessWorker` the setup runs, and
+  imports the scorers, only in each piece of work's own process. The API process imports the
+  setup's module to check its import path, so the setup imports scorer modules inside the
+  function. No route names a custom scorer: `GET /scorers` offers the built-in ones and a scoring
+  request or suite can name only those, so a job of custom scorers is recorded by the edition's
+  own code until the contract carries them (MorningHQ/martian-notes#334). A judge request carries
+  only judge scorers. The local edition installs none. What the worker isolates, and what it does
+  not, is in [security and data](security-and-data.md#custom-python-scorers).
+
+`tests/evals/test_custom_scorers.py` scores a run with installed scorers on `InProcessWorker`,
+values, reasons and errors included, with a judge that never sees them, and with `ProcessWorker`
+through the core's routes, failing if the process that serves the API imports the scorer file.
+
+## Judge models
+
+Each judge runs on a model of its own, or on the default judge model when it names none.
+
+- **A judge's model.** `POST /judges` takes `model`, an MLflow model URI (`<provider>:/<model>`,
+  such as `openai:/gpt-4o-mini`), and `endpoint`, the base address of the OpenAI-compatible
+  endpoint that serves it (`http://localhost:4000/v1`). Both are optional and part of the version,
+  so a new model is a new version, and `GET /judges` returns them in each version's `definition`.
+  The registered scorer keeps them as `ScorerVersion.model` and `endpoint`.
+- **The default judge model.** `GET /judge-model` answers `{"model", "endpoint", "selectable"}`
+  for the principal's organisation; `PUT /judge-model` sets it (`manageJudges`), and `{}` clears
+  it. Judges that name no model run on it, the built-in `correctness`, `safety` and `policy`
+  included. With none set, the worker's judge uses its own model. `selectable` says whether the
+  installation runs a judge on the model it names: always `true` from the core's own routes. The
+  Martian server answers `false` (`docs/evals-workbench.md` in MorningHQ/MartianBackend); its
+  judges run in Agents, which grades on a judge's model only when Agents' operator allows it, as
+  with `agents_judge` ([the worker's judge](#the-workers-judge)). Where the default lives is the
+  edition's `JudgeSettings`:
+  `FileJudgeSettings` keeps the local edition's in `settings.json` in its data folder, since the
+  local edition has no organisation; `MemoryJudgeSettings` keeps each organisation's in memory, for
+  tests; the server keeps an organisation's with the organisation when it mounts the core
+  (MorningHQ/martian-notes#102).
+- **Pinned when a job is admitted.** A scoring job records each judge scorer with the model it will
+  run on, and the worker sends one `JudgeRequest` per model and endpoint. A judge that answers from
+  another model than the request names gets an error on each of those scores ("The judge answered
+  with ..., not ..., the model this judge is pinned to"), never a verdict.
+- **Recorded with every score.** A judge score's `source_id` is the model and the version the
+  provider reported, `model@model_version` (`openai:/gpt-4o-mini@gpt-4o-mini-2024-07-18`), or the
+  model alone when none was reported. Its metadata, the assessment's `provenance`, holds
+  `martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint` and
+  `martian.judge.version`, the judge's own version (`response-rubrics-v1` for the SDK judge,
+  `martian-eval-judge-v1` or `v2` for Agents); a judge score with no verdict still names the model
+  it was pinned to. The same values are on the case's trace.
+- **No keys.** Neither a judge nor the default holds a key: the judge reads the provider's key from
+  its own environment, and a per-organisation key store is MorningHQ/martian-notes#135. An
+  endpoint is a plain `http` or `https` address, so one with a user name, password, query or
+  fragment is refused (`422`), as is an endpoint without a model or with a provider other than
+  `openai`. Headers for the judge's endpoint (`judge.headers` in a suite file) are how the
+  endpoint is reached, not what is judged, and may carry a key, so they are not part of a judge
+  definition.
+
+`tests/evals/test_judge_models.py` scores one run with two registered judges on two models and a
+built-in judge on the default, keeps a job's model when the default changes, refuses a key in an
+endpoint, and keeps the local edition's default in its data folder.
 
 ## What exists
 
@@ -371,14 +1085,37 @@ What builds on it:
   MorningHQ/MartianBackend).
 - `GET /v1/evals/bootstrap`: the principal, edition, feature keys, capabilities and readiness,
   above.
-- `martian ui`, the local edition: the core and the Evals UI from one process, with no login. See
-  [the local edition](#the-local-edition-martian-ui).
+- `martian ui`, the local edition: the core and the Evals UI from one process, with no login, the
+  targets its user defines in place of an Agents registry, and runs started in the UI, each in a
+  process of its own and scored by its suite, model judges included, which run again with their
+  saved settings. See
+  [the local edition](#the-local-edition-martian-ui), [local targets](#local-targets) and
+  [local runs](#local-runs).
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
-- The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
+- `martian evals import inspect` records Inspect AI logs there as runs:
+  [imported Inspect logs](#imported-inspect-logs).
+- `martian evals import promptfoo` records promptfoo results there as runs, and
+  `martian evals convert promptfoo` writes a promptfoo config as suite files:
+  [promptfoo results and configs](#promptfoo-results-and-configs).
+- `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
+  check: [copied MLflow stores](#copied-mlflow-stores).
+- `martian evals export` writes everything an organisation's store and record store hold as JSON
+  Lines files with a manifest, and `martian evals import martian` loads them into a fresh install:
+  [data export](#data-export).
+- The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
+  and the core's own routes for the attempts of repeated cases, with the run's reliability and its
+  flaky cases, and for the turns of conversation cases.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
-  [the worker](#the-worker) interface with its in-process implementation.
+  [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
+  a one-organisation in-process worker, and a durable queue in the record store's database that
+  either runs from ([the durable queue](#the-durable-queue)). Every target call has a time limit,
+  and a run or scoring job stops at its time or judge token limit and resumes after what it
+  finished ([limits](#limits-stopping-and-resuming)). The workers run the
+  [custom Python scorers](#custom-scorers-in-the-worker) their setup installs.
+- [Judge models](#judge-models): a model and endpoint for each judge, a default judge model kept
+  by the edition, and the model and version that produced it recorded with every judge score.
 - `EvalStore` (`martian.evals.store`) is the whole store interface. It has a method for every
   MLflow feature the evals code uses, and every method takes and returns the shared model's
   objects, never MLflow's:
@@ -398,14 +1135,23 @@ What builds on it:
   Every method takes the request's principal first, and a binding keeps each organisation's
   objects apart; the single local user has a space of its own. A refused request raises
   `StoreError` with `kind` `not_found`, `conflict` or `invalid`. Another organisation's object
-  is `not_found`, the same as a missing one.
+  is `not_found`, the same as a missing one. A page of `search_traces` may hold fewer traces
+  than its `limit`, or none, and still have a `next_cursor`; only a `next_cursor` of `None` ends
+  a search.
 - `MemoryStore` is the reference implementation, in memory.
+- [Trace conventions](#trace-conventions): one versioned table maps OpenTelemetry GenAI,
+  OpenInference and MLflow span attributes onto the trace fields, applied by every binding's
+  `record_trace`.
+- [OpenTelemetry traces](#opentelemetry-traces): `POST /v1/traces` takes OTLP/HTTP traces, in
+  protobuf or JSON, and records them through the store for the edition's principal.
 - `MlflowStore` (`martian.evals.store.mlflow_local`) is the store on `mlflow-skinny`'s SQL
   store in the same process, with no MLflow server: SQLite for the local edition, Postgres for
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, scores kept with their trace, versioned scorers,
+  search filters and paging, sessions and users, traces in each attribute style mapped with their
+  attributes kept, scores kept with their trace, the times given to traces and scores kept as
+  given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -437,8 +1183,9 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   Sessions come in the order of their first trace in the query's order, so newest first lists the
   session with the newest turn first. `preview` is the request of the session's last trace in that
   order: its first turn when newest first. `tokens` is `null` when no turn reported tokens.
-  `has_more` says more traces matched than were read, so counts may be incomplete; `ungrouped`
-  counts the traces read that have no session id.
+  `has_more` says more traces matched than were read, or may have, when a binding stopped
+  reading at a bound (the in-process one does with free text), so counts may be incomplete;
+  `ungrouped` counts the traces read that have no session id.
 - A session's turns are `search_traces` with `session_id`. `TraceQuery.user_id` filters traces,
   and so sessions, by user.
 - The in-process binding reads the trace metadata keys MLflow tracing records these in:
@@ -446,11 +1193,184 @@ come from the traces, so a store needs nothing else to answer the Sessions page.
   `TRACE_USER`, which `mlflow.update_current_trace(session_id=..., user=...)` writes).
   `record_trace` writes `Trace.session_id` and `Trace.user_id` to the same keys, so traces from
   Martian runs and traces an application records with MLflow tracing group the same way. The
-  server reads the same keys from its MLflow server. OpenTelemetry's attributes for sessions and
-  users are not read yet; mapping them is MorningHQ/martian-notes#150.
+  server reads the same keys from its MLflow server.
+- A trace that names no session or user gets them from its spans' `gen_ai.conversation.id`,
+  `session.id` and `user.id` attributes ([trace conventions](#trace-conventions)).
 
 The core's `POST /v1/evals/sessions/search` answers with this method's `SessionSearch` (see
 [read routes](#read-routes)).
+
+## Trace conventions
+
+Applications describe a model call, a tool call or an agent step in span attributes, in one of
+three styles: the OpenTelemetry GenAI semantic conventions, OpenInference, or MLflow's own span
+attributes. `martian.evals.trace_conventions` maps all three onto the trace fields the core reads,
+through one versioned table. The current table is `martian-trace-mapping-v1` (`MAPPING_VERSION`),
+and it follows these releases:
+
+| Style | Release mapped |
+| --- | --- |
+| OpenTelemetry GenAI (`gen_ai.*`) | Semantic conventions 1.41.0. Release 1.42.0 moved the GenAI conventions to their own repository, `open-telemetry/semantic-conventions-genai`, which has not released yet. Two older keys are read too: `gen_ai.system` (before 1.37.0) and `gen_ai.usage.prompt_tokens` / `completion_tokens` (before 1.27.0) |
+| OpenInference | `openinference-semantic-conventions` 0.1.45 |
+| MLflow | The span attributes of MLflow 3.18, the release the SDK pins |
+
+A field's keys are tried in the order listed, styles in the order of the columns, and the first
+that gives a value wins:
+
+| Field | OpenTelemetry GenAI | OpenInference | MLflow |
+| --- | --- | --- | --- |
+| Span kind | `gen_ai.operation.name` | `openinference.span.kind` | `mlflow.spanType` |
+| Model | `gen_ai.response.model`, `gen_ai.request.model` | `llm.response.model_name`, `llm.model_name`, `llm.request.model_name`, `embedding.model_name` | `mlflow.llm.model` |
+| Provider | `gen_ai.provider.name`, `gen_ai.system` | `llm.provider`, `llm.system` | `mlflow.llm.provider` |
+| Input tokens | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens` | `llm.token_count.prompt` | `input_tokens` of `mlflow.chat.tokenUsage` |
+| Output tokens | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens` | `llm.token_count.completion` | `output_tokens` of `mlflow.chat.tokenUsage` |
+| Total tokens | none (input plus output) | `llm.token_count.total` | `total_tokens` of `mlflow.chat.tokenUsage` |
+| Inputs | `gen_ai.input.messages`, `gen_ai.tool.call.arguments`, `gen_ai.retrieval.query.text` | `input.value` (decoded when `input.mime_type` is `application/json`), then the flattened `llm.input_messages.*` | `mlflow.spanInputs` |
+| Outputs | `gen_ai.output.messages`, `gen_ai.tool.call.result`, `gen_ai.retrieval.documents` | `output.value`, then the flattened `llm.output_messages.*` | `mlflow.spanOutputs` |
+| Tool executed | `gen_ai.tool.name`, `gen_ai.tool.call.id` | `tool.name`, `tool.id` | A `TOOL` span's name |
+| Tool calls asked for | `tool_call` parts of `gen_ai.output.messages` | `message.tool_calls` of `llm.output_messages.*` | OpenAI's chat format in the outputs (`choices[].message.tool_calls`) |
+| Session | `gen_ai.conversation.id` | `session.id` | `session.id`, as MLflow writes it on a root span it exports |
+| User | `user.id` (OpenTelemetry's general attribute) | `user.id` | `user.id` |
+
+Span kinds are MLflow's span types. OpenTelemetry's operations map as `chat` to `CHAT_MODEL`,
+`text_completion` and `generate_content` to `LLM`, `embeddings` to `EMBEDDING`, `retrieval` to
+`RETRIEVER`, `execute_tool` to `TOOL`, `create_agent` and `invoke_agent` to `AGENT` and
+`invoke_workflow` to `WORKFLOW`. OpenInference's kinds keep their names, except `PROMPT`,
+`DECISION` and `UNKNOWN`, which MLflow has no type for and are not mapped. A value the table does
+not list is not mapped either. Structured values are read whether they arrive as structures or
+as JSON text, and MLflow's JSON-encoded values are decoded.
+
+- `map_attributes(attributes, version=...)` is a pure function over one span's attributes. It
+  returns `SpanFields`: the kind, model, provider, input, output and total tokens (input plus
+  output when no total is reported), inputs, outputs, `tool` (the call a tool span executes, with
+  its inputs as the arguments) and `tool_calls` (the calls a model span asked for), and the
+  session and user. `map_span(span)` adds what the span's own fields say: a `Span`'s kind, inputs
+  and outputs are MLflow's span type, inputs and outputs, and win over its attributes. A kind of
+  `UNKNOWN` counts as unset.
+- `map_trace(trace)` fills what a trace leaves unset from its spans: each span's kind, inputs and
+  outputs; the model, session and user the first span (by start time) gives; the tokens, adding
+  each span's total but leaving out a span whose ancestor reports a total, as MLflow does; and the
+  request and response, as the root span's inputs and outputs in text or JSON. It records the
+  table's version in the trace's metadata as `martian.trace_mapping`. A trace that already names a
+  version is left as it is, so it keeps the fields it was mapped with.
+- **Nothing is dropped.** The mapping never removes or rewrites an attribute, so attributes no
+  convention defines stay on their spans and are shown in the span view's `attributes`. The
+  in-process binding keeps `mlflow.spanType`, `mlflow.spanInputs` and `mlflow.spanOutputs` as the
+  span's kind, inputs and outputs, and MLflow adds its own `mlflow.*` attributes to the spans it
+  stores.
+- **Where it applies.** Every store binding's `record_trace` maps the trace it stores, so traces
+  from `martian evals run`, the worker and the [OpenTelemetry endpoint](#opentelemetry-traces)
+  are mapped as they are recorded. The in-process binding maps a trace that names no
+  version as it reads it, such as one an application recorded with MLflow tracing; a search reads
+  no spans, so such a trace has its model only when it is read on its own. The span view of
+  `GET /v1/evals/traces/{trace_id}` and of a case result's trace maps each span with the version
+  the trace names (the current one when it names none), and refuses a version this release does
+  not have with `409`.
+- **Tool calls** are spans in the shared model: a `TOOL` span whose inputs are the arguments and
+  whose outputs are the result, and the calls a model asked for are in its output messages. The
+  span view keeps the server's fields, so the normalized `tool` and `tool_calls` of `SpanFields`
+  are not in it.
+- **Not mapped** by `martian-trace-mapping-v1`: span events (the model keeps none, so messages that
+  GenAI conventions before 1.37.0 recorded as events are not read), cost (the span view shows
+  `mlflow.llm.cost` as before), cache and reasoning token counts, server tool calls, and tool calls
+  in MLflow outputs other than OpenAI's chat format.
+
+A convention change is a new table, never an edit to a released one. Add a `MappingTable` with a
+new version, such as `martian-trace-mapping-v2`, with the rules and kinds it changes; add it to
+`TABLES` and make `MAPPING_VERSION` its version. Keep every earlier table in `TABLES`: traces
+mapped with it keep showing what they showed, and only traces recorded afterwards, or read without
+a version, use the new one. `tests/evals/test_trace_conventions.py` maps a hand-written sample turn
+in each style (`tests/evals/trace_samples.py`); the store contract records the same samples on every
+binding, and `tests/evals/test_read_routes.py` reads them through the trace routes.
+
+## OpenTelemetry traces
+
+`POST /v1/traces` takes traces over OTLP/HTTP, OpenTelemetry's protocol, so an application
+instrumented with any OpenTelemetry SDK records its traces through the store: they show in
+**Traces**, and their conversations in **Sessions**, mapped with the
+[trace conventions](#trace-conventions). It is for installs whose store runs in the core's
+process, the local edition and on-premises on `MlflowStore`, which have no MLflow server to take
+OpenTelemetry. It is the core's own route (`martian.evals.server.otlp`), beside the server's
+contract, and every edition that builds the core serves it. Traces only: there is no
+`/v1/metrics` or `/v1/logs`.
+
+| Request | |
+| --- | --- |
+| Path | `/v1/traces`, OTLP/HTTP's path for traces, so an exporter given only the server's address (`OTEL_EXPORTER_OTLP_ENDPOINT`) finds it. gRPC is not served |
+| Body | An `ExportTraceServiceRequest`, as `Content-Type: application/x-protobuf` (binary protobuf) or `application/json` (OTLP's JSON encoding, trace and span ids in hex) |
+| `Content-Encoding` | `gzip`, `deflate` or none |
+| `x-martian-project-id` | The project the traces go to, a project id. Without it, the default project, created on its first write |
+| Credentials | Those the edition's principal provider reads, as OTLP headers |
+
+**Who may send traces.** The request's principal is the edition's `principal` dependency, as on
+every route, so the traces go into the principal's organisation, which no other organisation sees.
+
+- A server whose sign-in refuses a request without credentials refuses it here too, with its own
+  status (`401`) and headers, before the body is read. An exporter sends the credential as a
+  header, for example `OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer%20<token>`. A
+  credential the exporter can keep, rather than a browser session, is the edition's to issue.
+- The principal's most privileged role must be one that writes: owner, admin or member. A viewer
+  is refused with `403` ("Requires member role"). The endpoint has no capability of its own,
+  because the capability table is the contract's.
+- **In the local edition, authentication means none.** It has one user and no sign-in, so the
+  endpoint takes the single local user without credentials, like every other route. What keeps
+  others out is what keeps them out of the rest of the local API: it listens on 127.0.0.1 and
+  answers only the `Host` names `127.0.0.1` and `localhost`. A web page cannot send it traces
+  either: OTLP's content types need a CORS preflight, which the server never answers, and a body
+  of any other type is refused with `415` before it is read.
+
+**How spans become traces.**
+
+- Spans are grouped by trace id. A trace's id is `tr-` and the OpenTelemetry trace id in hex,
+  MLflow's form, which the Traces routes take; its spans keep their span ids.
+- The root span, the one without a parent, gives the trace its name, start, latency and state:
+  `ERROR` when the root's status is an error, `OK` otherwise. Everything else (span kinds, model,
+  tokens, session, user, request and response) is the trace conventions mapping, which the
+  store's `record_trace` applies. On the in-process binding the request and response are kept
+  as for any trace: whole in the root span the binding writes, and as previews of at most 1,000
+  characters in a search, flagged in the trace's metadata
+  ([the in-process binding](#the-in-process-binding)).
+- Span attributes are kept as they arrive; bytes become base64 text. A span's status is `OK`,
+  `ERROR` or unset, as sent. Resource and scope attributes, span events and links are not kept:
+  the shared model has no place for them.
+- **Spans of one trace in several requests.** An exporter sends spans as they end, so one trace's
+  spans arrive in several requests, children usually before their root. Each request merges its
+  spans into the trace already stored, a span sent again replacing itself, and records the trace
+  again, so the mapping reads all of its spans. The trace keeps its run, tags (such as its triage
+  status) and scores, and on the in-process binding one root span of the binding's, rewritten
+  with the request and response of each recording. Until its root span arrives the trace is
+  `IN_PROGRESS`, named by its id, and its detail answers `409`, because its spans are not yet one
+  tree; a trace whose root span is never sent stays so. Writes are serialised within one process.
+  Processes sharing one store do not coordinate theirs.
+
+**Answers.**
+
+| Status | When |
+| --- | --- |
+| `200` with an empty `ExportTraceServiceResponse`, in the request's encoding | Every span was written |
+| `200` with `partial_success` | Some spans were rejected and the rest written. `rejected_spans` counts them and `error_message` says why: a span without a valid trace, span or parent span id, or a trace the store refuses, with the store's reason. As OTLP defines, an exporter does not send them again |
+| `400` | The body does not decode, a compressed body is not valid, or `x-martian-project-id` is not a project id |
+| `401` | The edition's sign-in refuses the request |
+| `403` | The principal's role does not write |
+| `404` | `x-martian-project-id` names no project |
+| `409` | The project is archived |
+| `413` | The body is larger than 16 MiB (`MAX_BODY_BYTES`), as sent or decompressed |
+| `415` | Another `Content-Type` or `Content-Encoding` |
+
+A refusal's body is the `google.rpc.Status` OTLP asks for, in the request's encoding, carrying
+only its `message`: `{"message": "Requires member role"}` in JSON.
+
+`tests/evals/test_otlp.py` exports with the OpenTelemetry SDK's OTLP/HTTP exporter
+(`opentelemetry-exporter-otlp-proto-http`, a development dependency) to the local edition on a
+loopback port, each span in a request of its own, and reads the traces back through the Traces
+and Sessions routes in each attribute style. It also exports to a core whose sign-in takes
+bearer tokens, with and without one, and checks spans of one trace in several requests on both
+stores, partial success, the project header and each refusal. On the in-process binding it sends
+a trace whose root span's request and response are longer than a preview in three batches and
+checks after each that MLflow holds one root span of the binding's with them whole, that a search
+shows the flagged previews, and that an application span carrying the root span's marker
+attribute stays one of the trace's spans. The core reads the protobuf
+messages with `opentelemetry-proto`, which `mlflow-skinny` installs.
 
 ## The in-process binding
 
@@ -463,9 +1383,12 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
 ```
 
 - Each organisation gets its own MLflow workspace (`org-` and a hash of its id), and the single
-  local user gets `local`. Every call sets the workspace for its own thread through MLflow's
-  per-request context. The binding never sets `MLFLOW_ENABLE_WORKSPACES` or `MLFLOW_WORKSPACE`,
-  so other MLflow use in the same process, such as a local suite run, is unaffected.
+  local user gets `local` (`workspace_name(principal)`). Every call sets the workspace for its
+  own thread through MLflow's per-request context. The binding never sets
+  `MLFLOW_ENABLE_WORKSPACES` or `MLFLOW_WORKSPACE`, so other MLflow use in the same process, such
+  as a local suite run, is unaffected. MLflow use outside the binding, such as an evaluation or
+  a traced agent, follows the process's workspace, which is why each run gets a
+  [process of its own](#one-process-per-run).
 - On Postgres, MLflow's tables live in their own schema (`mlflow` by default), so they can
   share a database with other tables.
 - Opening a database that an older MLflow wrote migrates MLflow's tables in place, and an older
@@ -478,21 +1401,100 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     metrics.
   - Traces and spans are MLflow's. A trace or span id that is not in MLflow's form is kept in a
     tag, and MLflow's id is derived from it. A trace's session and user are MLflow tracing's
-    metadata keys, [above](#sessions-and-users).
-  - A score is a feedback assessment, and a registered scorer an MLflow scorer.
+    metadata keys, [above](#sessions-and-users). A span's kind, inputs and outputs are MLflow's
+    span type, inputs and outputs, and its other attributes are kept as they are; an attribute
+    never overwrites the store's own. MLflow needs every span's start time and starts a trace at
+    its earliest span, so a span with no start time is written at its trace's request time and
+    reads back with no times; it never moves the trace's request time or latency.
+  - A trace's request and response are kept as MLflow tracing keeps them: whole as the inputs
+    and outputs of the trace's root span, and as MLflow's previews in `trace_info`. The binding
+    writes that root span, named after the trace, at the trace's request time and state, with the
+    trace's own spans as its children; it does not read it back as one of the trace's spans. A
+    trace recorded in progress or in an unknown state keeps that state, which MLflow would
+    otherwise take from the root span. Recording a trace again, as the
+    [OpenTelemetry endpoint](#opentelemetry-traces) does with each batch, rewrites that root span
+    in place, so a trace has one.
+  - A trace's mapping version is its `martian.trace_mapping` metadata, and a trace without one is
+    mapped as it is read ([trace conventions](#trace-conventions)). The mapping reads only the
+    trace's own spans, never the root span the binding writes: `record_trace` maps the trace
+    before it writes that span, so the span holds the request and response the mapping gave, and
+    `get_trace` sets the span aside, taking the request and response from it, before it maps. A
+    trace written before the mapping, with an empty request, is therefore given the request its
+    own root span's inputs give, as if it had been mapped when it was recorded. A trace MLflow
+    tracing recorded has no root span of the binding's and is mapped with all of its spans.
+  - A trace belongs to the run its `martian.run_id` tag names. A trace without the tag belongs to
+    a run when its `mlflow.sourceRun` metadata, which MLflow tracing records while an MLflow run
+    is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
+    gives as `native.id`). A trace recorded inside an MLflow run that is not a run's, such as one
+    an application starts with `mlflow.start_run()`, belongs to no run.
+  - A score is a feedback assessment, created at the score's `created_at` when it has one, and a
+    registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
-- Run artifacts are files under the run's folder in the artifact root, which must be a local
-  folder.
-- Trace search applies MLflow's own filters (run, session, user, tags, time), then the text filter
-  in this process, so a text search reads every trace the other filters match. A session search
-  reads the same traces and groups the first of them in this process.
+- Run artifacts, `martian/run.json` among them, are files in the run's folder,
+  `<artifact root>/<MLflow run id>/artifacts`. The artifact root must be a local folder. A
+  project's experiment keeps its artifacts in the root itself rather than in MLflow's
+  `workspaces/<workspace>/<experiment id>` under it, because MLflow keeps a run's folder in
+  `runs.artifact_uri`, 200 characters, and for an organisation, whose workspace name is 44
+  characters, that layout would take 58 or more of them. On Postgres, which enforces the length,
+  the store therefore takes an artifact root of at most 157 characters (`LONGEST_ARTIFACT_ROOT`)
+  and refuses a longer one with `ValueError` before it writes anything. SQLite does not enforce
+  the length and takes any root. A project whose
+  experiment an earlier SDK release created keeps MLflow's layout, for its earlier runs and its
+  new ones, so a data folder an earlier release wrote reads back unchanged.
+- Trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow
+  has: run, session, user, tags, trace ids, states and time. A page reads only its own traces
+  and a session search only the traces it groups, so the Traces page and the Sessions page take
+  about as long in a project of 100,000 traces as in one of 1,000. The binding checks each trace
+  MLflow returns against the whole query. Only free text, and a session, user, tag or run value
+  with a quote, backtick or backslash, which MLflow's filters cannot hold, are filtered in this
+  process; a search with one reads at most 1,000 traces a call (`TRACE_SCAN_LIMIT`) and returns
+  what matched among them with a `next_cursor` that reads on, so a page before the last may hold
+  fewer traces than its limit, or none, and a session search sets `has_more` when it stopped
+  there. MLflow's filters have no "or", so a search for a run's traces is two searches, on the
+  tag and on `mlflow.sourceRun` for untagged traces, merged in time order.
+- MLflow pages by offset, so a later page costs more than the first: the database passes over
+  every trace before it. A cursor is each MLflow search's offset, at most 18 of the digits 0-9,
+  joined by `.` for a run's two searches. Any other cursor, such as `²`, `١`, `page-2` or one
+  offset for a run's search, is refused as `invalid` ("cursor is not a next_cursor this store
+  returned").
+- A trace's request and response have no length limit of their own. MLflow's previews hold the
+  first 997 characters and `...` of a longer one, as MLflow tracing shortens its own, because
+  Postgres limits `trace_info.request_preview` and `response_preview` to 1,000 characters
+  (`TRACE_PREVIEW_LENGTH`). `get_trace` reads them whole from the root span. A search reads only
+  `trace_info`, so its results carry the previews and its text filter matches only them; such a
+  trace's metadata says so (`martian.request_preview_truncated` and
+  `martian.response_preview_truncated`, `"true"`, from `martian.evals.store`). A trace an earlier
+  release wrote has them whole in `martian.request` and `martian.response` metadata and reads
+  back as before.
+- On Postgres, a value of a trace's own metadata is still at most 8,000 characters, MLflow's
+  `trace_request_metadata.value`; a longer one is refused as `invalid`, naming `record_trace` and
+  that table, not the text. SQLite does not enforce the length.
+- An error MLflow raises is a `StoreError` that names the method: not found is `not_found`, an
+  object that exists `conflict`, and anything else `invalid`, with the table and the database's
+  error code when the database refused it. MLflow's own message is not passed on, except its
+  length refusal; see [what store errors contain](security-and-data.md#what-store-errors-contain).
+- How far these hold, measured: [trace store limits](trace-store-limits.md).
+- An experiment named by a project's id that the store did not create, such as one MLflow tracing
+  created for an application before the project existed, is not that project: creating the
+  project is refused as a `conflict`.
 
 The store contract runs on this binding with SQLite in every test run, and on Postgres when
 `MARTIAN_TEST_POSTGRES_URL` names a database the tests may create schemas in. On both,
 `tests/evals/test_store_mlflow.py` also records traces with MLflow tracing itself into the store's
-database and reads their sessions, turns and users back through the binding. That module belongs
-to the [MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
+database and reads back through the binding their sessions, turns and users, the run of a
+trace recorded inside a run's MLflow run, and the mapping of a span's OpenInference attributes.
+It checks that a page and a session search read only their own traces from MLflow for every
+filter MLflow has, that free text reads at most its bound a call and pages on, and that a cursor
+the store did not return is refused. It records a trace whose request and response are 100,000
+characters each and checks, in MLflow's own reading, that they are whole in the root span and
+shortened in the previews. It records a trace that says nothing but its spans, and again with one
+more span, and checks that MLflow holds one root span with the request and response the mapping
+read from the trace's own root span, and that a trace recorded without a mapping version is
+mapped from its own spans as it is read. It starts a run with a 157-character artifact root,
+reads runs an earlier release wrote in MLflow's layout, and checks that Postgres refuses a longer
+root before writing. That module belongs to the
+[MLflow compatibility suite](development.md#mlflow-upgrades), which also checks that a store
 written by one MLflow release reads back the same on the next.
 
 ## The record store
@@ -522,13 +1524,27 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   filter.
 - Updates that move a run or scoring job on name the state they expect, and draft and view edits
   name the revision they expect. A review chain never forks: a review is replaced at most once.
+- `put_results(..., scores=[...])` stores case results and their scores in one transaction, so a
+  case has both or neither: the worker's checkpoint of each finished case
+  ([checkpoints and resuming](#checkpoints-and-resuming)), and how `martian evals run` records each
+  batch.
+- A write the database refuses is a `StoreError` naming the method and the table: a duplicate
+  key, such as a run two writers create at once, is a `conflict`, and any other refused value,
+  such as a case position beyond Postgres's `integer`, is `invalid`. Any other database failure,
+  such as a lost connection, raises SQLAlchemy's error, whose engine hides the statement's values.
+  See [what store errors contain](security-and-data.md#what-store-errors-contain).
 - A suite version records who saved it and when (`Suite.created_by`, `created_at`). A draft can be
   renamed or described (`edit_draft`) and removed with its cases (`delete_draft`).
 - A saved view (`SavedView` in `martian.evals.records`) is UI state, not evaluation content, so it
   is not part of the shared model: `save_view` creates one or, naming the revision it read,
   replaces it; `get_view`, `list_views` and `delete_view` read and remove them. Migration `0002`
   adds its table.
-- Every change publishes an event (`martian.evals.records.events`) naming what changed.
+- The worker's queue (`SqlWorkQueue`, [the durable queue](#the-durable-queue)) is in the same
+  database, in `martian_work_queue`, which migration `0003` adds. It is not a `RecordStore`
+  method: only a `QueueWorker` uses it.
+- Every change publishes an event (`martian.evals.records.events`) naming what changed: its
+  `kind`, `project_id` and `id`, the run's id for `run`, `case_results` and `scores`, and, for a
+  `scoring_job`, its `run_id` too, which reading the job takes.
   `InProcessEvents` delivers events within one process, which is enough for the local edition.
   The server delivers them between processes. A listener that falls too far behind gets
   `EventsLost` and reads everything again.
@@ -559,14 +1575,35 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 | `--data-dir`, or `MARTIAN_EVALS_HOME` | `~/.martian/evals` | The data folder |
 | `--ui-dir`, or `MARTIAN_EVALS_UI_DIR` | The `ui` folder of the installed `martian` package, which the wheel ships | The built Evals UI: a folder holding `index.html` and `assets/` |
 | `--open` / `--no-open` | `--open` | Whether to open the UI in the default browser (Python's `webbrowser`; `BROWSER` names another) |
+| `--concurrency`, or `MARTIAN_EVALS_CONCURRENCY` | `1` | How many runs, and how many scoring jobs, may be in progress at once, and how many pieces of work the worker runs at once, each in a process of its own. A launch beyond it is `409`. At least 1 |
 
 - The principal is `SINGLE_USER` and the edition Community, so the bootstrap is the one
-  [above](#bootstrap-response).
+  [above](#bootstrap-response). Its limits are `--concurrency`: `concurrent_runs` and
+  `concurrent_scoring_jobs` are both that number (`local_entitlements` in `martian.evals.local`),
+  1 unless set, which is Community's. The work runs on the user's own machine, so the user sets
+  them.
 - The store is `MlflowStore` on SQLite (`mlflow.db` and `artifacts/` in the data folder), and the
-  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start
-  (`open_stores` in `martian.evals.local`). `martian evals run` writes its runs into the same
-  folder ([command-line runs](#command-line-runs)); a run made while the UI is open shows when a
-  page reads again, since the UI gets no live event from another process.
+  records are `SqlRecordStore` on SQLite (`martian.db`), all created on the first start with the
+  default project (`open_stores` in `martian.evals.local`). The targets the user defines are in
+  `targets.json` and their keys in `target-keys.json` ([local targets](#local-targets)).
+  `martian.db` also holds the worker's queue, in which each run is held by what works on it
+  ([runs whose process stopped](#runs-whose-process-stopped)).
+  `martian evals run` writes its runs into the same folder ([command-line runs](#command-line-runs)),
+  `martian evals import inspect` writes Inspect AI logs there as runs
+  ([imported Inspect logs](#imported-inspect-logs)), `martian evals import promptfoo` writes
+  promptfoo results there as runs ([promptfoo results and configs](#promptfoo-results-and-configs)),
+  `martian evals import mlflow` copies an MLflow tracking store there
+  ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
+  ([data export](#data-export)), and an application can record its traces there with MLflow
+  tracing or send them over OpenTelemetry ([below](#traces-from-an-application)). What another
+  process writes while the UI is open shows when a page reads again, since the UI gets no live
+  event from it.
+- The worker is `LocalWorker` (`martian.evals.local_runs`): each run started in the UI runs in a
+  process of its own against a local target, scored by its suite with the SDK judge, and a
+  finished one runs again with the same settings ([local runs](#local-runs)).
+- The default judge model is a local setting, `judge_model` in `settings.json` in the data folder
+  (`FileJudgeSettings`), set from the Judges page or `PUT /v1/evals/judge-model`. The file is
+  written when the default is first set ([judge models](#judge-models)).
 - The session call. The UI's API client first calls `POST /v1/auth/refresh` for an access token
   and a session. The local edition answers it with the fixed principal, so the UI needs no
   sign-in:
@@ -576,7 +1613,7 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
     "access_token": "local",
     "session": {
       "kind": "single_user",
-      "user": {"id": "local", "email": null, "display_name": null},
+      "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": null, "display_name": null},
       "organisation": null,
       "role": "owner",
       "platform_admin": false,
@@ -588,9 +1625,10 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   `session` is the bootstrap's `principal` with a `session_id`. Nothing checks the token. The
   route belongs to the local edition, not to the core: the Martian server answers the same call
   from its own sign-in.
-- Every path outside the API is a file of the built UI. The UI uses hash routes and relative
-  asset paths, and calls `/v1` on its own origin. `/ui-version.json` names the UI's version and
-  the frontend commit it was built from.
+- The API is the core's `/v1/evals` routes, its `POST /v1/traces` for OpenTelemetry exporters,
+  the session call, and the local targets and runs under `/v1/local`. Every other path is a file
+  of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
+  origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
 - The server listens on 127.0.0.1, and refuses with `400` a request whose `Host` is not
   `127.0.0.1` or `localhost`, so a web page cannot reach it through another name that resolves
   to this machine. There is no login: any program on this machine can call it. The container
@@ -598,26 +1636,350 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   [below](#the-local-edition-in-a-container).
 - If the UI folder holds no `index.html`, because an install has lost the packaged UI or
   `--ui-dir` names another folder, the command stops with exit code `2` and says so.
+- It sends nothing off the machine: MLflow's telemetry is off unless `MLFLOW_DISABLE_TELEMETRY`
+  says otherwise, the UI loads nothing from another host, and no other library it bundles has
+  telemetry ([telemetry](security-and-data.md#telemetry); `tests/evals/test_no_outbound.py`).
 
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
-when no `--ui-dir` is given, and the container settings below with their warning.
+when no `--ui-dir` is given, `--concurrency` and its variable in the bootstrap's limits and the
+worker, the container settings below with their warning, and an application's traces recorded
+with MLflow tracing ([below](#traces-from-an-application)).
+
+### Traces from an application
+
+An application's traces show in **Traces**, and their conversations in **Sessions**, in either of
+two ways: MLflow tracing writes them straight into the data folder, as below, or any OpenTelemetry
+SDK sends them to the running `martian ui` ([over OpenTelemetry](#over-opentelemetry)).
+
+An application instrumented with MLflow tracing (`@mlflow.trace`, `mlflow.start_span` or an MLflow
+autolog integration) can record its traces straight into the data folder. MLflow's own client
+writes them into the store's database; no other service runs. Start `martian ui` once first, or record a
+`martian evals run`, so the data folder and its default project exist. Then start the application
+with these settings in its environment:
+
+```bash
+export MLFLOW_TRACKING_URI="sqlite:///$HOME/.martian/evals/mlflow.db"
+export MLFLOW_ENABLE_WORKSPACES=true
+export MLFLOW_WORKSPACE=local
+export MLFLOW_EXPERIMENT_NAME=default
+```
+
+| Setting | What it does |
+| --- | --- |
+| `MLFLOW_TRACKING_URI` | The data folder's `mlflow.db`, as `sqlite:///` and the file's absolute path. With `--data-dir` or `MARTIAN_EVALS_HOME`, name that folder's `mlflow.db` |
+| `MLFLOW_ENABLE_WORKSPACES`, `MLFLOW_WORKSPACE` | The store keeps the local user's objects in the MLflow workspace `local` ([the in-process binding](#the-in-process-binding)). Without the first, MLflow refuses to open the database; without the second, it refuses to write |
+| `MLFLOW_EXPERIMENT_NAME` | The default project's experiment, named by the project's id, `default`. Another project's experiment is named by that project's id |
+
+```python
+import mlflow
+
+
+@mlflow.trace
+def answer(message: str, conversation: str, user: str) -> str:
+    # A session and a user group the application's traces in Sessions.
+    mlflow.update_current_trace(session_id=conversation, user=user)
+    return "..."
+```
+
+- A trace's session and user are the ones [above](#sessions-and-users). A trace without a session
+  is in Traces only.
+- Spans may carry OpenTelemetry GenAI or OpenInference attributes, such as those of an
+  instrumentation library, beside MLflow's. The store maps them as it reads the trace, so the
+  span view shows their model, tokens, inputs and outputs ([trace conventions](#trace-conventions)).
+- A trace recorded inside the application's own MLflow run (`mlflow.start_run()`) belongs to no
+  run in the UI; one recorded inside a run's MLflow run belongs to that run
+  ([the in-process binding](#the-in-process-binding)).
+- Run the application with the MLflow release the SDK installs, such as in the same environment as
+  `martian-sdk[evals]`. A newer MLflow migrates the database's tables, and the SDK then refuses it.
+- MLflow tracing sends traces in the background and sends the rest when the process exits;
+  `mlflow.flush_trace_async_logging()` sends them sooner.
+- The database is a file on this machine, so this does not reach the container image or another
+  machine. From those, send the traces [over OpenTelemetry](#over-opentelemetry).
+
+If the application names the experiment before the default project exists, MLflow creates the
+experiment itself, with its artifacts under the application's working folder, and the store does
+not take it as the project: `martian ui` and `martian evals run` then refuse the data folder with
+exit code `2`. With the settings above, rename that experiment; the next start creates the
+project, and the traces recorded so far stay in the renamed experiment, which the UI does not
+show:
+
+```bash
+python -c 'from mlflow import MlflowClient; c = MlflowClient(); c.rename_experiment(c.get_experiment_by_name("default").experiment_id, "default-old")'
+```
+
+`tests/evals/test_local.py` runs such an application in a process of its own, with only these
+settings, and reads its traces, sessions and spans back through the local edition's routes.
+
+#### Over OpenTelemetry
+
+An application instrumented with an OpenTelemetry SDK, in any language, sends its traces to the
+running `martian ui` with the SDK's OTLP/HTTP exporter, at `POST /v1/traces`
+([OpenTelemetry traces](#opentelemetry-traces)). Point the exporter at it with OpenTelemetry's
+own settings:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:7600/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+```
+
+| Setting | What it does |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The endpoint, whole. `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7600` says the same, since an exporter adds `/v1/traces` to it. With `--port`, use that port |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `http/protobuf` or `http/json`, for an SDK whose exporter would otherwise use gRPC, which is not served. Python's `opentelemetry-exporter-otlp-proto-http` sends protobuf whatever it says |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | Only for a project other than the default: `x-martian-project-id=<project id>`. No credentials: the local edition has no sign-in |
+
+In Python, with `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` installed:
+
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))  # reads the settings above
+trace.set_tracer_provider(provider)
+```
+
+- `martian ui` must be running while the application exports; an exporter that cannot reach it
+  drops the spans once its retries run out. A batch processor sends spans every few seconds and
+  the rest when the provider shuts down (`provider.shutdown()`, or `provider.force_flush()`
+  sooner).
+- Spans with OpenTelemetry GenAI, OpenInference or MLflow attributes, such as those an
+  instrumentation library writes, show their model, tokens, inputs and tool calls, and
+  `gen_ai.conversation.id` or `session.id` and `user.id` group them into sessions
+  ([trace conventions](#trace-conventions)).
+- A trace is `IN_PROGRESS` until its root span arrives, usually after its children.
+- To the container image, export to the published port. An application in another container on
+  the same Docker network reaches the server by the container's name, which must then be in
+  `MARTIAN_EVALS_ALLOWED_HOSTS`, or the `Host` check refuses it with `400`
+  ([below](#the-local-edition-in-a-container)).
+
+`tests/evals/test_otlp.py` exports with the Python SDK's exporter to the local edition on a
+loopback port and reads the traces back through the Traces and Sessions routes.
+
+### Local targets
+
+The hosted console starts a run against an agent from its Agents registry. The local edition has no
+registry: its user defines targets in the UI's **Run eval** dialog instead, each with the user's own
+key for it if it needs one (`martian.evals.local_targets`). A target is one of:
+
+| Kind | Fields | What it calls |
+| --- | --- | --- |
+| `http` | `url`, `body`, optional `response_path` and `key_header` (default `Authorization`) | One JSON `POST` per case to `url`, with the rules of a suite file's [URL target](evals.md#run-a-suite-file-locally): `body` uses `{{input}}`, `{{inputs.NAME}}` or `{{messages}}`, and may use `{{uuid}}`, `{{session_id}}` and `{{history}}`, and `response_path` finds the reply |
+| `model` | `base_url` (the endpoint's `/v1` address) and `model` | An OpenAI-compatible chat completions endpoint: `POST <base_url>/chat/completions` with the case's input as the user message, the reply at `choices.0.message.content` |
+
+Every target has a `name`, unique among the targets. The key is sent in `key_header` (always
+`Authorization` for a model): as `Bearer <key>` in `Authorization`, as it is in any other header.
+An address cannot hold credentials or `${...}`, so the key never goes in a URL.
+
+The routes are the local edition's, outside the frozen `/v1/evals` contract:
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/local/targets` | `{"items": [...]}`: every target, oldest first, with `id`, `created_at` and `has_key` |
+| `POST /v1/local/targets` | Define a target, with an optional `key`; `201` with the target. A name in use is `409` |
+| `DELETE /v1/local/targets/{target_id}` | Remove a target and its key; `204`, or `404` |
+
+```json
+{"name": "Support agent", "kind": "http", "url": "https://agent.example/api/chat",
+ "body": {"message": "{{input}}"}, "response_path": "reply", "key": "..."}
+```
+
+Where the keys are and are not:
+
+- `targets.json` in the data folder holds the definitions and never a key. `target-keys.json` beside
+  it holds each target's key by the target's id. Every write creates a new file with mode `0600` and
+  renames it over the old one, so only the user who runs `martian ui` can read it; on Windows the
+  file has the permissions of the data folder. The OS keychain is not used: a headless Linux machine
+  or the container image often has none.
+- No answer carries a key: a target has `has_key`, and a request the routes cannot read is answered
+  `422` with its problems as one line of text, without the values FastAPI's own answer would repeat.
+  Nothing logs a key, and `martian.db` and `mlflow.db` never hold one.
+- In the shared model a local target is an `http` `Target` whose key header names
+  `${MARTIAN_TARGET_KEY}` (`LocalTargets.model_target`), so a run that records it keeps the
+  reference, never the key. `LocalTargets.key(id)` is the one way to read a key, and only each
+  run's process reads it, through `LocalTargets.credential(principal, target_id, name)`, the
+  worker's [`Credentials`](#targets), which answers `MARTIAN_TARGET_KEY` with the key and any other
+  name with nothing ([local runs](#local-runs)).
+
+A launch from the local UI names the chosen target by its id in the launch request's `agent_id`,
+the frozen contract's one target field. Editing a target is not built; remove it and define it
+again, which gives it a new id. A run already recorded keeps its results and its pin of the
+target, and a run whose target was edited by hand in `targets.json` under the same id fails at its
+next start instead of calling it ([the same target](#the-same-target-on-every-start)).
+
+`tests/evals/test_local_targets.py` defines, lists and removes targets of both kinds, refuses
+targets that would not work, maps each kind onto the shared model, checks the key file's mode, and
+runs every target route on the server `martian ui` runs, then a full run of a target that takes a
+key, scored with a suite, and a run again, to check that the key reaches the target and is in no
+request but the one that defined it, no answer, no log record at any level, nothing the server or
+a run's process printed and no file in the data folder but the key file, traces included. The
+server's own process is made to fail if it ever reads a key.
+
+### Local runs
+
+A run started in the local UI runs on this machine, in a process of its own, against a local
+target (`martian.evals.local_runs`). The **Run eval** dialog names a target, a published dataset,
+a record budget and, optionally, a saved suite version; a finished run's **Run again** repeats it.
+
+The routes are the local edition's, outside the frozen `/v1/evals` contract. The UI uses them in
+place of `POST /v1/evals`, which the local edition also serves, for runs without a suite:
+
+| Route | What it does |
+| --- | --- |
+| `POST /v1/local/runs` | The contract's launch body (`request_id`, `agent_id`, `project_id`, `max_items`, `dataset_name`), with a local target's id as `agent_id`, an optional `suite_version_id`, the API id of a saved suite version (`GET /v1/evals/suites`), and `acknowledge_model_cost`. `202` with the queued run, as the launch |
+| `POST /v1/local/runs/{run_id}/again` | `{"request_id": ..., "acknowledge_model_cost": ..., "limits": ...}`: a new run of a finished run with its saved settings. `202` with the queued run |
+| `POST /v1/local/runs/{run_id}/resume` | `{"limits": ...}`: go on with a run that stopped at one of its limits, or whose suite's scoring job did, after what it finished, optionally under new limits. `202` with the run |
+
+```json
+{"request_id": "…", "agent_id": "<target id>", "dataset_name": "support-faq", "max_items": 100,
+ "suite_version_id": "<suite version id>", "acknowledge_model_cost": true,
+ "limits": {"max_seconds": 1800, "max_judge_tokens": 200000}}
+```
+
+- **Admission** is the launch's (`admit_run` in `martian.evals.server.launch`): as many runs in
+  progress at once as `--concurrency`, one unless set (`409` beyond it), run codes from
+  `EV-1001`, idempotent by `request_id` (the same `request_id` with other settings is `409`). A
+  target that is not defined is `404` ("Target not found"), a dataset not
+  published `422`, a suite version not saved `404`. A suite with a model judge (`correctness`,
+  `safety` or `policy`) calls a model for each judged case, so both routes refuse it with `422`
+  ("Model scoring requires cost acknowledgement") unless `acknowledge_model_cost` is true, as a
+  scoring request does.
+- **What a run keeps.** The run names the target by id (`Run.target`, kind `agent`) and pins it in
+  `provenance.target` as the worker pins an HTTP target, `{"kind": "http", "agent_id", "digest"}`
+  with a digest of the target as written and its key as `${MARTIAN_TARGET_KEY}`, and with the
+  target's `name`, which is the run's `agent_name`. It keeps the published dataset version it
+  reads (`store.dataset_id`, `dataset_digest`) and the suite version (`suite_id`,
+  `suite_version`, `suite_digest`, and `provenance.suite` with its API id, its name and
+  `model_judges`, whether it has a model judge), and its `limits` in `provenance.limits`, which its
+  suite's scoring job runs under too ([limits](#limits-stopping-and-resuming)). `LocalWorker` has
+  no limits of its own, so a run launched without any has none.
+- **The run.** `LocalWorker` queues each piece of work, and its worker, served beside the app,
+  hands it to a `ProcessWorker` whose HTTP targets
+  ([targets](#targets)) are the local targets, read from the data folder at each check and each
+  run (`LocalTargets.http_targets`), so each run's process receives them as written. Its setup,
+  `worker_services(home)`, opens the data folder's stores in the new process, gives the worker
+  the keys as its `Credentials` (`LocalTargets.credential`) and the SDK judge (`sdk_judge()`).
+  The worker calls the target itself, once per case, with `{{input}}` the case's prompt and
+  `${MARTIAN_TARGET_KEY}` filled in each time, and grades each output by exact match, with a
+  trace per called case (`execute_run`). A call that fails is the case's error, naming the
+  setting to check and never the address, a header, the key or the response.
+- **The suite.** With a suite, the worker records a queued scoring job of that suite version when
+  it starts the run, so the UI shows it from the start. Each judge that names no model is pinned
+  to the default judge model ([judge models](#judge-models)) when the job is recorded, as the
+  scoring route pins it. Once the run's process ends, the job is queued and runs in a process of
+  its own if the run completed (`execute_scoring`: the suite's scorers and policies over the saved outputs, its
+  judges on the SDK judge, which reads the provider's key from the environment `martian ui` runs
+  in; a skipped case has no output, so its scores are errors and the job ends `partial`), and is
+  `cancelled` otherwise ("The run did not complete, so its suite did not score it"). A run that
+  stopped at one of its limits leaves the job queued, to score the run once it resumes and
+  completes. The job is admitted with its run, under `concurrent_runs`: it counts against
+  `concurrent_scoring_jobs` once the run has completed, and is queued then even when that limit is
+  reached, so a completed run is never left unscored.
+- **Resume** goes on with a run that stopped at one of its limits, in a new process, after the cases
+  it finished, on the target it was admitted with ([the same
+  target](#the-same-target-on-every-start)), and then its suite scores it; or, for a completed
+  run whose suite's scoring job stopped at one, with that job, after the cases it scored. `limits`
+  in the request replace the run's. A run in neither case is `409`, and a run `martian evals run`
+  recorded `422`.
+- **Run again** repeats a run that has finished (`completed`, `partial`, `failed`, `cancelled` or
+  `stopped`; a queued or running one is `409`) with what it kept: the same target, the same dataset
+  version, even when a newer one is published, the same suite version, even when the suite has a
+  newer one, the same record budget and the same limits, unless the request gives others. Its suite's judges are pinned to the default judge model of the
+  moment, as any new scoring job is. The new run names the one it repeats in
+  `provenance.repeat_of`. A run with no saved settings, such as a suite-file run from `martian evals run` or a CI run, is
+  `422`; a run whose target was removed is `404` ("Target not found").
+- **The key.** The server's own process never reads a key: only each run's process does, and no
+  request but the one that defines a target, no answer, log line, trace or record holds one.
+
+`tests/evals/test_local_runs.py` starts runs through these routes on `martian ui`'s application,
+with a loopback HTTP target that wants the key and a loopback OpenAI-compatible endpoint as the
+default judge model, and checks that the run completes in its own process with its results,
+traces and the suite's scores, model judges included, that the server's process never reads the
+key, that run again keeps the target, dataset version, suite version and budget when newer
+versions exist, the refusals above, the suite job of a run that does not complete, that the
+frozen launch runs too, and that a run whose target answers after its time limit stops with its
+first case, leaves its suite's job queued, and resumed with a higher limit calls only its second
+case and is then scored.
+
+#### Runs whose process stopped
+
+Runs and scoring jobs are queued durably in the data folder's `martian.db`
+([the durable queue](#the-durable-queue)), and `martian ui` serves the queue beside the app:
+`LocalWorker` is a `QueueWorker` that starts each piece of work in a process of its own, as many at
+once as `--concurrency`. Each run is held by what works on it: a claim on the run's entry in the
+queue, whose lease, 10 seconds (`LEASE_SECONDS` in `martian.evals.local_runs`), that process
+renews.
+
+| Holder | Holds the run |
+| --- | --- |
+| `martian ui`'s worker | From taking the run from the queue until the run's process has ended and the run's suite scoring job is queued or cancelled. The run's process ends with the worker |
+| `martian evals run` | From before it records the run until the run ends (`RunHold`, a `recording` claim) |
+
+- **A run whose `martian ui` stopped**, however it stopped, a crash, a kill or a power cut
+  included, stays in the queue, and its run's process ends with it. The next `martian ui` on the
+  folder takes the run again once its lease runs out and resumes it in a new process, on the
+  dataset version and suite version it was admitted with: the cases that have a result are not
+  called again, and the case that was in flight is ([checkpoints and
+  resuming](#checkpoints-and-resuming)). A `martian ui` stopped with Ctrl+C gives its work back at
+  once. A scoring job is taken again the same way and resumes after the cases it scored. A run's
+  suite scoring job is queued once the run completes, or cancelled when it did not ("The run did
+  not complete, so its suite did not score it"), before the run leaves the queue, so a stop in
+  between does neither twice nor never.
+- **A run whose `martian evals run` stopped** cannot be taken again: the run is that process's.
+  Once its lease runs out, `martian ui`'s worker finishes it, `failed`, or `cancelled` when a stop
+  had been asked, with the `error` "Interrupted: the process working on this run stopped before
+  it finished". Cancelling it (`POST /v1/evals/{run_id}/cancel`) once its lease ran out finishes
+  it at once with the same `error` (`LocalWorker.cancel_interrupted`, the worker's
+  `InterruptedRuns`). While its process lives, the run is left alone: it counts against
+  `--concurrency` until it ends, so at the default of 1 it blocks launches, and cancelling it asks
+  its process to stop, as for any running run.
+- **A queued or running run that is not in the queue at all**, such as one an earlier release left
+  `running`, is finished as interrupted when `martian ui` starts, before it admits a run
+  (`finish_interrupted`), with the same `error`, and its suite's queued scoring job is cancelled.
+  The server's log names each run it finished. A new run is then admitted, and an interrupted run
+  can run again.
+
+What this does not do:
+
+- Two servers on one data folder never run one piece of work at once, but each takes work as it
+  comes. Keep one `martian ui` per data folder.
+- A lease is measured on the machine's clock. A data folder shared by machines whose clocks
+  disagree by more than a few seconds is not supported, nor, as for SQLite, one on a network share.
+
+`tests/evals/test_local_runs.py` kills a `martian ui` while its run waits on its target for the
+second case, after newer versions of the dataset and the suite were saved, and checks that the
+run's process ended with it and that the restarted server takes the run again once its lease runs
+out, calls the target again for the second case only, completes the run on its own dataset version
+and scores it with its own suite version; that a run another live process holds is left alone and
+counts against launches, and that cancelling it once that process is killed and its lease ran out
+finishes it; that runs not in the queue are finished at start; and that `martian evals run` holds
+its run while it records it.
 
 ### The local edition in a container
 
 The repository's `Dockerfile` builds the local edition as an image, for one user who runs it on a
-small server rather than a laptop. It runs the same `martian ui`: the wheel built from the
-checkout with the `evals` extra, with its dependencies at the versions `uv.lock` pins, on
-`python:3.12-slim`. Both base images are pinned by digest. The server runs as the user `martian`
-(uid 10001), with the data folder in `/data`, a volume, and without opening a browser.
+small server rather than a laptop. It runs the same `martian ui`: the one wheel in `dist/`, with
+the `evals` extra and its dependencies at the versions `uv.lock` pins, on `python:3.12-slim`. The
+image installs that wheel and never builds the package. Both base images are pinned by digest.
+The server runs as the user `martian` (uid 10001), with the data folder in `/data`, a volume, and
+without opening a browser.
 
 ```bash
+rm -rf dist && uv build --wheel
 docker build -t martian-evals .
 docker run -d --name martian-evals -p 127.0.0.1:7600:7600 -v martian-evals:/data martian-evals
 ```
 
+A release builds the image from the wheel it publishes, checks that both hold the same SDK
+version and Evals UI, and publishes it as `ghcr.io/morninghq/martian-evals:<version>`
+([releasing](releasing.md#the-local-editions-image)). To run a published version instead of a
+local build, give that name as the image, the last argument of `docker run`.
+
 Then open http://127.0.0.1:7600/ on the server. The `martian-evals` volume holds `mlflow.db`,
-`artifacts/` and `martian.db`, so the data outlives `docker stop` and `docker start`, and a new
+`artifacts/`, `martian.db` and `settings.json`, so the data outlives `docker stop` and `docker start`, and a new
 container started on the same volume. To keep the data in a folder of the server instead, mount
 that folder at `/data`; the image's user, uid 10001, must be able to write to it.
 
@@ -651,9 +2013,8 @@ it does not keep out a program that reaches the port, which is why the port must
 
 `tests/test_container_image.py` checks that the `Dockerfile` pins its base images, runs as a user
 other than root and sets the variable `martian ui` reads, and that `.dockerignore` lets in every
-file the build copies. CI does not build the image. Nothing
-publishes it to a registry yet: MorningHQ/martian-notes#223 builds the package and the image from
-one tagged release.
+file the build copies and no source to build the package from. CI does not build the image; the
+release workflow does, and `scripts/check_image.py` checks it there.
 
 ## Command-line runs
 
@@ -666,31 +2027,361 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests and the SDK version. In the store, an MLflow run in the default project's experiment |
-| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id` |
-| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. In the store, an MLflow run in the default project's experiment |
+| `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`. With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
+| `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts, and tagged `martian.simulated` when a simulated user wrote it; the case result's trace is its first turn with the conversation's verdict, else its first |
 
 - The run is `running` while it grades, and its results and counts are written after each batch,
   so it shows while it runs. It is `completed` once every case has a result, with a verdict or
   not. A run that stops on an error is `failed`, with `error` naming the exception's type, and an
-  interrupted one is `cancelled`.
-- A resumed run is a new run. A case whose verdict it reuses from the output folder's
+  interrupted one is `cancelled`. A run that reached one of its limits (`limits` in the suite file,
+  `--max-seconds`, `--max-judge-tokens`) is `stopped`, with the limit in `error` and
+  `provenance.stopped`, and the cases it did not reach have no result
+  ([`docs/evals.md`](evals.md#run-a-suite-file-locally)). With repeats, a case the run stopped in
+  the middle of is one it did not reach: it has no result, and the next run runs all of its
+  attempts ([limits and repeats](evals.md#limits-and-repeats)). The process holds the run while it runs,
+  so `martian ui` leaves it alone; cancelling it there sets `cancel_requested_at`, which the
+  process reads every second (`RunRecorder.watch_cancel`), so it stops before its next case as
+  `cancelled`, keeping the cases it finished, and no later write of the run drops the request. A
+  run whose process was killed before it could record its end is finished by `martian ui` when it
+  starts or when the run is cancelled there ([runs whose process stopped](#runs-whose-process-stopped)).
+- A resumed run is a new run, with its limits afresh. A case whose verdict it reuses from the output folder's
   `results.jsonl` has its result and scores but no trace, because the trace belongs to the run
   that graded the case; that result's trace route answers `409`.
-- The data folder is opened before anything in the output folder changes. One that cannot be
-  opened stops the run with exit code `2`.
+- The data folder is opened, with its default project, before anything in the output folder
+  changes. One that cannot be opened stops the run with exit code `2`.
 - The output folder is written as before: `results.jsonl`, `summary.json` and `junit.xml` hold
   what they held. `run_suite` returns the summary with the recorded run under `run`, and the
   command prints the run's code and how to open it. The output folder's `mlflow.db` stays as the
   store of MLflow's evaluation harness, or the server `mlflow.tracking_uri` names gets those
   runs. The core does not read it.
-- Traces that an application records with MLflow tracing, and mapping their `mlflow.sourceRun`
-  to a run, are MorningHQ/martian-notes#148.
+- A suite whose target is instrumented with MLflow tracing shows the target's own spans inside
+  each case's trace. The same application, run outside a suite, can record into the data folder
+  too ([traces from an application](#traces-from-an-application)).
 
 `tests/evals/test_runner.py` runs suite files and reads the recorded runs back through the local
 edition's routes: Runs and the run detail against the contract, a case's trace and its spans,
-trace search, Compare of two runs, a resumed run, a run that stops early, and a data folder that
-cannot be opened.
+trace search, Compare of two runs with its label (within noise for the same deterministic
+system twice, worse for a seeded regression), a run that repeats its cases and its attempts, its
+reliability and flaky cases, a resumed run, a run that stops early, and a data folder that cannot
+be opened. It also times out a function target that hangs and a URL target that sends its reply a
+byte at a time while the run finishes; stops a run at its time limit and at its judge token limit,
+against a loopback judge that reports its usage, and resumes each after the cases it finished;
+stops a repeated run in the middle of a case's attempts and resumes it with all of that case's
+attempts; and cancels a running command's run from the local edition's cancel route.
+`tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
+conversation verdicts, the turns route, each turn's trace and the session its turns share.
+`tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
+the simulator model, and for personas built from transcripts and from the data folder's sessions;
+`tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
+[fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
+
+## Imported Inspect logs
+
+`martian evals import inspect` records the logs [Inspect AI](https://inspect.aisi.org.uk/) writes
+as runs in the local edition's data folder (`martian.evals.inspect_import`), so `martian ui` opens
+them in Runs and the run detail, compares two of them case by case, shows each case's messages and
+tool calls as a trace, and takes reviews of them. Inspect has no server, permissions or run
+comparison of its own.
+
+```bash
+martian evals import inspect logs/*.eval                 # each log Inspect wrote to logs/
+martian evals import inspect run.json --data-dir ./evals-data
+```
+
+It reads both of Inspect's formats, `.eval` and `.json`, against Inspect's published log schema
+(log format version 2), without Inspect installed; the `zstandard` package in `martian-sdk[evals]`
+reads the Zstandard entries of an `.eval` log. The data folder is `--data-dir`, else
+`MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui`. Each log is one run, written
+through the store and the record store as `SINGLE_USER`, in the default project; the
+[eval model](eval-model.md#inspect-ai-logs) maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, a `stored` target, the state of the log (`success` is `completed`), Inspect's times, and a scorer for each score name. The code is `inspect-`, the task's name and the run's number among that task's imported runs, such as `inspect-my_task-2`. `provenance["inspect"]` keeps the log's path, its SHA-256 and format, the eval id, task, model and status, and Inspect's results with each scorer's metrics |
+| `CaseResult` | One per sample and epoch: the input, the target as `expected_response`, the completion, the sample's error and time |
+| `Score` | One per Inspect score value, the value kept exactly; a dict or list value is one per entry, named `<scorer>/<key>`. Inspect's `C` and `true` pass and `I`, `P`, `N` and `false` fail; numbers have no verdict. Unscored (NaN) is a score with no value and an error. A scorer that called a model is an `llm_judge` with that model as its source |
+| `Trace` | The sample's messages and tool calls as spans under a root span of the sample, timed by Inspect's events, linked to the run, named after the run code and the case id, and carrying the case's scores as assessments |
+
+- A case's status follows its scores: `error` when the sample failed, `failed` when a score fails,
+  else `error` when one is unscored, `passed` when one passes, and `skipped` when none gives a
+  verdict. Two imported runs compare when they cover the same samples; a sample's first epoch has
+  its own id as its case id, so runs with different numbers of epochs pair on it.
+- Every log is read before anything is written, so a file that is not a finished Inspect log
+  (a log still `started`, another format version, one with no samples, a damaged archive) stops
+  the command with exit code `2` and writes nothing. A data folder that cannot be opened does
+  the same.
+- The run is `running` while its cases are written; an import that stops early leaves it
+  `failed`, with `error` naming the exception's type, or `cancelled` when interrupted.
+- Importing the same log again makes another run. The log is not changed or copied: the run
+  names it.
+
+`tests/evals/test_inspect_import.py` imports two real Inspect logs from `tests/fixtures/inspect/`
+(one on GLM 5 in the JSON format, one with two epochs on Inspect's mock model in the `.eval`
+format; `fixture_task.py` there wrote them) and reads them back through the local edition's
+routes: every score against the log, Inspect's metrics recomputed from them, the run and its
+trace's spans, Compare of the two runs and a review. It also covers each kind of score value, chat
+inputs, an `.eval` log with Deflate entries, and the files the command refuses.
+
+## promptfoo results and configs
+
+A team that tried [promptfoo](https://www.promptfoo.dev/) brings its results and its configs, with
+promptfoo not installed and not a dependency. `martian evals import promptfoo` records a results
+file as runs in the local edition's data folder (`martian.evals.promptfoo_import`), and
+`martian evals convert promptfoo` writes a config as suite files for `martian evals run`
+(`martian.evals.promptfoo_convert`). Neither runs promptfoo or calls its providers.
+
+```bash
+martian evals import promptfoo results.json                    # as `promptfoo eval -o results.json` wrote it
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer \
+  --judge-model openai:/gpt-4.1-mini --output suite               # llm-rubric as the rubric judge
+```
+
+[`examples/promptfoo`](../examples/promptfoo) has a config written by hand from promptfoo's
+configuration reference, `agent.py`, which answers its tests from a table, and `results.json`,
+the results promptfoo writes for that config with its two providers, also written by hand.
+
+### Imported results
+
+The importer reads promptfoo's JSON output file (`evalId`, `results`, `config`, `shareableUrl`,
+`metadata`) whose `results` is an `EvaluateSummary` of version 3, the shape promptfoo's
+[configuration reference](https://www.promptfoo.dev/docs/configuration/reference/#evaluation-outputs)
+gives and promptfoo 0.125 writes. Version 2, with its results table, and the `.jsonl`, `.csv` and
+other output formats are refused. Each provider in the file is one run, written as
+`martian evals import inspect` writes its runs; the [eval model](eval-model.md#promptfoo-results)
+maps every field:
+
+| Object | What an import writes |
+| --- | --- |
+| `Run` | Source `local`, state `completed`, a `stored` target, and a scorer for each assertion type. The model's `Target` has no name, so the provider names the run: its code is `promptfoo-`, the provider's label (else its id) and the run's number among that provider's imported runs, such as `promptfoo-mini-2`, and `provenance["promptfoo"]["provider"]` holds its id and label. The provenance also keeps the file's path and SHA-256, the eval id, the timestamp, the description, the prompts' metrics and promptfoo's stats |
+| `CaseResult` | One per result row (a test, once per prompt and repeat), with case id `test <n>`, `test <n>, prompt <m>` when the eval has several prompts, and ` (repeat <k>)` for a later repeat. Its inputs are the rendered prompt and the vars, its expectations the test's assertions, its output the provider's, and its latency promptfoo's |
+| `Score` | One per assertion promptfoo graded, named after the assertion's type (`icontains`, a second one `icontains (2)`, one inside an `assert-set` `assert-set/regex`). The value and the verdict are the assertion's pass, as a suite file's checks record theirs, so Quality shows each assertion's pass rate; promptfoo's numeric score is `metadata["promptfoo.score"]` and its reason the rationale. Model-graded types (`llm-rubric`, `factuality`, `g-eval` and the others) and red team graders have source `llm_judge` |
+| `Trace` | One span, the provider call, with the prompt, the output, the vars, token use and cost, carrying the case's scores |
+
+- A case's status is promptfoo's own verdict on the row: `failureReason` 2 (the provider or a
+  grader failed) is `error`, a row that passed is `passed`, and any other `failed`, so a test's
+  `threshold` counts as promptfoo counted it.
+- Two providers of one file compare case by case: their runs cover the same tests and prompts.
+- Every file is read before anything is written, so a file that is not promptfoo results, one
+  of another version, one without rows, or one that has a provider's case twice or two providers
+  with one label stops the command with exit code `2` and writes nothing.
+- The file's `config` section is not copied into the run, only its `description`.
+
+### Converted configs
+
+The converter reads `prompts`, `providers`, `tests` with `vars` and `assert`, and `defaultTest`,
+and writes the suite files where the features map:
+
+- Each test, once per prompt, is a case. The prompt rendered with the test's vars is the input
+  `prompt` (`input_key: prompt`) and the vars are the input `vars`. Prompts are inline text,
+  `{raw, label}` objects, or `.txt` and `.md` files (a `.txt` file split on `---` lines).
+  Templates fill `{{ name }}` and `{{ name.key }}`; a var a test does not have is empty, as in
+  promptfoo. Case ids are the ones the importer gives the same tests' results.
+- `defaultTest` assertions and vars apply to every test, its assertions first, as promptfoo runs
+  them. `{{ name }}` in an assertion's value is filled from the test's vars.
+- A suite file applies every check to every case, and promptfoo asserts per test, so tests that
+  need the same checks share a suite: `evals.yaml` and `cases.jsonl`, then `evals-2.yaml`,
+  `cases-2.jsonl` and output folder `results-2` for the next group, and so on. Two tests share a
+  check when they assert the same type the same number of times with the same options; a text
+  check's values and a rubric that differ between them are read from each case's expectations.
+- `--target FILE.py[:FUNCTION]` is the target, called as `FUNCTION(prompt=..., vars=...)` (the
+  function defaults to `target`), and written relative to the suite file. Without it, each
+  test's `providerOutput` is the stored reply the suite grades, and a test without one is not
+  converted.
+- `--judge-model` is the rubric judge's model for `llm-rubric`; without it, `llm-rubric` does not
+  convert. promptfoo's grading `provider` is not read.
+- A folder that already has one of the files to write stops the command with exit code `2` before
+  anything is written, and so does a config with nothing that converts.
+
+Assertions map onto the checks on main ([deterministic checks](evals.md#deterministic-checks) and
+the rubric judge). An assertion converts only when its check decides the way promptfoo does;
+everything else is listed:
+
+| promptfoo assertion | Suite check |
+| --- | --- |
+| `contains`, `contains-all` | `contains`, `case_sensitive: true` |
+| `icontains`, `icontains-all` | `contains` |
+| `contains-any`, `icontains-any` | `contains`, `any_of: true` (and `case_sensitive: true` for `contains-any`) |
+| `not-contains`, `not-contains-any` | `not_contains`, `case_sensitive: true` |
+| `not-icontains`, `not-icontains-any` | `not_contains` |
+| `regex`, `not-regex` | `matches`, `not_matches`: the pattern as written, read by Python's `re` (a pattern Python cannot read is listed) |
+| `equals`, `not-equals` (text, a number or a boolean) | `matches`, `not_matches` on `\A<text>\Z` |
+| `starts-with`, `not-starts-with` | `matches`, `not_matches` on `\A<text>` |
+| `is-json`, with no schema or one of only `type: object` and `required` | `is_json`, with `required_keys` |
+| `llm-rubric` with a text rubric | `rubric`, on `--judge-model`; one per suite, so a test's second is listed |
+| `latency` with a `threshold` above 0, and `--target` | `latency`, `max_ms` the threshold: the target's call took at most that many milliseconds |
+| `cost` with a `threshold` above 0, and `--target` | `cost`, `max_usd` the threshold: the target's call cost at most that many US dollars |
+
+Case-insensitive checks compare with Python's `casefold`, where promptfoo lowercases; a value of a
+`-any` or `-all` type given as text is split on commas, as promptfoo splits it. `latency` and
+`cost` pass at the threshold, as promptfoo's do, and a call with no figure to compare is an error
+in both. promptfoo times and prices its provider's call; the checks read the trace MLflow records
+for the target's call, so `cost` needs the target's model calls traced with their token use (a
+target that makes none, such as `examples/promptfoo/agent.py`, gives the check an error, where
+promptfoo takes a cost the provider reports itself). A `threshold` is the limit of these two, not
+a score threshold.
+
+| Listed, not converted | Why |
+| --- | --- |
+| `javascript`, `python`, `ruby`, `webhook` | Custom code, which the built-in checks do not run. Write the rule as a custom Python scorer, `def scorer(inputs, outputs, expectations)` (name only the arguments it reads, `trace` too) returning `True` or `False`, a number, or a pair of either with a reason, and add it by hand as a `type: python` check with `file:` and `function:`. The converter does not translate the code |
+| `contains-json` | Finds JSON inside other text; `is_json` needs the whole reply to be JSON |
+| `is-json` with any other schema, `equals` with a JSON value | No check on main validates a schema or compares JSON values |
+| `latency`, `cost` with no `threshold`, one of 0 or less, or stored replies | The checks need a limit above 0 and a call to measure. A `cost` with no threshold is a promptfoo metric, which no check records |
+| `is-refusal` | Passes only a refusal; no check does (`no_refusal` passes the opposite) |
+| `not-is-refusal` | promptfoo counts a reply as a refusal when it starts with one of its refusal phrases, such as "I'm sorry", or holds one anywhere, such as "as an AI". `no_refusal` reads the reply's opening and passes a decline that goes on to answer, so the two decide some replies differently; add `no_refusal` by hand to use it |
+| `promptfoo:redteam:pii` and its variants | A model judges whether the reply discloses personal data, names, addresses and records included, and allows what the user gave or the purpose permits. `no_personal_data` finds email addresses and phone, card, IBAN and national id numbers by their form, with no context; add it by hand to use it |
+| `promptfoo:redteam:indirect-prompt-injection` | A model judges whether the reply followed the injected instructions, the assertion's value. `resists_injection` looks for a marker that only following them produces, which a config does not name; add it by hand with one |
+| Other red team graders | Graded by a model with their own prompts |
+| `similar`, `levenshtein`, `rouge-*`, `bleu`, `gleu`, `meteor`, `perplexity` | Closeness to a reference text or perplexity |
+| `factuality`, `g-eval`, `answer-relevance`, `context-*`, `model-graded-*` and other model-graded types, `classifier`, `moderation`, `pi` | Graded by a model with their own prompts |
+| `is-valid-function-call`, `is-valid-openai-function-call`, `is-valid-openai-tools-call` | Validate the reply's tool calls against the schemas of the provider's own `tools` or `functions`. The closest check, `tool_called` with `arguments_match: schema`, checks the calls of a tool it names against a schema it gives; add it by hand to use it |
+| `tool-call-f1` | Scores the reply's set of tool names against the expected set (F1, which passes at the default threshold of 1.0 only when the two sets are equal), and also reads Responses API `function_call` items and JSON on lines of its own inside text. The closest check, `tool_trajectory` with `order: any_order`, passes when the expected calls are made, other calls too, and refuses those replies; add it by hand to use it |
+| `trajectory:tool-used`, `trajectory:tool-args-match`, `trajectory:tool-sequence`, `trajectory:step-count` | promptfoo reads every span of its trace that names a tool in its attributes, a tool's own inner spans too, and matches a tool's name as a case-insensitive pattern (`*` and `?`). The closest checks, `tool_called` (with `arguments_match` for `tool-args-match`), `tool_trajectory` and `step_count`, read the `TOOL` spans of MLflow's trace of the target's call, not those inside a tool span, and compare the name as written. Besides: `tool-args-match` matches lists item by item and has `defaults` and `ignore`; `tool-sequence` orders tool spans by start time, where `tool_trajectory` orders model turns, so calls made in parallel in one turn are in order for promptfoo and not for `in_order`; `step-count` counts the trace's steps of a type, and a trace with no tool span as none, where `step_count` counts model turns and tool calls and reads no trace without a model or tool span. Add the check by hand with `source: trace` to use it |
+| Trace assertions, `finish-reason`, `guardrails`, `skill-used` | Read the provider's trace or metadata |
+| `is-html`, `is-sql`, `is-xml` and their `contains-` forms, `word-count` | No check on main reads them |
+| `assert-set`, `select-best`, `max-score`, `human`, other `not-` forms, unknown types | No check combines, compares or negates them |
+
+`not-contains`, `not-icontains` and their `-any` forms convert to `not_contains`, which matches a
+value as written, as promptfoo does. `no_prohibited_phrases`, added by hand, also matches a phrase
+through case, spacing and disguises.
+
+Options are listed too. `weight`, `metric` and an assertion's grading `provider` do not change its
+verdict, so the assertion converts and the option is listed. `transform`, `contextTransform`,
+`threshold` (except on `latency` and `cost`), `rubricPrompt`, `normalizeUnicode`, `config` and
+unknown options would, so the assertion is listed and not converted, as is one whose value is a `file://` reference or uses
+Nunjucks beyond `{{ name }}`. A test's `threshold`, `metadata`, `options`, `provider`,
+`providers`, `prompts` and `assertScoringFunction` are listed and not applied; a test with a list
+var (which promptfoo runs once per value) or a `file://` var is listed and not converted. The
+providers, prompts that are not text or `.txt` and `.md` files, `tests` or `defaultTest` in a
+file, `scenarios` and every other top-level field are listed. The command prints the list, and
+each suite file holds it as comments at its top, with the tests it covers.
+
+`tests/evals/test_promptfoo_import.py` imports `examples/promptfoo/results.json` and reads it back
+through the local edition's routes: both providers' runs, their cases and verdicts, every
+assertion's pass and score against the file, the provenance, a trace, and Compare of the two
+providers; it also covers repeated and nested assertions, grader errors, and the files the command
+refuses. `tests/evals/test_promptfoo_convert.py` converts the example config, checks each suite
+file and the list of what it left out, and runs its three suites against `agent.py`; it runs a
+stored-reply suite, checks that each converted assertion type decides a reply, or a call's time
+and cost, as promptfoo does, and that every assertion, option, prompt and test that does not
+convert is listed.
+
+## Copied MLflow stores
+
+`martian evals import mlflow` copies what a team kept in MLflow into the local edition's data
+folder (`martian.evals.mlflow_import`), so `martian ui` shows it: each experiment as a project,
+its traces with their spans, sessions and users, the evaluation datasets, every assessment, and
+each evaluation run with its cases, which Compare pairs case by case.
+
+```bash
+martian evals import mlflow ./mlflow.db                          # a SQLite tracking store
+martian evals import mlflow 'postgresql://user:password@host/mlflow' --data-dir ./evals-data
+martian evals import mlflow ./mlflow.db --experiment support-bot --dry-run
+```
+
+| Option | What it does |
+| --- | --- |
+| The source | The tracking store: its SQLite database file (`mlflow.db`), or a `sqlite:///` or `postgresql://` URL (read with psycopg; install `martian-sdk[postgres]`). The traces' artifact folder is wherever the store names it |
+| `--data-dir` | The data folder, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, as for `martian ui` |
+| `--experiment` | Copy only this experiment, by name or id; repeat for more. Default: every active experiment |
+| `--dry-run` | Check and read the store and report what would be copied, writing nothing |
+
+The version check comes first, before anything else is read. MLflow keeps its schema revision in
+the store's `alembic_version` table, and `mlflow-skinny` 3.18.0 reads one revision, the head of its
+own migrations (`schema_head()` in `martian.evals._mlflow`):
+
+- The same revision: the store is read.
+- An older revision, one an older MLflow wrote: refused. Reading it would mean migrating it, and the
+  import never changes the store it reads, because an older MLflow cannot open a migrated store
+  (a store 3.18.0 opened, 3.16.1 can no longer open). The message says how to copy it anyway: copy
+  the database, upgrade the copy with `mlflow db upgrade <the copy's URL>` on mlflow-skinny 3.18.0,
+  and import the copy.
+- A revision 3.18.0 does not know, which a newer MLflow wrote: refused. A martian-sdk release whose
+  MLflow knows the revision imports it.
+- A database with no schema revision, more than one, or without every table its revision has; a
+  store with experiments in MLflow workspaces other than `default`; a folder (MLflow's file
+  store); an MLflow server's URL: refused.
+
+A refused store stops the command with exit code `2` before the data folder is opened, so nothing
+is written. The store is read over a connection that cannot write: SQLite opened read-only with
+`query_only` on, Postgres with every transaction read-only. Every object is read and mapped before
+anything is written.
+
+**Copy, not attach.** The issue asked to attach to or copy from a store; the import copies.
+Attaching, the core's store reading the team's database in place, would not work as it is and
+would put the team's store at risk:
+
+- The in-process binding expects its own layout: a workspace per organisation, projects as
+  tagged experiments, runs as MLflow runs holding `martian/run.json`, datasets tagged
+  `martian.dataset.*`. MLflow's own experiments, runs and datasets are none of these.
+- Runs, case results and the scores the core gates on live in the record store, not in MLflow, so
+  an attached store would still need its runs copied.
+- Opening the database with the SDK's MLflow migrates an older one in place, after which the
+  team's MLflow cannot open it, and refuses a newer one. Writes from the UI (annotations, reviews,
+  scoring) would land in the team's database.
+- The core's ids differ from MLflow's: runs and projects are UUIDs.
+
+A copy reads the store once, at one schema revision, never writes it, and puts everything in the
+core's own forms, so the data folder is an ordinary one: it keeps working when the team upgrades or
+retires its MLflow. Copying the same store again copies only what is new: ids are derived from
+MLflow's (the trace id, the run id as a UUID, the record id, a project id from the experiment's id
+and creation time), and what an earlier copy wrote is left as it is and reported as there already.
+Read-only attach is feasible later as a separate read-only store binding over a store at the
+pinned revision, mapping as the copy does on every read, but it would have to derive runs and
+case results on each read, refuse every write route, and stop working whenever the team moves its
+MLflow to another revision.
+
+What maps where ([the eval model](eval-model.md#mlflow-tracking-stores) lists every field):
+
+| MLflow | What the copy writes |
+| --- | --- |
+| Experiment | A project with the experiment's name; MLflow's `Default` experiment is the default project. The organisation's limit of 25 projects besides the default one is checked before anything is written |
+| Trace | A trace in the experiment's project, under MLflow's trace id, with its spans, session, user, tags and metadata |
+| Assessment | A score on its trace. A person's feedback and every expectation are annotations, as the UI records them; a judge's or code's feedback is a score. Values are kept, a dict or list as its JSON text; `yes` and `no` are verdicts |
+| Evaluation dataset | A dataset version in the default project, a case per record under the record's id |
+| Run with traces | A run with MLflow's run id as a UUID and code `mlflow-<run name>`: a case per trace, the case's id the record with the same inputs, its scores the run's judge and code feedback. Its MLflow metrics, parameters and dataset are in its provenance |
+
+The command prints what each experiment, run and dataset became, the counts written and the counts
+there already, and what was not copied and why: deleted experiments and runs, runs without traces
+(parameters and metrics only) or still running, assessments a later one overrides, records without
+inputs, traces whose spans are in an artifact store that is not a file on this machine, and the
+registered scorers, labeling schemas, review queues, logged models and registered models or
+prompts the core has no place for.
+
+- `copy_mlflow_store(plan, store, records, principal)` copies into any organisation's store and
+  record store; the command copies into the local edition's, as `SINGLE_USER`.
+- A run is `running` while its cases are written; a copy that stops early leaves it `failed`, or
+  `cancelled` when interrupted, and a later copy leaves it so.
+- The hosted MLflow server's REST API is not read; copy from the database the server keeps (its
+  `--backend-store-uri`). Neither is MLflow's file store.
+- A copied assessment is a new assessment in the data folder's store, dated by the copy; its
+  MLflow creation time is `metadata["mlflow_source.created_at"]`, and a run's scores in the
+  record store keep it as `created_at`.
+
+`tests/evals/test_mlflow_import.py` has mlflow-skinny write a real tracking store
+(`tests/fixtures/mlflow/write_store.py`: traces in two sessions, a person's feedback, an
+expectation, a judge's feedback, a corrected assessment, an evaluation dataset, two
+`mlflow.genai.evaluate` runs, a run without traces and a deleted experiment), copies it and reads
+it back through the local edition's routes: projects, traces, sessions, spans, annotations, the
+dataset, both runs with their cases and scores, their provenance and Compare. It checks the
+source's SHA-256 is unchanged, that a second copy writes nothing new, that spans kept in a trace's
+artifact file are read from there, that an older, unknown or missing schema revision, a missing
+table, workspaces and files that are not stores are refused with nothing written, the project
+limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
+Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
+
+## Data export
+
+`martian evals export <folder>` exports everything the local edition's store and record store
+hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
+`martian evals import martian <folder>` loads an export into a data folder that holds no data
+yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
+interrupted export resumes when it is run again into the same folder. An install that runs the
+core in its own process calls `export_data` and `import_data` with its store, record store and the
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
+an export holds, resuming, and what the receiving store assigns are in
+[data export](data-export.md).
 
 ## Not built yet
 
@@ -698,13 +2389,18 @@ cannot be opened.
 | --- | --- |
 | The signed offline licence file | MorningHQ/martian-notes#131 |
 | The server's REST binding of the store, moving its MLflow calls behind the interface | MorningHQ/martian-notes#105 |
-| A durable worker, and one process per evaluation run | MorningHQ/martian-notes#139, #140 |
-| HTTP targets and the SDK judge in the worker | MorningHQ/martian-notes#137, #133 |
+| The Martian server's queue worker process | MorningHQ/martian-notes#139, after MorningHQ/martian-notes#102 |
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
-| Publishing the local edition's image, with the package, from one tagged release | MorningHQ/martian-notes#223 |
+| LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
+| A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
+| The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
-`test_read_routes.py`, `test_read_contract.py`, `test_write_routes.py`, `test_write_contract.py`,
-`test_worker.py` and the store and record tests run the core without the backend. The `Evals core`
-job in CI runs them with the model tests, on Postgres as well as SQLite.
+`test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
+`test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
+`test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
+`test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
+`test_worker_concurrency.py`, `test_no_outbound.py` and the store and record tests run the core
+without the backend. The `Evals core` job in CI runs them with the model tests, on Postgres as
+well as SQLite.

@@ -3,6 +3,7 @@ the record store, as the server's routes serve them from its tables and MLflow. 
 MemoryStore and on the in-process MLflow binding."""
 
 import asyncio
+import json
 import uuid
 from datetime import timedelta
 
@@ -12,9 +13,12 @@ from fastapi.testclient import TestClient
 from martian.evals.model import Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
+from martian.evals.stats import wilson
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION
 from tests.evals.read_fixture import T0, seed
+from tests.evals.trace_samples import ARGUMENTS, MODEL, QUESTION, RESULT, STYLES, sample_trace
 
 ORG = organisation_principal("user-1", "org-a", frozenset({"member"}), display_name="Ada")
 
@@ -124,9 +128,11 @@ def test_the_workbench_shows_the_newest_scoring_job_and_its_scores(served):
         1,
         1.0,
     )
+    # The Wilson interval of 2 of 2; a boolean scorer has no mean to give an interval for.
+    assert card["confidence_95"] == list(wilson(2, 2)) and card["mean_confidence_95"] is None
     assert [r["id"] for r in work["latest_reviews"]] == ["review-1"]
     assert work["calibration"][0]["paired"] == 1 and work["calibration"][0]["agreement"] == 1.0
-    assert work["members"] == [{"id": "local", "name": "local", "role": "owner"}]
+    assert work["members"] == [{"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "name": "local", "role": "owner"}]
 
 
 def test_the_workbench_filters_by_result_and_refuses_another_runs_job(served):
@@ -148,10 +154,27 @@ def test_comparing_two_runs_pairs_their_cases(served):
     assert result["compatible"] and result["coverage"]["paired"] == 3
     assert [i["change"] for i in result["items"]] == ["unchanged", "improved", "not_comparable"]
     assert result["changes"] == {"improved": 1, "regressed": 0, "unchanged": 1, "not_comparable": 1}
+    # Two comparable pairs and one change: far too few to tell from noise.
+    found = result["significance"]
+    assert (found["label"], found["test"], found["compared"], found["improved"], found["p_value"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+        1.0,
+    )
+    assert found["minimum_detectable_effect"] is None
     with_jobs = {**pair, "baseline_job_id": seeded.baseline_job.id, "candidate_job_id": seeded.candidate_job.id}
     scored = client.get("/v1/evals/compare", params=with_jobs).json()
     assert scored["criteria"] == {"correctness": {"unchanged": 1, "improved": 1, "not_comparable": 1}}
     assert scored["items"][1]["criteria"]["correctness"]["delta"] == 1.0
+    judged = scored["criteria_significance"]["correctness"]
+    assert (judged["label"], judged["test"], judged["compared"], judged["improved"]) == (
+        "within_noise",
+        "mcnemar_exact",
+        2,
+        1,
+    )
     one_job = {**pair, "baseline_job_id": seeded.baseline_job.id}
     assert client.get("/v1/evals/compare", params=one_job).status_code == 422
 
@@ -164,6 +187,7 @@ def test_runs_of_different_datasets_are_not_comparable(served):
         "/v1/evals/compare", params={"baseline_id": other.id, "candidate_id": seeded.candidate.id}
     ).json()
     assert not result["compatible"] and "different dataset identities" in result["reason"]
+    assert result["significance"] is None
     running = client.get(
         "/v1/evals/compare", params={"baseline_id": seeded.running.id, "candidate_id": seeded.candidate.id}
     )
@@ -280,6 +304,44 @@ def test_trace_search_in_a_project_that_does_not_exist(served, tmp_path):
     assert empty.post("/v1/evals/sessions/search", json={}).json()["items"] == []
     assert empty.get("/v1/evals/datasets").json() == [] and empty.get("/v1/evals").json() == []
     records.close()
+
+
+@pytest.mark.parametrize("style", STYLES)
+def test_a_trace_in_each_convention_shows_its_model_tokens_tool_calls_and_inputs(served, style):
+    client, seeded = served
+    trace_id = "tr-" + uuid.uuid4().hex
+    sample = sample_trace(style, trace_id).model_copy(update={"request_time": T0 + timedelta(days=3)})
+    asyncio.run(seeded.store.record_trace(SINGLE_USER, sample))
+    (row,) = search(client, session_id="conversation-1")["items"]
+    assert (row["id"], row["model"], row["tokens"], row["user_id"]) == (trace_id, MODEL, 20, "alice")
+    assert QUESTION in row["request"]
+    detail = client.get(f"/v1/evals/traces/{trace_id}").json()
+    assert detail["info"]["trace_metadata"][MAPPING_KEY] == MAPPING_VERSION
+    assert detail["token_usage"] == {"total_tokens": 20}
+    agent, model_call, tool = detail["spans"]
+    assert (agent["type"], model_call["type"], tool["type"]) == (
+        "AGENT",
+        "LLM" if style == "openinference" else "CHAT_MODEL",
+        "TOOL",
+    )
+    assert model_call["model"] == MODEL
+    assert model_call["token_usage"] == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+    assert QUESTION in json.dumps(model_call["inputs"])
+    # The tool call the model asked for is in its output messages, and the call is a tool span.
+    assert "call_1" in json.dumps(model_call["outputs"]) and "order_status" in json.dumps(model_call["outputs"])
+    assert "order_status" in tool["name"] and (tool["inputs"], tool["outputs"]) == (ARGUMENTS, RESULT)
+    assert agent["attributes"]["acme.region"] == "eu-west"
+
+
+def test_a_trace_mapped_with_a_version_this_release_does_not_know_is_refused(served):
+    client, seeded = served
+    trace_id = "tr-" + uuid.uuid4().hex
+    newer = sample_trace("otel_genai", trace_id).model_copy(
+        update={"metadata": {MAPPING_KEY: "martian-trace-mapping-v99"}}
+    )
+    asyncio.run(seeded.store.record_trace(SINGLE_USER, newer))
+    refused = client.get(f"/v1/evals/traces/{trace_id}")
+    assert refused.status_code == 409 and "martian-trace-mapping-v99" in refused.json()["detail"]
 
 
 def test_a_trace_shows_its_info_and_downloads(served):

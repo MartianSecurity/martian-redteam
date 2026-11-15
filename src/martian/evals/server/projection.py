@@ -9,18 +9,24 @@ stay a port of the server's and the mapping is in one place:
 - A case result has no id of its own in the model. Its API ``id`` is a UUID derived from its run
   and case ids, and a score's ``id`` one derived from its run, case, scorer and scoring job, so
   each is the same in every response.
+- A person is named by a UUID (``user_out``): their id when it is one, else one derived from it,
+  so the local user ``local`` has an id the routes that take a user accept.
 - A case's text (``prompt``, ``expected``, ``output``) is what the server shows: the first text
   under ``message``, ``prompt``, ``question`` or ``content`` of the inputs, and under
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
-  with none of those keys are shown as their JSON.
+  with none of those keys are shown as their JSON. A conversation case's ``prompt`` is its first
+  turn's, and its ``output`` the conversation as messages.
 - Traces are shown in MLflow's terms, as the contract's MLflow-shaped responses are: states such as
-  ``OK``, assessment sources such as ``LLM_JUDGE``, and a ``TraceInfo`` built from the trace.
+  ``OK``, assessment sources such as ``LLM_JUDGE``, and a ``TraceInfo`` built from the trace. A
+  span's type, model, usage, inputs and outputs are what the trace conventions mapping
+  (``martian.evals.trace_conventions``) reads from it.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -37,10 +43,14 @@ from martian.evals.model import (
     ScoringJob,
     Trace,
     TraceState,
+    TurnResult,
     Value,
     digest,
 )
+from martian.evals.repeats import flaky, reliability
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
+from martian.evals.stats import wilson
+from martian.evals.trace_conventions import MAPPING_KEY, MAPPING_VERSION, map_span, mapping_table
 
 DEFAULT_PROJECT = "default"
 """The project a request without ``project_id`` reads: the contract's default project."""
@@ -62,6 +72,7 @@ RUN_STATUS = {
     "partial": "FINISHED",
     "failed": "FAILED",
     "cancelled": "KILLED",
+    "stopped": "KILLED",
 }
 USAGE_NOTE = "Native instrumented usage is shown when supplied; missing token/cost values remain unavailable."
 
@@ -93,6 +104,14 @@ def user_uuid(user_id: str) -> uuid.UUID:
         return uuid.UUID(user_id)
     except ValueError:
         return derived_id("user", user_id)
+
+
+def user_out(user_id: str) -> str:
+    """A person as the API names them: :func:`user_uuid` of their id, as text. Every user id a
+    response carries is in this form, and a user id a request names is compared in it, so the id
+    the API gives for the principal is one the routes that take a user (a UUID) accept. A UUID id
+    is itself; the local user ``local`` is a UUID derived from it."""
+    return str(user_uuid(user_id))
 
 
 def suite_version_id(suite_id: str, version: int) -> uuid.UUID:
@@ -159,7 +178,7 @@ def item_out(result: CaseResult) -> EvalItemOut:
         dataset_item_id=result.case_id,
         position=result.position,
         status=result.status,
-        prompt=prompt_text(result.inputs),
+        prompt=prompt_text(result.turns[0].inputs if result.turns else result.inputs),
         expected=expected_text(result.expectations),
         output=text_of(result.output),
         error=result.error,
@@ -170,8 +189,108 @@ def item_out(result: CaseResult) -> EvalItemOut:
     )
 
 
+_ATTEMPT_VERDICT: dict[str, bool] = {"passed": True, "failed": False}
+
+
+def attempt_verdicts(result: CaseResult) -> list[bool | None]:
+    """A case result's attempts' verdicts in order: True passed, False failed, None no verdict."""
+    return [_ATTEMPT_VERDICT.get(attempt.status) for attempt in result.attempts]
+
+
+def reliability_out(results: Sequence[CaseResult]) -> dict[str, Any]:
+    """The run's reliability for the core's own attempts route: the cases that passed every attempt
+    (``passed``), failed one (``failed``) or are left open (``errors``), their share
+    (``pass_rate``) with its 95% Wilson interval, and ``flaky``, the case ids whose verdict changed
+    between attempts. Only results with attempts count; the cases count as independent, as in a
+    scorecard."""
+    cases = [(result.case_id, attempt_verdicts(result)) for result in results if result.attempts]
+    found = reliability(cases)
+    graded = found["passed"] + found["failed"]
+    interval = wilson(found["passed"], graded)
+    return {
+        "passed": found["passed"],
+        "failed": found["failed"],
+        "errors": found["errors"],
+        "pass_rate": found["passed"] / graded if graded else None,
+        "confidence_95": list(interval) if interval else None,
+        "flaky": found["flaky"],
+    }
+
+
+def attempts_out(result: CaseResult) -> dict[str, Any]:
+    """A case result's attempts, for the core's own attempts route: each attempt's verdict, each
+    check's verdict, the reply as text, the target error, latency and trace, and whether the
+    case is flaky, its verdict changing between attempts. Empty, and not flaky, for a case that
+    ran once. An attempt of a conversation case also has its ``session_id`` and its ``turns``."""
+    attempts = []
+    for attempt in result.attempts:
+        found: dict[str, Any] = {
+            "number": attempt.number,
+            "status": attempt.status,
+            "output": text_of(attempt.output),
+            "error": attempt.error,
+            "latency_ms": attempt.latency_ms,
+            "trace_id": attempt.trace_id,
+            "checks": {label: verdict.model_dump(mode="json") for label, verdict in attempt.checks.items()},
+        }
+        if attempt.turns:
+            found |= {"session_id": attempt.session_id, "turns": [turn_out(turn) for turn in attempt.turns]}
+        attempts.append(found)
+    return {
+        "id": result_id(result.run_id, result.case_id),
+        "dataset_item_id": result.case_id,
+        "position": result.position,
+        "status": result.status,
+        "flaky": flaky(attempt_verdicts(result)),
+        "attempts": attempts,
+    }
+
+
+def turn_out(turn: TurnResult) -> dict[str, Any]:
+    """One turn of a conversation, for the core's own routes: its verdict, its prompt, expected text
+    and reply as the run detail shows a case's, the target error, latency, trace and each check's
+    verdict on it."""
+    return {
+        "number": turn.number,
+        "status": turn.status,
+        "prompt": prompt_text(turn.inputs),
+        "expected": expected_text(turn.expectations),
+        "output": text_of(turn.output),
+        "error": turn.error,
+        "latency_ms": turn.latency_ms,
+        "trace_id": turn.trace_id,
+        "checks": {label: verdict.model_dump(mode="json") for label, verdict in turn.checks.items()},
+    }
+
+
+def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, Any]:
+    """A conversation case's result, for the core's own turns route: its verdict and each check's
+    verdict on the whole conversation (``scores``, the run's own scores of the case), its session
+    id, which its turns' traces share, its latency, its turns, and whether a simulator wrote its
+    user's turns (``simulated``). With repeats these are the attempt's that stands for the case;
+    the attempts route has every attempt's."""
+    own = [score for score in scores if score.scoring_job_id is None]
+    return {
+        "id": result_id(result.run_id, result.case_id),
+        "dataset_item_id": result.case_id,
+        "position": result.position,
+        "status": result.status,
+        "session_id": result.session_id,
+        "simulated": result.simulated,
+        "latency_ms": result.latency_ms,
+        "checks": {
+            score.scorer: {"passed": score.passed, "rationale": score.rationale, "error": score.error} for score in own
+        },
+        "turns": [turn_out(turn) for turn in result.turns],
+    }
+
+
 def _run_fields(run: Run) -> dict[str, Any]:
     target = run.target
+    # A worker that knows its targets by name pins the name with the target, as the local
+    # edition's does; a registered agent's name is the server's.
+    pinned = run.provenance.get("target")
+    name = pinned.get("name") if isinstance(pinned, dict) else None
     return {
         "id": uuid.UUID(run.id),
         "run_code": run.code,
@@ -189,6 +308,7 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "errored": run.counts.errors,
         "error": run.error,
         "agent_id": uuid.UUID(target.agent_id) if target and target.kind == "agent" and target.agent_id else NO_AGENT,
+        "agent_name": name if isinstance(name, str) else None,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
@@ -275,8 +395,8 @@ class ReviewRow:
             queue_id=review.queue_id,
             criterion=review.criterion,
             previous_id=review.previous_id,
-            actor_id=review.reviewer,
-            assignee_id=review.assignee,
+            actor_id=user_out(review.reviewer) if review.reviewer else None,
+            assignee_id=user_out(review.assignee) if review.assignee else None,
             assessment_id=review.score_id,
             state=review.state,
             value=review.value,
@@ -344,7 +464,7 @@ def queue_out(queue: ReviewQueue) -> dict[str, Any]:
         "name": queue.name,
         "question": queue.questions[0].model_dump(mode="json"),
         "questions": [question.model_dump(mode="json") for question in queue.questions],
-        "assignee_id": queue.assignee,
+        "assignee_id": user_out(queue.assignee) if queue.assignee else None,
         "item_ids": [str(result_id(queue.run_id, case_id)) for case_id in queue.case_ids],
         "native_state": "persisted",
         "native_id": None,
@@ -453,15 +573,26 @@ def trace_info(trace: Trace, experiment_id: str) -> dict[str, Any]:
 
 def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
     """A trace's spans as the Evals UI's span inspector reads them, at most 200, with the trace's
-    usage. Refuses a trace whose spans are not one tree."""
+    usage. Each span's type, model, token usage, inputs and outputs are what the trace conventions
+    mapping reads from it, with the mapping version the trace names (the newest when it names
+    none): a tool call is a ``TOOL`` span whose inputs are its arguments and outputs its result,
+    and the calls a model asked for are in its output messages. The rows keep the server's
+    fields. Refuses a trace whose spans are not one tree, or whose mapping version this release
+    does not know."""
     spans = trace.spans
     roots = [span for span in spans if not span.parent_id]
     if spans and len(roots) != 1:
         raise HTTPException(409, "Unexpected saved trace structure")
+    version = trace.metadata.get(MAPPING_KEY, MAPPING_VERSION)
+    try:
+        mapping_table(version)
+    except ValueError as error:
+        raise HTTPException(409, f"The trace was mapped with {version}, which this release does not know") from error
     root_start = (roots[0].start_ms or 0) if roots else 0
     rows: list[dict[str, Any]] = []
     for span in spans[:200]:
         fields = span.attributes
+        mapped = map_span(span, version=version)
         start, end = span.start_ms or 0, span.end_ms or 0
         rows.append(
             {
@@ -470,13 +601,13 @@ def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
                 "name": span.name,
                 "duration_ms": max(0, end - start),
                 "offset_ms": max(0, start - root_start),
-                "type": span.kind or fields.get("mlflow.spanType", "UNKNOWN"),
-                "token_usage": fields.get("mlflow.chat.tokenUsage"),
+                "type": mapped.kind or "UNKNOWN",
+                "token_usage": mapped.token_usage(),
                 "cost": fields.get("mlflow.llm.cost"),
-                "model": fields.get("gen_ai.request.model") or fields.get("mlflow.llm.model"),
+                "model": mapped.model,
                 "retrieved_documents": fields.get("mlflow.retrievedDocuments"),
-                "inputs": span.inputs,
-                "outputs": span.outputs,
+                "inputs": mapped.inputs,
+                "outputs": mapped.outputs,
                 "status": {"code": SPAN_STATUS.get(span.status, "STATUS_CODE_UNSET")},
                 "attributes": fields,
                 "events": [],
@@ -495,12 +626,11 @@ def trace_view(trace: Trace, trace_id: str) -> dict[str, Any]:
             parent = by_id[parent]["parent_id"]
         row["depth"] = len(seen) - 1
     root = roots[0].attributes if roots else {}
+    root_usage = map_span(roots[0], version=version).token_usage() if roots else None
     return {
         "trace_id": trace_id,
         "spans": rows,
-        "token_usage": {"total_tokens": trace.tokens}
-        if trace.tokens is not None
-        else root.get("mlflow.chat.tokenUsage"),
+        "token_usage": {"total_tokens": trace.tokens} if trace.tokens is not None else root_usage,
         "estimated_cost": {"total_cost": trace.cost} if trace.cost is not None else root.get("mlflow.llm.cost"),
         "truncated": len(spans) > 200,
         "usage_note": USAGE_NOTE,

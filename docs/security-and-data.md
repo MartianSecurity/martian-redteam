@@ -33,7 +33,8 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 `martian evals run evals.yaml` does not use the platform connection above and sends nothing to
 Martian. Its outbound calls are the ones the suite file names:
 
-- **A URL target** (`target.url`) receives one JSON `POST` per case, carrying that case's input.
+- **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
+  suite repeats its cases, carrying that case's input.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -52,22 +53,175 @@ Martian. Its outbound calls are the ones the suite file names:
 
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
-verdicts and reasons as `results.jsonl` holds them, its trace with the target's spans, and the
+verdicts and reasons as `results.jsonl` holds them (every attempt's, when the suite repeats
+cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
 
+`martian evals import promptfoo` records a promptfoo results file in the same folder: each row's
+prompt, vars, output and assertion reasons. It does not copy the file's `config` section, which
+promptfoo writes with best-effort redaction of provider settings; the run keeps only the config's
+`description` and the file's path and hash. An assertion's grading `provider` given as an
+object, with settings that may hold a key, is kept as its id only. `martian evals convert
+promptfoo` writes suite files and calls nothing: a converted suite calls only the `--target`
+function it names, never the config's providers.
+
+`martian evals import mlflow` copies an MLflow tracking store into the same folder. It opens the
+store so that it cannot write it (SQLite read-only, Postgres with read-only transactions) and never
+migrates it, and reads the trace files the store names on this machine only. A Postgres URL's
+password is not printed or stored: the report and each copied run's provenance keep the URL
+without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
+See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
+
+`martian evals export` writes everything the data folder's store and record store hold into the
+folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
+reviews, and run artifacts. It holds no credentials: the local targets and their keys
+(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
+`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+data folder. See [data export](data-export.md).
+
+## Custom Python scorers
+
+A [custom Python check](evals.md#custom-python-checks) is code, and it is **not sandboxed**. It
+runs with the full privileges of the process that calls it: it can read that process's
+environment (model keys, a `MARTIAN_API_TOKEN`), any file its user can read, and the network, and
+it is given each case's inputs, reply and expectations. Nothing in the SDK limits what it imports,
+how long it runs or how much memory it takes.
+
+**Who can add one, and where it runs.**
+
+| Where | Who adds it | Where the code runs |
+| --- | --- | --- |
+| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
+| Python (`python_check`) | The test's author | In the test's process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The local edition (`martian ui`) | Nobody: it installs none | — |
+
+**Never in the API process.** No route of the evals core takes code, a file or a module to import,
+and no record names one: a scoring job's `code` scorer is matched by name to what the worker's
+setup installed. The process that serves the API never imports or calls a custom scorer on any
+path that could reach one:
+
+- **Suite loading and validation** check the shape only, as above.
+- **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
+  scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
+  scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
+  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+- **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
+  custom scorer.
+- **The worker's setup** is imported by module in the API process, to check that a new process can
+  import it, so the setup imports each scorer's module inside its function, never at the top of
+  its own module.
+
+`tests/evals/test_custom_scorers.py` serves the core with a `ProcessWorker` whose setup installs
+scorers from a file that records the process id of every process importing it, calls those
+routes, scores a run with the scorers, and fails if the test's own process, which serves the API,
+ever imported the file.
+
+**What the worker isolates, and what it does not.** `ProcessWorker` runs each piece of work in a
+new process for one organisation's work, so a custom scorer's code never runs in the API process,
+MLflow's process-wide state stays with that organisation, and the scorer is handed one case at a
+time: that case's inputs, saved output and expectations. It does not isolate the code from
+anything else the worker can reach. The work's process runs as the same operating-system user as
+the API process, with all of its environment, so any key or database address the API process
+holds; beside the setup's store and record store, whose databases hold every organisation's
+records; and with the same files and network. There is no time or memory limit: a scorer that
+never returns holds its scoring job, and one that ends its process fails the work ("The worker
+process ended before this work finished"). Installing a custom scorer on a server is deploying
+code into the worker, with the worker's privileges; review it as such.
+
+## Telemetry
+
+The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
+`martian evals run`, the eval gate, a server that serves the [evals core](evals-core.md) and
+each of its worker processes. Importing `martian.evals` sets `MLFLOW_DISABLE_TELEMETRY=true`
+before it imports MLflow, unless the environment already sets the variable, and each worker
+process inherits it. MLflow decides when it is first imported whether to start its telemetry
+client, which otherwise asks `config.mlflow-telemetry.io` for a configuration and then posts
+usage events from a background thread. A process that imports MLflow before `martian.evals`,
+such as an application that serves the core beside its own MLflow code, must set the variable
+in its environment.
+
+| Setting | In the evals processes | Effect |
+| --- | --- | --- |
+| `MLFLOW_DISABLE_TELEMETRY` | `true` unless the environment sets it | MLflow's usage telemetry. `false` turns it back on |
+| `DO_NOT_TRACK` | Not set | `true` also turns MLflow's telemetry off |
+
+What each part sends without a setting of yours:
+
+| Part | Sends by itself | Sends only when you configure it |
+| --- | --- | --- |
+| `mlflow-skinny` | Usage telemetry, off as above | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
+| `opentelemetry-sdk`, under MLflow tracing | Nothing | Spans to the collector `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` names |
+| `databricks-sdk` and `google-auth`, which MLflow brings | Nothing | Databricks and Google Cloud URIs, which the local and on-premises stores do not use |
+| FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
+| The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
+| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+
+`tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
+deterministic check, `martian ui` serving the UI and that run, and the core with a process
+worker running a function target, each in a clean environment (no CI or pytest variables, under
+which MLflow turns its telemetry off by itself, and no telemetry settings) with every connection
+and name lookup for an address other than loopback refused. It fails on any such attempt and on
+MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
+loads nothing from another host.
+
 ## The local edition has no login
 
 `martian ui` serves the evals core and the Evals UI for one fixed user with no sign-in. Anything
-that reaches its port can read and change all of its data. On a laptop it listens on 127.0.0.1
+that reaches its port can read and change all of its data, and send it traces over OpenTelemetry
+(`POST /v1/traces`) without credentials. On a laptop it listens on 127.0.0.1
 and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
 and a web page cannot reach it through a name that resolves to the laptop. The container image
 listens on the container's interfaces, keeps the same `Host` check and prints a warning when it
 starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through an SSH tunnel.
 Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).
+
+The targets a user defines in its UI keep their keys in `target-keys.json` in the data folder, a
+file with mode `0600` that only the user can read. Only the process that runs a run reads a key,
+to send it to that run's target in the target's key header; the server's own process never does.
+No answer of the server, no log line and no other file in the folder holds a key, traces
+included; a run records the key only as the reference `${MARTIAN_TARGET_KEY}`. Anyone who can reach the port cannot read a key back through it, and
+cannot point an existing target, and so its key, at another address: a target cannot be edited.
+They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
+
+## What store errors contain
+
+An error of the evals store or the record store never quotes what was written. When either
+refuses a request, its `StoreError` names the operation, the store method such as
+`record_trace`, and what was refused. For a write the database refused, that is the table, the
+column or constraint when Postgres names one, and the driver's error class and code:
+`record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
+It holds no value written: no request, response, case, score, review, id or name. The same text is
+the `detail` of the API's `404`, `409` or `422`, the `error` of a failed run, and the worker's log
+line.
+
+- The database's and MLflow's own messages are not passed on, because both can quote values:
+  SQLAlchemy writes a statement's values into its errors, and Postgres repeats a duplicate key's.
+  The one MLflow message passed on is its length refusal, such as
+  `'value' exceeds the maximum length of 20000 characters`, which names the field and the limit.
+- A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
+  so no traceback or error reporter reaches the values. The names above are what an operator
+  debugs with.
+- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+  database failure that is not a refusal holds none either. The record store raises such a
+  failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
+  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  the database's own message for the failure.
+- Not covered: MLflow shortens a trace tag value over 8,000 characters given to
+  `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
+  trace tag. Errors that are not the stores', such as a function target's own exception, which a
+  case result keeps as its error, are the target's text.
+
+`tests/evals/test_store_errors.py` writes a canary in writes that are refused: a trace the
+database refuses, directly for a metadata value over 8,000 characters and through a run of the
+worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
+refuses, a case result, a run two writers create at once, a draft case through its route, and a
+score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
+included, on SQLite and on Postgres.
 
 ## Runtime reporting data boundary
 

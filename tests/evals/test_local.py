@@ -1,7 +1,10 @@
 """`martian ui`: the evals core on SQLite and the Evals UI from one local process, with no login."""
 
+import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -20,7 +23,8 @@ LOCAL = "http://127.0.0.1:7600"
 
 SESSION = {
     "kind": "single_user",
-    "user": {"id": "local", "email": None, "display_name": None},
+    # The local user `local`, as the API names it: a UUID derived from it.
+    "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": None, "display_name": None},
     "organisation": None,
     "role": "owner",
     "platform_admin": False,
@@ -35,6 +39,7 @@ def no_telemetry(monkeypatch):
     # The container image's settings: unset unless a test sets them.
     monkeypatch.delenv(local.BIND_ENV, raising=False)
     monkeypatch.delenv(local.ALLOWED_HOSTS_ENV, raising=False)
+    monkeypatch.delenv(local.CONCURRENCY_ENV, raising=False)
 
 
 @pytest.fixture
@@ -202,6 +207,24 @@ def test_the_command_defaults_to_the_data_folder_in_home_and_opens_the_browser(m
     assert (tmp_path / ".martian" / "evals" / "mlflow.db").is_file()
 
 
+def test_the_concurrency_is_how_many_runs_and_scoring_jobs_may_be_in_progress_at_once(monkeypatch, tmp_path, ui):
+    served = {}
+    monkeypatch.setattr(local, "serve", lambda app, **options: served.update(options, app=app))
+    command = ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"]
+    for options, setting, expected in (([], None, 1), (["--concurrency", "3"], None, 3), ([], "2", 2)):
+        if setting is not None:
+            monkeypatch.setenv(local.CONCURRENCY_ENV, setting)
+        result = CliRunner().invoke(cli, [*command, *options])
+        assert result.exit_code == 0, result.output
+        bootstrap = TestClient(served["app"], base_url=LOCAL).get("/v1/evals/bootstrap").json()
+        assert bootstrap["edition"]["key"] == "community"
+        assert bootstrap["entitlements"]["limits"] == {"concurrent_runs": expected, "concurrent_scoring_jobs": expected}
+        assert served["app"].state.martian_evals_worker.concurrency == expected
+    monkeypatch.delenv(local.CONCURRENCY_ENV)
+    refused = CliRunner().invoke(cli, [*command, "--concurrency", "0"])
+    assert refused.exit_code == 2 and "--concurrency" in refused.output
+
+
 def test_the_image_settings_listen_on_the_named_address_keep_the_host_check_and_warn(monkeypatch, tmp_path, ui):
     # What the Dockerfile sets, and a name a user adds for a server reached by name.
     served = {}
@@ -281,3 +304,75 @@ def test_the_command_says_how_to_name_a_ui_when_the_package_has_none(monkeypatch
     assert result.exit_code == 2
     assert "there is no built Evals UI in" in result.output
     assert "has lost the Evals UI it ships: reinstall it, or pass --ui-dir" in result.output
+
+
+TRACED_APPLICATION = """
+import mlflow
+
+
+@mlflow.trace(span_type="AGENT")
+def answer(message, session, user):
+    mlflow.update_current_trace(session_id=session, user=user)
+    return "echo " + message
+
+
+answer("Where is my order?", "conversation-1", "alice")
+answer("And the invoice?", "conversation-1", "alice")
+answer("Hello", "conversation-2", "bob")
+"""
+
+
+def tracing_settings(home: Path) -> dict[str, str]:
+    """What docs/evals-core.md tells an application to set to record into the data folder."""
+    return {
+        "MLFLOW_TRACKING_URI": f"sqlite:///{home / 'mlflow.db'}",
+        "MLFLOW_ENABLE_WORKSPACES": "true",
+        "MLFLOW_WORKSPACE": "local",
+        "MLFLOW_EXPERIMENT_NAME": "default",
+    }
+
+
+def test_an_application_using_mlflow_tracing_shows_in_traces_and_sessions(tmp_path, ui):
+    home = tmp_path / "home"
+    client = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    app = tmp_path / "application"
+    app.mkdir()
+    (app / "app.py").write_text(TRACED_APPLICATION, encoding="utf-8")
+    # The application in a process of its own, with only MLflow and the documented settings.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("MLFLOW_")}
+    environment.update(tracing_settings(home), MLFLOW_DISABLE_TELEMETRY="true")
+    done = subprocess.run(
+        [sys.executable, "app.py"], cwd=app, env=environment, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+
+    traces = client.post("/v1/evals/traces/search", json={"order": "oldest"}).json()["items"]
+    assert [(t["name"], t["session_id"], t["user_id"], t["state"]) for t in traces] == [
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-2", "bob", "OK"),
+    ]
+    assert traces[0]["response"] == '"echo Where is my order?"' and traces[0]["run_id"] is None
+    sessions = client.post("/v1/evals/sessions/search", json={}).json()
+    assert [(s["id"], s["turns"]) for s in sessions["items"]] == [("conversation-2", 1), ("conversation-1", 2)]
+    detail = client.get(f"/v1/evals/traces/{traces[0]['id']}").json()
+    assert [(span["name"], span["type"]) for span in detail["spans"]] == [("answer", "AGENT")]
+    assert detail["info"]["trace_metadata"]["mlflow.trace.user"] == "alice"
+    # The project's experiment existed, so MLflow kept the traces' artifacts in the data folder.
+    assert not (app / "mlruns").exists()
+
+
+def test_a_data_folder_whose_default_experiment_mlflow_created_is_refused(tmp_path, ui):
+    from martian.evals._mlflow import ServerWorkspaceContext
+    from martian.evals.server.principal import SINGLE_USER
+    from martian.evals.store.mlflow_local import MlflowStore
+
+    # What MLflow tracing leaves when an application names the experiment before the project exists.
+    home = tmp_path / "home"
+    home.mkdir()
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    store._workspace(SINGLE_USER)
+    with ServerWorkspaceContext("local"):
+        store._store.create_experiment("default")
+    with pytest.raises(LocalEditionError, match="cannot hold the default project: an MLflow experiment with this id"):
+        create_local_app(home, ui)

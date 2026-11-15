@@ -95,7 +95,7 @@ jobs:
 
       - name: Run Python tests
         run: >
-          uv run --extra evals pytest -q
+          uv run --extra evals pytest -q -n auto
           --cov=martian_redteam --cov=martian
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
@@ -151,11 +151,17 @@ jobs:
         env:
           MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
         run: >
-          uv run --extra postgres pytest -q tests/evals/test_server.py tests/evals/test_store.py
-          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_model.py
+          uv run --extra postgres pytest -q -n auto tests/evals/test_server.py tests/evals/test_store.py
+          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_store_errors.py
+          tests/evals/test_model.py
           tests/evals/test_mlflow_private.py tests/evals/test_entitlements.py tests/evals/test_bootstrap.py
-          tests/evals/test_local.py tests/evals/test_read_routes.py tests/evals/test_read_contract.py tests/evals/test_write_routes.py
-          tests/evals/test_write_contract.py tests/evals/test_worker.py
+          tests/evals/test_local.py tests/evals/test_local_targets.py tests/evals/test_read_routes.py tests/evals/test_read_contract.py
+          tests/evals/test_write_routes.py
+          tests/evals/test_write_contract.py tests/evals/test_user_ids.py tests/evals/test_worker.py
+          tests/evals/test_worker_process.py
+          tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py tests/evals/test_worker_queue.py
+          tests/evals/test_no_outbound.py tests/evals/test_worker_concurrency.py tests/evals/test_trace_conventions.py
+          tests/evals/test_otlp.py
 
   mlflow-compat:
     name: MLflow compatibility
@@ -224,6 +230,8 @@ jobs:
           uv build
           uv run --all-extras twine check --strict dist/*
           uv run --all-extras python scripts/check_release.py --install
+          # The release's licence check: a dependency under a licence outside scripts/licence-policy.json fails here.
+          uv run --all-extras python scripts/sbom.py wheel --out-dir release-sbom
           shopt -s nullglob
           wheels=(dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then

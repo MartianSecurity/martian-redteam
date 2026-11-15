@@ -8,6 +8,11 @@ store migrates the database to the newest revision when it starts, unless ``migr
 Every statement filters on the organisation's space. On Postgres each transaction also sets that
 space for row-level security, which filters the same rows again and applies to the tables' owner;
 a role that bypasses row-level security, such as a superuser, is not held by that second guard.
+
+A write the database refuses, such as a value out of range or a duplicate key, raises
+``StoreError`` naming the method and the table, never a value written. The engine hides statement
+values from SQLAlchemy's errors and log lines, so any other database failure, such as a lost
+connection, raises SQLAlchemy's error without them.
 """
 
 from __future__ import annotations
@@ -20,10 +25,23 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, Engine, Table, create_engine, delete, func, insert, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import (
+    Connection,
+    Engine,
+    Select,
+    Table,
+    create_engine,
+    delete,
+    func,
+    insert,
+    literal,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import DataError, IntegrityError
 
-from martian.evals._sql import check_schema, create_schema, is_postgres, postgres_url
+from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
 from martian.evals.model import (
     Case,
     CaseResult,
@@ -77,11 +95,12 @@ def downgrade(engine: Engine, revision: str = "base") -> None:
 
 
 def engine_for(database_url: str, *, schema: str = "martian") -> Engine:
-    """An engine whose unqualified tables are in ``schema`` on Postgres, created if missing."""
+    """An engine whose unqualified tables are in ``schema`` on Postgres, created if missing. It
+    keeps statement values out of SQLAlchemy's errors and log lines: they are customer content."""
     if is_postgres(database_url):
         create_schema(database_url, check_schema(schema))
-        return create_engine(postgres_url(database_url, schema))
-    return create_engine(database_url, connect_args={"timeout": 30})
+        return create_engine(postgres_url(database_url, schema), hide_parameters=True)
+    return create_engine(database_url, connect_args={"timeout": 30}, hide_parameters=True)
 
 
 def _now() -> datetime:
@@ -90,6 +109,16 @@ def _now() -> datetime:
 
 def _json(model: Any) -> Any:
     return model.model_dump(mode="json")
+
+
+_ACTIVE = ("queued", "running")
+
+
+def _count(connection: Connection, rows: Select[Any], up_to: int | None) -> int:
+    """The number of ``rows``, one statement, reading no more than ``up_to`` of them."""
+    if up_to is not None:
+        rows = rows.limit(up_to)
+    return connection.execute(select(func.count()).select_from(rows.subquery())).scalar_one()
 
 
 def _page[M](items: list[M], offset: int, limit: int, total: int) -> Page[M]:
@@ -122,18 +151,30 @@ class SqlRecordStore:
     # --- plumbing ----------------------------------------------------------------------------
 
     async def _run(self, principal: Principal, work: Callable[[Connection, str], T]) -> T:
+        """Run ``work`` in one transaction, on a thread. A write the database refuses becomes a
+        ``StoreError`` naming the method ``work`` belongs to (``database_refusal``)."""
         space = space_of(principal)
+        operation = operation_name(work)
 
         def transaction() -> T:
-            with self._engine.begin() as connection:
-                if self._postgres:
-                    connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
-                return work(connection, space)
+            try:
+                with self._engine.begin() as connection:
+                    if self._postgres:
+                        connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
+                    return work(connection, space)
+            except (DataError, IntegrityError) as error:
+                refused = database_refusal(operation, error)
+            # Raised outside the except clause, so that the database's error, which holds the
+            # values written, does not stay on it as its context.
+            raise refused
 
         return await asyncio.to_thread(transaction)
 
-    def _emit(self, principal: Principal, kind: Any, project_id: str, record_id: str) -> None:
-        self.events.publish(space_of(principal), Event(kind=kind, project_id=project_id, id=record_id))
+    def _emit(
+        self, principal: Principal, kind: Any, project_id: str, record_id: str, *, run_id: str | None = None
+    ) -> None:
+        event = Event(kind=kind, project_id=project_id, id=record_id, run_id=run_id)
+        self.events.publish(space_of(principal), event)
 
     @staticmethod
     def _one(connection: Connection, table: Table, space: str, project_id: str, **keys: Any) -> Any:
@@ -218,6 +259,12 @@ class SqlRecordStore:
 
         return await self._run(principal, work)
 
+    async def count_active_runs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        def work(connection: Connection, space: str) -> int:
+            return _count(connection, select(literal(1)).where(runs.c.space == space, runs.c.state.in_(_ACTIVE)), up_to)
+
+        return await self._run(principal, work)
+
     async def update_run(self, principal: Principal, run: Run, *, expected_state: RunState | None = None) -> Run:
         def work(connection: Connection, space: str) -> Run:
             stored = self._one(connection, runs, space, run.project_id, id=run.id)
@@ -240,8 +287,10 @@ class SqlRecordStore:
 
     # --- case results and scores ------------------------------------------------------------
 
-    async def put_results(self, principal: Principal, project_id: str, results: list[CaseResult]) -> None:
-        def work(connection: Connection, space: str) -> set[str]:
+    async def put_results(
+        self, principal: Principal, project_id: str, results: list[CaseResult], *, scores: list[Score] | None = None
+    ) -> None:
+        def work(connection: Connection, space: str) -> tuple[set[str], set[str]]:
             touched = set()
             for result in results:
                 self._require_run(connection, space, project_id, result.run_id)
@@ -260,10 +309,13 @@ class SqlRecordStore:
                     ["space", "project_id", "run_id", "case_id"],
                 )
                 touched.add(result.run_id)
-            return touched
+            return touched, self._put_scores(connection, space, project_id, scores or [])
 
-        for run_id in await self._run(principal, work):
+        results_of, scores_of = await self._run(principal, work)
+        for run_id in results_of:
             self._emit(principal, "case_results", project_id, run_id)
+        for run_id in scores_of:
+            self._emit(principal, "scores", project_id, run_id)
 
     async def list_results(
         self, principal: Principal, project_id: str, run_id: str, *, offset: int = 0, limit: int = 100
@@ -293,31 +345,34 @@ class SqlRecordStore:
 
         return await self._run(principal, work)
 
+    def _put_scores(self, connection: Connection, space: str, project_id: str, scores: list[Score]) -> set[str]:
+        touched = set()
+        for score in scores:
+            if score.run_id is None or score.case_id is None:
+                raise StoreError("invalid", "a stored score names its run and case")
+            self._require_run(connection, space, project_id, score.run_id)
+            saved = score.model_copy(update={"created_at": score.created_at or _now()})
+            self._upsert(
+                connection,
+                score_rows,
+                {
+                    "space": space,
+                    "project_id": project_id,
+                    "run_id": score.run_id,
+                    "case_id": score.case_id,
+                    "scorer": score.scorer,
+                    "scoring_job_id": score.scoring_job_id or "",
+                    "created_at": saved.created_at,
+                    "record": _json(saved),
+                },
+                ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id"],
+            )
+            touched.add(score.run_id)
+        return touched
+
     async def put_scores(self, principal: Principal, project_id: str, scores: list[Score]) -> None:
         def work(connection: Connection, space: str) -> set[str]:
-            touched = set()
-            for score in scores:
-                if score.run_id is None or score.case_id is None:
-                    raise StoreError("invalid", "a stored score names its run and case")
-                self._require_run(connection, space, project_id, score.run_id)
-                saved = score.model_copy(update={"created_at": score.created_at or _now()})
-                self._upsert(
-                    connection,
-                    score_rows,
-                    {
-                        "space": space,
-                        "project_id": project_id,
-                        "run_id": score.run_id,
-                        "case_id": score.case_id,
-                        "scorer": score.scorer,
-                        "scoring_job_id": score.scoring_job_id or "",
-                        "created_at": saved.created_at,
-                        "record": _json(saved),
-                    },
-                    ["space", "project_id", "run_id", "case_id", "scorer", "scoring_job_id"],
-                )
-                touched.add(score.run_id)
-            return touched
+            return self._put_scores(connection, space, project_id, scores)
 
         for run_id in await self._run(principal, work):
             self._emit(principal, "scores", project_id, run_id)
@@ -361,7 +416,7 @@ class SqlRecordStore:
 
         saved, created = await self._run(principal, work)
         if created:
-            self._emit(principal, "scoring_job", project_id, job.id)
+            self._emit(principal, "scoring_job", project_id, job.id, run_id=job.run_id)
         return saved
 
     async def update_scoring_job(
@@ -382,7 +437,7 @@ class SqlRecordStore:
             return saved
 
         saved = await self._run(principal, work)
-        self._emit(principal, "scoring_job", project_id, job.id)
+        self._emit(principal, "scoring_job", project_id, job.id, run_id=job.run_id)
         return saved
 
     async def list_scoring_jobs(self, principal: Principal, project_id: str, run_id: str) -> list[ScoringJob]:
@@ -402,6 +457,29 @@ class SqlRecordStore:
                 .all()
             )
             return [ScoringJob.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    async def count_active_scoring_jobs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        def work(connection: Connection, space: str) -> int:
+            active = (
+                select(literal(1))
+                .select_from(
+                    scoring_jobs.join(
+                        runs,
+                        (runs.c.space == scoring_jobs.c.space)
+                        & (runs.c.project_id == scoring_jobs.c.project_id)
+                        & (runs.c.id == scoring_jobs.c.run_id),
+                    )
+                )
+                .where(
+                    scoring_jobs.c.space == space,
+                    scoring_jobs.c.state.in_(_ACTIVE),
+                    runs.c.space == space,
+                    runs.c.state == "completed",
+                )
+            )
+            return _count(connection, active, up_to)
 
         return await self._run(principal, work)
 
@@ -439,8 +517,10 @@ class SqlRecordStore:
                         )
                     )
             except IntegrityError:
-                raise StoreError("conflict", "that review was already replaced") from None
-            return saved, True
+                pass  # raised below, without the database's error, which holds the review
+            else:
+                return saved, True
+            raise StoreError("conflict", "that review was already replaced")
 
         saved, created = await self._run(principal, work)
         if created:
@@ -509,8 +589,10 @@ class SqlRecordStore:
                         )
                     )
             except IntegrityError:
-                raise StoreError("conflict", "another version of the suite was saved at the same time") from None
-            return saved, True
+                pass  # raised below, without the database's error, which holds the suite
+            else:
+                return saved, True
+            raise StoreError("conflict", "another version of the suite was saved at the same time")
 
         saved, created = await self._run(principal, work)
         if created:

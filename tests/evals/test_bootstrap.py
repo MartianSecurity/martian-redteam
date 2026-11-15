@@ -1,5 +1,7 @@
 """One bootstrap response tells the UI who is signed in, the edition, and what to show."""
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -22,6 +24,10 @@ from martian.evals.store import MemoryStore, StoreStatus
 
 # These tests read no records; an in-memory record store satisfies create_app.
 RECORDS = SqlRecordStore("sqlite://")
+
+# The local user `local`, as the API names it: a UUID derived from it.
+LOCAL_USER = "bf0808be-f788-5dd7-8fc2-2d28ed350045"
+MEMBER_ID = str(uuid.UUID(int=1))
 
 WRITERS = {"run", "score", "review", "createReviewQueues", "saveSuites", "saveViews", "editDrafts"}
 ADMINS = WRITERS | {
@@ -71,13 +77,13 @@ def test_the_local_edition_answers_with_its_fixed_principal_in_community():
     assert response.json() == {
         "principal": {
             "kind": "single_user",
-            "user": {"id": "local", "email": None, "display_name": None},
+            "user": {"id": LOCAL_USER, "email": None, "display_name": None},
             "organisation": None,
             "role": "owner",
             "platform_admin": False,
         },
         "edition": {"key": "community", "name": "Community"},
-        "entitlements": {"features": [], "limits": {}},
+        "entitlements": {"features": [], "limits": {"concurrent_runs": 1, "concurrent_scoring_jobs": 1}},
         "capabilities": {name: name in ADMINS - PAID for name in ADMINS},
         "status": {
             "status": "ready",
@@ -94,7 +100,7 @@ def test_the_local_edition_answers_with_its_fixed_principal_in_community():
 @pytest.mark.parametrize(("edition", "role"), sorted(EXPECTED))
 def test_each_edition_and_role_gets_its_capabilities(edition, role):
     member = organisation_principal(
-        "user-1",
+        MEMBER_ID,
         "org-a",
         frozenset({role}),
         email="ada@example.test",
@@ -108,13 +114,16 @@ def test_each_edition_and_role_gets_its_capabilities(edition, role):
     body = TestClient(app).get("/v1/evals/bootstrap").json()
     assert body["principal"] == {
         "kind": "organisation",
-        "user": {"id": "user-1", "email": "ada@example.test", "display_name": "Ada"},
+        "user": {"id": MEMBER_ID, "email": "ada@example.test", "display_name": "Ada"},
         "organisation": {"id": "org-a", "name": "Org A"},
         "role": role,
         "platform_admin": False,
     }
     assert body["edition"]["key"] == edition
-    assert body["entitlements"] == {"features": sorted(EDITIONS[edition].features), "limits": {}}
+    assert body["entitlements"] == {
+        "features": sorted(EDITIONS[edition].features),
+        "limits": dict(EDITIONS[edition].limits),
+    }
     assert {name for name, allowed in body["capabilities"].items() if allowed} == EXPECTED[(edition, role)]
     assert set(body["capabilities"]) == ADMINS
     assert (body["status"]["status"], body["status"]["ready"]) == ("provisioning", False)

@@ -28,10 +28,15 @@ checks:
 ```
 
 `target` can also name an HTTP endpoint (`url`, `headers`, `body`, `response_path`), so an agent
-behind an API needs no Python file.
+behind an API needs no Python file. A case can be a conversation of several turns, sent in order
+to a target that keeps it and graded per turn and as a whole, and its user can be simulated: a
+model plays a goal and a persona, which `martian evals personas` can build from real
+conversations. Simulated results are labelled as such, and `martian evals fidelity` compares a
+simulator's conversations with real ones.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, and can be stopped and resumed. It is also recorded for `martian ui`
+prints a summary table, can run each case several times, combine the attempts and report the
+share of cases that passed every attempt and the flaky ones, and can be stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
 [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full
@@ -44,15 +49,37 @@ push and keeps one comment with the result, also without a Martian account. See
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
+  to open, compare and review; see
+  [imported Inspect logs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
+- `martian evals import promptfoo` and `martian evals convert promptfoo`: promptfoo results as
+  runs in `martian ui`, one per provider, and a promptfoo config as suite files where its
+  assertions map onto the checks, with everything that does not listed; see
+  [promptfoo results and configs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs).
+- `martian evals import mlflow`: an MLflow tracking store (SQLite or Postgres) copied into
+  `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
+  version check; see
+  [copied MLflow stores](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
+- `martian evals export` and `martian evals import martian`: everything in `martian ui`'s data
+  folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
+  JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
+  see [data export](https://github.com/MorningHQ/martian-redteam/blob/main/docs/data-export.md).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
-  service; see
+  service. It runs evals against endpoints you define with your own key, and runs them again;
+  see
   [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
+  It also shows the traces an application records into it with
+  [MLflow tracing](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly
   ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
-  deterministic checks (`contains`, `not_contains`, `matches`, `not_matches`, `is_json`),
-  pinned datasets, Backend-scored regression gates and recorded CI sessions.
+  grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
+  twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
+  personal data, secrets, planted-instruction markers and refusals, the agent's tool calls and
+  their order, turn by turn, and the call's latency and cost, custom checks written as Python
+  functions (unsandboxed: they run with the caller's privileges), pinned datasets, Backend-scored
+  regression gates and recorded CI sessions.
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside
@@ -103,7 +130,7 @@ uv sync --locked --extra evals
 uv run --extra evals ruff format --check src tests examples
 uv run --extra evals ruff check src tests examples
 uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q
+uv run --extra evals pytest -q -n auto
 uv build
 ```
 

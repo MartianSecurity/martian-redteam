@@ -69,6 +69,171 @@ def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_pat
     assert "wrote no results (exit code 2)" in body and "old" not in body
 
 
+def test_a_repeated_run_says_how_often_each_case_ran_each_checks_rule_and_its_reliability(tmp_path):
+    counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
+    summary = {
+        "cases": 2,
+        **counts,
+        "groups": None,
+        "repeats": {
+            "attempts": 5,
+            "combine": "any",
+            "checks": {
+                "no_leak": {"combine": "all", "from": "security"},
+                "polite": {"combine": "any", "from": "suite"},
+            },
+        },
+        "checks": {"no_leak": counts, "polite": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+        "reliability": {**counts, "pass_rate": 0.0, "confidence_95": [0.0, 0.66], "flaky": ["key", "hint"]},
+    }
+    body = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE)
+    assert (
+        "Each case ran 5 times, and the counts are of cases: each check's attempts combine by its rule, "
+        "`all` for `no_leak`; `any` for `polite`."
+    ) in body
+    # The share of cases that passed every attempt, under the pass rate, and the flaky cases.
+    rows = body.splitlines()
+    assert rows[rows.index("| **All checks** | 0 | 2 | 0 | 0% (0–66%) |") + 1] == (
+        "| **Reliability** (every attempt) | 0 | 2 | 0 | 0% (0–66%) |"
+    )
+    assert (
+        "Reliability counts the cases that passed every attempt. Flaky cases, whose verdict changed "
+        "between attempts: `key`, `hint`."
+    ) in body
+    calm = {**summary, "reliability": {**summary["reliability"], "flaky": []}}
+    assert "No flaky cases: no case's verdict changed between attempts." in comment.render(
+        comment.Outcome(1, calm), suite=SUITE, key=SUITE
+    )
+    plain = comment.render(
+        comment.Outcome(1, {**summary, "repeats": None, "reliability": None}), suite=SUITE, key=SUITE
+    )
+    assert "Each case ran" not in plain and "Reliability" not in plain and "Flaky" not in plain
+
+
+def test_a_conversation_suite_counts_its_turns_and_names_the_turn_that_failed(tmp_path, monkeypatch):
+    for name in ("MARTIAN_API_URL", "MARTIAN_API_TOKEN", "MARTIAN_AGENT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
+    monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
+    old_uri = mlflow.get_tracking_uri()
+    STATE.reset()
+    folder = tmp_path / "results"
+    suite = "examples/evals/conversation/evals.yaml"
+    try:
+        result = CliRunner().invoke(app, ["evals", "run", str(ROOT / suite), "--output", str(folder)])
+    finally:
+        STATE.reset()
+        mlflow.set_tracking_uri(old_uri)
+    assert result.exit_code == 1
+    assert "Turns" in result.output and "2 of the cases are conversations" in " ".join(result.output.split())
+    body = comment.render(comment.load_outcome(folder, result.exit_code), suite=suite, key=suite)
+    rows = body.splitlines()
+    assert rows[rows.index("| **All checks** | 1 | 1 | 0 | 50% (9–91%) |") + 1] == (
+        "| **Turns** (of conversations) | 5 | 1 | 0 | — |"
+    )
+    assert (
+        "2 cases are conversations of 6 turns in all. A conversation counts once: it passes when each turn "
+        "check passed every turn it grades and each conversation check passed the whole conversation."
+    ) in body
+    assert "| `cancel-later` | `answers` (failed turn 3) |" in rows
+    # Turn numbers, never the conversation's text.
+    assert "order number" not in body and "A-1002" not in body
+    errored = {"id": "chat", "passed": None, "checks": {}, "error": "the target returned HTTP 500"}
+    errored["turns"] = [{"number": 1, "error": None}, {"number": 2, "error": "the target returned HTTP 500"}]
+    assert comment._reason(errored) == "Turn 2: `the target returned HTTP 500`"
+
+
+def test_a_policy_suite_says_how_many_benign_cases_were_refused_under_the_headline():
+    from martian.evals.runner import false_refusal_line
+
+    checks = {
+        "no_secrets": {"passed": 4, "failed": 0, "errors": 0, "pass_rate": 1.0, "confidence_95": [0.51, 1.0]},
+        "no_refusal": {"passed": 3, "failed": 1, "errors": 0, "pass_rate": 0.75, "confidence_95": [0.3, 0.95]},
+    }
+    measured = {"checks": ["no_refusal"], "benign": 3, "refused": 1, "errors": 0, "rate": 0.3333}
+    summary = {
+        "cases": 4,
+        **checks["no_refusal"],
+        "groups": None,
+        "checks": checks,
+        "false_refusals": measured,
+    }
+    lines = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE).splitlines()
+    assert lines[3:7] == [
+        f"Suite {comment.code(SUITE, 120, cell=False)}: 4 cases, 3 passed, 1 failed, 0 errors.",
+        "",
+        "False refusals: 1 of 3 benign cases refused (33.3%).",
+        "",
+    ]
+    # The comment and `martian evals run` say the same, measured or not.
+    unmeasured = {"checks": [], "benign": 0, "refused": 0, "errors": 0, "rate": None}
+    for found in (measured, unmeasured, {**measured, "errors": 2}, {**measured, "benign": 0, "rate": None}):
+        assert comment.false_refusals(found) == false_refusal_line(found)
+    # A suite with no policy check has no false_refusals, and its comment no line for them.
+    without = {key: item for key, item in summary.items() if key != "false_refusals"}
+    assert "False refusals" not in comment.render(comment.Outcome(1, without), suite=SUITE, key=SUITE)
+
+
+def test_a_repeated_policy_suite_shows_its_false_refusals_and_its_reliability():
+    counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
+    summary = {
+        "cases": 2,
+        **counts,
+        "groups": None,
+        "repeats": {
+            "attempts": 5,
+            "combine": "any",
+            "checks": {
+                "no_secrets": {"combine": "all", "from": "security"},
+                "no_refusal": {"combine": "any", "from": "suite"},
+            },
+        },
+        "checks": {"no_secrets": counts, "no_refusal": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+        "false_refusals": {"checks": ["no_refusal"], "benign": 2, "refused": 0, "errors": 0, "rate": 0.0},
+        "reliability": {**counts, "flaky": []},
+    }
+    lines = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE).splitlines()
+    # The false-refusal line under the headline, and the reliability row under the pass rate.
+    assert lines[5:7] == ["False refusals: 0 of 2 benign cases refused (0.0%).", ""]
+    assert lines[lines.index("| **All checks** | 0 | 2 | 0 | 0% (0–66%) |") + 1] == (
+        "| **Reliability** (every attempt) | 0 | 2 | 0 | 0% (0–66%) |"
+    )
+    assert "`all` for `no_secrets`; `any` for `no_refusal`." in "\n".join(lines)
+
+
+def test_a_stopped_run_says_how_many_cases_it_did_not_run_and_shows_no_earlier_result_for_them(tmp_path):
+    from martian.evals.runner import write_junit
+
+    stopped = "Stopped at its time limit (max_seconds 60) after 61 seconds"
+    counts = {"passed": 1, "failed": 0, "errors": 0, "pass_rate": 1.0, "confidence_95": [0.21, 1.0]}
+    summary = {
+        "cases": 1,
+        **counts,
+        "groups": None,
+        "checks": {"no_leak": counts},
+        "not_run": 1,
+        "stopped": {"limit": "max_seconds", "value": 60, "used": 61, "message": stopped},
+    }
+    done = {"id": "done", "passed": True, "checks": {"no_leak": {"passed": True}}, "error": None}
+    # An earlier run's record of the case this run stopped before.
+    earlier = {"id": "later", "passed": None, "checks": {}, "error": "the target call failed"}
+    lines = "".join(json.dumps(record) + "\n" for record in (done, earlier))
+    (tmp_path / "results.jsonl").write_text(lines, encoding="utf-8")
+    (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    write_junit([done], tmp_path / "junit.xml", suite_name="evals", summary=summary, not_run=["later"], stopped=stopped)
+    outcome = comment.load_outcome(tmp_path, 2)
+    assert [case["id"] for case in outcome.cases] == ["done"]
+    body = comment.render(outcome, suite=SUITE, key=SUITE)
+    assert body.splitlines()[1] == "### Martian evals did not finish"
+    assert f"{stopped}: 1 cases not run. Run the suite again to resume after the cases it finished." in body
+    assert "later" not in body and "Cases without a verdict" not in body
+    cancelled = comment.render(
+        comment.Outcome(2, {**summary, "stopped": None, "cancelled": True}), suite=SUITE, key=SUITE
+    )
+    assert "It was cancelled: 1 cases not run." in cancelled
+
+
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():
     cell = comment.code("a|b`c @team <b>x</b>")
     assert cell == "``a\\|b`c @team <b>x</b>``"  # one code span; the escaped pipe stays in its cell

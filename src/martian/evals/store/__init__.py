@@ -41,6 +41,12 @@ if TYPE_CHECKING:
 
 StoreState = Literal["not_configured", "pending", "provisioning", "ready", "failed", "needs_review"]
 
+REQUEST_PREVIEW_TRUNCATED = "martian.request_preview_truncated"
+"""The trace metadata key that is ``"true"`` when a binding's search gives a shortened preview of
+the trace's request instead of the whole; ``get_trace`` gives it whole. Absent otherwise."""
+RESPONSE_PREVIEW_TRUNCATED = "martian.response_preview_truncated"
+"""The same for the trace's response."""
+
 
 class StoreStatus(BaseModel):
     """Whether the store can take evaluation work for a principal. The same shape as the server's
@@ -134,11 +140,16 @@ class EvalStore(Protocol):
 
     # Traces.
     async def record_trace(self, principal: Principal, trace: Trace) -> Trace:
-        """Store a trace (with its spans), for a case result or for live traffic."""
+        """Store a trace (with its spans), for a case result or for live traffic, mapped with
+        ``martian.evals.trace_conventions.map_trace``: the fields its spans' GenAI attributes give
+        are filled and the mapping version is kept in its metadata. Attributes are kept as given."""
         ...
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
-        """Traces without their spans."""
+        """Traces without their spans. A page may hold fewer than ``limit`` traces, or none, and
+        still have a ``next_cursor``: only a ``next_cursor`` of ``None`` ends the search. A binding
+        may give a preview of a long request or response, and says so in the trace's metadata
+        (``REQUEST_PREVIEW_TRUNCATED``)."""
         ...
 
     async def search_sessions(
@@ -151,7 +162,7 @@ class EvalStore(Protocol):
         ...
 
     async def get_trace(self, principal: Principal, project_id: str, trace_id: str) -> Trace | None:
-        """One trace with its spans and scores."""
+        """One trace with its spans and scores, and its request and response whole."""
         ...
 
     async def set_trace_tag(
@@ -225,6 +236,8 @@ STORE_METHODS = frozenset(
 from martian.evals.store.memory import MemoryStore  # noqa: E402  (MemoryStore implements the interface above)
 
 __all__ = [
+    "REQUEST_PREVIEW_TRUNCATED",
+    "RESPONSE_PREVIEW_TRUNCATED",
     "STORE_METHODS",
     "EvalStore",
     "MemoryStore",

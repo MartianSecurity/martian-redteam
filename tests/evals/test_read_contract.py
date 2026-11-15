@@ -49,9 +49,16 @@ SPAN = {"id", "parent_id", "name", "duration_ms", "offset_ms", "type", "token_us
 SPAN |= {"retrieved_documents", "inputs", "outputs", "status", "attributes", "events", "depth"}
 COMPARISON = {"compatible", "reason", "baseline_id", "candidate_id", "coverage", "changes", "items"}
 JOB_COMPARISON = {"criteria", "baseline_job_id", "candidate_job_id", "baseline_scorecard", "candidate_scorecard"}
+# The core's own additions (martian.evals.stats); the server's comparison does not have them yet.
+COMPARISON |= {"significance"}
+JOB_COMPARISON |= {"criteria_significance"}
+SIGNIFICANCE = {"label", "test", "p_value", "alpha", "compared", "changed", "improved", "regressed", "baseline"}
+SIGNIFICANCE |= {"candidate", "effect", "minimum_detectable_effect"}
 SCORECARD = {"criteria", "total", "latency", "gate"}
 CARD = {"name", "kind", "categories", "total", "evaluated", "missing", "errors", "coverage", "pass_rate", "passed"}
 CARD |= {"confidence_95", "mean", "p50", "p95", "minimum", "maximum", "gate", "policy"}
+# The core's own addition (martian.evals.stats); the server's scorecard does not have it yet.
+CARD |= {"mean_confidence_95"}
 
 
 @pytest.fixture
@@ -62,8 +69,8 @@ def served(tmp_path):
     records.close()
 
 
-def test_the_copy_is_version_2_of_the_servers_contract():
-    assert CONTRACT["info"]["version"] == VERSION == "2"
+def test_the_copy_is_version_3_of_the_servers_contract():
+    assert CONTRACT["info"]["version"] == VERSION == "3"
     assert CONTRACT["info"]["title"] == "Martian Evals API"
 
 
@@ -146,12 +153,13 @@ def test_untyped_responses_have_the_servers_fields(served):
 
     pair = {"baseline_id": seeded.baseline.id, "candidate_id": seeded.candidate.id}
     comparison = client.get("/v1/evals/compare", params=pair).json()
-    assert set(comparison) == COMPARISON
+    assert set(comparison) == COMPARISON and set(comparison["significance"]) == SIGNIFICANCE
     assert set(comparison["items"][0]) == {"dataset_item_id", "prompt", "expected", "baseline", "candidate", "change"}
     assert set(comparison["items"][0]["baseline"]) == {"trace_id", "status", "output", "latency_ms"}
     jobs = {"baseline_job_id": seeded.baseline_job.id, "candidate_job_id": seeded.candidate_job.id}
     scored = client.get("/v1/evals/compare", params={**pair, **jobs}).json()
     assert set(scored) == COMPARISON | JOB_COMPARISON
+    assert set(scored["criteria_significance"]["correctness"]) == SIGNIFICANCE
     assert set(scored["baseline_scorecard"]) == SCORECARD
 
     search = client.post("/v1/evals/traces/search", json={"limit": 2}).json()
