@@ -54,6 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals import _custom, _numeric, _policy, _tool_calls
+from martian.evals._digits import ascii_digits
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 from martian.evals.conversations import (
@@ -198,7 +199,7 @@ def _response_steps(path: str | None, setting: str) -> list[str]:
     0-9: one with other digits, such as ``²``, is a ``ValueError`` that names ``setting``."""
     steps = [part for part in (path or "").split(".") if part]
     for position, step in enumerate(steps, 1):
-        if step.isdigit() and not step.isascii():
+        if step.isdigit() and not ascii_digits(step):
             raise ValueError(f"{setting} indexes lists with the digits 0-9 only; step {position} uses other digits")
     return steps
 
@@ -841,7 +842,7 @@ def _reply(response: httpx.Response, steps: list[str]) -> Any:
     for step in steps:
         if isinstance(reply, dict) and step in reply:
             reply = reply[step]
-        elif isinstance(reply, list) and step.isascii() and step.isdigit() and int(step) < len(reply):
+        elif isinstance(reply, list) and ascii_digits(step) and int(step) < len(reply):
             reply = reply[int(step)]
         else:
             raise TargetCallError("the target's response has no value at response_path")

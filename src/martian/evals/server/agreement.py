@@ -57,12 +57,11 @@ from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, project_key, project_out
 from martian.evals.server.runs import EPOCH, project_runs, run_queues, run_results
 from martian.evals.server.suites import is_judge
-from martian.evals.server.traces import READ_LIMIT
 from martian.evals.store import EvalStore
 
 explorer = APIRouter(prefix="/v1/evals", tags=["evaluation explorer"])
 
-TRACE_LIMIT = READ_LIMIT
+TRACE_LIMIT = 1000
 """The most traces one report reads, newest first."""
 
 _TRACE_PAGE = 500

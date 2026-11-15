@@ -26,13 +26,14 @@ from fastapi import APIRouter, HTTPException, Query
 from martian.evals.model import CaseResult, Project, ReviewQueue, Run, Score, ScoringJob, Trace
 from martian.evals.records import RecordStore
 from martian.evals.server.capabilities import highest_role
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep
+from martian.evals.server.dependencies import AgentNames, AgentNamesDep, PrincipalDep, RecordsDep, StoreDep
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
     RUN_STATUS,
     Assessment,
     ReviewRow,
+    agent_of,
     attempts_out,
     conversation_out,
     item_out,
@@ -41,6 +42,7 @@ from martian.evals.server.projection import (
     project_key,
     public_job,
     queue_out,
+    reader_provenance,
     reliability_out,
     result_id,
     run_detail,
@@ -64,6 +66,16 @@ PROVENANCE_NOTE = (
 
 
 # --- lookups --------------------------------------------------------------------------------
+
+
+async def agent_names(names: AgentNames | None, principal: Principal, runs: Sequence[Run]) -> dict[str, str]:
+    """The display names of the runs' agents, by agent id, as far as the edition can name them."""
+    ids = sorted({agent for run in runs if (agent := agent_of(run))})
+    return await names(principal, ids) if names is not None and ids else {}
+
+
+def name_of(found: dict[str, str], run: Run) -> str | None:
+    return found.get(agent_of(run) or "")
 
 
 async def project_keys(store: EvalStore, principal: Principal) -> list[str]:
@@ -242,6 +254,7 @@ async def list_runs(
     principal: PrincipalDep,
     store: StoreDep,
     records: RecordsDep,
+    names: AgentNamesDep,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     project_id: uuid.UUID | None = None,
@@ -261,14 +274,18 @@ async def list_runs(
         for run in await project_runs(records, principal, key)
         if needle in run.code.casefold() or needle in run.dataset_name.casefold()
     ]
-    runs = _newest(runs, lambda r: (r.created_at or EPOCH, r.id))
-    return [run_out(r) for r in runs[(page - 1) * limit : page * limit]]
+    runs = _newest(runs, lambda r: (r.created_at or EPOCH, r.id))[(page - 1) * limit : page * limit]
+    found = await agent_names(names, principal, runs)
+    return [run_out(r, name_of(found, r)) for r in runs]
 
 
 @router.get("/{run_id:uuid}", response_model=EvalRunDetailOut)
-async def get_run(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunDetailOut:
+async def get_run(
+    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, names: AgentNamesDep
+) -> EvalRunDetailOut:
     run = await find_run(store, records, principal, run_id)
-    return run_detail(run, await run_results(records, principal, run))
+    found = await agent_names(names, principal, [run])
+    return run_detail(run, await run_results(records, principal, run), name_of(found, run))
 
 
 @router.get("/{run_id:uuid}/attempts", response_model=None)
@@ -283,7 +300,7 @@ async def attempts(
     # their responses are typed in the frozen contract.
     run = await find_run(store, records, principal, run_id)
     results = await run_results(records, principal, run)
-    repeats = run.provenance.get("repeats")
+    repeats = reader_provenance(run.provenance).get("repeats")
     items = [attempts_out(result) for result in results]
     return {
         "run_id": run.id,
@@ -404,8 +421,9 @@ async def workbench(
 async def provenance(
     run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep
 ) -> dict[str, Any]:
-    # The run as it was admitted, and its run in the store.
+    # The run as it was admitted, as far as its readers see it, and its run in the store.
     run = await find_run(store, records, principal, run_id)
+    admission = reader_provenance(run.provenance)
     try:
         native = await store.get_run(principal, run.project_id, run.id)
     except StoreError as error:
@@ -413,11 +431,11 @@ async def provenance(
             raise
         native = None
     if native is None:
-        return {"admission": run.provenance, "native": None, "note": NOT_PERSISTED}
+        return {"admission": admission, "native": None, "note": NOT_PERSISTED}
     if native.id != run.id or native.dataset_digest != run.dataset_digest:
         raise HTTPException(409, "Native run provenance differs from its admission")
     return {
-        "admission": run.provenance,
+        "admission": admission,
         "native": {
             "id": native.store.run_id or native.id,
             "status": RUN_STATUS[native.state],
