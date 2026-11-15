@@ -54,6 +54,7 @@ from martian.evals.server.dependencies import (
     require_capability,
     require_entitlement,
 )
+from martian.evals.server.launch import pin_target
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
@@ -252,7 +253,7 @@ async def create_schedule(
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    await worker.check_target(principal, target)  # an id the worker does not know is 404, as for a launch
+    await pin_target(worker, principal, target)  # 404 for an id the worker does not know, 422 for one it refuses
     if len(await records.list_schedules(principal, key)) >= SCHEDULE_LIMIT:
         raise HTTPException(
             409, f"Delete a schedule before adding another ({SCHEDULE_LIMIT}-schedule limit per project)"
