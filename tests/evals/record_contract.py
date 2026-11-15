@@ -667,10 +667,11 @@ class RecordContract:
             job = ScoringJob(id=f"{run_id}-job", run_id=run_id, scorers=[JUDGE], state="completed")
             await records.create_scoring_job(ORG_A, "p1", job)
             judged = own.model_copy(update={"scorer": "rubric_judge", "source": "llm_judge", "scoring_job_id": job.id})
-            answers[run_id] = Score(
-                run_id=run_id, case_id="c1", trace_id=f"tr-{run_id}", scorer="politeness", source="human", value=True
-            )
+            # A person's answer named like the check: a row of its own, keyed by its source.
+            answers[run_id] = own.model_copy(update={"source": "human", "trace_id": f"tr-{run_id}", "value": False})
             await records.put_scores(ORG_A, "p1", [judged, answers[run_id]])
+            sources = [s.source for s in await records.list_scores(ORG_A, "p1", run_id) if s.scorer == "exact_match"]
+            assert sources == ["code", "human"]
             first = Review(id=f"{run_id}-v1", run_id=run_id, case_id="c1", state="complete", value=True)
             await records.add_review(ORG_A, "p1", first)
             later = first.model_copy(update={"id": f"{run_id}-v2", "previous_id": first.id, "value": False})

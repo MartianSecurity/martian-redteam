@@ -661,7 +661,8 @@ class RecordStore(Protocol):
 
     async def delete_run(self, principal: Principal, project_id: str, run_id: str) -> dict[str, int]:
         """Remove the run and every record keyed to it, in one transaction: its case results, its
-        scores, its scoring jobs, its reviews, its work left in the worker's queue, the outbox's
+        scores of every source and scoring job, its scoring jobs, its reviews, its work left in the
+        worker's queue, the outbox's
         deliveries of its scores, whatever their state, and the slot of the schedule that started
         it. Returns how many rows it removed from each of those tables, by table name.
 

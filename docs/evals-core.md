@@ -2647,8 +2647,9 @@ retention, MartianSecurity/martian-notes#162). No route calls them; the edition 
   cutoff, oldest first, paged by offset as `list_runs` is: the candidates, without paging every
   run. A caller that deletes what it lists asks again without a cursor.
 - `RecordStore.delete_run(principal, project_id, run_id)` removes, in one transaction, the run and
-  every row keyed to it: its case results, its scores, its scoring jobs, its reviews, its work
-  left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
+  every row keyed to it: its case results, its scores of every source and scoring job (a person's
+  answer beside a check's score of the same name included), its scoring jobs, its reviews, its
+  work left in the worker's queue, the outbox's deliveries of its scores in any state, and the slot of
   the schedule that started it, so the schedule's history and the thresholds on its gate results
   no longer count that run. The tables have no foreign keys, so the delete names each one. It
   returns the rows it removed from each table, by table name, such as

@@ -254,7 +254,8 @@ async def _everything_of_a_run(records: SqlRecordStore, queue: SqlWorkQueue, run
     await records.put_results(ORG_A, "p1", [CaseResult(run_id=run_id, case_id="c1", status="passed")], scores=[own])
     job = ScoringJob(id=f"{run_id}-job", run_id=run_id, scorers=[JUDGE], state="cancelled")
     await records.create_scoring_job(ORG_A, "p1", job)
-    answer = own.model_copy(update={"scorer": "politeness", "source": "human", "trace_id": f"tr-{run_id}"})
+    # A person's answer named like the check: a row of its own, keyed by its source (migration 0012).
+    answer = own.model_copy(update={"source": "human", "trace_id": f"tr-{run_id}"})
     await records.put_scores(ORG_A, "p1", [own.model_copy(update={"scoring_job_id": job.id}), answer])
     first = await records.add_review(
         ORG_A, "p1", Review(id=f"{run_id}-v1", run_id=run_id, case_id="c1", state="pending")
@@ -294,6 +295,7 @@ async def test_a_deleted_run_leaves_no_row_naming_it_in_any_table(database):
             await _everything_of_a_run(records, queue, run_id, day)
         before, kept = _rows_naming(engine, "org-a", GONE), _rows_naming(engine, "org-a", KEPT)
         assert {name for name, count in before.items() if count} == KEYED_TO_A_RUN
+        assert before["martian_scores"] == 3  # the check's, the scoring job's and the person's answer
 
         removed = await records.delete_run(ORG_A, "p1", GONE)
         assert removed == {name: count for name, count in before.items() if count}
