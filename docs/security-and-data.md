@@ -49,6 +49,10 @@ Martian. Its outbound calls are the ones the suite file names:
   never stored. A literal value is stored as it is: keep credentials in the environment.
 - **An LLM judge** receives the case's input, the reply and your criteria at the provider you
   configure.
+- **The cheating inspection's judge**, only with `martian evals inspect-cheating --judge MODEL
+  --accept-judge-cost`, receives each transcript no signal flagged: the case's inputs, the
+  target's steps with what each was asked and returned, and the reply, each cut to 600
+  characters, never the expectations ([the judge](evals.md#the-judge)).
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
 
@@ -111,6 +115,16 @@ in the data file, the suite file and the scorer, and the test checks that the fi
 them. The target finds none, in a suite file run and in the worker, though it finds a control value
 in a file beside it and another in its environment, and it can neither change the results and the
 stores nor plant a file beside them.
+
+What isolation leaves reachable, and what an agent tries anyway, shows in its transcript.
+[`martian evals inspect-cheating`](evals.md#inspect-a-run-for-cheating), and the evals core's
+[route for a run](evals-core.md#runs-inspected-for-cheating), read each case's trace and reply for
+signs that the agent reached for its answers, tests or grader: a step that names the run's hidden
+files, an answer key, results or a grader's file, the evals or MLflow API, the run's environment
+variables or another process, a refusal by isolation, an expected answer it had before any step
+produced it, or a reply that writes to the grader. Isolation records nothing itself, so a refused
+attempt shows only where the target's own step records its error. Its miss and false-alarm rates on
+a labelled set are in [how well it catches cheating](evals.md#how-well-it-catches-cheating).
 
 ## Custom Python scorers
 

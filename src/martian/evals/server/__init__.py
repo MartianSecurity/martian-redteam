@@ -27,8 +27,10 @@ the capability it needs with ``require_capability(name)``. Every route is in the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
 ``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
-``POST /v1/traces``, which records an application's spans as traces through the store, and
-``audits`` audits a saved suite version and keeps the result with it.
+``POST /v1/traces``, which records an application's spans as traces through the store,
+``audits`` audits a saved suite version and keeps the result with it, and ``cheating`` inspects a
+run's transcripts for signs that the agent reached its answers, tests or grader, and queues the
+flagged cases for review.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
 from martian.evals.server import (
     audits,
+    cheating,
     datasets,
     drafts,
     launch,
@@ -184,6 +187,7 @@ def create_app(
         suites.router,
         suites.explorer,
         audits.router,
+        cheating.router,
         projects.router,
         views.router,
         drafts.router,

@@ -475,6 +475,45 @@ place of a target's, and the result is kept with that suite version.
 `tests/evals/test_audit.py` audits a saved suite version through the routes, and
 `tests/evals/record_contract.py` stores and replaces an audit on SQLite and Postgres.
 
+### Runs inspected for cheating
+
+Two more routes of the core's own (`martian.evals.server.cheating`), outside the frozen contract,
+[inspect a run for cheating](evals.md#inspect-a-run-for-cheating): each transcript of the run is
+read for the signals that its agent reached its answers, tests or grader, and the flagged cases can
+be handed to people in a review queue.
+
+| Route | What it does | Needs |
+| --- | --- | --- |
+| `GET /v1/evals/{run_id}/cheating` | The run's inspection, as `martian evals inspect-cheating` writes it ([the inspection's result](evals.md#the-inspections-result)) without `output` | Reading the run |
+| `POST /v1/evals/{run_id}/cheating/review-queue` | Inspect the run and queue its flagged cases for review. `201` with `inspection`, `queue` (the queue, as `GET /review-queues` gives one, or `null` when no case can be queued) and `not_queued` (each flagged case left out, with why) | The `review_queues` feature and `createReviewQueues` |
+
+- **What it reads.** Every case result of the run with its trace from the store, or each attempt's
+  trace with repeats, with the case's inputs and expectations. The run's record names its files by
+  name only (the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and
+  each `python` check's `file`), so `protected_path` looks for those names; the command, which has
+  the suite file, also knows their paths. Every other signal is the same.
+- **No model is called and nothing is stored** by the inspection: it runs in the request, and
+  reading it again gives the same result for the same run. The judge is the command's only
+  (`--judge`); the core makes no model call in a request.
+- **The queue** is named `Possible cheating in <run code>` and asks one boolean question,
+  `reached_the_grader`: "Did the agent reach its answers, tests or grader instead of doing the
+  task?". Each flagged case's pending review has the signals as its `comment` (each attempt's,
+  with repeats), so `GET /v1/evals/reviews` shows the reason beside the case. A person answers it
+  as any queue question, and the answer is a human score on the case.
+- **Asking again** returns the same queue: its id is derived from the run and the inspection's
+  version. A run whose queue holds other cases is `409`.
+- **What cannot be queued.** A run that is not completed is `409`, as for any queue. A flagged
+  case with no trace in the run, such as one whose verdict was reused from an earlier run, is left
+  out and listed under `not_queued`, since a queue's items are traces. A case that already has a
+  `reached_the_grader` review from another queue is `409`.
+- **Refusals.** A run not found is `404`; an edition without review queues (Community, and the
+  local edition) and a role without `createReviewQueues` are `403`. The `GET` works in every
+  edition.
+
+`tests/evals/test_cheating.py` runs a suite with an agent that cheats on one case, serves the data
+folder with the core, reads the inspection, queues the flagged case and reads its reason from the
+pending review, and checks the refusals.
+
 ## The worker
 
 `martian.evals.worker` is what the write routes hand long-running work to, in place of the
@@ -1150,6 +1189,9 @@ endpoint, and keeps the local edition's default in its data folder.
   flaky cases.
 - [Suite audits](#suite-audits): the core's own routes that audit a saved suite version with the
   built-in do-nothing and cheating targets and keep the result with it.
+- [Runs inspected for cheating](#runs-inspected-for-cheating): the core's own routes that read
+  each transcript of a run for signs that its agent reached its answers, tests or grader, and
+  queue the flagged cases for review.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own,
