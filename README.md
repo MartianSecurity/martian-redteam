@@ -48,6 +48,9 @@ pull request with the last result of `main` and name the cases that went from pa
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
+- `martian evals prompts push`: a suite file's matrix prompts kept as immutable versions in the
+  local Evals UI, where each later run shows the prompt version it used; see
+  [prompt versions](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md#prompt-versions).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see

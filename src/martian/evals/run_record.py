@@ -21,7 +21,10 @@
 - A suite with a matrix records one run per combination (:mod:`martian.evals.matrix`). Its
   ``provenance`` holds the combination under ``matrix`` (:func:`martian.evals.matrix.provenance`),
   and its code is the suite's name with the combination's id in brackets and its number among
-  that combination's runs, such as ``evals[model=large,prompt=terse]-2``.
+  that combination's runs, such as ``evals[model=large,prompt=terse]-2``. Each of the
+  combination's text values that is a registered prompt version's text, by content digest, is
+  named under ``prompts`` (:func:`martian.evals.prompts.matched_prompts`), with the prompt's name
+  and version, so the run shows the prompt version it used.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -58,6 +61,7 @@ from martian.evals.model import (
     Trace,
     from_results_record,
 )
+from martian.evals.prompts import PROVENANCE_KEY, matched_prompts
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
@@ -142,6 +146,10 @@ class RunRecorder:
             provenance["repeats"] = repeats
         if self.matrix is not None:
             provenance["matrix"] = self.matrix
+            # The combination's text values that are registered prompt versions, by content digest.
+            used = await matched_prompts(self.store, SINGLE_USER, suite.matrix, self.matrix["values"])
+            if used:
+                provenance[PROVENANCE_KEY] = used
         run = Run(
             id=str(uuid.uuid4()),
             project_id=DEFAULT_PROJECT,

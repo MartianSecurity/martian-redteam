@@ -17,7 +17,9 @@ from martian_redteam.cli import app as redteam_app
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False)
 evals_app = typer.Typer(no_args_is_help=True, add_completion=False)
+prompts_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(evals_app, name="evals", help="Dataset regressions and scorer checks.")
+evals_app.add_typer(prompts_app, name="prompts", help="Prompt versions in the local Evals UI.")
 app.add_typer(redteam_app, name="redteam", help="Adversarial tests and risk reports.")
 
 
@@ -116,6 +118,49 @@ def run_evals(
     required = ["--martian-require-redteam"] if require_redteam else []
     code = pytest.main(["-p", "martian.evals.plugin", "--martian-evals-gate", *required, *ctx.args])
     raise typer.Exit(code=int(code))
+
+
+@prompts_app.command("push")
+def push_prompts(
+    suite_file: Annotated[Path, typer.Argument(dir_okay=False, help="The suite file (evals.yaml).")],
+    axis: Annotated[str, typer.Option("--axis", help="The matrix axis that holds the prompts.")] = "prompt",
+    value: Annotated[
+        list[str] | None,
+        typer.Option("--value", help="Push only this value of the axis; repeat for more. Default: every value."),
+    ] = None,
+    message: Annotated[str, typer.Option("--message", "-m", help="The commit message of each new version.")] = "",
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="The local Evals UI's data folder, as for `martian ui`. Default: MARTIAN_EVALS_HOME, else "
+            "~/.martian/evals.",
+        ),
+    ] = None,
+) -> None:
+    """Register each prompt of a suite file's matrix as a version of the prompt named by its value.
+
+    Text a prompt's latest version already has adds nothing. A run of the suite then records the
+    prompt version each of its combinations used.
+    """
+    if importlib.util.find_spec("mlflow") is None:
+        typer.echo("Prompt versions need martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.config import ConfigError
+    from martian.evals.prompts import push_suite_prompts
+    from martian.evals.store import StoreError
+
+    try:
+        pushed = push_suite_prompts(suite_file, axis=axis, values=value or (), message=message, home=data_dir)
+    except (ConfigError, StoreError) as error:
+        typer.echo(f"martian evals prompts push: {getattr(error, 'detail', error)}", err=True)
+        raise typer.Exit(code=2) from None
+    for found in pushed:
+        version = found.version
+        said = "added" if found.added else "unchanged"
+        typer.echo(f"{version.name}: version {version.version} {said}")
 
 
 def _run_suite(
