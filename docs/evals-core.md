@@ -403,7 +403,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   cursor is `422`, as on the server.
 
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
-questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
+questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes). The
+core's own routes for prompts and their versions are in [prompt versions](#prompt-versions).
 
 `tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`;
 `tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics,
@@ -437,6 +438,9 @@ routes, and the local edition's [launch and run again](#local-runs)), the proven
 | `simulator` | The model that played the simulated users: `model`, `parameters`, `version` |
 | `limits` | `max_seconds`, `max_judge_tokens` ([limits](#limits-stopping-and-resuming)) |
 | `stopped` | `limit`, `value`, `used`, `message` |
+| `matrix` | A suite-file run's combination of its [matrix](evals.md#a-matrix-of-prompts-and-models): `id`, `values`, `axes`, `invocation` |
+| `prompts` | A list, one object per axis whose value is a registered [prompt version](#prompt-versions)'s text: `axis`, `value`, `name`, `version`, `digest` |
+| `cache` | A suite-file run's use of the [cache of model calls](evals.md#a-cache-of-model-calls): `on` (`true`), and `target` and `judge`, each its `hits` (replies from the cache), `calls` (requests sent to the model) and `stored` (replies written to the cache). Never the cache's `folder`, `ttl_seconds` or `functions` |
 | `model` | The model the run's target reported ([the model a target reports](#the-model-a-target-reports)): `name`, `cases` |
 | `schedule` | The [schedule](#schedules) that admitted the run: `id`, `name`, `slot`; `model_change` (`from`, `to`) when the run was for a change of the model, and `trigger` (`model_change`) when that change had a slot of its own |
 | `inspect` | What an [imported Inspect log](#imported-inspect-logs) records: `log`, `log_sha256`, `format`, `log_version`, `status`, `eval_id`, `run_id`, `eval_set_id`, `task`, `task_id`, `task_version`, `task_file`, `model`, `created`, `epochs`, `dataset`, `tags`, `packages`, `results`, `model_usage` |
@@ -444,7 +448,7 @@ routes, and the local edition's [launch and run again](#local-runs)), the proven
 | `mlflow` | What a [copied MLflow run](#copied-mlflow-stores) records: `source` (the store, a URL without its password), `schema_revision`, `experiment_id`, `experiment`, `run_id`, `run_name`, `status`, `user`, `run_type`, `metrics`, `params`, `tags`, `datasets` |
 
 A key or a sub-key the run does not have is left out, and a value of another form than the table
-gives is not shown. Nothing else a run's provenance holds is in any response:
+gives is not shown; of a list, each object shows the keys the table gives. Nothing else a run's provenance holds is in any response:
 
 - **A CI run's `provenance.ci`.** The server's CI gate records there the run's attribution with
   the CI token that uploaded it (`token_id`, `token_name`) and the digests of the upload request
@@ -1584,8 +1588,54 @@ built-in judge on the default, keeps a job's model when the default changes, ref
 endpoint, and keeps the local edition's default in its data folder.
 `tests/evals/test_judge_panel.py` covers the panel's rule, a panel in Python and in a suite file
 against a loopback endpoint, and a registered panel the worker grades with a fake judge: one
-member's error still decides, no majority is an error, every vote is on the score, and a panel is
+member's error still decides, no majority is an error, every vote is on the score, every
+combination of a suite's matrix is graded by the panel on its own replies, and a panel is
 reported and calibrated as one judge.
+
+## Prompt versions
+
+The core keeps prompts and their versions, and serves them on routes of its own, which the
+server's frozen contract does not have; the contract is unchanged. A prompt belongs to the
+organisation, or to the single local user, not to a project, as in MLflow's prompt registry. Each
+version is immutable: its text, its digest (`prompt_digest`, SHA-256 of the text as UTF-8), an
+optional commit message, its author and its time ([the model](eval-model.md#objects)).
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/prompts` | Every prompt, by name: `name`, `description`, `created_at`, `created_by`, `version_count`, `latest` (the latest version without its text, or `null`) and `run_count`, the runs that used one of its versions |
+| `POST /v1/evals/prompts` | Create a prompt from `name` (1 to 64 letters, digits and `. _ -`, starting with a letter or digit) and an optional `description`: `201`. The same name and description again returns it; the same name with another description is `409` |
+| `GET /v1/evals/prompts/{name}` | The prompt as the list has it, and `versions`, oldest first, each with `version`, `text`, `digest`, `message`, `created_at`, `created_by` and `runs`: the runs that used it, newest first, from every project, each in the run list's shape (`EvalRunOut`) with `prompt`, the matrix `axis` and `value` that held it. `404` for a prompt that does not exist |
+| `POST /v1/evals/prompts/{name}/versions` | Add a version from `text` (1 to 100,000 characters), an optional `message` and an optional `base_version`, the latest version the change was made from (`0` for none): `201` with `added: true` and the `version`. Text the latest version already has adds nothing: `200` with `added: false` and that version. A `base_version` older than the latest is `409`, so two people editing one prompt do not overwrite each other unnoticed |
+
+- **Authors.** `created_by` is the user who created the prompt or added the version, as the API
+  names users ([read routes](#read-routes)): the local user is
+  `bf0808be-f788-5dd7-8fc2-2d28ed350045`.
+- **Who may write.** The two writes need the role that saves suites (`saveSuites`); any role
+  reads. Every edition has them.
+- **The runs of a version** are the runs whose `provenance.prompts` names it. `martian evals run`
+  writes that entry for a combination of a matrix whose text value is a registered version's text,
+  by digest, when it records the run ([prompt versions](evals.md#prompt-versions)); a run the UI
+  launches has no matrix and names none. Reading a prompt reads every run of every project.
+- **In the store** the group is `create_prompt`, `get_prompt`, `list_prompts`,
+  `add_prompt_version`, `prompt_versions` and `find_prompt_versions` (by digest), and
+  `import_prompt`, which creates a prompt with its versions as another install had them, each
+  version's number, author and time kept, for the [data export](data-export.md). On the in-process
+  binding it is MLflow's prompt registry: a prompt is an MLflow prompt, a version an MLflow prompt
+  version, its text the template and its commit message MLflow's, with the digest and author in
+  version tags ([the in-process binding](#the-in-process-binding)). MLflow stamps the time it
+  creates each; an import sets the prompt's and each version's creation time to the export's
+  (`PromptRegistryStore.keep_prompt_times` in `martian.evals._mlflow`). MLflow keeps the registry in its
+  model registry tables, in the same database, in the principal's workspace. No table of the
+  record store holds prompts.
+- `martian evals prompts push SUITE` registers a suite file's prompts in the local edition's data
+  folder through the same store, as the single local user
+  ([prompt versions](evals.md#prompt-versions)).
+
+`tests/evals/test_prompts.py` covers the routes, a viewer's refusal, the runs of each version, and
+`martian evals prompts push` followed by `martian evals run` on the matrix example, read back
+through `martian ui`'s routes. The store contract's prompt test runs on `MemoryStore` and on
+`MlflowStore` on SQLite and Postgres. `tests/evals/test_write_contract.py` lists the four routes
+as the core's own.
 
 ## Monitors
 
@@ -2331,6 +2381,8 @@ store keeps the watch, its progress and the noted changes on both databases.
   version's calibration and its re-checks, which the core's own write routes save and ask for.
   Another registers a judge graded by a [panel of judges](evals.md#a-panel-of-judges), which the
   worker grades on each member.
+- [Prompt versions](#prompt-versions): the core's own routes for prompts, their immutable
+  versions and the runs that used each, and `martian evals prompts push`.
 - [Suite audits](#suite-audits): the core's own routes that audit a saved suite version with the
   built-in do-nothing and cheating targets and keep the result with it.
 - [Runs inspected for cheating](#runs-inspected-for-cheating): the core's own routes that read
@@ -2376,6 +2428,7 @@ store keeps the watch, its progress and the noted changes on both databases.
   | Traces | `record_trace`, `search_traces`, `search_sessions`, `get_trace`, `set_trace_tag`, `link_traces`, `delete_traces`, `delete_traces_before` |
   | Scores | `log_score`, `list_scores` |
   | Registered scorers | `register_scorer`, `list_scorers`, `scorer_versions` |
+  | Prompts | `create_prompt`, `get_prompt`, `list_prompts`, `add_prompt_version`, `prompt_versions`, `find_prompt_versions`, `import_prompt` |
   | Review | `save_question`, `list_questions`, `create_queue`, `get_queue`, `queue_items`, `set_queue_item` |
   | Run artifacts | `put_artifact`, `get_artifact`, `list_artifacts` |
   | Readiness | `status` |
@@ -2408,7 +2461,7 @@ store keeps the watch, its progress and the noted changes on both databases.
   attributes kept, a span's attributes read back as recorded (text that reads as JSON, such as
   `"42"` or `"true"`, stays text; numbers, booleans, objects and lists keep their types), a
   trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
-  given, versioned scorers,
+  given, versioned scorers, prompts with immutable versions found by digest,
   review queues, artifact names, traces deleted for good by id and before a cutoff
   ([deleting runs and traces](#deleting-runs-and-traces)), and organisations never seeing each
   other. A binding's tests
@@ -2691,6 +2744,15 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     an application starts with `mlflow.start_run()`, belongs to no run.
   - A score is a feedback assessment, created at the score's `created_at` when it has one, and a
     registered scorer an MLflow scorer.
+  - A prompt is a prompt of MLflow's prompt registry, with its creator in the
+    `martian.prompt.created_by` tag, and a prompt version an MLflow prompt version: its text is the
+    template, its commit message MLflow's, and its digest and author are the
+    `martian.prompt.digest` and `martian.prompt.author` version tags. MLflow keeps them in its
+    model registry tables, beside its tracking tables, and the binding reaches them through
+    `martian.evals._mlflow.PromptRegistryStore`, MLflow's model registry store with workspaces on
+    for it alone. A version is found by its digest with MLflow's search of prompt versions. Its
+    creation time is MLflow's; an imported prompt and version keep the export's, which the binding
+    sets on MLflow's rows after creating them (`keep_prompt_times`).
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts, `martian/run.json` among them, are files in the run's folder,
@@ -3432,7 +3494,7 @@ default project:
 | Object | What a run writes |
 | --- | --- |
 | `Project` | The default project, named `Default`, on the first run |
-| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. In the store, an MLflow run in the default project's experiment |
+| `Run` | Source `local`, the suite's id and digest, its target and scorers, and the dataset's name (the data file's stem) and digest. The code is the suite's name and the run's number among that suite's runs, such as `evals-3`. `max_cases` is `--limit`, and `truncated` says the limit left cases out. `provenance` holds the suite's and the dataset's names and digests, the SDK version, the run's `limits` when it has any, and, when the suite [repeats its cases](evals.md#repeated-attempts), `repeats` as `summary.json` has it; with [simulated users](evals.md#simulated-users), `simulator` (its `model`, `parameters` and `version`), and the run's scorers include `goal_reached`, of kind `llm_judge` with the simulator's model. A suite with a [matrix](evals.md#a-matrix-of-prompts-and-models) writes one run per combination: its code is the suite's name with the combination's id in brackets and its number among that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`, and its `provenance.matrix` holds the combination's `id` and `values`, the matrix's `axes` and the `invocation` the runs of one command share ([the suite file](eval-model.md#the-sdk-suite-file)), and `provenance.prompts` names each of its values that is a registered prompt version's text ([prompt versions](#prompt-versions)). A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on has `provenance.cache`: `on`, the cache's folder, time to live and `functions`, and, once the run ends, how many target and judge replies came from the cache, in the records; the store's copy keeps the settings it started with. The run routes show only `on` and the counts ([run provenance](#run-provenance)). In the store, an MLflow run in the default project's experiment |
 | `CaseResult`, `Score` | One case result per `results.jsonl` record, by `from_results_record`, with the case's own expectations and its trace's latency. A check's score has source `code`; an LLM judge's has source `llm_judge` and the judge model as `source_id`, or for a panel check `panel:` and a digest of its members, with every member's vote in its `metadata` (from the check's `metadata` in `results.jsonl`). With repeats, the result holds every attempt with its trace and latency, and its scores are the attempts combined. A [conversation](evals.md#conversations) case's result holds its session id and every turn, each with its trace and latency, and its scores are the conversation's verdicts, on no trace; its latency is its turns' added up. A simulated conversation's result is marked `simulated`, and its goal score has the simulator model as `source_id` |
 | `Trace` | The trace MLflow's evaluation harness recorded for the case, with its spans, under a new `tr-` id, named after the run code and the case id, linked to the run, and carrying the case's scores as assessments. Its request is the case's input under `input_key` and its response the reply. With repeats, one trace per attempt, named `<code> <case> attempt <n>`, tagged `martian.attempt`, and carrying that attempt's verdicts; the case result's trace is the one of the attempt that shows its reply. A conversation case has one trace per turn, named `<code> <case> turn <n>` (with `attempt <a>` before `turn` with repeats), tagged `martian.turn`, with the turn's input as its request, the conversation's `session_id`, and that turn's verdicts, and tagged `martian.simulated` when a simulated user wrote it; the case result's trace is its first turn with the conversation's verdict, else its first |
 
@@ -3474,10 +3536,13 @@ byte at a time while the run finishes; stops a run at its time limit and at its 
 against a loopback judge that reports its usage, and resumes each after the cases it finished;
 stops a repeated run in the middle of a case's attempts and resumes it with all of that case's
 attempts; and cancels a running command's run from the local edition's cancel route.
+`tests/evals/test_matrix.py` runs a suite with a matrix and reads each combination's run back
+through the same routes, validated against the contract.
 `tests/evals/test_conversations.py` does the same for conversation cases: per-turn and
 conversation verdicts, the turns route, each turn's trace and the session its turns share.
 `tests/evals/test_simulated_users.py` does it for simulated users, with a loopback endpoint as
-the simulator model, and for personas built from transcripts and from the data folder's sessions;
+the simulator model, in each combination of a matrix under its own token limit, and for personas
+built from transcripts and from the data folder's sessions;
 `tests/evals/test_simulator_fidelity.py` for the simulated label on the command's results and the
 [fidelity report](evals.md#simulator-fidelity) against invented transcripts and sessions.
 
@@ -3953,6 +4018,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_user_ids.py`, `test_worker.py`, `test_worker_process.py`, `test_worker_targets.py`,
 `test_trace_conventions.py`, `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`,
 `test_worker_limits.py`, `test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`,
-`test_schedules.py`, `test_model_changes.py`, `test_no_outbound.py`, `test_push.py` and the store
+`test_schedules.py`, `test_model_changes.py`, `test_no_outbound.py`, `test_prompts.py`, `test_push.py` and the store
 and record tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.

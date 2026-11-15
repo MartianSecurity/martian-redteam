@@ -39,8 +39,8 @@ send alerts, ``schedules`` the schedules that run a saved suite against a target
 ``push`` the runs another installation pushes here (``martian evals push``), written as
 :func:`~martian.evals.server.push.push_principal`. Some routes are the core's own, which the
 contract does not have: a run's attempts in ``runs``, the judges' agreement with people and people's
-agreement with each other in ``agreement``, each judge version's calibration in ``calibration``, and
-``push``, under ``/v1/push``.
+agreement with each other in ``agreement``, each judge version's calibration in ``calibration``, the
+prompt versions in ``prompts``, and ``push``, under ``/v1/push``.
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ from martian.evals.server import (
     monitors,
     otlp,
     projects,
+    prompts,
     push,
     reviews,
     runs,
@@ -218,6 +219,7 @@ def create_app(
         projects.router,
         views.router,
         drafts.router,
+        prompts.router,
         push.router,
         runs.router,
         otlp.router,

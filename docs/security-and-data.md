@@ -35,7 +35,9 @@ Martian. Its outbound calls are the ones the suite file names:
 
 - **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
   suite repeats its cases, carrying that case's inputs and never its expectations
-  ([the target and the grader](#the-target-and-the-grader)).
+  ([the target and the grader](#the-target-and-the-grader)), and for each combination of the
+  suite's [matrix](evals.md#a-matrix-of-prompts-and-models) once more, with that combination's
+  values.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -56,12 +58,22 @@ Martian. Its outbound calls are the ones the suite file names:
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
 
+With the [cache of model calls](#the-cache-of-model-calls) on, a call whose reply the cache
+holds is not sent at all.
+
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
 verdicts and reasons as `results.jsonl` holds them (every attempt's, when the suite repeats
 cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
+
+`verdicts.json`, which every run also writes, holds no input, reply or judge reason: each case's
+id, verdicts, the SDK's wording of a target failure, a SHA-256 digest of its inputs and
+expectations, and the reasons of the deterministic checks that report counts, sizes or names. It
+is what a later run compares with (`--baseline`). With `baseline-branch`, the
+[evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps the baseline branch's
+copy in the repository's Actions cache, which pull requests, including those from forks, can read.
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
@@ -90,6 +102,42 @@ threshold's webhook secret, and a target's `${NAME}` references stay unexpanded,
 keeps them. Treat an export as you treat the
 data folder. See [data export](data-export.md).
 
+### The cache of model calls
+
+The [cache](evals.md#a-cache-of-model-calls) is off unless the suite file has a `cache` block or
+the run is given `--cache`. With it on, `martian evals run` stores model replies on disk:
+
+- **Where.** The suite file's `cache.folder`, else `cache` in the local Evals UI's data folder
+  (`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`). The folder and its subfolders are
+  created readable by their owner only (`0700`) and each entry likewise (`0600`). Nothing in it
+  leaves the machine, and nothing outside the run reads it. A function target's process cannot
+  reach it ([the target and the grader](#the-target-and-the-grader)): it holds judgments.
+- **What an entry holds.** One JSON file per reply, named by the SHA-256 digest of its key: the
+  format, the kind (`target` or `judge`), when it was stored, and the reply. A target's reply is
+  the text or value at `response_path` the endpoint returned, or a function target's return
+  value. A judge's is its judgment, the per-criterion verdicts with their reasons, and the
+  reply's metadata, such as the response format and the model version the provider named. An
+  entry holds no request, no header and no key, so the case's input appears in it only where the
+  reply quotes it. Treat the folder as you treat `results.jsonl`: replies can hold whatever the
+  target said.
+- **What the key leaves out.** The key is a digest of the full request, which is never written
+  down. Credentials are not part of it: a header or a query parameter whose name says it holds
+  one (`Authorization`, `Proxy-Authorization`, `Cookie`, and any name that holds `auth`, `key`,
+  `token`, `secret`, `pass`, `credential`, `cookie`, `session` or `signature`, or is `sig`,
+  `code` or `pwd`) is left out, and so is a user name or password in an address; a judge's key is
+  never read into it. Other header values are part of it as sent, with `${NAME}` read from the
+  environment, so a secret kept in a header whose name says nothing of it, such as
+  `X-Customer: ${CUSTOMER_SECRET}`, enters the digest: name such headers for what they hold.
+- **Errors are never stored**, so a cached entry is always a reply the model gave.
+- **Replayed results are marked.** A run that used the cache says so in `summary.json`, the
+  printed summary, the pull-request comment and the recorded run's `provenance.cache`, with how
+  many replies came from the cache.
+- **Sharing a folder** shares the replies in it. Point `cache.folder` at a shared location, or
+  keep the folder in a CI cache, only where everyone who can read it may read the replies, and
+  remember that a pull request from a fork can read the repository's Actions cache. An entry
+  older than `cache.ttl_seconds` is not used, but stays on disk until a successful call replaces
+  it or the folder is deleted.
+
 `martian evals push` is the one command that sends the data folder's content off the machine, and
 only when it is run: each finished run's case inputs and outputs, scores, reasons, scoring jobs and
 traces with their spans go to the server `MARTIAN_API_URL` names, signed in with the API key in
@@ -107,7 +155,7 @@ cannot reach them. How far that goes depends on the kind of target:
 
 | Target | Given | Runs | Cannot reach | Can still reach |
 | --- | --- | --- | --- | --- |
-| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments; in a conversation's turn also its history and session id, as far as its parameters take them | In a process of its own, started with the run (`python -P`), which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri` and the local Evals UI's data folder: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
+| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments, and the values of the combination of the suite's [matrix](evals.md#a-matrix-of-prompts-and-models) it runs; in a conversation's turn also its history and session id, as far as its parameters take them | In a process of its own, started with the run (`python -P`), which every combination of the matrix calls and which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri`, the local Evals UI's data folder and the suite file's own `cache.folder` when the run uses the cache: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
 | A suite file's URL target | One JSON `POST` per case, its body filled from the case's inputs and `{{uuid}}`; a placeholder that names anything else is refused when the suite loads | Wherever the endpoint runs | Nothing of the run's process: it receives the request and nothing else | Whatever its own host lets it. An endpoint on this machine that runs as your user can read the suite's files |
 | A function in the pytest gate (`evaluate`, `predict_fn`) | The case's inputs, as keyword arguments | In the test's own process | Nothing is hidden from it | The test's memory, which holds the dataset's expected values, and its files |
 | A function target in the evals core's worker (`Target(kind="function")`) | The case's inputs, as keyword arguments | In a process of its own for each run, started before its first case | The work's process, which holds the stores and every case's expectations. On Linux with Landlock, the worker's private paths (`WorkerServices.private_paths`), which the setup names: its stores' files | As a suite file's function target. A store on a server, such as Postgres, is reachable over the network by anything that has its address and credentials, which the target's process is not given unless they are in a variable it keeps |

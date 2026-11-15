@@ -8,10 +8,12 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
 ``RecordStore``), so they work on every binding. ``docs/data-export.md`` is the format:
 
 - One file per kind of object, each line one object in the shared model's JSON with the project
-  it belongs to, and ``manifest.json``, written last, with the format's name and version and each
-  file's line count, size and SHA-256. Run artifacts are files named by their SHA-256.
-- An export runs in steps: a project's definitions, a dataset version, a run, its monitoring (its
-  monitors, schedules and thresholds with their history), a page of traces.
+  it belongs to (an organisation's prompts belong to none), and ``manifest.json``, written last,
+  with the format's name and version and each file's line count, size and SHA-256. Run artifacts
+  are files named by their SHA-256.
+- An export runs in steps: the organisation's prompts, then a project's definitions, a dataset
+  version, a run, its monitoring (its monitors, schedules and thresholds with their history), a
+  page of traces.
   After each step the files are flushed and ``export-progress.json`` records how long each file
   is. An interrupted export is resumed by exporting into the same folder again: the files are cut
   back to the last finished step and the export carries on from there.
@@ -22,7 +24,8 @@ organisation's principal. Both work only through the store interfaces (``EvalSto
   reference at them. Monitors and schedules come back paused, and a threshold's webhook comes
   back without its secret, which an export never holds. A judge calibration's re-check that was
   queued or running comes back failed (:data:`RECHECK_INTERRUPTED`): nothing works on it in the
-  fresh install.
+  fresh install. Prompt versions keep their numbers, authors and times
+  (``EvalStore.import_prompt``), so a run's ``provenance.prompts`` names the same versions.
 - :data:`EXPORTED_TABLES` and :data:`EXPORTED_KINDS` name each table of the record store and each
   kind of object of the two interfaces that an export carries, and the files it is in;
   :data:`LEFT_OUT_TABLES` and :data:`LEFT_OUT_KINDS` name the rest, each with why. A test fails
@@ -53,6 +56,8 @@ from martian.evals.model import (
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     Review,
     ReviewQuestion,
@@ -81,6 +86,7 @@ from martian.evals.records import (
     Threshold,
     ThresholdStatus,
 )
+from martian.evals.store import StoreError
 
 if TYPE_CHECKING:
     from martian.evals.records import RecordStore
@@ -92,14 +98,15 @@ if TYPE_CHECKING:
 FORMAT = "martian-evals-export"
 """The format's name, in ``manifest.json``."""
 
-VERSION = 5
+VERSION = 6
 """The format's version, in ``manifest.json``. An import reads this version only. Version 2 added
 the monitoring files: monitors, the traces they took, schedules, their slots, thresholds and their
 alerts. Version 3 added the dataset publications (``manifests.jsonl``), version 4 the judge
-calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), and version 5
-let ``scores.jsonl`` hold a score of each source for one case, scorer and scoring job (a person's
-answer beside a check's or a judge's score of the same name), which an SDK that keeps one score
-per scorer and scoring job would import as one."""
+calibrations and their re-checks (``calibrations.jsonl`` and ``rechecks.jsonl``), version 5 let
+``scores.jsonl`` hold a score of each source for one case, scorer and scoring job (a person's answer
+beside a check's or a judge's score of the same name), which an SDK that keeps one score per scorer
+and scoring job would import as one, and version 6 the organisation's prompts and their versions
+(``prompts.jsonl`` and ``prompt_versions.jsonl``)."""
 
 MANIFEST = "manifest.json"
 PLAN = "export-plan.json"
@@ -107,6 +114,8 @@ PROGRESS = "export-progress.json"
 ARTIFACTS = "artifacts"
 
 FILES = (
+    "prompts.jsonl",
+    "prompt_versions.jsonl",
     "projects.jsonl",
     "scorers.jsonl",
     "questions.jsonl",
@@ -182,6 +191,8 @@ LEFT_OUT_TABLES = {
 """Each table of the record store that an export leaves out, and why."""
 
 EXPORTED_KINDS = {
+    "Prompt": ("prompts.jsonl",),
+    "PromptVersion": ("prompt_versions.jsonl",),
     "Project": ("projects.jsonl",),
     "ScorerVersion": ("scorers.jsonl",),
     "ReviewQuestion": ("questions.jsonl",),
@@ -214,7 +225,8 @@ EXPORTED_KINDS = {
 """Each kind of object the store (``EvalStore``) and the record store (``RecordStore``) take or
 return, by model class, that an export carries, and the files it is in. Run artifacts are bytes,
 not objects: ``artifacts.jsonl`` and ``artifacts/``. A threshold's webhook secret is not an object
-either: the record store keeps it apart and the export never reads it (``threshold_secret``)."""
+either: the record store keeps it apart and the export never reads it (``threshold_secret``).
+Prompts are the store's (MLflow's prompt registry), not the record store's, so they have no table."""
 
 LEFT_OUT_KINDS = {
     "StoreStatus": "the store's readiness, not data",
@@ -235,6 +247,9 @@ TRACE_PAGE = 500
 PAGE = 1000
 """Cases or case results read per call, and the traces a monitor took, a schedule's slots or a
 threshold's alerts."""
+
+ORGANISATION = ("prompts.jsonl", "prompt_versions.jsonl")
+"""The files whose lines are the organisation's, not a project's: they have no ``project_id``."""
 
 WRITE_BATCH = 500
 """Case results or scores written per call on import."""
@@ -402,7 +417,7 @@ async def _plan(store: EvalStore, records: RecordStore, principal: Principal) ->
 
 
 def _steps(plan: dict[str, Any]) -> list[tuple[str, str, str]]:
-    steps: list[tuple[str, str, str]] = []
+    steps: list[tuple[str, str, str]] = [("prompts", "", "")]
     for project in plan["projects"]:
         steps.append(("project", project["id"], ""))
         steps += [("dataset", project["id"], dataset_id) for dataset_id in project["datasets"]]
@@ -449,6 +464,8 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
                     files.commit()
                     progress = {**progress, "cursor": cursor, "sizes": dict(files.sizes), "lines": dict(files.lines)}
                     _write_json(folder / PROGRESS, progress)
+            elif kind == "prompts":
+                await _prompts(store, principal, files)
             elif kind == "project":
                 await _project(store, records, principal, files, project_id)
             elif kind == "dataset":
@@ -469,6 +486,14 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
         files.close()
     manifest = _finish(folder, plan, files)
     return ExportSummary(folder=folder, resumed=resumed, manifest=manifest)
+
+
+async def _prompts(store: EvalStore, principal: Principal, files: _Files) -> None:
+    """The organisation's prompts, by name, each with every version, oldest first."""
+    for prompt in await store.list_prompts(principal):
+        files.write("prompts.jsonl", {"prompt": _json(prompt)})
+        for version in await store.prompt_versions(principal, prompt.name):
+            files.write("prompt_versions.jsonl", {"version": _json(version)})
 
 
 async def _project(
@@ -716,7 +741,9 @@ def _read(folder: Path, name: str) -> Iterator[tuple[int, dict[str, Any]]]:
                 line = json.loads(raw)
             except ValueError:
                 raise ExportError(f"{name} line {number} is not JSON") from None
-            if not isinstance(line, dict) or not isinstance(line.get("project_id"), str):
+            if not isinstance(line, dict):
+                raise ExportError(f"{name} line {number} is not an object")
+            if name not in ORGANISATION and not isinstance(line.get("project_id"), str):
                 raise ExportError(f"{name} line {number} names no project")
             yield number, line
 
@@ -863,6 +890,9 @@ async def _refuse_data(store: EvalStore, records: RecordStore, principal: Princi
                 f"the install already holds data: project {project_id} has {', '.join(found)}. "
                 "Import into a fresh install"
             )
+    # Prompts are the organisation's, not a project's.
+    if await store.list_prompts(principal):
+        raise ExportError("the install already holds data: it has prompts. Import into a fresh install")
 
 
 class _Groups[T]:
@@ -932,6 +962,7 @@ async def _import(
     projects = [project for _, project in _objects(folder, "projects.jsonl", "project", Project)]
     await _refuse_data(store, records, principal, projects)
     refs = References()
+    await _import_prompts(store, principal, folder)
 
     # Projects, open until everything is written into them; then the archived ones are archived.
     for project in projects:
@@ -976,6 +1007,29 @@ async def _import(
     return ImportSummary(
         folder=folder, manifest=manifest, references=refs.maps, paused=paused, needs_secret=needs_secret
     )
+
+
+async def _import_prompts(store: EvalStore, principal: Principal, folder: Path) -> None:
+    """Each prompt with its versions as the export holds them: numbers, texts, commit messages,
+    authors and times (``EvalStore.import_prompt``)."""
+
+    def versions() -> Iterator[tuple[tuple[str, str], PromptVersion]]:
+        for number, line in _read(folder, "prompt_versions.jsonl"):
+            version = _model(PromptVersion, line.get("version"), "prompt_versions.jsonl", number)
+            yield ("", version.name), version
+
+    grouped = _Groups(versions())
+    for number, line in _read(folder, "prompts.jsonl"):
+        prompt = _model(Prompt, line.get("prompt"), "prompts.jsonl", number)
+        found = grouped.take(("", prompt.name))
+        try:
+            stored = await store.import_prompt(principal, prompt, found)
+        except StoreError as error:
+            raise ExportError(f"prompt {prompt.name} did not import: {error}") from None
+        if [(v.version, v.digest) for v in stored] != [(v.version, v.digest) for v in found]:
+            raise ExportError(f"prompt {prompt.name} did not import whole")
+    if not grouped.done():
+        raise ExportError("prompt_versions.jsonl holds versions of a prompt prompts.jsonl does not list")
 
 
 async def _import_datasets(store: EvalStore, principal: Principal, folder: Path, refs: References) -> None:

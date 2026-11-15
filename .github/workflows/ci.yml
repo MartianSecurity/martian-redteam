@@ -269,11 +269,13 @@ jobs:
           config: examples/config.yaml
 
       # The two sample suites need no secret: each keeps its own comment on the pull request.
+      # The passing sample keeps its result on main and compares each pull request with it.
       - name: Evals action on the passing sample
         uses: ./.github/actions/evals
         with:
           suite: examples/github-action/passing/evals.yaml
           output: results/evals-passing
+          baseline-branch: main
 
       - name: Evals action on the failing sample
         id: failing-sample

@@ -70,7 +70,8 @@ OWN_NAMES = {("get", "/v1/evals/status"), ("get", "/v1/evals/bootstrap"), ("post
 # The core's own routes, which the server's contract does not have: a run's attempts
 # (MartianSecurity/martian-notes#180) and turns (MartianSecurity/martian-notes#191), the judges' agreement
 # with people (MartianSecurity/martian-notes#185), people's agreement with each other
-# (MartianSecurity/martian-notes#189) and each judge version's calibration (MartianSecurity/martian-notes#186).
+# (MartianSecurity/martian-notes#189), each judge version's calibration (MartianSecurity/martian-notes#186)
+# and prompt versions (MartianSecurity/martian-notes#207).
 OWN_NAMES |= {("get", "/v1/evals/{run_id}/attempts"), ("get", "/v1/evals/{run_id}/turns")}
 # The core's suite audits (MartianSecurity/martian-notes#214).
 OWN_NAMES |= {
@@ -84,6 +85,12 @@ OWN_NAMES |= {
     ("get", "/v1/evals/judge-calibrations"),
     ("post", "/v1/evals/judge-calibrations"),
     ("get", "/v1/evals/judge-calibrations/{calibration_id}"),
+}
+OWN_NAMES |= {
+    ("get", "/v1/evals/prompts"),
+    ("post", "/v1/evals/prompts"),
+    ("get", "/v1/evals/prompts/{name}"),
+    ("post", "/v1/evals/prompts/{name}/versions"),
 }
 # Registering a judge graded by a panel of judge models (MartianSecurity/martian-notes#187), which the
 # contract's POST /judges has no field for.
