@@ -4,6 +4,7 @@ MemoryStore and on the in-process MLflow binding."""
 
 import asyncio
 import base64
+import dataclasses
 import json
 import uuid
 from datetime import timedelta
@@ -357,8 +358,9 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
         await records.put_results(SINGLE_USER, DEFAULT_PROJECT, [result])
 
     asyncio.run(record())
-    # Room for the resumed run beside the one still running.
-    entitlements = local_entitlements(concurrency=5)
+    # Room for the resumed run beside the one still running, and review queues for the cheating queue.
+    local = local_entitlements(concurrency=5)
+    entitlements = dataclasses.replace(local, features=local.features | {"review_queues"})
     app = create_app(
         store=store,
         records=records,
@@ -385,6 +387,10 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
             {},
         ),
         ("post", "/v1/evals/{run_id}/cancel", f"/v1/evals/{stopping.id}/cancel", {}),
+        # The core's inspection of a run for cheating (MartianSecurity/martian-notes#217) reads the
+        # run's record and shows its id and code.
+        ("get", "/v1/evals/{run_id}/cheating", f"/v1/evals/{ci.id}/cheating", {}),
+        ("post", "/v1/evals/{run_id}/cheating/review-queue", f"/v1/evals/{ci.id}/cheating/review-queue", {}),
         ("post", "/v1/local/runs", "/v1/local/runs", {"json": {**replay, "request_id": str(launched)}}),
         (
             "post",
@@ -397,7 +403,7 @@ def test_no_run_route_shows_the_ci_token_or_what_else_only_the_server_keeps(tmp_
     shown = {}
     for method, route, path, options in calls:
         response = client.request(method, path, **options)
-        assert response.status_code in (200, 202), (route, response.text)
+        assert response.status_code in (200, 201, 202), (route, response.text)
         assert [value for value in NEVER_SHOWN if value in response.text] == [], route
         shown[(method, route)] = response.json()
     # Every route that names a run, lists runs or compares them is above, or answers with no run.

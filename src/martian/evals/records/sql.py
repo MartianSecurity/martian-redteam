@@ -70,6 +70,7 @@ from martian.evals.records import (
     Schedule,
     ScheduledRun,
     ScheduleProgress,
+    SuiteAudit,
     Threshold,
     ThresholdStatus,
 )
@@ -90,6 +91,7 @@ from martian.evals.records.tables import (
     schedule_runs,
     schedules,
     scoring_jobs,
+    suite_audits,
     suites,
     threshold_alerts,
     thresholds,
@@ -766,6 +768,37 @@ class SqlRecordStore:
                 suite = Suite.model_validate(row)
                 latest[suite.id] = suite
             return sorted(latest.values(), key=lambda s: (s.name, s.id))
+
+        return await self._run(principal, work)
+
+    async def put_suite_audit(self, principal: Principal, project_id: str, audit: SuiteAudit) -> SuiteAudit:
+        def work(connection: Connection, space: str) -> SuiteAudit:
+            if self._one(connection, suites, space, project_id, id=audit.suite_id, version=audit.suite_version) is None:
+                raise StoreError("not_found", "suite version not found")
+            saved = audit.model_copy(
+                update={"created_at": audit.created_at or _now(), "created_by": audit.created_by or principal.user_id}
+            )
+            values = {
+                "space": space,
+                "project_id": project_id,
+                "suite_id": audit.suite_id,
+                "suite_version": audit.suite_version,
+                "created_at": saved.created_at,
+                "record": _json(saved),
+            }
+            self._upsert(connection, suite_audits, values, ["space", "project_id", "suite_id", "suite_version"])
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "suite", project_id, audit.suite_id)
+        return saved
+
+    async def get_suite_audit(
+        self, principal: Principal, project_id: str, suite_id: str, version: int
+    ) -> SuiteAudit | None:
+        def work(connection: Connection, space: str) -> SuiteAudit | None:
+            stored = self._one(connection, suite_audits, space, project_id, suite_id=suite_id, suite_version=version)
+            return SuiteAudit.model_validate(stored) if stored else None
 
         return await self._run(principal, work)
 

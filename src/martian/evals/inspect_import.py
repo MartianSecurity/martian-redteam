@@ -896,9 +896,12 @@ async def _cases(store: EvalStore, records: RecordStore, run: Run, cases: list[I
     scores: list[Score] = []
     for case in cases:
         saved = await store.record_trace(SINGLE_USER, case.trace)
-        stored = {score.scorer: score.store for score in saved.scores}
+        # By name and source: a code score and a judge's may share a name on one case.
+        stored = {(score.scorer, score.source): score.store for score in saved.scores}
         scores += [
-            score.model_copy(update={"trace_id": saved.id, "store": stored.get(score.scorer, StoreRef())})
+            score.model_copy(
+                update={"trace_id": saved.id, "store": stored.get((score.scorer, score.source), StoreRef())}
+            )
             for score in case.scores
         ]
         results.append(case.result.model_copy(update={"store": StoreRef(trace_id=saved.id)}))

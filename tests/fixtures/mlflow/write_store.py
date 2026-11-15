@@ -18,7 +18,8 @@ The store holds what a team that used MLflow for GenAI evaluation would have:
   person's feedback that a later correction overrides;
 - the evaluation dataset ``support-questions``, three records with expectations;
 - two evaluation runs over that dataset (``mlflow.genai.evaluate`` with two code scorers), the
-  second with a better agent;
+  second with a better agent; on one case of the first, a judge's feedback and a person's
+  feedback with the same name as a code scorer's;
 - a run with a parameter and a metric and no traces;
 - the experiment ``scratch``, deleted, with one trace.
 """
@@ -33,6 +34,7 @@ import mlflow
 from mlflow.entities import AssessmentSource, AssessmentSourceType
 from mlflow.genai.datasets import create_dataset
 from mlflow.genai.scorers import scorer
+from mlflow.tracing.constant import AssessmentMetadataKey
 
 ANSWERS = {
     "How do I reset my password?": "Open Settings, choose Security, then Reset password.",
@@ -120,8 +122,16 @@ def write(folder: Path, url: str | None = None) -> None:
         return len(outputs)
 
     for name, table in (("baseline", ANSWERS), ("candidate", BETTER)):
-        with mlflow.start_run(run_name=name):
+        with mlflow.start_run(run_name=name) as run:
             mlflow.genai.evaluate(data=dataset, predict_fn=make_agent(table), scorers=[exact_match, answer_length])
+            if name == "baseline":
+                # A judge and a person name their feedback on one case like the code scorer's.
+                mlflow.flush_trace_async_logging()
+                cases = mlflow.search_traces(run_id=run.info.run_id, return_type="list")
+                order = next(t.info.trace_id for t in cases if questions[2] in (t.info.request_preview or ""))
+                made_in = {AssessmentMetadataKey.SOURCE_RUN_ID: run.info.run_id}
+                mlflow.log_feedback(trace_id=order, name="exact_match", value="yes", source=judge, metadata=made_in)
+                mlflow.log_feedback(trace_id=order, name="exact_match", value=False, source=person)
     mlflow.flush_trace_async_logging()
 
     with mlflow.start_run(run_name="prompt-tuning"):

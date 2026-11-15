@@ -81,6 +81,10 @@ describe, and what the two stores do not hold:
   expire. The run each one recorded is exported, with its `provenance` (a matrix's combination,
   its prompt versions, and how much of the cache it used); copy an output folder that a baseline
   should read, and let the fresh install's cache fill again.
+- A suite version's [audit](evals-core.md#suite-audits) (the record store's `martian_suite_audits`
+  table): it is derived, the suite version's checks grading the built-in do-nothing and cheating
+  replies to a published dataset, with no target or model called. An import holds none; audit a
+  suite version again over the same dataset to have it back.
 - A threshold's webhook secret. The record store keeps it apart from the threshold
   (`martian_thresholds.secret`) and the export never reads it, so a threshold with a webhook comes
   back without it and its secret is given again (see Importing). The SMTP server's login and the
@@ -93,13 +97,13 @@ describe, and what the two stores do not hold:
 `martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
 store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store
 and the record store take or return to its files; `LEFT_OUT_TABLES` and `LEFT_OUT_KINDS` give
-the rest, each with why. Every table but the worker's queue and the outbox is exported, and every
-kind of object but the outbox's deliveries; the other model classes left out are not data of
-their own (the store's status, a trace search and the sessions it groups, a page of a listing, a
-run's counts). The webhook secret is a column, not an object, and no file carries it. The judges'
-agreement with people and the reviewers' agreement with each other are computed from the runs,
-scores, reviews and traces when they are read, so they are not stored and come back with those. A
-table or a kind added to
+the rest, each with why. Every table but the worker's queue, the outbox and the suite audits is
+exported, and every kind of object but the outbox's deliveries and a suite audit; the other model
+classes left out are not data of their own (the store's status, a trace search and the sessions it
+groups, a page of a listing, a run's counts). The webhook secret is a column, not an object, and
+no file carries it. The judges' agreement with people and the reviewers' agreement with each other
+are computed from the runs, scores, reviews and traces when they are read, so they are not stored
+and come back with those. A table or a kind added to
 either store fails `tests/evals/test_data_export.py` until the export carries it, in a new file
 of a new format version, or names it as left out and why.
 
