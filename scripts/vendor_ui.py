@@ -1,6 +1,6 @@
 """Replace the Evals UI the wheel ships, src/martian/ui/, with a build of the frontend's Evals app, and pin it.
 
-The build is the ``dist-evals/`` folder that ``npm run build:evals`` writes in MorningHQ/MartianFrontend,
+The build is the ``dist-evals/`` folder that ``npm run build:evals`` writes in MartianSecurity/MartianFrontend,
 from a clean checkout of the commit to ship. Its ``ui-version.json`` names that commit. This script copies
 the build into ``src/martian/ui/`` and writes its version, commit and digest into the ``[tool.martian.ui]``
 table of ``pyproject.toml``, which ``check_release.py`` checks the distributions against.

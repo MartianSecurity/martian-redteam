@@ -5,7 +5,7 @@ has finished.
 on SQLite or Postgres, beside the records it names. A worker takes a row that is ``queued``, or
 ``claimed`` by a lease that ran out, with :meth:`SqlWorkQueue.claim`: the oldest row of the
 organisation with the fewest rows running, so one organisation's many queued pieces never hold
-back another's (MorningHQ/martian-notes#145). A row is running while a claim whose lease has not
+back another's (MartianSecurity/martian-notes#145). A row is running while a claim whose lease has not
 run out holds it. A claim holds the row for ``lease_seconds``; the worker renews it while the work
 runs (:meth:`renew`) and removes the row when the work has ended (:meth:`done`). A claim is a new
 random token each time, and every change to a claimed row names it, so a worker whose lease ran

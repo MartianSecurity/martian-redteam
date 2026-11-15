@@ -34,7 +34,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 
 ## Repository
 
-- GitHub: https://github.com/MorningHQ/martian-redteam
+- GitHub: https://github.com/MartianSecurity/martian-redteam
 - License: Apache-2.0 (`LICENSE`, `NOTICE`). This repository is the home of the open-source
   evals core; see [its names and layout](architecture.md#open-source-evals-core) and
   [its editions](evals-core.md#editions-and-entitlements).

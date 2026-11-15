@@ -111,7 +111,7 @@ path that could reach one:
 - **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
   scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
   scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
-  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+  custom scorer there needs a contract change (MartianSecurity/martian-notes#334).
 - **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
   custom scorer.
 - **The worker's setup** is imported by module in the API process, to check that a new process can
@@ -349,9 +349,9 @@ The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes
   `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
   (`tr-` and 32 hex digits) and derives one from any other id.
   `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
-- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+- **The hosted MLflow server** (MartianSecurity/martian-evals) runs its own pinned release on Postgres,
   not the file store. Only Backend holds credentials for it, and Backend sends only derived
-  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
+  `tr-` ids; MartianSecurity/MartianBackend's evals workbench guide states that side.
 
 ## Licence, attribution and vulnerability reports
 

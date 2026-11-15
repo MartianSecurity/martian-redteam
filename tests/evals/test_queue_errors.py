@@ -1,5 +1,5 @@
 """A queue write the database refuses is reported by the operation and the table, never by a value
-(MorningHQ/martian-notes#354).
+(MartianSecurity/martian-notes#354).
 
 A canary in the refused write, in the queued entry's id, its project, its kind, its work and the
 principal's organisation, appears in no queue error, no API answer and no log line, on SQLite and

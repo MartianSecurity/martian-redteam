@@ -326,7 +326,7 @@ and are not copied; the report counts the first five.
 | `eval_judge_operations` | Registering a `ScorerVersion` |
 
 The column-by-column map lives with the tables, in `app/evals_model_map.py` in
-MorningHQ/MartianBackend, and a test there fails when an evals table or column has no entry. A
+MartianSecurity/MartianBackend, and a test there fails when an evals table or column has no entry. A
 column that is not model content names why: tenancy, request receipts, job custody, delivery to
 MLflow, or the dormant Langfuse columns. Tables with no model content at all (API keys, saved
 views, store bindings, migrations, delivery progress and CI gate sessions) are listed there too.
@@ -339,5 +339,5 @@ results are imported into them ([above](#inspect-ai-logs), [above](#promptfoo-re
 promptfoo config is converted into suite files ([converted configs](evals-core.md#converted-configs)),
 and MLflow tracking stores copied into them ([above](#mlflow-tracking-stores)). An organisation's [data export](data-export.md) is these
 objects' JSON, one per line. The evals core serves them
-(MorningHQ/martian-notes#98), and the server imports them when it mounts that core
-(MorningHQ/martian-notes#102).
+(MartianSecurity/martian-notes#98), and the server imports them when it mounts that core
+(MartianSecurity/martian-notes#102).

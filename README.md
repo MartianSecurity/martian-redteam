@@ -39,40 +39,40 @@ prints a summary table, can run each case several times, combine the attempts an
 share of cases that passed every attempt and the flaky ones, and can be stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
-[Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full
+[Evals](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md) has the full
 guide: data formats, every check, provider setup and results.
 
 On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
 push and keeps one comment with the result, also without a Martian account. See
-[gate and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
+[gate and CI](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 ## What is in the package
 
 - `martian evals run`: a suite file run locally, as above.
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
-  [imported Inspect logs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
+  [imported Inspect logs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
 - `martian evals import promptfoo` and `martian evals convert promptfoo`: promptfoo results as
   runs in `martian ui`, one per provider, and a promptfoo config as suite files where its
   assertions map onto the checks, with everything that does not listed; see
-  [promptfoo results and configs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs).
+  [promptfoo results and configs](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs).
 - `martian evals import mlflow`: an MLflow tracking store (SQLite or Postgres) copied into
   `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
   version check; see
-  [copied MLflow stores](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
+  [copied MLflow stores](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
 - `martian evals export` and `martian evals import martian`: everything in `martian ui`'s data
   folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
   JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
-  see [data export](https://github.com/MorningHQ/martian-redteam/blob/main/docs/data-export.md).
+  see [data export](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/data-export.md).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service. It runs evals against endpoints you define with your own key, and runs them again;
   see
-  [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
+  [the local edition](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
   It also shows the traces an application records into it with
-  [MLflow tracing](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
+  [MLflow tracing](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly
-  ([in a container](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
+  ([in a container](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-in-a-container)).
 - `martian.evals`: LLM judges (`response_rubric`, `response_guidelines`, `response_conditions`),
   grounding and retrieval judges (`groundedness`, `context_relevance`, `context_sufficiency`),
   twenty-eight deterministic checks on the reply's text, its JSON, its numbers and tables, its
@@ -110,10 +110,10 @@ uv run --extra evals martian redteam validate examples/config.yaml
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --output results
 ```
 
-[Unified SDK and CI](https://github.com/MorningHQ/martian-redteam/blob/main/docs/sdk-and-ci.md) documents imports, the shared connection,
+[Unified SDK and CI](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/sdk-and-ci.md) documents imports, the shared connection,
 installation, the combined gate and compatibility.
-[Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) documents the regression gate and the local judges.
-[Documentation index](https://github.com/MorningHQ/martian-redteam/blob/main/docs/README.md) lists every guide.
+[Evals](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals.md) documents the regression gate and the local judges.
+[Documentation index](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/README.md) lists every guide.
 
 The wheel retains `martian_redteam`, `martian_evals_kit` and `martian-redteam`
 for existing integrations. Both test engines run in the customer's process.
@@ -136,13 +136,13 @@ uv build
 
 The existing eval regression suite has moved into this SDK's CI. Tests use
 local MLflow and loopback service fixtures; hosted/paid execution is a separate
-qualification. See [development](https://github.com/MorningHQ/martian-redteam/blob/main/docs/development.md).
+qualification. See [development](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/development.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](https://github.com/MorningHQ/martian-redteam/blob/main/LICENSE)
-and [NOTICE](https://github.com/MorningHQ/martian-redteam/blob/main/NOTICE).
+Apache-2.0. See [LICENSE](https://github.com/MartianSecurity/martian-redteam/blob/main/LICENSE)
+and [NOTICE](https://github.com/MartianSecurity/martian-redteam/blob/main/NOTICE).
 
 The evals core here is the open-source Community edition of Martian Evals. Martian Cloud and
 On-Premises serve the same core, with its paid features turned on by feature keys; see
-[editions](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#editions-and-entitlements).
+[editions](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#editions-and-entitlements).
