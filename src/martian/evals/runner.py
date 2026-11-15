@@ -18,9 +18,10 @@ platform.
 
 Every target call has a time limit, ``target.timeout_seconds``: a URL target's client stops the
 call, and a function runs on a thread of its own, which the run stops waiting for at the limit. A
-run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``): once it reaches one, it
-calls no more targets, records the cases it finished, and ends ``stopped``; running it again
-resumes after them. A case is the unit a run stops at and resumes from: with repeats, a case whose
+run has limits too (``limits``: ``max_seconds``, ``max_judge_tokens``, which counts the tokens of
+its LLM judges and its simulated users): once it reaches one, it calls no more targets, records
+the cases it finished, and ends ``stopped``; running it again resumes after them. A case is the
+unit a run stops at and resumes from: with repeats, a case whose
 attempts did not all run has no result, and so has a conversation whose turns did not all run;
 running again runs all of its attempts and turns. Cancelling the run in ``martian ui`` stops it the
 same way, as ``cancelled``.
@@ -465,7 +466,7 @@ class MlflowConfig(_Model):
 
 class LimitsConfig(_Model):
     """When the run stops before its last case: after ``max_seconds`` of wall time, or once its
-    judges have used ``max_judge_tokens`` tokens (``RunLimits``)."""
+    LLM judges and simulated users have used ``max_judge_tokens`` tokens (``RunLimits``)."""
 
     max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_judge_tokens: int | None = Field(default=None, ge=1)
@@ -502,8 +503,11 @@ class Suite(_Model):
             raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
-        if self.limits.max_judge_tokens is not None and not kinds:
-            raise ValueError("limits.max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
+        if self.limits.max_judge_tokens is not None and not kinds and self.simulator is None:
+            raise ValueError(
+                "limits.max_judge_tokens counts the tokens of LLM judge checks and simulated users, "
+                "and the suite has neither"
+            )
         calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
         if calls and self.target is None:
             raise ValueError(
@@ -1655,13 +1659,15 @@ def run_suite(
     shows it (:mod:`martian.evals.run_record`). The returned summary also names that run, under
     ``run``; summary.json does not.
 
-    ``max_seconds`` and ``max_judge_tokens`` replace the suite file's ``limits``. A run that
-    reaches one, or that is cancelled in ``martian ui``, calls no more targets: the cases it
-    finished are kept, the others have no result (``not_run``), and running it again resumes
-    after them. The summary's ``stopped`` says which limit it reached. With repeats, a case is
+    ``max_seconds`` and ``max_judge_tokens`` replace the suite file's ``limits``.
+    ``max_judge_tokens`` counts the tokens of the LLM judges and of the simulated users' replies
+    together. A run that reaches one, or that is cancelled in ``martian ui``, calls no more
+    targets: the cases it finished are kept, the others have no result (``not_run``), and running
+    it again resumes after them. The summary's ``stopped`` says which limit it reached, and its
+    ``tokens_this_run`` the tokens the judges and the simulator used. With repeats, a case is
     finished only when all of its attempts ran: one the run stopped in the middle of is not run,
-    the attempts it did run are dropped (their judge tokens still count towards the limit), and
-    running again runs all of its attempts.
+    the attempts it did run are dropped (their judge and simulator tokens still count towards the
+    limit), and running again runs all of its attempts.
 
     The suite is read through the shared model (:func:`martian.evals.suite_file.load_suite_file`),
     so a field the model has no place for is refused with the field named, never ignored.
@@ -1718,8 +1724,10 @@ def run_suite(
         max_judge_tokens=suite.limits.max_judge_tokens if max_judge_tokens is None else max_judge_tokens,
     )
     judges = {check.label for check in suite.checks if check.type in JUDGES}
-    if limits.max_judge_tokens is not None and not judges:
-        raise ConfigError("max_judge_tokens counts the tokens of LLM judge checks, and the suite has none")
+    if limits.max_judge_tokens is not None and not judges and not any("simulated_user" in case for case in cases):
+        raise ConfigError(
+            "max_judge_tokens counts the tokens of LLM judge checks and simulated users, and the run has neither"
+        )
     target = _load_target(suite.target, base, suite.input_key) if suite.target is not None else None
     scorers = _build_scorers(suite, base)
     labels = [check.label for check in suite.checks]
@@ -1915,7 +1923,13 @@ def run_suite(
                 if not asked:
                     return []
                 with ThreadPoolExecutor(max_workers=min(workers, len(asked))) as pool:
-                    return list(zip(asked, pool.map(ask, asked), strict=True))
+                    found = list(zip(asked, pool.map(ask, asked), strict=True))
+                # Each reply's tokens count towards max_judge_tokens, as a judgment's do; a failed
+                # call counts nothing.
+                for _, step in found:
+                    if isinstance(step, Step):
+                        budget.spend(step.tokens, "simulator")
+                return found
 
             def turn_at(key: tuple[str, int], index: int) -> dict[str, Any]:
                 case = by_id[key[0]]
@@ -2235,6 +2249,12 @@ def run_suite(
             not_run=len(not_run),
             stopped=stopped,
         )
+        # The tokens this run's model calls used, by who used them: None when one of the calls
+        # reported none. The simulator's only in a run with simulated users.
+        summary["tokens_this_run"] = {
+            "judges": budget.used["judges"],
+            **({} if simulator is None else {"simulator": budget.used["simulator"]}),
+        }
         summary["output"] = str(folder)
         if not_run and cancelled.is_set():
             summary["cancelled"] = True

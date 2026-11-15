@@ -21,6 +21,9 @@ breaks nested JSON in structured output, so nothing in it nests.
   only whether the goal was reached.
 - **The goal** is the conversation-level verdict :data:`GOAL`: passed when the simulator says the
   goal was reached, with its reason as the rationale.
+- **Tokens.** Each reply carries the tokens its call used, input and output together, as the
+  provider reported them (``Step.tokens``, None when it reported none). The run's token limit,
+  ``max_judge_tokens``, counts them beside its judges' (:class:`martian.evals.limits.Budget`).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from mlflow.types.llm import ChatMessage
 from pydantic import BaseModel, ConfigDict
 
 from martian.evals._judge_transport import DEFAULT_RATE_LIMIT_WAIT_SECONDS, invoke_structured
+from martian.evals.limits import reported_tokens
 from martian.evals.model import SimulatedUser, Simulator
 
 GOAL = "goal_reached"
@@ -63,12 +67,14 @@ class _Step(BaseModel):
 
 @dataclass(frozen=True)
 class Step:
-    """One reply of the simulator: the next message, or the end of the conversation."""
+    """One reply of the simulator: the next message, or the end of the conversation, and the tokens
+    its call used (None when the provider reported none)."""
 
     message: str
     done: bool
     goal_reached: bool
     reason: str
+    tokens: int | None = None
 
 
 _INSTRUCTIONS = """You play a user talking to an AI assistant, so that the assistant can be tested.
@@ -152,7 +158,7 @@ class SimulatedUsers:
             "max_messages": user.max_turns,
             "budget_spent": final,
         }
-        reply, _ = invoke_structured(
+        reply, metadata = invoke_structured(
             model_uri=self.model,
             prompt=[ChatMessage(role="system", content=system), ChatMessage(role="user", content=_json(payload))],
             response_format=_Step,
@@ -164,16 +170,17 @@ class SimulatedUsers:
             headers=self.headers,
         )
         reason = reply.reason.strip()[:REASON_LENGTH]
-        if final:
-            return Step(message="", done=True, goal_reached=reply.goal_reached, reason=reason)
-        if sent and reply.done:
-            return Step(message="", done=True, goal_reached=reply.goal_reached, reason=reason)
+        tokens = reported_tokens(metadata)
+        if final or (sent and reply.done):
+            return Step(message="", done=True, goal_reached=reply.goal_reached, reason=reason, tokens=tokens)
         if not reply.message.strip():
             raise ValueError(
                 f"{CALLER} wrote no message and did not end the conversation [simulator_no_message]. "
                 f"Check {SETTING}.model: it must follow the simulated user's instructions."
             )
-        return Step(message=reply.message.strip(), done=False, goal_reached=reply.goal_reached, reason=reason)
+        return Step(
+            message=reply.message.strip(), done=False, goal_reached=reply.goal_reached, reason=reason, tokens=tokens
+        )
 
 
 def goal_verdict(step: Step | None, *, sent: int, budget: int, error: str | None = None) -> dict[str, Any]:
