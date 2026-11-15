@@ -106,6 +106,22 @@ EVERY_FIELD_URL = {
         {"type": "no_secrets", "name": "no_keys", "kinds": ["api_key", "private_key"], "allow": ["sk-documented"]},
         {"type": "resists_injection", "values": ["ZEBRA-7731"], "expectation": "markers"},
         {"type": "no_refusal", "expectation": "benign"},
+        {
+            "type": "tool_called",
+            "calls": [{"name": "lookup_order", "arguments": {"order_id": "A-1001"}}],
+            "arguments_match": "exact",
+            "min_calls": 1,
+            "max_calls": 2,
+            "source": "reply",
+        },
+        {"type": "tool_not_called", "calls": ["close_account"], "source": "reply"},
+        {
+            "type": "tool_trajectory",
+            "calls": ["lookup_order", ["get_policy", "check_eligibility"]],
+            "order": "in_order",
+            "source": "reply",
+        },
+        {"type": "step_count", "min_turns": 1, "max_turns": 5, "min_calls": 0, "max_calls": 8, "source": "reply"},
     ],
     "repeats": 3,
     "combine": "majority",
@@ -118,7 +134,11 @@ EVERY_FIELD_URL = {
 EVERY_FIELD_FUNCTION = {
     "data": "cases.jsonl",
     "target": {"file": "agent.py", "function": "answer"},
-    "checks": [{"type": "contains", "values": ["hello"]}, {"type": "cost", "max_usd": 0.02, "max_tokens": 4000}],
+    "checks": [
+        {"type": "contains", "values": ["hello"]},
+        {"type": "cost", "max_usd": 0.02, "max_tokens": 4000},
+        {"type": "tool_trajectory", "name": "trajectory", "expectation": "expected_tool_calls", "source": "trace"},
+    ],
 }
 
 
@@ -147,7 +167,7 @@ def written_fields(value: typing.Any, prefix: str = "") -> set[str]:
     for name, item in value.items():
         found.add(prefix + name)
         for nested in item if isinstance(item, list) else [item]:
-            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows")
+            opaque = ("headers", "body", "inference_params", "conditions", "schema", "rows", "calls")
             if isinstance(nested, dict) and name not in opaque:
                 found |= written_fields(nested, f"{prefix}{name}.")
     return found
@@ -179,7 +199,7 @@ def test_every_suite_file_field_has_a_place_in_the_model():
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
     assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
-    groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS
+    groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS + runner.TOOL_CHECKS
     assert set(groups) <= set(runner.CHECKS)
     assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
 
@@ -273,6 +293,19 @@ def test_every_field_lands_where_the_map_says(tmp_path):
     )
     assert by_name["resists_injection"].parameters == {"expectation": "markers", "values": ["ZEBRA-7731"]}
     assert by_name["no_refusal"].parameters == {"expectation": "benign"}
+    # The calls keep the form they were written in: a name, an object, and a list for one turn.
+    assert by_name["tool_trajectory"].parameters == {
+        "calls": ["lookup_order", ["get_policy", "check_eligibility"]],
+        "order": "in_order",
+        "source": "reply",
+    }
+    assert by_name["step_count"].parameters == {
+        "max_calls": 8,
+        "max_turns": 5,
+        "min_calls": 0,
+        "min_turns": 1,
+        "source": "reply",
+    }
     assert suite.settings.model_dump() == {
         "concurrency": 8,
         "batch": 10,

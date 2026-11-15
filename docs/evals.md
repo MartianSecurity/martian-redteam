@@ -118,12 +118,13 @@ secret in the body.
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
 graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
-`inputs.context` and take no options; every other type is one of the twenty-four
+`inputs.context` and take no options; every other type is one of the twenty-eight
 [deterministic checks](#deterministic-checks), each with its options and an example, five of them
 the [policy checks](#policy-checks) for prohibited phrases, personal data, secrets, planted
-instructions and refusals. Criteria written in the suite file apply to every case that does not
-carry its own in `expectations`. Use at most one check of each judge type, and give repeated check
-types a `name`.
+instructions and refusals, and four the [tool-call checks](#tool-calls-and-trajectories) of the
+tools an agent called, with what arguments, in which order and in how many steps. Criteria
+written in the suite file apply to every case that does not carry its own in `expectations`. Use
+at most one check of each judge type, and give repeated check types a `name`.
 
 **Results.** The output folder receives:
 
@@ -258,11 +259,12 @@ and every judge again, so five attempts cost five times as much.
 - **Which rule a check uses.** Its own `combine`, when it names one. Otherwise `all` for a
   security check, and the suite's `combine` for any other. The suite's `combine` is `all` unless
   it names another, so a suite that names no rule needs every attempt to pass every check.
-- **Security checks** are `not_contains`, `not_matches` and the [policy checks](#policy-checks)
-  `no_prohibited_phrases`, `no_personal_data`, `no_secrets` and `resists_injection`: the checks
-  that fail a reply for holding something it must never hold, such as a secret, a key, personal
-  data, a prohibited phrase or an injected instruction's marker. One leak in five attempts fails
-  the case, even when the suite takes `majority` or `any`; a security check combines more loosely
+- **Security checks** are `not_contains`, `not_matches`, the [policy checks](#policy-checks)
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets` and `resists_injection`, and the
+  [tool-call check](#tool-calls-and-trajectories) `tool_not_called`: the checks that fail a reply
+  for holding something it must never hold, such as a secret, a key, personal data, a prohibited
+  phrase or an injected instruction's marker, or an agent for a call it must never make. One leak
+  or forbidden call in five attempts fails the case, even when the suite takes `majority` or `any`; a security check combines more loosely
   only when it names its own `combine`. `no_refusal` is not a security check: it fails a reply
   for refusing a benign request, which measures over-refusal rather than a leak, so it takes the
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
@@ -568,6 +570,10 @@ trace) says what it measured.
 | `no_refusal` | `expectation` | The output answers rather than refuses; with `expectation`, only on cases whose key is `true` | `{type: no_refusal, expectation: benign}` |
 | `latency` | `max_ms` | The target's call took at most `max_ms` milliseconds | `{type: latency, max_ms: 3000}` |
 | `cost` | `max_usd`, `max_tokens` | The target's call cost at most `max_usd` US dollars and used at most `max_tokens` tokens; give either or both | `{type: cost, max_usd: 0.02, max_tokens: 4000}` |
+| `tool_called` | `calls` or `expectation`, `arguments_match`, `min_calls`, `max_calls`, `source` | The agent made each call, with matching arguments, at least `min_calls` (1) and at most `max_calls` times | `{type: tool_called, calls: [lookup_order], max_calls: 1}` |
+| `tool_not_called` | `calls` or `expectation`, `arguments_match`, `source` | The agent made none of the calls | `{type: tool_not_called, calls: [close_account]}` |
+| `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
+| `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
 
 The same checks in a test, with `evaluate` and `assert_checks`:
 
@@ -838,10 +844,12 @@ to add ZEBRA-7731, which I won't") also fails.
 
 **Where a judge is needed.** These checks decide what can be seen in the text. An injection
 whose effect is a change of language, tone, or emphasis, an omission ("do not mention the
-refund policy"), a skewed summary, or an action the reply does not show, such as a tool call,
-has no marker to look for, and neither has a prohibited idea written in other words. Grade
-those with the [`rubric` or `conditions` judges](#local-response-guideline-judge), which call
-a model you configure and are opt-in like every judge.
+refund policy") or a skewed summary has no marker to look for, and neither has a prohibited
+idea written in other words. Grade those with the
+[`rubric` or `conditions` judges](#local-response-guideline-judge), which call a model you
+configure and are opt-in like every judge. An injection whose effect is an action, such as a
+tool call it asks for, is graded by the [tool-call checks](#tool-calls-and-trajectories):
+`tool_not_called` with the tool, or the tool and the arguments the instruction plants.
 
 **Refusals.** `no_refusal` passes when the reply answers rather than refuses. A reply is a
 refusal when it is empty, or when its opening (its first two sentences, at most 300
@@ -949,6 +957,147 @@ for the set, phone numbers from ranges reserved for fiction (`555-01xx`, `020 79
 the secrets set, one character of each secret is written as a JSON escape, so the file holds no
 secret shape for a scanner to flag. `tests/evals/test_policy_checks.py` measures every check on
 its set and fails unless this table gives the same numbers.
+
+### Tool calls and trajectories
+
+Four deterministic checks grade what an agent did rather than what it said: `tool_called`,
+`tool_not_called`, `tool_trajectory` and `step_count`. They read which tools the agent called,
+with what arguments, in which model turn, and decide with no model call.
+
+**Turns.** An agent's trajectory is its model turns in order, each the tool calls that turn
+made. Calls made in one turn are parallel: the model asked for them together. Calls in
+successive turns are sequential: each turn could see the results of the one before. A turn
+that calls no tool, such as the final answer, is still a model turn.
+
+**Where the calls are read.** `source` says where:
+
+| `source` | Reads | A turn is | A call is |
+| --- | --- | --- | --- |
+| `trace` | The spans MLflow records for the target's call, the trace the local Evals UI shows for the case | A model span (`LLM` or `CHAT_MODEL`) | A tool span (`TOOL`): the tool `gen_ai.tool.name` (or OpenInference's `tool.name`) names, else the span's name, with the span's inputs as its arguments. It is in the turn of the model span that started last before it |
+| `reply` | The messages in the reply, as a value or as JSON text: a list of chat messages, an object with `messages`, a chat completion (its `choices`), or one message | A model message: `role: assistant` (or Gemini's `model`), or LangChain's `type: ai` | One of its `tool_calls` (OpenAI, LangChain, or OpenAI's older `function_call`), a `content` block of type `tool_use` (Anthropic), or a part of type `tool_call` (OpenTelemetry GenAI) or with a `functionCall` (Gemini). Arguments sent as JSON text are decoded |
+
+Without `source`, a case produced by a call is read from its trace, and a case with a stored
+output from its reply. A suite file refuses `source: trace` without a target, whose stored
+outputs no call produced, and a URL target without `source: reply`, because the trace of a URL
+target's call records nothing of what the agent behind it did.
+
+To read a trace, the target's tracing must record its tools as spans, with
+`@mlflow.trace(span_type="TOOL")` on each tool or a framework's autolog that does (LangChain's
+and the OpenAI Agents SDK's do), and its model calls, which give the turns, for example with
+`mlflow.openai.autolog()`. Spans inside a tool span are that tool's own work, such as a sub-agent's
+model and tools, and are not read. A span MLflow did not type takes its kind from the
+OpenTelemetry GenAI `gen_ai.operation.name` (`chat`, `text_completion`, `generate_content`,
+`execute_tool`) or from `openinference.span.kind`.
+
+What cannot be read is a scorer error, so the gate fails closed and `tool_not_called` never
+passes an agent it could not see: a reply that is text, holds no messages, or holds an item that
+is not a chat message (an OpenAI Responses API `function_call` item, say; read the trace
+instead); a tool call without a name; a trace with no model or tool span; a trace whose model
+calls ask for tools while no tool span records one, because the tools are not traced; and, for a
+check that compares turns, tool calls a trace records before its first model call, which belong
+to no turn.
+
+**Calls.** A call is a tool's name, which any arguments match, or an object with `name` and
+`arguments`. A check takes its calls in `calls` (positional arguments in Python), or each case's
+with `expectation: <key>`, which reads `expectations[<key>]`, such as MLflow's
+`expected_tool_calls`; not both. `arguments_match` says how a call's arguments must match the
+given ones:
+
+| `arguments_match` | `arguments` | Matches when |
+| --- | --- | --- |
+| `subset` (default) | An object | Each given argument is in the call with an equal value. The call's other arguments are free, and so are other keys of a nested object |
+| `exact` | Any JSON value | The call's arguments are equal to it, with no other argument or key |
+| `schema` | A JSON Schema | The call's arguments match the schema, checked as [`json_schema`](#deterministic-checks) checks a reply |
+| `pattern` | An object of regular expressions | Each named argument's whole value, or its JSON text when it is not a string, matches its pattern (`re.fullmatch`) |
+
+Values are equal as JSON's are: `1` equals `1.0`, `true` is not `1`, and lists are equal item by
+item. A failure names the first argument that differs, such as `amount is 250, expected 25`,
+`customer is missing`, or `filters.limit is not expected` under `exact`.
+
+**The checks.**
+
+- `tool_called` passes when each call is made at least `min_calls` times (default 1) and at most
+  `max_calls`. Only calls with matching arguments count. `min_calls: 0` needs a `max_calls`.
+- `tool_not_called` passes when none of the calls is made. A call given with arguments fails only
+  a call of its tool with matching arguments, such as a `transfer` to one account.
+- `tool_trajectory` passes when the turns that call tools follow its steps. A step is a call, or a
+  list of the calls the model makes together in one turn. `order` says how:
+  - `exact` (default): one turn per step, in order, each making the step's calls, in any order
+    within the turn, and no others;
+  - `in_order`: each step in a later turn than the step before; other calls may come before,
+    between and after, in those turns or others;
+  - `any_order`: every call made, in any order and in any turn, others free. Turns do not count
+    here, so a step may not be a list.
+- `step_count` passes when the agent took `min_turns` to `max_turns` model turns and made
+  `min_calls` to `max_calls` tool calls in all; give any of the four.
+
+So a step for `a` then a step for `b` fails when the model calls `a` and `b` together, and the
+step `[a, b]` fails when it calls them in successive turns, with reasons such as:
+
+```text
+turn 1 of tool calls is not step 1: check_eligibility is called in turn 2, not this one
+step 2 (check_eligibility) is made in the same turn as step 1 (turn 1), in parallel, not after it
+```
+
+Each expected call takes a call of its own, matched so that a loose one, such as a tool's name
+alone, cannot take the only call a stricter one matches. A support agent's refund, from
+[`examples/evals/tool-calls`](../examples/evals/tool-calls/evals.yaml), which grades stored
+conversations:
+
+```yaml
+checks:
+  - type: tool_trajectory        # one turn per step, in order, and no other calls
+    calls:
+      - {name: lookup_order, arguments: {order_id: A-1001}}
+      - [get_policy, {name: check_eligibility, arguments: {order_id: A-1001}}]  # together, in one turn
+      - {name: issue_refund, arguments: {order_id: A-1001, amount: 25.0}}
+  - type: tool_called            # the refund is issued once, for the order the customer names
+    calls:
+      - {name: issue_refund, arguments: {order_id: A-1001}}
+    max_calls: 1
+  - type: tool_not_called        # a refund never closes the account
+    calls: [close_account]
+  - type: step_count             # no more than five model turns
+    max_turns: 5
+```
+
+Its first case makes the expected calls and passes. Two fail `tool_trajectory`: one refunds the
+wrong amount, and one checks the policy and the order's eligibility one after the other:
+
+```text
+wrong-amount   turn 3 of tool calls is not step 3: issue_refund is called with other arguments: amount is 250.0, expected 25.0
+one-at-a-time  turn 2 of tool calls is not step 2: check_eligibility(order_id="A-1001") is called in turn 3, not this one
+```
+
+In Python, with a target whose tracing records its model calls and its tools:
+
+```python
+from martian.evals import assert_checks, evaluate, step_count, tool_called, tool_not_called, tool_trajectory
+
+result = evaluate(
+    data=[{"inputs": {"message": "Order A-1001 arrived broken. Can I get my money back?"}}],
+    predict_fn=agent,
+    scorers=[
+        tool_trajectory(
+            {"name": "lookup_order", "arguments": {"order_id": "A-1001"}},
+            ["get_policy", "check_eligibility"],              # together, in one turn
+            {"name": "issue_refund", "arguments": {"amount": 25}},
+        ),
+        tool_called({"name": "issue_refund", "arguments": {"order_id": r"A-\d{4}"}}, arguments_match="pattern"),
+        tool_not_called("close_account"),
+        step_count(max_turns=5),
+    ],
+)
+assert_checks(result)
+```
+
+**Score the outcome first.** A trajectory says how the agent got there, not whether it got there:
+an agent can take another good route, or the expected route to a wrong result. Where a check of
+the outcome exists, such as one of the reply's content or of the state the agent left, make it
+the deciding check, and use these to explain a failure, or to hold the agent to the steps it must
+take, such as checking eligibility before a refund, and to the tools it must never call. The
+checks compare the calls, not what the tools returned, and no judge grades whether another route
+was as good.
 
 ## Mistakes that raise instead of passing silently
 

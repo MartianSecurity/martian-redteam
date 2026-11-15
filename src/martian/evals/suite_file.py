@@ -76,6 +76,14 @@ SUITE_FILE_FIELDS = {
     "checks.rows": "ScorerVersion.parameters.rows",
     "checks.kinds": "ScorerVersion.parameters.kinds",
     "checks.allow": "ScorerVersion.parameters.allow",
+    "checks.calls": "ScorerVersion.parameters.calls, as written",
+    "checks.arguments_match": "ScorerVersion.parameters.arguments_match",
+    "checks.order": "ScorerVersion.parameters.order",
+    "checks.source": "ScorerVersion.parameters.source",
+    "checks.min_calls": "ScorerVersion.parameters.min_calls",
+    "checks.max_calls": "ScorerVersion.parameters.max_calls",
+    "checks.min_turns": "ScorerVersion.parameters.min_turns",
+    "checks.max_turns": "ScorerVersion.parameters.max_turns",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
@@ -95,6 +103,7 @@ COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
 # Loading refuses the others.
 _TEXT_OPTIONS = frozenset({"values", "expectation", "case_sensitive"})
 _TOLERANCE_OPTIONS = frozenset({"abs_tolerance", "rel_tolerance"})
+_CALL_OPTIONS = frozenset({"calls", "expectation", "arguments_match", "source"})
 CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
@@ -127,6 +136,10 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "no_secrets": frozenset({"kinds", "allow"}),
     "resists_injection": frozenset({"values", "expectation"}),
     "no_refusal": frozenset({"expectation"}),
+    "tool_called": _CALL_OPTIONS | {"min_calls", "max_calls"},
+    "tool_not_called": _CALL_OPTIONS,
+    "tool_trajectory": _CALL_OPTIONS | {"order"},
+    "step_count": frozenset({"min_turns", "max_turns", "min_calls", "max_calls", "source"}),
 }
 
 # The fields of a JSONL case that the runner reads.
