@@ -32,6 +32,7 @@ from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAl
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
 from mlflow.tracking import fluent as _fluent
+from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
 
@@ -69,6 +70,7 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._get_artifact_location"),
     ("mlflow.store.tracking.sqlalchemy_store", "SqlAlchemyStore._load_dataset_records"),
     ("mlflow.store.workspace.sqlalchemy_store", "SqlAlchemyStore"),
+    ("mlflow.utils.search_utils", "SearchTraceUtils.create_page_token"),
     ("mlflow.utils.workspace_utils", "WORKSPACE_HEADER_NAME"),
 )
 
@@ -139,6 +141,16 @@ def load_dataset_records(store: WorkspaceAwareSqlAlchemyStore, dataset_id: str, 
     return store._load_dataset_records(dataset_id, page_token=page_token)
 
 
+def trace_page_token(offset: int) -> str | None:
+    """MLflow's page token for a trace search that starts after its first ``offset`` traces, or
+    ``None`` for the first page. MLflow's SQL store pages traces by offset; the token is its own
+    encoding of the offset, which it does not promise to keep."""
+    if offset == 0:
+        return None
+    token: bytes = SearchTraceUtils.create_page_token(offset)  # type: ignore[no-untyped-call]
+    return token.decode("ascii")
+
+
 def mlflow_test_attr() -> str:
     """The attribute ``@mlflow.test`` sets on a test function. Imported late: it loads pytest."""
     from mlflow.pytest.decorator import MLFLOW_TEST_ATTR
@@ -180,4 +192,5 @@ __all__ = [
     "parse_model_uri",
     "provider_instance",
     "restore_active_experiment_id",
+    "trace_page_token",
 ]

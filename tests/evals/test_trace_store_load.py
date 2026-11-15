@@ -84,11 +84,13 @@ def test_a_small_run_measures_every_phase(tmp_path, monkeypatch, capsys) -> None
     assert found == {
         "page": 12,
         "mlflow_page": 12,
+        "last_page": 12,
         "session": found["session"],
         "user": 1,
         "tag": 1,
         "window": 12,
         "text": 1,
+        "text_all": 1,
         "sessions": 3,
         "get": 1,
     }
