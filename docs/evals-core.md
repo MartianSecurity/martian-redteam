@@ -66,7 +66,7 @@ a limit is a whole number of at least 1.
 | `concurrent_runs` | The organisation's runs `queued` or `running` at once, in every project | 1 | 5 | No limit |
 | `concurrent_scoring_jobs` | The `queued` or `running` scoring jobs of the organisation's completed runs | 1 | 5 | No limit |
 
-They are checked where the work is admitted (`martian.evals.server.admission`): a launch, a run
+They are checked where the work is admitted (`martian.evals.server.admission`), each with one indexed count in the record store (`count_active_runs`, `count_active_scoring_jobs`, on the organisation's space, read up to the limit and no further), so admission costs the same whatever the number of runs: a launch, a run
 again or a resume of a run beyond `concurrent_runs`, and a scoring request or a resume of a scoring
 job beyond `concurrent_scoring_jobs`, are `409` ([write routes](#write-routes)). An on-premises
 installation sets none because its own workers bound what runs at once
@@ -636,7 +636,7 @@ runner's, so the routes do not change.
 
 The queue is `SqlWorkQueue(database_url, schema="martian", migrate=True)`
 (`martian.evals.records.queue`): the `martian_work_queue` table in the record store's database,
-SQLite locally and Postgres on a server, created by the record store's migration `0003`.
+SQLite locally and Postgres on a server, created by the record store's migrations (`0004` adds the state indexes admission counts with).
 
 ```python
 from martian.evals.records.queue import SqlWorkQueue

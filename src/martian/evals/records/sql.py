@@ -25,7 +25,20 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, Engine, Table, create_engine, delete, func, insert, select, text, update
+from sqlalchemy import (
+    Connection,
+    Engine,
+    Select,
+    Table,
+    create_engine,
+    delete,
+    func,
+    insert,
+    literal,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import DataError, IntegrityError
 
 from martian.evals._sql import check_schema, create_schema, database_refusal, is_postgres, operation_name, postgres_url
@@ -96,6 +109,16 @@ def _now() -> datetime:
 
 def _json(model: Any) -> Any:
     return model.model_dump(mode="json")
+
+
+_ACTIVE = ("queued", "running")
+
+
+def _count(connection: Connection, rows: Select[Any], up_to: int | None) -> int:
+    """The number of ``rows``, one statement, reading no more than ``up_to`` of them."""
+    if up_to is not None:
+        rows = rows.limit(up_to)
+    return connection.execute(select(func.count()).select_from(rows.subquery())).scalar_one()
 
 
 def _page[M](items: list[M], offset: int, limit: int, total: int) -> Page[M]:
@@ -233,6 +256,12 @@ class SqlRecordStore:
                 .all()
             )
             return _page([Run.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    async def count_active_runs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        def work(connection: Connection, space: str) -> int:
+            return _count(connection, select(literal(1)).where(runs.c.space == space, runs.c.state.in_(_ACTIVE)), up_to)
 
         return await self._run(principal, work)
 
@@ -428,6 +457,29 @@ class SqlRecordStore:
                 .all()
             )
             return [ScoringJob.model_validate(r) for r in rows]
+
+        return await self._run(principal, work)
+
+    async def count_active_scoring_jobs(self, principal: Principal, *, up_to: int | None = None) -> int:
+        def work(connection: Connection, space: str) -> int:
+            active = (
+                select(literal(1))
+                .select_from(
+                    scoring_jobs.join(
+                        runs,
+                        (runs.c.space == scoring_jobs.c.space)
+                        & (runs.c.project_id == scoring_jobs.c.project_id)
+                        & (runs.c.id == scoring_jobs.c.run_id),
+                    )
+                )
+                .where(
+                    scoring_jobs.c.space == space,
+                    scoring_jobs.c.state.in_(_ACTIVE),
+                    runs.c.space == space,
+                    runs.c.state == "completed",
+                )
+            )
+            return _count(connection, active, up_to)
 
         return await self._run(principal, work)
 
