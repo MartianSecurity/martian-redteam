@@ -51,6 +51,10 @@ push and keeps one comment with the result, also without a Martian account. See
   `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
   version check; see
   [copied MLflow stores](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#copied-mlflow-stores).
+- `martian evals export` and `martian evals import martian`: everything in `martian ui`'s data
+  folder (runs, case results, scores, datasets, reviews and annotations, traces and the rest) as
+  JSON Lines files with a manifest, resumable, and loaded into a fresh install with nothing lost;
+  see [data export](https://github.com/MorningHQ/martian-redteam/blob/main/docs/data-export.md).
 - `martian ui`: the Evals UI, which the wheel ships, on your machine, with no login and no other
   service; see
   [the local edition](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).

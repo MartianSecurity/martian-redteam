@@ -436,6 +436,9 @@ What builds on it:
   [imported Inspect logs](#imported-inspect-logs).
 - `martian evals import mlflow` copies an MLflow tracking store there, after a schema version
   check: [copied MLflow stores](#copied-mlflow-stores).
+- `martian evals export` writes everything an organisation holds as JSON Lines files with a
+  manifest, and `martian evals import martian` loads them into a fresh install:
+  [data export](#data-export).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
@@ -467,7 +470,8 @@ What builds on it:
   on-premises installs. See [the in-process binding](#the-in-process-binding).
 - `tests/evals/store_contract.py` is the behaviour every binding must have: idempotent creates,
   immutable dataset versions identified by content, archived projects refusing new work, trace
-  search filters and paging, sessions and users, scores kept with their trace, versioned scorers,
+  search filters and paging, sessions and users, scores kept with their trace, the times given
+  to traces and scores kept as given, versioned scorers,
   review queues, artifact names, and organisations never seeing each other. A binding's tests
   subclass `StoreContract`; `MemoryStore` passes it.
 - `Entitlements` is an edition, its feature keys and its limits; `require_entitlement` refuses a
@@ -549,7 +553,8 @@ store = MlflowStore("postgresql+psycopg://user:password@host/db", "/var/lib/mart
     is active, names that run's MLflow run (`Run.store.run_id`, which the run's provenance route
     gives as `native.id`). A trace recorded inside an MLflow run that is not a run's, such as one
     an application starts with `mlflow.start_run()`, belongs to no run.
-  - A score is a feedback assessment, and a registered scorer an MLflow scorer.
+  - A score is a feedback assessment, created at the score's `created_at` when it has one, and a
+    registered scorer an MLflow scorer.
   - A review question is a label schema, and a review queue an MLflow review queue whose
     definition is an experiment tag.
 - Run artifacts, `martian/run.json` among them, are files in the run's folder,
@@ -655,7 +660,8 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   into the same folder ([command-line runs](#command-line-runs)), `martian evals import inspect`
   writes Inspect AI logs there as runs ([imported Inspect logs](#imported-inspect-logs)),
   `martian evals import mlflow` copies an MLflow tracking store there
-  ([copied MLflow stores](#copied-mlflow-stores)), and an
+  ([copied MLflow stores](#copied-mlflow-stores)), `martian evals export` exports the folder
+  ([data export](#data-export)), and an
   application can record its traces there with MLflow tracing
   ([below](#traces-from-an-application)). What another process writes while the UI is open
   shows when a page reads again, since the UI gets no live event from it.
@@ -1001,6 +1007,17 @@ artifact file are read from there, that an older, unknown or missing schema revi
 table, workspaces and files that are not stores are refused with nothing written, the project
 limit, and the command's report. With `MARTIAN_TEST_POSTGRES_URL` set it copies a store on
 Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-upgrades).
+
+## Data export
+
+`martian evals export <folder>` exports everything in the local edition's data folder, and
+`martian evals import martian <folder>` loads an export into a data folder that holds no data
+yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
+interrupted export resumes when it is run again into the same folder. An install that runs the
+core in its own process calls `export_data` and `import_data` with its store, record store and the
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
+an export holds, resuming, and what the receiving store assigns are in
+[data export](data-export.md).
 
 ## Not built yet
 

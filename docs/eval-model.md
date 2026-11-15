@@ -254,6 +254,7 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
 suite file is their written form ([above](#the-sdk-suite-file)). Inspect AI logs are imported
 into them ([above](#inspect-ai-logs)), and MLflow tracking stores copied into them
-([above](#mlflow-tracking-stores)). The evals core serves them
+([above](#mlflow-tracking-stores)). An organisation's [data export](data-export.md) is these
+objects' JSON, one per line. The evals core serves them
 (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).

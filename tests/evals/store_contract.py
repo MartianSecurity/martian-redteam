@@ -253,6 +253,21 @@ class StoreContract:
         assert found.scores == [judged, human]
         await refused("not_found", store.log_score(ORG_A, "p1", "missing", Score(scorer="s", source="code")))
 
+    async def test_a_trace_keeps_the_time_it_was_given_even_at_the_epoch(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        await store.record_trace(ORG_A, trace("t1", request_time=epoch))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.request_time == epoch
+
+    async def test_a_score_keeps_the_time_it_was_given(self, store: EvalStore, project: Project) -> None:
+        # As an imported score does: the time it was scored, not the time it was written.
+        await store.record_trace(ORG_A, trace("t1"))
+        given = await store.log_score(ORG_A, "p1", "t1", Score(scorer="politeness", source="human", created_at=T0))
+        assert given.created_at == T0
+        assert [s.created_at for s in await store.list_scores(ORG_A, "p1", "t1")] == [T0]
+
     async def test_registered_scorers_are_versioned_by_name(self, store: EvalStore, project: Project) -> None:
         judge = ScorerVersion(
             name="politeness", kind="llm_judge", type="guidelines", criteria={"guidelines": ["Be kind."]}
