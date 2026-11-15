@@ -8,8 +8,9 @@ function target runs in this process, a URL target is called from it, LLM judges
 you configure, and MLflow's evaluation harness uses a local store in the output folder unless you
 point it at your own server. The run, its case results, scores and traces are also recorded in the
 local Evals UI's data folder, so ``martian ui`` shows them. A run can be stopped and started again;
-a finished case is skipped while nothing that produced its verdict has changed. Use ``martian ci``
-when a result must be recorded on the platform.
+a finished case is skipped while nothing that produced its verdict has changed. A suite can run each
+case several times and combine the attempts' verdicts by a rule (:mod:`martian.evals.repeats`).
+Use ``martian ci`` when a result must be recorded on the platform.
 """
 
 from __future__ import annotations
@@ -37,12 +38,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from martian._version import __version__
 from martian.config import ConfigError
 from martian.evals._endpoint_errors import names_unknown_model
+from martian.evals.model import MAX_ATTEMPTS, CombineRule
+from martian.evals.repeats import combine_attempts, plan
 from martian.evals.stats import proportion_interval
 
 JUDGES = ("rubric", "guidelines", "conditions")
 GROUP_TAG = "martian.group"
 """The case tag that holds a data file case's ``group``."""
 CHECKS = ("contains", "not_contains", "matches", "not_matches", "is_json")
+SECURITY_CHECKS = ("not_contains", "not_matches")
+"""Check types that fail a reply for holding something it must never hold, such as a leaked secret
+or a key. A case's attempts combine by ``all`` for these unless the check names its own rule, so a
+leak in one attempt of five is never outvoted. A new check type of that kind belongs here."""
 
 
 class _Model(BaseModel):
@@ -146,6 +153,8 @@ class CheckSpec(_Model):
     case_sensitive: bool = False
     pattern: str | None = None
     required_keys: list[str] = Field(default_factory=list)
+    # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
+    combine: CombineRule | None = None
 
     @model_validator(mode="after")
     def complete(self) -> CheckSpec:
@@ -158,6 +167,11 @@ class CheckSpec(_Model):
     @property
     def label(self) -> str:
         return self.name or (f"{self.type}_judge" if self.type in JUDGES else self.type)
+
+    @property
+    def security(self) -> bool:
+        """Whether this is a security check, whose attempts combine by ``all`` unless it says otherwise."""
+        return self.type in SECURITY_CHECKS
 
 
 class MlflowConfig(_Model):
@@ -177,6 +191,10 @@ class Suite(_Model):
     output: str = "results"
     input_key: str = "message"
     mlflow: MlflowConfig = Field(default_factory=MlflowConfig)
+    # Attempts of each case, and the rule a check's attempts combine by when it names none and is
+    # not a security check (martian.evals.repeats).
+    repeats: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
+    combine: CombineRule = "all"
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -189,6 +207,11 @@ class Suite(_Model):
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
         return self
+
+    def repeat_plan(self) -> dict[str, Any]:
+        """The attempts of each case, the suite's rule, and each check's rule and where it came from."""
+        checks = [(check.label, check.combine, check.security) for check in self.checks]
+        return plan(self.repeats, self.combine, checks)
 
 
 def load_suite(path: str | Path) -> tuple[Suite, Path]:
@@ -529,6 +552,10 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
     address in the environment, say how its endpoint is reached. A function target counts by the
     contents of its file; modules that file imports and the service behind a URL target cannot be
     seen from here.
+
+    With repeats, the attempts per case and the rule each check's attempts combine by count too.
+    With one attempt every rule gives the same verdict, so neither counts and the fingerprint is
+    the one a suite without repeats has.
     """
     target: dict[str, Any] | None = None
     if suite.target is not None:
@@ -537,17 +564,22 @@ def _suite_fingerprint(suite: Suite, base: Path) -> str:
             file = Path(suite.target.file)
             file = file if file.is_absolute() else base / file
             target["file_sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
-    return _digest(
-        {
-            "sdk": __version__,
-            "checks": [check.model_dump(mode="json") for check in suite.checks],
-            "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds", "headers"})
-            if suite.judge
-            else None,
-            "input_key": suite.input_key,
-            "target": target,
+    definition: dict[str, Any] = {
+        "sdk": __version__,
+        "checks": [check.model_dump(mode="json", exclude={"combine"}) for check in suite.checks],
+        "judge": suite.judge.model_dump(mode="json", exclude={"max_retries", "rate_limit_wait_seconds", "headers"})
+        if suite.judge
+        else None,
+        "input_key": suite.input_key,
+        "target": target,
+    }
+    if suite.repeats > 1:
+        repeats = suite.repeat_plan()
+        definition["repeats"] = {
+            "attempts": repeats["attempts"],
+            "combine": {label: rule["combine"] for label, rule in repeats["checks"].items()},
         }
-    )
+    return _digest(definition)
 
 
 def _case_fingerprint(suite_fingerprint: str, case: dict[str, Any]) -> str:
@@ -599,37 +631,57 @@ def _pass_rate(verdicts: list[tuple[str, bool | None]], groups: dict[str, str]) 
     return {"pass_rate": sum(outcomes) / len(outcomes), "confidence_95": [interval[0], interval[1]]}
 
 
+def _counts(verdicts: list[bool | None]) -> dict[str, int]:
+    return {
+        "passed": sum(passed is True for passed in verdicts),
+        "failed": sum(passed is False for passed in verdicts),
+        "errors": sum(passed is None for passed in verdicts),
+    }
+
+
 def _summary(
-    records: list[dict[str, Any]], labels: list[str], seconds: float, invalidated: int, groups: dict[str, str]
+    records: list[dict[str, Any]],
+    labels: list[str],
+    seconds: float,
+    invalidated: int,
+    groups: dict[str, str],
+    repeats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """The run's counts and pass rates. A record is one case: with repeats its verdicts are its
+    attempts combined, so the pass rates and their intervals count cases, never attempts. With
+    ``repeats`` (the suite's :meth:`Suite.repeat_plan`, when it runs each case more than once) the
+    summary also states the plan and counts the attempts, and the target and check errors are
+    counted over attempts, where they happened."""
+    repeated = repeats is not None
     per_check = {}
     for label in labels:
         verdicts = [(str(r["id"]), r["checks"].get(label, {}).get("passed")) for r in records]
-        per_check[label] = {
-            "passed": sum(passed is True for _, passed in verdicts),
-            "failed": sum(passed is False for _, passed in verdicts),
-            "errors": sum(passed is None for _, passed in verdicts),
-            **_pass_rate(verdicts, groups),
-        }
+        per_check[label] = {**_counts([passed for _, passed in verdicts]), **_pass_rate(verdicts, groups)}
+        if repeated:
+            tried = [attempt["checks"][label]["passed"] for r in records for attempt in r["attempts"]]
+            per_check[label]["attempts"] = _counts(tried)
     target_errors: dict[str, int] = {}
     # Why checks gave no verdict, such as a judge setting to fix; a target failure is counted above.
     check_errors: dict[str, dict[str, int]] = {}
-    for record in records:
-        if record.get("error"):
-            target_errors[str(record["error"])] = target_errors.get(str(record["error"]), 0) + 1
+    for unit in (attempt for r in records for attempt in r["attempts"]) if repeated else records:
+        if unit.get("error"):
+            target_errors[str(unit["error"])] = target_errors.get(str(unit["error"]), 0) + 1
             continue
-        for label, check in record["checks"].items():
+        for label, check in unit["checks"].items():
             if check.get("passed") is None and check.get("error"):
                 reasons = check_errors.setdefault(label, {})
                 reasons[str(check["error"])] = reasons.get(str(check["error"]), 0) + 1
     shown = {groups[str(r["id"])] for r in records if str(r["id"]) in groups}
-    return {
+    summary: dict[str, Any] = {
         "cases": len(records),
-        "passed": sum(r["passed"] is True for r in records),
-        "failed": sum(r["passed"] is False for r in records),
-        "errors": sum(r["passed"] is None for r in records),
+        **_counts([r["passed"] for r in records]),
         **_pass_rate([(str(r["id"]), r["passed"]) for r in records], groups),
         "groups": len(shown) if shown else None,
+    }
+    if repeated:
+        tried = [attempt["passed"] for r in records for attempt in r["attempts"]]
+        summary |= {"repeats": repeats, "attempts": {"total": len(tried), **_counts(tried)}}
+    return summary | {
         "checks": per_check,
         "target_errors": target_errors,
         "check_errors": check_errors,
@@ -639,7 +691,8 @@ def _summary(
 
 
 def _junit_properties(summary: dict[str, Any]) -> list[str]:
-    """The run's pass rates and their 95% intervals, overall and per check, as testsuite properties."""
+    """The run's pass rates and their 95% intervals, overall and per check, as testsuite properties,
+    and with repeats the attempts per case and the rule each check's attempts combined by."""
     values: list[tuple[str, Any]] = []
     for prefix, rate in [("", summary), *((f"check.{label}.", found) for label, found in summary["checks"].items())]:
         if rate["pass_rate"] is not None:
@@ -648,11 +701,15 @@ def _junit_properties(summary: dict[str, Any]) -> list[str]:
             values += [(f"{prefix}pass_rate_95_high", high)]
     if summary["groups"] is not None:
         values.append(("case_groups", summary["groups"]))
+    if (repeats := summary.get("repeats")) is not None:
+        values.append(("repeats", repeats["attempts"]))
+        values += [(f"check.{label}.combine", rule["combine"]) for label, rule in repeats["checks"].items()]
     if not values:
         return []
+    shown = [(name, value if isinstance(value, str) else f"{value:.6g}") for name, value in values]
     return [
         "  <properties>",
-        *(f"    <property name={quoteattr(name)} value={quoteattr(f'{value:.6g}')}/>" for name, value in values),
+        *(f"    <property name={quoteattr(name)} value={quoteattr(value)}/>" for name, value in shown),
         "  </properties>",
     ]
 
@@ -693,6 +750,7 @@ def run_suite(
     resume: bool = True,
     progress: Callable[[str], None] | None = None,
     home: str | Path | None = None,
+    repeats: int | None = None,
 ) -> dict[str, Any]:
     """Run the suite and return its summary. Writes results.jsonl, summary.json and junit.xml, and
     records the run, its case results, scores and traces in the local edition's data folder
@@ -702,13 +760,26 @@ def run_suite(
 
     The suite is read through the shared model (:func:`martian.evals.suite_file.load_suite_file`),
     so a field the model has no place for is refused with the field named, never ignored.
+    ``repeats`` replaces the suite file's ``repeats``: each case runs that many times, and each
+    check's attempts combine by its rule (:mod:`martian.evals.repeats`).
     """
     from martian.evals.local import data_folder
+    from martian.evals.model import suite_digest
     from martian.evals.run_record import GradedCase, RunRecorder
     from martian.evals.suite_file import load_suite_file
 
     model, model_cases = load_suite_file(path)
     suite, base = load_suite(path)
+    if repeats is not None:
+        if not 1 <= repeats <= MAX_ATTEMPTS:
+            raise ConfigError(f"repeats must be from 1 to {MAX_ATTEMPTS}")
+        suite = suite.model_copy(update={"repeats": repeats})
+        model = model.model_copy(update={"repeats": model.repeats.model_copy(update={"attempts": repeats})})
+        model = model.model_copy(update={"digest": suite_digest(model)})
+    repeated = suite.repeats > 1
+    numbers = range(1, suite.repeats + 1)
+    repeat_plan = suite.repeat_plan()
+    rules: dict[str, CombineRule] = {label: rule["combine"] for label, rule in repeat_plan["checks"].items()}
     cases: list[dict[str, Any]] = [
         {
             "id": case.id,
@@ -744,7 +815,8 @@ def run_suite(
         invalidated = len(finished) - len(done)
         todo = [case for case in cases if case["id"] not in done]
         say = progress or (lambda message: None)
-        message = f"{len(cases)} cases, {len(cases) - len(todo)} already done"
+        each = f" of {suite.repeats} attempts each" if repeated else ""
+        message = f"{len(cases)} cases{each}, {len(cases) - len(todo)} already done"
         if invalidated:
             plural = "result" if invalidated == 1 else "results"
             message += f", {invalidated} earlier {plural} discarded because the suite, the data or the target changed"
@@ -757,19 +829,72 @@ def run_suite(
         from martian.evals.gate import _interpret
         from martian.evals.scorers import output_text
 
-        def graded(case: dict[str, Any], record: dict[str, Any], trace: Any = None) -> GradedCase:
+        def graded(case: dict[str, Any], record: dict[str, Any], traces: list[Any] | None = None) -> GradedCase:
+            found = tuple(trace if isinstance(trace, str) else None for trace in traces or [])
             return GradedCase(
                 position=positions[case["id"]],
                 record=record,
                 expectations=case["expectations"],
-                trace=trace if isinstance(trace, str) else None,
+                trace=found[0] if found and not repeated else None,
+                attempt_traces=found if repeated else (),
             )
+
+        def outcome(case: dict[str, Any], frame: Any, position: int) -> dict[str, Any]:
+            """One attempt's verdict, check verdicts, reply and target error, from its row of the frame."""
+            response = frame["response"].iloc[position] if "response" in frame.columns else None
+            state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
+            broke = _missing(response) or "ERROR" in state
+            # A function target's exception may hold anything, so only a URL target gives a reason.
+            # A case's attempts send the same inputs, so each failed attempt takes one of the
+            # reasons its case's calls failed with; attempts that ran at once may swap theirs.
+            reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
+                "the target call failed" if broke else None
+            )
+            verdicts: dict[str, dict[str, Any]] = {}
+            for label in labels:
+                value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
+                rationale = (
+                    frame[f"{label}/rationale"].iloc[position] if f"{label}/rationale" in frame.columns else None
+                )
+                detail = (
+                    frame[f"{label}/error_message"].iloc[position]
+                    if f"{label}/error_message" in frame.columns
+                    else None
+                )
+                passed = None if broke else _interpret(value, None)
+                verdicts[label] = {
+                    "passed": passed,
+                    "rationale": None if _missing(rationale) else str(rationale),
+                    "error": None
+                    if passed is not None
+                    else (
+                        "the target failed" if broke else str(detail)[:300] if not _missing(detail) else "no verdict"
+                    ),
+                }
+            values = [verdict["passed"] for verdict in verdicts.values()]
+            return {
+                "passed": None if any(v is None for v in values) else all(values),
+                "checks": verdicts,
+                "output": None if broke else output_text(response),
+                "error": reason,
+            }
+
+        # MLflow leaves out a row whose trace it could not read back. That attempt has no verdict,
+        # so it is an error now, and its case is graded again on the next run.
+        lost = f"no result was recorded for this {'attempt' if repeated else 'case'}"
+        unrecorded = {
+            "passed": None,
+            "checks": {label: {"passed": None, "rationale": None, "error": lost} for label in labels},
+            "output": None,
+            "error": None,
+        }
 
         recorder.start(
             planned=len(cases),
             total=total,
             limit=limit,
             reused=[graded(case, finished[case["id"]]) for case in cases if case["id"] in done],
+            repeats=repeat_plan if repeated else None,
         )
         # Leave MLflow as it was found: another evaluation in this process must not inherit this
         # run's store, experiment or worker settings.
@@ -788,85 +913,45 @@ def run_suite(
                 batch = todo[start : start + suite.batch]
                 data = []
                 for case in batch:
-                    row: dict[str, Any] = {
-                        "inputs": case["inputs"],
-                        "expectations": _with_suite_criteria(case, suite),
-                        "tags": {"martian_case_id": case["id"]},
-                    }
-                    if "outputs" in case:
-                        row["outputs"] = case["outputs"]
-                    data.append(row)
+                    # One row per attempt; with repeats each row names its attempt.
+                    for number in numbers:
+                        row: dict[str, Any] = {
+                            "inputs": case["inputs"],
+                            "expectations": _with_suite_criteria(case, suite),
+                            "tags": {"martian_case_id": case["id"]}
+                            | ({"martian_attempt": str(number)} if repeated else {}),
+                        }
+                        if "outputs" in case:
+                            row["outputs"] = case["outputs"]
+                        data.append(row)
                 frame: Any = evaluate_rows(
                     data=data, scorers=scorers, predict_fn=target
                 ).result_df  # never None: evaluate_rows raises
                 by_id = {case["id"]: case for case in batch}
-                recorded: list[GradedCase] = []
+                rows: dict[tuple[str, int], tuple[dict[str, Any], Any]] = {}
                 for position in range(len(frame)):
-                    case = by_id[str((frame["tags"].iloc[position] or {}).get("martian_case_id"))]
-                    response = frame["response"].iloc[position] if "response" in frame.columns else None
-                    state = str(frame["state"].iloc[position]).upper() if "state" in frame.columns else "OK"
-                    broke = _missing(response) or "ERROR" in state
-                    # A function target's exception may hold anything, so only a URL target gives a reason.
-                    reason = (failure_reason(case["inputs"]) if broke and failure_reason else None) or (
-                        "the target call failed" if broke else None
-                    )
-                    verdicts: dict[str, dict[str, Any]] = {}
-                    for label in labels:
-                        value = frame[f"{label}/value"].iloc[position] if f"{label}/value" in frame.columns else None
-                        rationale = (
-                            frame[f"{label}/rationale"].iloc[position]
-                            if f"{label}/rationale" in frame.columns
-                            else None
-                        )
-                        detail = (
-                            frame[f"{label}/error_message"].iloc[position]
-                            if f"{label}/error_message" in frame.columns
-                            else None
-                        )
-                        passed = None if broke else _interpret(value, None)
-                        verdicts[label] = {
-                            "passed": passed,
-                            "rationale": None if _missing(rationale) else str(rationale),
-                            "error": None
-                            if passed is not None
-                            else (
-                                "the target failed"
-                                if broke
-                                else str(detail)[:300]
-                                if not _missing(detail)
-                                else "no verdict"
-                            ),
-                        }
-                    values = [verdict["passed"] for verdict in verdicts.values()]
+                    tags = frame["tags"].iloc[position] or {}
+                    case = by_id[str(tags.get("martian_case_id"))]
+                    trace = frame["trace"].iloc[position] if "trace" in frame.columns else None
+                    rows[(case["id"], int(tags.get("martian_attempt", 1)))] = (outcome(case, frame, position), trace)
+                recorded: list[GradedCase] = []
+                for case in batch:
+                    tried = [rows.get((case["id"], number), (unrecorded, None)) for number in numbers]
+                    attempts = [{"number": number, **found} for number, (found, _) in zip(numbers, tried, strict=True)]
+                    result = combine_attempts(attempts, rules) if repeated else tried[0][0]
                     record = {
                         "id": case["id"],
-                        "passed": None if any(v is None for v in values) else all(values),
-                        "checks": verdicts,
+                        "passed": result["passed"],
+                        "checks": result["checks"],
                         "inputs": case["inputs"],
-                        "output": None if broke else output_text(response),
-                        "error": reason,
+                        "output": result["output"],
+                        "error": result["error"],
                         "fingerprint": prints[case["id"]],
                     }
+                    if repeated:
+                        record["attempts"] = attempts
                     results.append(record)
-                    trace = frame["trace"].iloc[position] if "trace" in frame.columns else None
-                    recorded.append(graded(case, record, trace))
-                # MLflow leaves out a row whose trace it could not read back. That case has no
-                # verdict, so it is an error now and is graded again on the next run.
-                seen = {item.record["id"] for item in recorded}
-                for case in batch:
-                    if case["id"] not in seen:
-                        missing = {"passed": None, "rationale": None, "error": "no result was recorded for this case"}
-                        record = {
-                            "id": case["id"],
-                            "passed": None,
-                            "checks": {label: dict(missing) for label in labels},
-                            "inputs": case["inputs"],
-                            "output": None,
-                            "error": None,
-                            "fingerprint": prints[case["id"]],
-                        }
-                        results.append(record)
-                        recorded.append(graded(case, record))
+                    recorded.append(graded(case, record, [trace for _, trace in tried]))
                 recorder.graded(recorded)
                 say(f"{min(start + suite.batch, len(todo))}/{len(todo)} cases graded")
         finally:
@@ -881,7 +966,9 @@ def run_suite(
         final = results.records()
         ordered = [final[case["id"]] for case in cases if case["id"] in final]
         groups = {case.id: case.tags[GROUP_TAG] for case in model_cases if GROUP_TAG in case.tags}
-        summary = _summary(ordered, labels, time.monotonic() - started, invalidated, groups)
+        summary = _summary(
+            ordered, labels, time.monotonic() - started, invalidated, groups, repeat_plan if repeated else None
+        )
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem, summary=summary)

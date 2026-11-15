@@ -170,6 +170,30 @@ def item_out(result: CaseResult) -> EvalItemOut:
     )
 
 
+def attempts_out(result: CaseResult) -> dict[str, Any]:
+    """A case result's attempts, for the core's own attempts route: each attempt's verdict, each
+    check's verdict, the reply as text, the target error, latency and trace. Empty for a case
+    that ran once."""
+    return {
+        "id": result_id(result.run_id, result.case_id),
+        "dataset_item_id": result.case_id,
+        "position": result.position,
+        "status": result.status,
+        "attempts": [
+            {
+                "number": attempt.number,
+                "status": attempt.status,
+                "output": text_of(attempt.output),
+                "error": attempt.error,
+                "latency_ms": attempt.latency_ms,
+                "trace_id": attempt.trace_id,
+                "checks": {label: verdict.model_dump(mode="json") for label, verdict in attempt.checks.items()},
+            }
+            for attempt in result.attempts
+        ],
+    }
+
+
 def _run_fields(run: Run) -> dict[str, Any]:
     target = run.target
     return {

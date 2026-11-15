@@ -69,6 +69,31 @@ def test_a_run_that_wrote_no_results_says_so_and_ignores_an_older_folder(tmp_pat
     assert "wrote no results (exit code 2)" in body and "old" not in body
 
 
+def test_a_repeated_run_says_how_often_each_case_ran_and_each_checks_rule(tmp_path):
+    counts = {"passed": 0, "failed": 2, "errors": 0, "pass_rate": 0.0, "confidence_95": [0.0, 0.66]}
+    summary = {
+        "cases": 2,
+        **counts,
+        "groups": None,
+        "repeats": {
+            "attempts": 5,
+            "combine": "any",
+            "checks": {
+                "no_leak": {"combine": "all", "from": "security"},
+                "polite": {"combine": "any", "from": "suite"},
+            },
+        },
+        "checks": {"no_leak": counts, "polite": {**counts, "passed": 2, "failed": 0, "pass_rate": 1.0}},
+    }
+    body = comment.render(comment.Outcome(1, summary), suite=SUITE, key=SUITE)
+    assert (
+        "Each case ran 5 times, and the counts are of cases: each check's attempts combine by its rule, "
+        "`all` for `no_leak`; `any` for `polite`."
+    ) in body
+    plain = comment.render(comment.Outcome(1, {**summary, "repeats": None}), suite=SUITE, key=SUITE)
+    assert "Each case ran" not in plain
+
+
 def test_names_cannot_break_the_table_the_marker_or_mention_anyone():
     cell = comment.code("a|b`c @team <b>x</b>")
     assert cell == "``a\\|b`c @team <b>x</b>``"  # one code span; the escaped pipe stays in its cell

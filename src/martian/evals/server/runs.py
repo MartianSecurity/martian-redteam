@@ -5,7 +5,9 @@
 Runs, case results, scores, scoring jobs and reviews come from the record store; projects, traces,
 run telemetry and review queues from the store. A run is found by its id in the default project,
 then in each of the store's projects. The run routes match only a UUID in place of ``{run_id}``,
-so a route an edition adds under ``/v1/evals`` is not taken for a run.
+so a route an edition adds under ``/v1/evals`` is not taken for a run. ``GET /{run_id}/attempts``
+is the core's own addition, which the server's contract does not have: the attempts of each case
+of a run whose suite repeats its cases.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -30,6 +32,7 @@ from martian.evals.server.projection import (
     RUN_STATUS,
     Assessment,
     ReviewRow,
+    attempts_out,
     item_out,
     job_config,
     mlflow_assessment,
@@ -262,6 +265,19 @@ async def list_runs(
 async def get_run(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunDetailOut:
     run = await find_run(store, records, principal, run_id)
     return run_detail(run, await run_results(records, principal, run))
+
+
+@router.get("/{run_id:uuid}/attempts", response_model=None)
+async def attempts(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> dict[str, Any]:
+    # The core's own route, not the contract's: every attempt of each case of a run whose suite
+    # repeats its cases, with the run's repeats (MorningHQ/martian-notes#180). A run without
+    # repeats answers `repeats: null` and no attempts.
+    run = await find_run(store, records, principal, run_id)
+    return {
+        "run_id": run.id,
+        "repeats": run.provenance.get("repeats"),
+        "items": [attempts_out(result) for result in await run_results(records, principal, run)],
+    }
 
 
 @router.get("/{run_id:uuid}/workbench", response_model=None)

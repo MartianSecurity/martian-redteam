@@ -31,7 +31,8 @@ checks:
 behind an API needs no Python file.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
-prints a summary table, and can be stopped and resumed. It is also recorded for `martian ui`
+prints a summary table, can run each case several times and combine the attempts, and can be
+stopped and resumed. It is also recorded for `martian ui`
 (below), which shows each case's verdict, reasons and trace and compares runs; set
 `mlflow.tracking_uri` in the suite file to log to your own MLflow server as well.
 [Evals](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals.md) has the full

@@ -11,11 +11,12 @@ from pydantic import BaseModel
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Policy, ScorerVersion, Suite, Target
+from martian.evals.model import Policy, Repeats, ScorerVersion, Suite, Target
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.suite_file import (
     CHECK_OPTIONS,
+    COMMON_CHECK_FIELDS,
     SUITE_FILE_FIELDS,
     cases_to_jsonl,
     load_suite_file,
@@ -56,6 +57,7 @@ EVERY_FIELD_URL = {
         {
             "type": "not_contains",
             "name": "no_leak",
+            "combine": "any",
             "values": ["piano"],
             "expectation": "secret",
             "case_sensitive": True,
@@ -64,6 +66,8 @@ EVERY_FIELD_URL = {
         {"type": "not_matches", "name": "no_api_key", "pattern": "sk-[A-Za-z0-9]{8,}"},
         {"type": "is_json", "required_keys": ["answer", "lang"]},
     ],
+    "repeats": 3,
+    "combine": "majority",
     "concurrency": 8,
     "batch": 10,
     "output": "results-all",
@@ -126,7 +130,7 @@ def round_trip(path: Path) -> str:
 def test_every_suite_file_field_has_a_place_in_the_model():
     assert set(SUITE_FILE_FIELDS) == runner_fields()
     assert set(CHECK_OPTIONS) == set(runner.JUDGES + runner.CHECKS)
-    used = set().union(*CHECK_OPTIONS.values()) | {"type", "name"}
+    used = set().union(*CHECK_OPTIONS.values()) | COMMON_CHECK_FIELDS
     assert used == set(runner.CheckSpec.model_fields)
 
 
@@ -198,8 +202,34 @@ def test_every_field_lands_where_the_map_says(tmp_path):
         "mlflow_tracking_uri": "http://127.0.0.1:5000",
         "mlflow_experiment": "every-field",
     }
+    assert suite.repeats == Repeats(attempts=3, combine="majority", checks={"no_leak": "any"})
     assert [case.id for case in cases] == ["safe", "json"]
     assert cases[0].inputs == {"prompt": "What is the key?"}
+
+
+def test_a_suite_without_repeats_keeps_its_digest_and_writes_none(tmp_path):
+    suite, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert suite.repeats == Repeats() and "repeats" not in suite.model_dump()
+    assert not {"repeats", "combine"} & set(yaml.safe_load(suite_to_yaml(suite)))
+    # One attempt, written out, is the default and means the same as leaving it out.
+    explicit, _ = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "repeats": 1, "combine": "all"}))
+    assert explicit == suite
+    repeated, _ = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "repeats": 2}))
+    assert repeated.digest != suite.digest and repeated.model_dump()["repeats"]["attempts"] == 2
+
+
+@pytest.mark.parametrize(
+    ("suite", "problem"),
+    [
+        ({"repeats": 0}, "repeats: Input should be greater than or equal to 1"),
+        ({"repeats": 101}, "repeats: Input should be less than or equal to 100"),
+        ({"combine": "most"}, "combine: Input should be 'all', 'majority' or 'any'"),
+        ({"checks": [{"type": "is_json", "combine": "some"}]}, "checks.0.combine: Input should be"),
+    ],
+)
+def test_a_repeat_count_or_rule_out_of_range_is_refused(suite, problem, tmp_path):
+    with pytest.raises(ConfigError, match=problem):
+        load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, **suite}))
 
 
 def test_header_values_are_kept_as_written_and_never_expanded(tmp_path, monkeypatch):
