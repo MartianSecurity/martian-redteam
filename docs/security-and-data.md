@@ -33,7 +33,8 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 `martian evals run evals.yaml` does not use the platform connection above and sends nothing to
 Martian. Its outbound calls are the ones the suite file names:
 
-- **A URL target** (`target.url`) receives one JSON `POST` per case, carrying that case's input.
+- **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
+  suite repeats its cases, carrying that case's input.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -52,7 +53,8 @@ Martian. Its outbound calls are the ones the suite file names:
 
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
-verdicts and reasons as `results.jsonl` holds them, its trace with the target's spans, and the
+verdicts and reasons as `results.jsonl` holds them (every attempt's, when the suite repeats
+cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
 
