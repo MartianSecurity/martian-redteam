@@ -90,6 +90,10 @@ def test_a_launch_and_a_scoring_request_hand_their_work_over_without_running_it(
         assert job["state"] == "queued" and inert.submitted[-1].job_id == job["id"]
 
 
+PIN = {"kind": "agent", "agent_id": AGENT}
+"""A function target's pin, as a launch records it."""
+
+
 def _run(**changes) -> Run:
     base = Run(
         id=str(uuid.uuid4()),
@@ -99,9 +103,15 @@ def _run(**changes) -> Run:
         target=Target(kind="agent", agent_id=AGENT),
         dataset_name="support-faq",
         dataset_digest="0" * 64,
+        provenance={"target": PIN},
         store=StoreRef(dataset_id="ds-missing"),
     )
     return base.model_copy(update=changes)
+
+
+async def _pinned(run: Run) -> dict[str, str]:
+    """The pin of the run's target as the worker has it now: the one it was admitted with."""
+    return PIN
 
 
 async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(records):
@@ -110,7 +120,7 @@ async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(rec
     work = lambda run: Work(kind="run", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run.id)  # noqa: E731
 
     gone = await records.create_run(SINGLE_USER, _run())
-    await execute_run(store, records, work(gone), call_for=lambda run: None, timeout_seconds=1)
+    await execute_run(store, records, work(gone), call_for=lambda run: None, pin_for=_pinned, timeout_seconds=1)
     failed = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, gone.id)
     assert (failed.state, failed.error) == ("failed", "The worker cannot call this run's target")  # type: ignore[union-attr]
 
@@ -118,12 +128,12 @@ async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(rec
         return "x"
 
     changed = await records.create_run(SINGLE_USER, _run())
-    await execute_run(store, records, work(changed), call_for=lambda run: answer, timeout_seconds=1)
+    await execute_run(store, records, work(changed), call_for=lambda run: answer, pin_for=_pinned, timeout_seconds=1)
     failed = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, changed.id)
     assert (failed.state, failed.error) == ("failed", "Dataset identity changed; submit a new eval run")  # type: ignore[union-attr]
 
     finished = await records.create_run(SINGLE_USER, _run(state="completed"))
-    await execute_run(store, records, work(finished), call_for=lambda run: answer, timeout_seconds=1)
+    await execute_run(store, records, work(finished), call_for=lambda run: answer, pin_for=_pinned, timeout_seconds=1)
     assert await records.get_run(SINGLE_USER, DEFAULT_PROJECT, finished.id) == finished
 
 

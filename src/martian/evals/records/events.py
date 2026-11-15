@@ -23,11 +23,16 @@ EventKind = Literal[
 
 
 class Event(BaseModel):
+    """``id`` names the record: a run's id for ``run``, ``case_results`` and ``scores``, and the
+    record's own id for the other kinds. A ``scoring_job`` event also names its ``run_id``, which
+    reading the job takes, so a listener follows a scoring job's progress as it follows a run's."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: EventKind
     project_id: str
     id: str
+    run_id: str | None = None
 
 
 class EventsLost(Exception):

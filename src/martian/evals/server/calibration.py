@@ -73,7 +73,6 @@ explorer = APIRouter(prefix="/v1/evals", tags=["evaluation explorer"])
 NAME_PATTERN = r"^[a-z][a-z0-9_]{0,59}$"
 NO_ACKNOWLEDGEMENT = "Model scoring requires cost acknowledgement"
 NO_JUDGE = "Model judges require a judge configured for this installation's worker"
-NOT_ACCEPTED = "The worker did not accept this re-check"
 ACTIVE = ("queued", "running")
 
 
@@ -414,14 +413,10 @@ async def recheck_judge_calibration(
     if created:
         # Imported here: the worker's own modules import the server's, so the server's cannot
         # import them while the package loads.
-        from martian.evals.worker.execute import fail_unfinished
+        from martian.evals.worker.execute import submit_or_fail
 
         work = Work(kind="recheck", principal=principal, project_id=key, run_id="", job_id=recheck.id)
-        try:
-            await worker.submit(work)
-        except Exception:
-            await fail_unfinished(records, work, NOT_ACCEPTED)
-            raise
+        await submit_or_fail(worker, records, work)
     return recheck_out(recheck)
 
 

@@ -12,7 +12,9 @@ things the core never imports:
   ``lambda p: entitlements_for(resolve_edition(plan=...))``. The default is Community.
 - ``worker``: a :class:`~martian.evals.worker.Worker` that runs what the write routes start, such
   as :class:`~martian.evals.worker.InProcessWorker`. Without one, a route that starts a run or a
-  scoring job answers ``503``.
+  scoring job answers ``503``. A worker that runs beside the app (``Lifecycle``, such as a
+  :class:`~martian.evals.worker.QueueWorker` serving in this process) is started when the app
+  starts serving and stopped when it stops.
 - ``judge_settings``: :class:`~martian.evals.judge_settings.JudgeSettings`, where each
   organisation's default judge model is kept, such as the local edition's
   :class:`~martian.evals.judge_settings.FileJudgeSettings`. Without it there is no default, and
@@ -24,13 +26,18 @@ feature declares ``dependencies=[Depends(require_entitlement(key))]``, and a wri
 the capability it needs with ``require_capability(name)``. Every route is in the shape of the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
-``projects``, ``views`` and ``drafts``. Some routes are the core's own, which the contract does
-not have: a run's attempts in ``runs``, the judges' agreement with people and people's agreement
-with each other in ``agreement``, and each judge version's calibration in ``calibration``.
+``projects``, ``views`` and ``drafts``. Beside the contract, ``otlp`` serves OpenTelemetry's
+``POST /v1/traces``, which records an application's spans as traces through the store. Some routes
+are the core's own, which the contract does not have: a run's attempts in ``runs``, the judges'
+agreement with people and people's agreement with each other in ``agreement``, and each judge
+version's calibration in ``calibration``.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -44,6 +51,7 @@ from martian.evals.server import (
     datasets,
     drafts,
     launch,
+    otlp,
     projects,
     reviews,
     runs,
@@ -84,7 +92,7 @@ from martian.evals.server.entitlements import (
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.server.projection import DEFAULT_PROJECT, NO_AGENT, result_id, score_id
 from martian.evals.store import EvalStore, StoreError, StoreStatus
-from martian.evals.worker import Worker
+from martian.evals.worker import Lifecycle, Worker
 
 STORE_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
@@ -115,6 +123,25 @@ async def _store_error(_request: Request, error: Exception) -> JSONResponse:
     return JSONResponse({"detail": error.detail}, status_code=STORE_ERROR_STATUS[error.kind])
 
 
+def _with_worker(worker: Lifecycle, inner: Any) -> Callable[[FastAPI], AbstractAsyncContextManager[Any]]:
+    """A lifespan that starts the worker when the app starts serving and stops it when the app
+    stops, around the edition's own lifespan, if it gave one."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+        await worker.start()
+        try:
+            if inner is None:
+                yield None
+            else:
+                async with inner(app) as state:
+                    yield state
+        finally:
+            await worker.stop()
+
+    return lifespan
+
+
 def create_app(
     *,
     store: EvalStore,
@@ -136,12 +163,16 @@ def create_app(
         raise TypeError("worker must implement martian.evals.worker.Worker")
     if judge_settings is not None and not isinstance(judge_settings, JudgeSettings):
         raise TypeError("judge_settings must implement martian.evals.judge_settings.JudgeSettings")
+    if isinstance(worker, Lifecycle):
+        fastapi_options["lifespan"] = _with_worker(worker, fastapi_options.get("lifespan"))
     app = FastAPI(title="Martian Evals", **fastapi_options)
     app.state.martian_evals_store = store
     app.state.martian_evals_records = records
     app.state.martian_evals_entitlements = entitlements
     app.state.martian_evals_worker = worker
     app.state.martian_evals_judge_settings = judge_settings
+    # One OpenTelemetry trace write at a time, so that requests carrying spans of one trace merge in turn.
+    app.state.martian_evals_trace_writes = asyncio.Lock()
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
     for part in (
@@ -161,6 +192,7 @@ def create_app(
         views.router,
         drafts.router,
         runs.router,
+        otlp.router,
     ):
         app.include_router(part)
     return app

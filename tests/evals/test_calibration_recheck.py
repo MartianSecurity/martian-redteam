@@ -23,8 +23,10 @@ from martian.evals.records import CalibrationRecheck
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER
 from martian.evals.store import MemoryStore, StoreError
-from martian.evals.worker import JudgeError, JudgeRequest, JudgeResult, Verdict
+from martian.evals.worker import JudgeError, JudgeRequest, JudgeResult, Verdict, Work
+from martian.evals.worker.execute import fail_unfinished, take_over
 from martian.evals.worker.judges import RUBRICS
+from martian.evals.worker.queue import entry_id
 from tests.evals.test_worker_judges import KEY, Loopback
 from tests.evals.write_fixture import Served, request_id, serve
 
@@ -231,6 +233,30 @@ def test_a_recheck_is_refused_before_any_model_call(core):
     assert busy["detail"] == "A re-check of this judge version is already queued or running"
     assert core.asked == []
     core.call("GET", f"/v1/evals/judge-rechecks/{uuid.uuid4()}", 404)
+
+
+def test_a_recheck_whose_worker_stopped_is_queued_again_or_failed(tmp_path):
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+    scorer = ScorerVersion(name="tone", kind="llm_judge", type="instructions", version="1")
+    for n, state in enumerate(["running", "running", "completed"]):
+        recheck = CalibrationRecheck(id=f"q{n}", project_id=DEFAULT_PROJECT, judge="tone", version="1",
+                                     calibration_id="k1", scorer=scorer, definition="d", state=state,
+                                     total=30, graded=12)  # fmt: skip
+        asyncio.run(records.create_recheck(SINGLE_USER, DEFAULT_PROJECT, recheck))
+    work = [Work(kind="recheck", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id="", job_id=f"q{n}")
+            for n in range(3)]  # fmt: skip
+    assert [entry_id(each) for each in work] == ["recheck:q0", "recheck:q1", "recheck:q2"]
+    # The queue's next worker starts a re-check that keeps no checkpoint again from its first item.
+    asyncio.run(take_over(records, work[0]))
+    asyncio.run(fail_unfinished(records, work[1], "The worker stopped"))
+    asyncio.run(take_over(records, work[2]))
+    found = [asyncio.run(records.get_recheck(SINGLE_USER, DEFAULT_PROJECT, f"q{n}")) for n in range(3)]
+    assert [(r.state, r.graded, r.error) for r in found] == [
+        ("queued", 0, ""),
+        ("failed", 12, "The worker stopped"),
+        ("completed", 12, ""),
+    ]
+    records.close()
 
 
 def test_editing_what_a_built_in_judge_means_marks_its_calibration_unchecked(core, monkeypatch):

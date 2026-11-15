@@ -18,8 +18,10 @@ their own worker without changing the routes:
 - :class:`InProcessWorker` runs one organisation's work as tasks of the calling process's event
   loop and refuses any other organisation's. It is enough for the local edition and for tests,
   and it runs the work inside each of ``ProcessWorker``'s processes.
-- A durable queue (MorningHQ/martian-notes#139) implements ``submit`` by enqueueing, and hands
-  each ``Work`` to a process of its own.
+- :class:`QueueWorker` implements ``submit`` by putting the work in a durable queue in the record
+  store's database, and a worker, beside the app or in a process of its own, takes it from there
+  and runs it with either of the two above, its :class:`Runner`. Restarting the API process then
+  loses no queued or running work (:mod:`martian.evals.worker.queue`).
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
@@ -27,7 +29,8 @@ their own worker without changing the routes:
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
 HTTP target's credentials come from the worker's :class:`Credentials`, in the process that calls
-it (:mod:`martian.evals.worker.targets`).
+it (:mod:`martian.evals.worker.targets`). A run calls only the target it was admitted with: the
+worker pins the target again before each start of a run, and fails a run whose target changed.
 
 A worker learns that someone asked it to stop from the record itself
 (``Run.cancel_requested_at``, ``ScoringJob.cancel_requested_at``), which it reads before each case,
@@ -35,6 +38,12 @@ so a worker in another process sees it too. A worker that can tell when nothing 
 any more also implements :class:`InterruptedRuns`, so that cancelling such a run finishes it at once
 instead of waiting for a next case that never comes. :func:`execute_run` and
 :func:`execute_scoring` are the work itself, for any worker to call.
+
+Every target call has the worker's time limit (``target_timeout_seconds``), whatever the target.
+Each piece of work also runs under limits (:class:`~martian.evals.model.RunLimits`): the run's own,
+kept in ``Run.provenance["limits"]`` (a scoring job has its run's), else the worker's. Work that
+reaches one stops before its next case as ``stopped``, with the limit in its ``error``, and keeps
+its finished cases, so it can be resumed (:func:`martian.evals.server.launch.resume_run`).
 """
 
 from __future__ import annotations
@@ -71,7 +80,9 @@ class Work:
 
 TargetCall = Callable[[Case], Awaitable[Any]]
 """Calls the thing under test with one case and returns its output. An exception or a timeout is
-the case's error; the worker never retries."""
+the case's error; the worker never retries. A function the worker is given as a target runs on an
+event loop of a thread of its own, so a function that blocks, or never returns, ends its case as
+``item timed out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
 
 
 class Credentials(Protocol):
@@ -102,7 +113,12 @@ class AgentExecutor(Protocol):
     async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
         """Admit the agent for this principal and return what pins it, which the run keeps as
         ``provenance["target"]``. Raises ``StoreError`` (``not_found`` for an agent it does not
-        know). Never calls the agent."""
+        know). Never calls the agent.
+
+        The worker asks again before each start of a run, a resume included, in the process that
+        calls the agent, and fails the run without calling the agent when the pin differs from the
+        run's. So the pin is the same for as long as the agent is, and holds nothing that changes
+        while the agent does not, such as a lease or a time."""
         ...
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
@@ -149,13 +165,16 @@ class JudgeResult:
     ``model@model_version``, or ``model`` alone without a version. ``judge_version`` names the
     judge's own prompt and rules (``response-rubrics-v1`` for the SDK judge), recorded on each
     score. ``errors`` holds, by scorer name, why the judge gave a scorer of the request no verdict,
-    such as a judge kind it cannot grade."""
+    such as a judge kind it cannot grade. ``tokens`` is how many tokens the judge's model calls for
+    the request used, input and output together, as the provider reported them, or None when it
+    reported none; a scoring job counts them against its judge token limit (``RunLimits``)."""
 
     model: str
     verdicts: Mapping[str, Verdict] = field(default_factory=dict)
     model_version: str = ""
     judge_version: str = ""
     errors: Mapping[str, str] = field(default_factory=dict)
+    tokens: int | None = None
 
 
 class JudgeError(Exception):
@@ -181,7 +200,9 @@ class Worker(Protocol):
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         """Before a run is recorded, check that this worker can call ``target`` for this principal
         and return what pins it, which the run keeps as ``provenance["target"]``. Raises
-        ``StoreError`` (``not_found`` for an unknown agent). Never calls the target."""
+        ``StoreError`` (``not_found`` for an unknown agent). Never calls the target. The worker
+        that runs the run pins the target again before each start and fails the run when the
+        target is no longer the one it pinned (:func:`execute_run`)."""
         ...
 
     async def submit(self, work: Work) -> None:
@@ -191,11 +212,32 @@ class Worker(Protocol):
 
 
 @runtime_checkable
+class Runner(Worker, Protocol):
+    """A worker that can also do one piece of work and wait for it, as a :class:`QueueWorker` runs
+    what it takes from its queue: :class:`InProcessWorker` and :class:`ProcessWorker`."""
+
+    async def run(self, work: Work) -> None:
+        """Do the work and return once it has ended, whatever its outcome, which its record holds.
+        Cancelled, it stops the work and leaves its record as it is."""
+        ...
+
+
+@runtime_checkable
+class Lifecycle(Protocol):
+    """A worker that runs beside the app, as a :class:`QueueWorker` serving in the API process does:
+    ``create_app`` starts it when the app starts serving and stops it when the app stops."""
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+@runtime_checkable
 class InterruptedRuns(Protocol):
-    """What a worker adds when it can tell that nothing is working on a run any more, as the local
-    edition's ``LocalWorker`` can: each of its runs is held by the processes running it. The cancel
-    route asks it about a running run. Without it, a running run whose worker stopped waits for a
-    next case that never comes, until the durable queue (MorningHQ/martian-notes#139)."""
+    """What a worker adds when it can tell that nothing is working on a run any more, as a
+    :class:`QueueWorker` can: each run is held by a claim in the queue, whose lease the process
+    working on it renews. The cancel route asks it about a running run. Without it, a running run
+    whose worker stopped waits for a next case that never comes."""
 
     async def cancel_interrupted(self, principal: Principal, run: Run) -> Run | None:
         """Cancel ``run``, which is ``running``, at once when nothing is working on it any more,
@@ -205,10 +247,11 @@ class InterruptedRuns(Protocol):
         ...
 
 
-from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished  # noqa: E402
+from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
+from martian.evals.worker.queue import QueueWorker  # noqa: E402
 from martian.evals.worker.recheck import execute_recheck  # noqa: E402
 
 __all__ = [
@@ -221,7 +264,10 @@ __all__ = [
     "JudgeError",
     "JudgeRequest",
     "JudgeResult",
+    "Lifecycle",
     "ProcessWorker",
+    "QueueWorker",
+    "Runner",
     "TargetCall",
     "Verdict",
     "Work",
@@ -235,4 +281,5 @@ __all__ = [
     "fail_unfinished",
     "load_work",
     "sdk_judge",
+    "take_over",
 ]

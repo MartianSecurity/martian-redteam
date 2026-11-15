@@ -39,6 +39,7 @@ evals = [
     "pytest>=8",
     "sqlalchemy>=2.0",
     "uvicorn>=0.30",
+    "zstandard>=0.23",
 ]
 postgres = ["martian-sdk[evals]", "psycopg[binary]>=3.2"]
 
@@ -113,4 +114,5 @@ dev = [
     "jsonschema>=4.23,<5",
     "pytest-xdist>=3.8.0",
     "twine>=7.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
 ]
