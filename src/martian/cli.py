@@ -186,6 +186,66 @@ def import_inspect(
     typer.echo(f"Open them in the local Evals UI: {ui}")
 
 
+@import_app.command("mlflow")
+def import_mlflow(
+    source: Annotated[
+        str,
+        typer.Argument(
+            show_default=False,
+            help="The MLflow tracking store: its SQLite database file (mlflow.db), or a sqlite:/// or "
+            "postgresql:// URL.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            file_okay=False,
+            show_default=False,
+            help="The local Evals UI's data folder to copy into, as for `martian ui`. "
+            "Default: MARTIAN_EVALS_HOME, else ~/.martian/evals.",
+        ),
+    ] = None,
+    experiment: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--experiment",
+            show_default=False,
+            help="Copy only this experiment, by name or id. Repeat for more. Default: every active experiment.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Check and read the store, and report what would be copied.")
+    ] = False,
+) -> None:
+    """Copy an MLflow tracking store into the local Evals UI: experiments, traces, datasets,
+    assessments and evaluation runs. The store is only read, and only at the schema revision this
+    release's MLflow writes; any other is refused before anything is copied.
+
+    martian evals import mlflow ./mlflow.db
+    """
+    if any(importlib.util.find_spec(name) is None for name in ("mlflow", "sqlalchemy")):
+        typer.echo("Copying an MLflow store needs martian-sdk[evals].", err=True)
+        raise typer.Exit(code=2)
+    from martian.evals.local import LocalEditionError, data_folder
+    from martian.evals.mlflow_import import MlflowSourceError, import_mlflow_store, report_lines
+
+    home = data_folder(data_dir)
+    try:
+        report = import_mlflow_store(source, home, experiments=experiment or None, dry_run=dry_run)
+    except (MlflowSourceError, LocalEditionError) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except ImportError as error:  # a postgresql:// source without the driver
+        typer.echo(f"Import failed: {error}. A Postgres store needs martian-sdk[postgres].", err=True)
+        raise typer.Exit(code=2) from None
+    for line in report_lines(report, written=not dry_run):
+        typer.echo(line)
+    if not dry_run:
+        ui = "martian ui" if data_folder() == home else f"martian ui --data-dir {home}"
+        typer.echo(f"Open them in the local Evals UI: {ui}")
+
+
 def _export_counts(lines: dict[str, Any]) -> str:
     """The main counts of an export's manifest, for one line of output."""
     shown = (
