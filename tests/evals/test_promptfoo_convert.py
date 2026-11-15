@@ -228,9 +228,9 @@ def test_each_converted_assertion_decides_as_promptfoo_does(tmp_path, assertion,
     conversion = convert_promptfoo_config(config, output=out, target=TARGET)
     assert conversion.unconverted == [] and len(conversion.suites) == 1
     write_conversion(conversion, out)
-    suite, _ = runner.load_suite(out / "evals.yaml")
+    suite, base = runner.load_suite(out / "evals.yaml")
     _, cases = load_suite_file(out / "evals.yaml")
-    (check,) = runner._build_scorers(suite)
+    (check,) = runner._build_scorers(suite, base)
     (spec,) = suite.checks
     assert spec.type == ASSERTION_CHECKS[assertion["type"]]
     expectations = cases[0].expectations
@@ -324,11 +324,11 @@ def test_latency_and_cost_limit_the_targets_call_as_promptfoo_does(tmp_path, ass
         "tests[0].assert[0].metric: names a promptfoo metric; the check is named after the assertion's type"
     ]
     write_conversion(conversion, out)
-    suite, _ = runner.load_suite(out / "evals.yaml")
+    suite, base = runner.load_suite(out / "evals.yaml")
     (spec,) = suite.checks
     limit = CALL_CHECKS[assertion["type"]]
     assert (spec.type, getattr(spec, limit)) == (assertion["type"], assertion["threshold"])
-    (check,) = runner._build_scorers(suite)
+    (check,) = runner._build_scorers(suite, base)
     if verdict is None:
         with pytest.raises(ValueError, match="records no cost"):
             check(trace=trace)
