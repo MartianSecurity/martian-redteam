@@ -358,6 +358,37 @@ def test_agents_judge_refuses_a_judge_version_in_other_digits_without_calling_ag
     assert agents.requests == []
 
 
+def test_agents_judge_asks_the_connection_for_each_request_and_sends_its_admitted_item(agents):
+    # The Martian server admits each judge call on its own: a coroutine gives a fresh target lease
+    # header and the saved item it admits, just before the call.
+    asked: list[str] = []
+
+    async def leased(principal):
+        asked.append(principal.user_id)
+        await asyncio.sleep(0)
+        action = f"00000000-0000-4000-8000-00000000000{len(asked)}"
+        return AgentsConnection(
+            target_id="eval/target-1",
+            authorization_ref="auth-ref-1",
+            headers={"X-API-Key": AGENTS_KEY, "X-Martian-Target-Lease": f"lease-{len(asked)}"},
+            action_id=action,
+        )
+
+    judge = agents_judge(agents.origin, leased)
+    for _ in range(2):
+        found = asyncio.run(judge(judge_request()))
+        assert found.verdicts["safety"].value is False
+    assert asked == [SINGLE_USER.user_id] * 2
+    assert [sent["headers"]["x-martian-target-lease"] for sent in agents.requests] == ["lease-1", "lease-2"]
+    assert [sent["body"]["action_id"] for sent in agents.requests] == [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    ]
+    # With the route's static authorization the request names no item, as before.
+    asyncio.run(agents_judge(agents.origin, connection)(judge_request()))
+    assert "action_id" not in agents.requests[-1]["body"]
+
+
 def test_agents_judge_refuses_a_judge_pinned_to_a_model_without_calling_agents(agents):
     judge = agents_judge(agents.origin, connection)
     with pytest.raises(Exception, match="runs on its operator's model; this judge is pinned to openai:/alpha"):
