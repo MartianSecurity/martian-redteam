@@ -138,8 +138,8 @@ They can still remove targets and define new ones. See [local targets](evals-cor
 
 ## What store errors contain
 
-An error of the evals store or the record store never quotes what was written. When either
-refuses a request, its `StoreError` names the operation, the store method such as
+An error of the evals store, the record store or the work queue never quotes what was written.
+When any of them refuses a request, its `StoreError` names the operation, the store method such as
 `record_trace`, and what was refused. For a write the database refused, that is the table, the
 column or constraint when Postgres names one, and the driver's error class and code:
 `record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
@@ -154,10 +154,14 @@ line.
 - A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
   so no traceback or error reporter reaches the values. The names above are what an operator
   debugs with.
-- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+- The work queue (`SqlWorkQueue`, in the record store's database) maps its refusals the same way:
+  `put: the database refused a value for martian_work_queue (...)`. Holding an entry that is in the
+  queue already raises `AlreadyHeld`, a `conflict` `StoreError` of the same kind, never the
+  driver's `IntegrityError`, which Postgres fills with the entry's id and organisation.
+- The stores' and the queue's database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
   database failure that is not a refusal holds none either. The record store raises such a
   failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
-  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  such as SQLite's "database is locked". The queue raises such a failure as SQLAlchemy's own error too. What they carry is the statement, with placeholders, and
   the database's own message for the failure.
 - Not covered: MLflow shortens a trace tag value over 8,000 characters given to
   `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
@@ -168,8 +172,9 @@ line.
 database refuses, directly for a metadata value over 8,000 characters and through a run of the
 worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
 refuses, a case result, a run two writers create at once, a draft case through its route, and a
-score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
-included, on SQLite and on Postgres.
+score whose write fails. `tests/evals/test_queue_errors.py` does the same for a duplicate `hold` and
+a kind the database refuses, in the queue's errors and in an API answer carrying them. Each finds
+the canary in no error, API answer or log line, MLflow's included, on SQLite and on Postgres.
 
 ## Runtime reporting data boundary
 

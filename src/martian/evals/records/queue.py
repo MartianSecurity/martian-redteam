@@ -41,11 +41,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy import Connection, and_, delete, func, or_, select, text, update
+from sqlalchemy.exc import DataError, IntegrityError
 
-from martian.evals._sql import is_postgres
+from martian.evals._sql import database_refusal, is_postgres, operation_name
 from martian.evals.records.events import space_of
 from martian.evals.records.sql import engine_for, upgrade
 from martian.evals.records.tables import work_queue
+from martian.evals.store import StoreError
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -73,6 +75,14 @@ class Claim:
     attempt: int
 
 
+class AlreadyHeld(StoreError):
+    """:meth:`SqlWorkQueue.hold` found its entry in the queue already. A ``conflict`` that names
+    the operation and the table, never the entry's id or the principal's organisation."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("conflict", detail)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -91,16 +101,27 @@ class SqlWorkQueue:
         self._engine.dispose()
 
     async def _run(self, space: str | None, work: Callable[[Connection], T]) -> T:
-        """``work`` in one transaction, for ``space``, or for every space when it is None (a claim)."""
+        """``work`` in one transaction, for ``space``, or for every space when it is None (a claim).
+        A write the database refuses becomes a ``StoreError`` naming the method ``work`` belongs to
+        and the table, never a value (``database_refusal``)."""
+        operation = operation_name(work)
 
         def transaction() -> T:
-            with self._engine.begin() as connection:
-                if self._postgres:
-                    if space is None:
-                        connection.execute(text("SELECT set_config('martian.claim', 'on', true)"))
-                    else:
-                        connection.execute(text("SELECT set_config('martian.space', :space, true)"), {"space": space})
-                return work(connection)
+            try:
+                with self._engine.begin() as connection:
+                    if self._postgres:
+                        if space is None:
+                            connection.execute(text("SELECT set_config('martian.claim', 'on', true)"))
+                        else:
+                            connection.execute(
+                                text("SELECT set_config('martian.space', :space, true)"), {"space": space}
+                            )
+                    return work(connection)
+            except (DataError, IntegrityError) as error:
+                refused = database_refusal(operation, error)
+            # Raised outside the except clause, so that the database's error, which holds the
+            # values written, does not stay on it as its context.
+            raise refused
 
         return await asyncio.to_thread(transaction)
 
@@ -130,7 +151,11 @@ class SqlWorkQueue:
             created_at=_now(),
             work=work,
         )
-        await self._run(space, lambda connection: connection.execute(statement.on_conflict_do_nothing()))
+
+        def put(connection: Connection) -> None:
+            connection.execute(statement.on_conflict_do_nothing())
+
+        await self._run(space, put)
 
     async def hold(
         self,
@@ -144,7 +169,8 @@ class SqlWorkQueue:
         """Put ``work`` in the queue already claimed by the caller for ``lease_seconds``: a process
         that does the work itself, outside any worker, and holds it in the queue so that its end is
         noticed if it stops (``martian evals run`` holding the run it records). Renew and remove it
-        as a worker's claim. Raises ``IntegrityError`` when ``entry_id`` is in the queue already."""
+        as a worker's claim. Raises :class:`AlreadyHeld`, a ``StoreError``, when ``entry_id`` is in
+        the queue already; a refusal of any other value is a ``StoreError`` too."""
         space, token, now = space_of(principal), uuid.uuid4().hex, _now()
         statement = work_queue.insert().values(
             space=space,
@@ -158,8 +184,19 @@ class SqlWorkQueue:
             created_at=now,
             work=work,
         )
-        await self._run(space, lambda connection: connection.execute(statement))
-        return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
+
+        def hold(connection: Connection) -> None:
+            connection.execute(statement)
+
+        try:
+            await self._run(space, hold)
+        except StoreError as error:
+            if error.kind != "conflict":
+                raise
+            already = AlreadyHeld(error.detail)
+        else:
+            return Claim(space, project_id, entry_id, kind, dict(work), token, 1)
+        raise already
 
     async def claim(self, lease_seconds: float) -> Claim | None:
         """Take a piece of work that is queued, or whose claim's lease ran out, and hold it for
@@ -299,4 +336,4 @@ class SqlWorkQueue:
         )
 
 
-__all__ = ["CLAIMED", "QUEUED", "RECORDING", "Claim", "SqlWorkQueue"]
+__all__ = ["CLAIMED", "QUEUED", "RECORDING", "AlreadyHeld", "Claim", "SqlWorkQueue"]
