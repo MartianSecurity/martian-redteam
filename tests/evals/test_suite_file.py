@@ -98,6 +98,11 @@ EVERY_FIELD_URL = {
             "case_sensitive": True,
         },
         {"type": "table_equals", "name": "ledger", "expectation": "ledger", "key": "ref"},
+        {"type": "no_prohibited_phrases", "values": ["guaranteed returns"], "expectation": "banned"},
+        {"type": "no_personal_data", "kinds": ["email", "phone"], "allow": ["support@shop.example"]},
+        {"type": "no_secrets", "name": "no_keys", "kinds": ["api_key", "private_key"], "allow": ["sk-documented"]},
+        {"type": "resists_injection", "values": ["ZEBRA-7731"], "expectation": "markers"},
+        {"type": "no_refusal", "expectation": "benign"},
     ],
     "concurrency": 8,
     "batch": 10,
@@ -169,7 +174,9 @@ def test_every_suite_file_field_has_a_place_in_the_model():
 def test_every_check_type_the_file_accepts_is_one_the_runner_builds():
     check_types = typing.get_args(runner.CheckSpec.model_fields["type"].annotation)
     assert sorted(check_types) == sorted(runner.JUDGES + runner.CHECKS)
-    assert set(runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS) <= set(runner.CHECKS)
+    groups = runner.TEXT_CHECKS + runner.CALL_CHECKS + runner.NUMERIC_CHECKS + runner.POLICY_CHECKS
+    assert set(groups) <= set(runner.CHECKS)
+    assert set(runner.REFUSAL_PASSING) < set(runner.POLICY_CHECKS)
 
 
 def test_the_every_field_suites_set_every_field():
@@ -251,6 +258,16 @@ def test_every_field_lands_where_the_map_says(tmp_path):
     assert by_name["ledger"] == ScorerVersion(
         name="ledger", kind="check", type="table_equals", parameters={"expectation": "ledger", "key": "ref"}
     )
+    # A policy check's kinds and allowed values keep the order and form they were written in.
+    assert by_name["no_personal_data"].parameters == {"kinds": ["email", "phone"], "allow": ["support@shop.example"]}
+    assert by_name["no_keys"] == ScorerVersion(
+        name="no_keys",
+        kind="check",
+        type="no_secrets",
+        parameters={"allow": ["sk-documented"], "kinds": ["api_key", "private_key"]},
+    )
+    assert by_name["resists_injection"].parameters == {"expectation": "markers", "values": ["ZEBRA-7731"]}
+    assert by_name["no_refusal"].parameters == {"expectation": "benign"}
     assert suite.settings.model_dump() == {
         "concurrency": 8,
         "batch": 10,
@@ -384,6 +401,20 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
             {"checks": [{"type": "contains", "values": ["a"], "abs_tolerance": 0.01}]},
             "abs_tolerance does not apply to contains checks",
         ),
+        ({"checks": [{"type": "no_refusal", "values": ["sorry"]}]}, "values does not apply to no_refusal checks"),
+        (
+            {"checks": [{"type": "no_prohibited_phrases", "values": ["act now"], "kinds": ["email"]}]},
+            "kinds does not apply to no_prohibited_phrases checks",
+        ),
+        (
+            {"checks": [{"type": "no_secrets", "case_sensitive": True}]},
+            "case_sensitive does not apply to no_secrets checks",
+        ),
+        (
+            {"checks": [{"type": "resists_injection", "values": ["ZEBRA-7731"], "allow": ["x"]}]},
+            "allow does not apply to resists_injection checks",
+        ),
+        ({"checks": [{"type": "no_personal_data", "kinds": ["passport"]}]}, "kinds: passport is not one of email"),
     ],
 )
 def test_a_field_the_model_would_lose_is_refused_on_load(suite, problem, tmp_path):
@@ -446,6 +477,19 @@ def judge(name="rubric_judge", model="openai:/judge-model", **fields):
                 ]
             },
             "add is not an option of sums_to checks",
+        ),
+        (
+            {"scorers": [ScorerVersion(name="s", kind="check", type="no_secrets", parameters={"values": ["x"]})]},
+            "values is not an option of no_secrets checks",
+        ),
+        (
+            {
+                "scorers": [
+                    judge(parameters={"temperature": 0, "max_tokens": 512}),
+                    ScorerVersion(name="m", kind="check", type="resists_injection", parameters={"values": ["ab"]}),
+                ]
+            },
+            "invalid suite file: .*a marker needs at least 4 letters or digits",
         ),
         ({"scorers": [judge(), judge(name="second")]}, "invalid suite file: .*at most one check of each judge type"),
         (

@@ -100,7 +100,9 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
 - anything `martian evals run` refuses, such as an unknown field, a `json_schema` keyword the
   check cannot apply, a `latency` or `cost` check with no target to measure, or a numeric or
   table option the check cannot read, such as a `value` that is not a number, a `rel_tolerance`
-  of 1 or more, a path with an empty step, or `rows` with two rows of one key
+  of 1 or more, a path with an empty step, or `rows` with two rows of one key, or a policy check
+  option it cannot use, such as an unknown `kinds` entry, a phrase with no letter or digit, or a
+  marker shorter than four letters or digits
   ([deterministic checks](evals.md#deterministic-checks)).
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
