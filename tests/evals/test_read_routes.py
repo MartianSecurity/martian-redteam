@@ -129,7 +129,7 @@ def test_the_workbench_shows_the_newest_scoring_job_and_its_scores(served):
     assert card["confidence_95"] == list(wilson(2, 2)) and card["mean_confidence_95"] is None
     assert [r["id"] for r in work["latest_reviews"]] == ["review-1"]
     assert work["calibration"][0]["paired"] == 1 and work["calibration"][0]["agreement"] == 1.0
-    assert work["members"] == [{"id": "local", "name": "local", "role": "owner"}]
+    assert work["members"] == [{"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "name": "local", "role": "owner"}]
 
 
 def test_the_workbench_filters_by_result_and_refuses_another_runs_job(served):
