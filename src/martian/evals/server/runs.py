@@ -5,7 +5,9 @@
 Runs, case results, scores, scoring jobs and reviews come from the record store; projects, traces,
 run telemetry and review queues from the store. A run is found by its id in the default project,
 then in each of the store's projects. The run routes match only a UUID in place of ``{run_id}``,
-so a route an edition adds under ``/v1/evals`` is not taken for a run.
+so a route an edition adds under ``/v1/evals`` is not taken for a run. ``GET /{run_id}/attempts``
+is the core's own addition, which the server's contract does not have: the attempts of each case
+of a run whose suite repeats its cases, the run's reliability and its flaky cases.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -30,12 +32,14 @@ from martian.evals.server.projection import (
     RUN_STATUS,
     Assessment,
     ReviewRow,
+    attempts_out,
     item_out,
     job_config,
     mlflow_assessment,
     project_key,
     public_job,
     queue_out,
+    reliability_out,
     result_id,
     run_detail,
     run_out,
@@ -263,6 +267,28 @@ async def list_runs(
 async def get_run(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunDetailOut:
     run = await find_run(store, records, principal, run_id)
     return run_detail(run, await run_results(records, principal, run))
+
+
+@router.get("/{run_id:uuid}/attempts", response_model=None)
+async def attempts(
+    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, flaky: bool = False
+) -> dict[str, Any]:
+    # The core's own route, not the contract's: every attempt of each case of a run whose suite
+    # repeats its cases, with the run's repeats (MorningHQ/martian-notes#180) and its reliability
+    # and flaky cases (MorningHQ/martian-notes#183). `flaky=true` keeps only the flaky cases; the
+    # reliability is the whole run's. A run without repeats answers `repeats: null`,
+    # `reliability: null` and no attempts. Reliability is here, not on the run routes, because
+    # their responses are typed in the frozen contract.
+    run = await find_run(store, records, principal, run_id)
+    results = await run_results(records, principal, run)
+    repeats = run.provenance.get("repeats")
+    items = [attempts_out(result) for result in results]
+    return {
+        "run_id": run.id,
+        "repeats": repeats,
+        "reliability": reliability_out(results) if repeats is not None else None,
+        "items": [item for item in items if item["flaky"]] if flaky else items,
+    }
 
 
 @router.get("/{run_id:uuid}/workbench", response_model=None)
