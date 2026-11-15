@@ -47,6 +47,10 @@ push and keeps one comment with the result, also without a Martian account. See
 - `martian evals import inspect`: Inspect AI logs (`.eval` or `.json`) as runs in `martian ui`,
   to open, compare and review; see
   [imported Inspect logs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#imported-inspect-logs).
+- `martian evals import promptfoo` and `martian evals convert promptfoo`: promptfoo results as
+  runs in `martian ui`, one per provider, and a promptfoo config as suite files where its
+  assertions map onto the checks, with everything that does not listed; see
+  [promptfoo results and configs](https://github.com/MorningHQ/martian-redteam/blob/main/docs/evals-core.md#promptfoo-results-and-configs).
 - `martian evals import mlflow`: an MLflow tracking store (SQLite or Postgres) copied into
   `martian ui`: experiments, traces, datasets, assessments and evaluation runs, after a schema
   version check; see

@@ -1,0 +1,1893 @@
+{
+  "evalId": "eval-k3Q-2026-11-14T10:00:00",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-11-14T10:00:00.000Z",
+    "prompts": [
+      {
+        "raw": "You are a travel assistant. Answer {{traveller}} in one sentence. Question: {{question}}",
+        "label": "answer",
+        "id": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": "openai:gpt-4.1-mini",
+        "metrics": {
+          "score": 3.3571,
+          "testPassCount": 1,
+          "testFailCount": 3,
+          "testErrorCount": 1,
+          "assertPassCount": 21,
+          "assertFailCount": 4,
+          "totalLatencyMs": 34419,
+          "tokenUsage": {
+            "total": 252,
+            "prompt": 168,
+            "completion": 84,
+            "cached": 0,
+            "numRequests": 5
+          },
+          "namedScores": {
+            "spend": 1
+          },
+          "namedScoresCount": {
+            "spend": 1
+          },
+          "cost": 0.00057
+        }
+      },
+      {
+        "raw": "You are a travel assistant. Answer {{traveller}} in one sentence. Question: {{question}}",
+        "label": "answer",
+        "id": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": "file://agent.py",
+        "metrics": {
+          "score": 4.8443,
+          "testPassCount": 4,
+          "testFailCount": 1,
+          "testErrorCount": 0,
+          "assertPassCount": 31,
+          "assertFailCount": 1,
+          "totalLatencyMs": 14,
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 5
+          },
+          "namedScores": {
+            "spend": 1
+          },
+          "namedScoresCount": {
+            "spend": 1
+          },
+          "cost": 0
+        }
+      }
+    ],
+    "results": [
+      {
+        "id": "7cfe5355-2594-5308-ba74-5b6cd7ae2df9",
+        "promptIdx": 0,
+        "testIdx": 0,
+        "testCase": {
+          "description": "capital of France",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of France?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "paris",
+              "weight": 2
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Paris as the capital of France"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "openai:gpt-4.1-mini",
+          "label": "mini"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of France?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of France?"
+        },
+        "latencyMs": 812,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "37112183-0fab-5120-91cc-6c67a300e763"
+        },
+        "tokenUsage": {
+          "total": 61,
+          "prompt": 42,
+          "completion": 19,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "The capital of France is Paris.",
+          "tokenUsage": {
+            "total": 61,
+            "prompt": 42,
+            "completion": 19,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 812,
+          "cost": 9e-05
+        },
+        "error": null,
+        "failureReason": 0,
+        "success": true,
+        "score": 1.0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 210,
+            "prompt": 180,
+            "completion": 30,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 812ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "starts-with",
+                "value": "The capital of"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "paris",
+                "weight": 2
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "The response names Paris as the capital.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Names Paris as the capital of France"
+              },
+              "tokensUsed": {
+                "total": 210,
+                "prompt": 180,
+                "completion": 30,
+                "cached": 0,
+                "numRequests": 1
+              }
+            }
+          ]
+        },
+        "cost": 9e-05
+      },
+      {
+        "id": "6fbdeaf5-206d-5643-a6b7-729d4358657d",
+        "promptIdx": 0,
+        "testIdx": 1,
+        "testCase": {
+          "description": "capital of Japan",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of Japan?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "tokyo"
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Tokyo as the capital of Japan"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "openai:gpt-4.1-mini",
+          "label": "mini"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of Japan?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of Japan?"
+        },
+        "latencyMs": 954,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "3735bfd8-5263-5d6e-906b-9b76c8b12fe2"
+        },
+        "tokenUsage": {
+          "total": 62,
+          "prompt": 42,
+          "completion": 20,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "Tokyo is the capital of Japan.",
+          "tokenUsage": {
+            "total": 62,
+            "prompt": 42,
+            "completion": 20,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 954,
+          "cost": 8e-05
+        },
+        "error": "Expected output to start with \"The capital of\"",
+        "failureReason": 1,
+        "success": false,
+        "score": 0.8333,
+        "gradingResult": {
+          "pass": false,
+          "score": 0.8333,
+          "reason": "Expected output to start with \"The capital of\"",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 210,
+            "prompt": 180,
+            "completion": 30,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 954ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Expected output to start with \"The capital of\"",
+              "assertion": {
+                "type": "starts-with",
+                "value": "The capital of"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "tokyo"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "The response names Tokyo as the capital.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Names Tokyo as the capital of Japan"
+              },
+              "tokensUsed": {
+                "total": 210,
+                "prompt": 180,
+                "completion": 30,
+                "cached": 0,
+                "numRequests": 1
+              }
+            }
+          ]
+        },
+        "cost": 8e-05
+      },
+      {
+        "id": "be19f782-183b-589e-9347-92d8423d5348",
+        "promptIdx": 0,
+        "testIdx": 2,
+        "testCase": {
+          "description": "capital of Portugal",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of Portugal?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "lisbon"
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Lisbon as the capital of Portugal"
+            },
+            {
+              "type": "similar",
+              "value": "The capital of Portugal is Lisbon.",
+              "threshold": 0.8
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "openai:gpt-4.1-mini",
+          "label": "mini"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of Portugal?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of Portugal?"
+        },
+        "latencyMs": 30012,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "a8ab4fa9-7db6-59d7-b224-1521a5bb71fa"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "error": "API error: 429 Too Many Requests: Rate limit reached for requests",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          }
+        },
+        "error": "API error: 429 Too Many Requests: Rate limit reached for requests",
+        "failureReason": 2,
+        "success": false,
+        "score": 0,
+        "gradingResult": null
+      },
+      {
+        "id": "8267fbcf-d644-57bd-9448-f870ca0cd35c",
+        "promptIdx": 0,
+        "testIdx": 3,
+        "testCase": {
+          "description": "a day in Paris as JSON",
+          "vars": {
+            "traveller": "Sam",
+            "question": "Plan a day in Paris as JSON with the keys city, traveller and stops."
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "required": [
+                  "city",
+                  "traveller",
+                  "stops"
+                ]
+              }
+            },
+            {
+              "type": "contains-all",
+              "value": [
+                "Louvre",
+                "{{traveller}}"
+              ]
+            },
+            {
+              "type": "contains-json"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "openai:gpt-4.1-mini",
+          "label": "mini"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: Plan a day in Paris as JSON with the keys city, traveller and stops.",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "Plan a day in Paris as JSON with the keys city, traveller and stops."
+        },
+        "latencyMs": 1430,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "f0b1a140-fefd-5b16-9c6e-88ee429f836e"
+        },
+        "tokenUsage": {
+          "total": 64,
+          "prompt": 42,
+          "completion": 22,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "{\"city\": \"Paris\", \"stops\": [\"Louvre\", \"Eiffel Tower\"]}",
+          "tokenUsage": {
+            "total": 64,
+            "prompt": 42,
+            "completion": 22,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 1430,
+          "cost": 0.00021
+        },
+        "error": "JSON does not conform to the provided schema. Errors: data must have required property 'traveller'\nExpected output to contain all of [Louvre, Sam]. Missing: [Sam]",
+        "failureReason": 1,
+        "success": false,
+        "score": 0.6667,
+        "gradingResult": {
+          "pass": false,
+          "score": 0.6667,
+          "reason": "JSON does not conform to the provided schema. Errors: data must have required property 'traveller'\nExpected output to contain all of [Louvre, Sam]. Missing: [Sam]",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 1430ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "JSON does not conform to the provided schema. Errors: data must have required property 'traveller'",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "city",
+                    "traveller",
+                    "stops"
+                  ]
+                }
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Expected output to contain all of [Louvre, Sam]. Missing: [Sam]",
+              "assertion": {
+                "type": "contains-all",
+                "value": [
+                  "Louvre",
+                  "{{traveller}}"
+                ]
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains-json"
+              }
+            }
+          ]
+        },
+        "cost": 0.00021
+      },
+      {
+        "id": "6180db24-45ba-5e11-961b-a6658ffbec6f",
+        "promptIdx": 0,
+        "testIdx": 4,
+        "testCase": {
+          "description": "a day in Lisbon as JSON",
+          "vars": {
+            "traveller": "Sam",
+            "question": "Plan a day in Lisbon as JSON with the keys city, traveller and stops."
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "required": [
+                  "city",
+                  "traveller",
+                  "stops"
+                ]
+              }
+            },
+            {
+              "type": "contains-all",
+              "value": [
+                "Alfama",
+                "{{traveller}}"
+              ]
+            },
+            {
+              "type": "javascript",
+              "value": "JSON.parse(output).stops.length >= 2"
+            },
+            {
+              "type": "cost",
+              "threshold": 0.002,
+              "metric": "spend"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "openai:gpt-4.1-mini",
+          "label": "mini"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: Plan a day in Lisbon as JSON with the keys city, traveller and stops.",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "Plan a day in Lisbon as JSON with the keys city, traveller and stops."
+        },
+        "latencyMs": 1211,
+        "namedScores": {
+          "spend": 1
+        },
+        "metadata": {
+          "sessionId": "3afc4331-590b-57b0-add7-fe9704d3ba30"
+        },
+        "tokenUsage": {
+          "total": 65,
+          "prompt": 42,
+          "completion": 23,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "{\"city\": \"Lisbon\", \"traveller\": \"Sam\", \"stops\": [\"Alfama\"]}",
+          "tokenUsage": {
+            "total": 65,
+            "prompt": 42,
+            "completion": 23,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 1211,
+          "cost": 0.00019
+        },
+        "error": "Custom function returned false\nJSON.parse(output).stops.length >= 2",
+        "failureReason": 1,
+        "success": false,
+        "score": 0.8571,
+        "gradingResult": {
+          "pass": false,
+          "score": 0.8571,
+          "reason": "Custom function returned false\nJSON.parse(output).stops.length >= 2",
+          "namedScores": {
+            "spend": 1
+          },
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 1211ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "city",
+                    "traveller",
+                    "stops"
+                  ]
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains-all",
+                "value": [
+                  "Alfama",
+                  "{{traveller}}"
+                ]
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Custom function returned false\nJSON.parse(output).stops.length >= 2",
+              "assertion": {
+                "type": "javascript",
+                "value": "JSON.parse(output).stops.length >= 2"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Cost 0.0002 is less than or equal to threshold 0.002",
+              "assertion": {
+                "type": "cost",
+                "threshold": 0.002,
+                "metric": "spend"
+              }
+            }
+          ]
+        },
+        "cost": 0.00019
+      },
+      {
+        "id": "88336e5f-4394-5374-86e1-d64f85cb808f",
+        "promptIdx": 0,
+        "testIdx": 0,
+        "testCase": {
+          "description": "capital of France",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of France?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "paris",
+              "weight": 2
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Paris as the capital of France"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "file://agent.py",
+          "label": "agent"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of France?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of France?"
+        },
+        "latencyMs": 3,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "1cf06e53-1a58-5b59-b12b-e7d989d565f8"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "The capital of France is Paris.",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 3,
+          "cost": 0
+        },
+        "error": null,
+        "failureReason": 0,
+        "success": true,
+        "score": 1.0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 210,
+            "prompt": 180,
+            "completion": 30,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 3ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "starts-with",
+                "value": "The capital of"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "paris",
+                "weight": 2
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "The response names Paris as the capital.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Names Paris as the capital of France"
+              },
+              "tokensUsed": {
+                "total": 210,
+                "prompt": 180,
+                "completion": 30,
+                "cached": 0,
+                "numRequests": 1
+              }
+            }
+          ]
+        },
+        "cost": 0
+      },
+      {
+        "id": "8f3047be-6551-5384-8c77-187433cdbc08",
+        "promptIdx": 0,
+        "testIdx": 1,
+        "testCase": {
+          "description": "capital of Japan",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of Japan?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "tokyo"
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Tokyo as the capital of Japan"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "file://agent.py",
+          "label": "agent"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of Japan?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of Japan?"
+        },
+        "latencyMs": 2,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "5085b7f2-badb-53ac-a82d-2583999b9bfd"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "The capital of Japan is Tokyo.",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 2,
+          "cost": 0
+        },
+        "error": null,
+        "failureReason": 0,
+        "success": true,
+        "score": 1.0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 210,
+            "prompt": 180,
+            "completion": 30,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 2ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "starts-with",
+                "value": "The capital of"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "tokyo"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "The response names Tokyo as the capital.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Names Tokyo as the capital of Japan"
+              },
+              "tokensUsed": {
+                "total": 210,
+                "prompt": 180,
+                "completion": 30,
+                "cached": 0,
+                "numRequests": 1
+              }
+            }
+          ]
+        },
+        "cost": 0
+      },
+      {
+        "id": "d12ae8e4-adc6-5ac6-948e-1aa036023353",
+        "promptIdx": 0,
+        "testIdx": 2,
+        "testCase": {
+          "description": "capital of Portugal",
+          "vars": {
+            "traveller": "Sam",
+            "question": "What is the capital of Portugal?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "starts-with",
+              "value": "The capital of"
+            },
+            {
+              "type": "icontains",
+              "value": "lisbon"
+            },
+            {
+              "type": "llm-rubric",
+              "value": "Names Lisbon as the capital of Portugal"
+            },
+            {
+              "type": "similar",
+              "value": "The capital of Portugal is Lisbon.",
+              "threshold": 0.8
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "file://agent.py",
+          "label": "agent"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: What is the capital of Portugal?",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "What is the capital of Portugal?"
+        },
+        "latencyMs": 2,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "f7e07513-eadd-5862-a23e-09e6d587c418"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "Lisbon is the capital of Portugal.",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 2,
+          "cost": 0
+        },
+        "error": "Expected output to start with \"The capital of\"",
+        "failureReason": 1,
+        "success": false,
+        "score": 0.8443,
+        "gradingResult": {
+          "pass": false,
+          "score": 0.8443,
+          "reason": "Expected output to start with \"The capital of\"",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 210,
+            "prompt": 180,
+            "completion": 30,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 2ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Expected output to start with \"The capital of\"",
+              "assertion": {
+                "type": "starts-with",
+                "value": "The capital of"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "lisbon"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "The response names Lisbon as the capital.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Names Lisbon as the capital of Portugal"
+              },
+              "tokensUsed": {
+                "total": 210,
+                "prompt": 180,
+                "completion": 30,
+                "cached": 0,
+                "numRequests": 1
+              }
+            },
+            {
+              "pass": true,
+              "score": 0.91,
+              "reason": "Similarity 0.91 is greater than or equal to threshold 0.8",
+              "assertion": {
+                "type": "similar",
+                "value": "The capital of Portugal is Lisbon.",
+                "threshold": 0.8
+              }
+            }
+          ]
+        },
+        "cost": 0
+      },
+      {
+        "id": "41895681-5dc9-5ad4-a629-9142cc3d05dd",
+        "promptIdx": 0,
+        "testIdx": 3,
+        "testCase": {
+          "description": "a day in Paris as JSON",
+          "vars": {
+            "traveller": "Sam",
+            "question": "Plan a day in Paris as JSON with the keys city, traveller and stops."
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "required": [
+                  "city",
+                  "traveller",
+                  "stops"
+                ]
+              }
+            },
+            {
+              "type": "contains-all",
+              "value": [
+                "Louvre",
+                "{{traveller}}"
+              ]
+            },
+            {
+              "type": "contains-json"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "file://agent.py",
+          "label": "agent"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: Plan a day in Paris as JSON with the keys city, traveller and stops.",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "Plan a day in Paris as JSON with the keys city, traveller and stops."
+        },
+        "latencyMs": 4,
+        "namedScores": {},
+        "metadata": {
+          "sessionId": "9445200f-8c57-50c6-8c72-4af724f87d53"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "{\"city\": \"Paris\", \"traveller\": \"Sam\", \"stops\": [\"Louvre\", \"Mus\\u00e9e d'Orsay\", \"Seine cruise\"]}",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 4,
+          "cost": 0
+        },
+        "error": null,
+        "failureReason": 0,
+        "success": true,
+        "score": 1.0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 4ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "city",
+                    "traveller",
+                    "stops"
+                  ]
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains-all",
+                "value": [
+                  "Louvre",
+                  "{{traveller}}"
+                ]
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains-json"
+              }
+            }
+          ]
+        },
+        "cost": 0
+      },
+      {
+        "id": "97d6d938-0523-51e7-bc2d-afc97578a16a",
+        "promptIdx": 0,
+        "testIdx": 4,
+        "testCase": {
+          "description": "a day in Lisbon as JSON",
+          "vars": {
+            "traveller": "Sam",
+            "question": "Plan a day in Lisbon as JSON with the keys city, traveller and stops."
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI language model"
+            },
+            {
+              "type": "not-regex",
+              "value": "\\b(?:sorry|apologi[sz]e)\\b"
+            },
+            {
+              "type": "latency",
+              "threshold": 3000
+            },
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "required": [
+                  "city",
+                  "traveller",
+                  "stops"
+                ]
+              }
+            },
+            {
+              "type": "contains-all",
+              "value": [
+                "Alfama",
+                "{{traveller}}"
+              ]
+            },
+            {
+              "type": "javascript",
+              "value": "JSON.parse(output).stops.length >= 2"
+            },
+            {
+              "type": "cost",
+              "threshold": 0.002,
+              "metric": "spend"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "promptId": "3a8c0f5d6e1b2a4c9d7e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "provider": {
+          "id": "file://agent.py",
+          "label": "agent"
+        },
+        "prompt": {
+          "raw": "You are a travel assistant. Answer Sam in one sentence. Question: Plan a day in Lisbon as JSON with the keys city, traveller and stops.",
+          "label": "answer",
+          "config": {}
+        },
+        "vars": {
+          "traveller": "Sam",
+          "question": "Plan a day in Lisbon as JSON with the keys city, traveller and stops."
+        },
+        "latencyMs": 3,
+        "namedScores": {
+          "spend": 1
+        },
+        "metadata": {
+          "sessionId": "9b711f27-79c6-53d9-9f08-4e7a85ddfe92"
+        },
+        "tokenUsage": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 1
+        },
+        "response": {
+          "output": "{\"city\": \"Lisbon\", \"traveller\": \"Sam\", \"stops\": [\"Alfama\", \"Bel\\u00e9m Tower\"]}",
+          "tokenUsage": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 1
+          },
+          "cached": false,
+          "latencyMs": 3,
+          "cost": 0
+        },
+        "error": null,
+        "failureReason": 0,
+        "success": true,
+        "score": 1.0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All assertions passed",
+          "namedScores": {
+            "spend": 1
+          },
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI language model"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-regex",
+                "value": "\\b(?:sorry|apologi[sz]e)\\b"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Latency 3ms is less than or equal to threshold 3000ms",
+              "assertion": {
+                "type": "latency",
+                "threshold": 3000
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "city",
+                    "traveller",
+                    "stops"
+                  ]
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains-all",
+                "value": [
+                  "Alfama",
+                  "{{traveller}}"
+                ]
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "JSON.parse(output).stops.length >= 2"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Cost 0.0000 is less than or equal to threshold 0.002",
+              "assertion": {
+                "type": "cost",
+                "threshold": 0.002,
+                "metric": "spend"
+              }
+            }
+          ]
+        },
+        "cost": 0
+      }
+    ],
+    "stats": {
+      "successes": 5,
+      "failures": 4,
+      "errors": 1,
+      "tokenUsage": {
+        "total": 252,
+        "prompt": 168,
+        "completion": 84,
+        "cached": 0,
+        "numRequests": 10
+      },
+      "durationMs": 31840
+    }
+  },
+  "config": {
+    "description": "Travel assistant",
+    "prompts": [
+      {
+        "id": "answer",
+        "label": "answer",
+        "raw": "You are a travel assistant. Answer {{traveller}} in one sentence. Question: {{question}}"
+      }
+    ],
+    "providers": [
+      {
+        "id": "openai:gpt-4.1-mini",
+        "label": "mini"
+      },
+      {
+        "id": "file://agent.py",
+        "label": "agent"
+      }
+    ],
+    "evaluateOptions": {
+      "maxConcurrency": 2
+    },
+    "defaultTest": {
+      "vars": {
+        "traveller": "Sam"
+      },
+      "assert": [
+        {
+          "type": "not-icontains",
+          "value": "as an AI language model"
+        },
+        {
+          "type": "not-regex",
+          "value": "\\b(?:sorry|apologi[sz]e)\\b"
+        },
+        {
+          "type": "latency",
+          "threshold": 3000
+        }
+      ]
+    },
+    "tests": [
+      {
+        "description": "capital of France",
+        "vars": {
+          "question": "What is the capital of France?"
+        },
+        "assert": [
+          {
+            "type": "starts-with",
+            "value": "The capital of"
+          },
+          {
+            "type": "icontains",
+            "value": "paris",
+            "weight": 2
+          },
+          {
+            "type": "llm-rubric",
+            "value": "Names Paris as the capital of France"
+          }
+        ]
+      },
+      {
+        "description": "capital of Japan",
+        "vars": {
+          "question": "What is the capital of Japan?"
+        },
+        "assert": [
+          {
+            "type": "starts-with",
+            "value": "The capital of"
+          },
+          {
+            "type": "icontains",
+            "value": "tokyo"
+          },
+          {
+            "type": "llm-rubric",
+            "value": "Names Tokyo as the capital of Japan"
+          }
+        ]
+      },
+      {
+        "description": "capital of Portugal",
+        "vars": {
+          "question": "What is the capital of Portugal?"
+        },
+        "assert": [
+          {
+            "type": "starts-with",
+            "value": "The capital of"
+          },
+          {
+            "type": "icontains",
+            "value": "lisbon"
+          },
+          {
+            "type": "llm-rubric",
+            "value": "Names Lisbon as the capital of Portugal"
+          },
+          {
+            "type": "similar",
+            "value": "The capital of Portugal is Lisbon.",
+            "threshold": 0.8
+          }
+        ]
+      },
+      {
+        "description": "a day in Paris as JSON",
+        "vars": {
+          "question": "Plan a day in Paris as JSON with the keys city, traveller and stops."
+        },
+        "assert": [
+          {
+            "type": "is-json",
+            "value": {
+              "type": "object",
+              "required": [
+                "city",
+                "traveller",
+                "stops"
+              ]
+            }
+          },
+          {
+            "type": "contains-all",
+            "value": [
+              "Louvre",
+              "{{traveller}}"
+            ]
+          },
+          {
+            "type": "contains-json"
+          }
+        ]
+      },
+      {
+        "description": "a day in Lisbon as JSON",
+        "vars": {
+          "question": "Plan a day in Lisbon as JSON with the keys city, traveller and stops."
+        },
+        "assert": [
+          {
+            "type": "is-json",
+            "value": {
+              "type": "object",
+              "required": [
+                "city",
+                "traveller",
+                "stops"
+              ]
+            }
+          },
+          {
+            "type": "contains-all",
+            "value": [
+              "Alfama",
+              "{{traveller}}"
+            ]
+          },
+          {
+            "type": "javascript",
+            "value": "JSON.parse(output).stops.length >= 2"
+          },
+          {
+            "type": "cost",
+            "threshold": 0.002,
+            "metric": "spend"
+          }
+        ]
+      }
+    ]
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.125.1",
+    "exportedAt": "2026-11-14T10:00:32.000Z",
+    "evaluationCreatedAt": "2026-11-14T10:00:00.000Z"
+  }
+}

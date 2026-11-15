@@ -845,9 +845,16 @@ def _wait[T](work: Coroutine[Any, Any, T]) -> T:
 
 
 def _record(store: EvalStore, records: RecordStore, found: InspectLog) -> Run:
-    """Record the log as a run: ``running`` while its cases are written, then the state of the
-    log. An import that stops early leaves the run ``failed``, or ``cancelled`` when interrupted."""
+    """Record the log as a run."""
     imported = inspect_run(found, run_id=str(uuid.uuid4()), code=_wait(_code(records, found.log.eval.task)))
+    return record_imported_run(store, records, imported)
+
+
+def record_imported_run(store: EvalStore, records: RecordStore, imported: ImportedRun) -> Run:
+    """Record a run read from another tool's files, as ``SINGLE_USER`` in the default project:
+    ``running`` while its cases are written, then its own state. An import that stops early
+    leaves the run ``failed``, or ``cancelled`` when interrupted. The promptfoo importer records
+    its runs the same way."""
     final = imported.run
     started = final.model_copy(
         update={"state": "running", "counts": Counts(cases=final.counts.cases), "error": "", "finished_at": None}
@@ -928,6 +935,7 @@ __all__ = [
     "inspect_run",
     "inspect_scores",
     "read_inspect_log",
+    "record_imported_run",
     "spans_of",
     "verdict",
 ]

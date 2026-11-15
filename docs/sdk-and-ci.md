@@ -131,6 +131,9 @@ martian evals run evals.yaml
 martian ui
 # Inspect AI logs as runs in that UI (see the evals core guide):
 martian evals import inspect logs/*.eval
+# promptfoo results as runs in that UI, and a promptfoo config as suite files (see the evals core guide):
+martian evals import promptfoo results.json
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
 # An MLflow tracking store copied into that UI, after a schema version check:
 martian evals import mlflow ./mlflow.db
 # All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):

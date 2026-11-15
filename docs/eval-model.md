@@ -193,6 +193,48 @@ times, model and token use (`mlflow.chat.tokenUsage`). Text a log keeps once in 
 Inspect's per-epoch reductions (`reductions`), the sample's store, sandbox and the events other
 than model, tool and span events are not imported; the log the run names keeps them.
 
+## promptfoo results
+
+`martian evals import promptfoo` reads the JSON file `promptfoo eval -o results.json` writes:
+promptfoo's output file around an `EvaluateSummary` of version 3, as its
+[configuration reference](https://www.promptfoo.dev/docs/configuration/reference/#evaluation-outputs)
+gives it, and records each provider in it as one run
+([promptfoo results and configs](evals-core.md#promptfoo-results-and-configs)).
+`martian.evals.promptfoo_import` does the mapping without promptfoo installed.
+
+| promptfoo results | Model |
+| --- | --- |
+| The file | `Run.provenance["promptfoo"]`: `results` (its absolute path), `results_sha256` and `results_version` |
+| `evalId`, `results.timestamp`, `results.stats`, `metadata` (such as `promptfooVersion`), `config.description` | `eval_id`, `timestamp`, `stats`, `metadata` and `description` in `Run.provenance["promptfoo"]` |
+| `results.prompts` of the provider | `Run.provenance["promptfoo"]["prompts"]`: each prompt's `label`, `raw` and `metrics` |
+| A result's `provider` (`id`, `label`) | One `Run` per provider, with `provenance["promptfoo"]["provider"]`, the code `promptfoo-<label or id>-<n>`, and each trace's `model` the provider's id. `Run.target` is `stored` |
+| `results.timestamp`, `stats.durationMs` | `Run.created_at` and `started_at`; `finished_at` the timestamp plus the duration |
+| `config.description` | `Run.dataset_name`, else the file's name. `Run.dataset_digest` is the digest of the cases' ids, inputs and expectations, so two providers over the same tests compare |
+| A result (`testIdx`, `promptIdx`, `repeatIndex`) | A `CaseResult`, in test, prompt and repeat order, with `case_id` `test <testIdx + 1>`, `, prompt <promptIdx + 1>` when the file has several prompts, and ` (repeat <repeatIndex + 1>)` for a later repeat |
+| `prompt.raw` (the rendered prompt), `vars` | `CaseResult.inputs.prompt` and `inputs.vars`; the prompt is the trace's request |
+| `testCase.assert` | `CaseResult.expectations.assert`; a grading `provider` given as an object is kept as its id only, here and in each score's metadata |
+| `response.output` | `CaseResult.output` and the trace's response |
+| `success`, `failureReason` | `CaseResult.status`: `failureReason` 2 is `error`, else `passed` when `success`, else `failed` |
+| `error`, else `response.error`, when `failureReason` is 2 | `CaseResult.error`, and the trace's state is `error`. A failed assertion's reason, which promptfoo also puts in `error`, stays with its score |
+| `latencyMs` | `CaseResult.latency_ms` and the trace's latency |
+| `cost`, `tokenUsage.total` | The trace's `cost` and `tokens` |
+| `id`, `score`, `namedScores`, `testCase.description` | Trace metadata `promptfoo.result_id`, `promptfoo.score`, `promptfoo.named_scores` and `promptfoo.description`; tags `promptfoo.test_idx`, `promptfoo.prompt_idx` and `promptfoo.provider` |
+| `vars`, `response.cached`, the token use and cost | The span's attributes `promptfoo.vars`, `promptfoo.cached`, `promptfoo.token_usage` and `promptfoo.cost` |
+| `gradingResult.componentResults[]` (or `gradingResult` itself when it has an `assertion` and no components) | One `Score` each, below |
+
+| promptfoo assertion result | Model |
+| --- | --- |
+| `assertion.type` | `Score.scorer`; a type seen again in the same row is `<type> (2)`, and a result nested in another's `componentResults` (an `assert-set`) is `<parent>/<type>`. `Run.scorers` has one `ScorerVersion` per name with `type` the assertion type |
+| `pass` | `Score.value` and `Score.passed` |
+| `score` | `metadata["promptfoo.score"]`; 1 when it passed and 0 when it did not if promptfoo gives none |
+| `reason` | `Score.rationale` |
+| `assertion`, `namedScores`, `metadata` | `metadata["promptfoo.assertion"]`, `["promptfoo.named_scores"]`, `["promptfoo.metadata"]` |
+| `metadata.graderError` | A score with no value and no verdict, and the reason as its `error` |
+| A model-graded type or a `promptfoo:redteam:*` grader | `source` `llm_judge`, with `source_id` the assertion's grading `provider` when it names one; every other type has source `code` |
+
+The file's `config` (but its `description`), the results' `traceId` and `evaluationId`, and a
+row's `metadata` and `promptId` are not imported; the file the run names keeps them.
+
 ## MLflow tracking stores
 
 `martian evals import mlflow` copies an MLflow tracking store, read through MLflow's own SQL
@@ -252,9 +294,10 @@ views, store bindings, migrations, delivery progress and CI gate sessions) are l
 ## What uses it
 
 The [evals core](evals-core.md)'s store interface takes and returns these objects, and the
-suite file is their written form ([above](#the-sdk-suite-file)). Inspect AI logs are imported
-into them ([above](#inspect-ai-logs)), and MLflow tracking stores copied into them
-([above](#mlflow-tracking-stores)). An organisation's [data export](data-export.md) is these
+suite file is their written form ([above](#the-sdk-suite-file)). Inspect AI logs and promptfoo
+results are imported into them ([above](#inspect-ai-logs), [above](#promptfoo-results)), a
+promptfoo config is converted into suite files ([converted configs](evals-core.md#converted-configs)),
+and MLflow tracking stores copied into them ([above](#mlflow-tracking-stores)). An organisation's [data export](data-export.md) is these
 objects' JSON, one per line. The evals core serves them
 (MorningHQ/martian-notes#98), and the server imports them when it mounts that core
 (MorningHQ/martian-notes#102).
