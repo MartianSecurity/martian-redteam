@@ -25,16 +25,18 @@ on its own model when the request names none, and reads the provider's key from 
 :func:`agents_judge` sends the request to martian-agents' judge route
 (``POST /v1/martian/targets/{target_id}/judge``), as the Martian server does, and checks the
 reply as the server does. Agents judges on the model its operator configured, so it refuses a
-request pinned to a model or an endpoint.
+request pinned to a model or an endpoint. The route checks a static authorization of the target,
+or a target lease the worker's connection sends with the saved item it admits (``action_id``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -205,13 +207,19 @@ def sdk_judge(
 
 @dataclass(frozen=True)
 class AgentsConnection:
-    """How the worker reaches martian-agents' judge for one organisation: the approved HTTP target
-    and authorization the judge route checks, and the headers that authenticate the worker (an
-    ``X-API-Key``, or a bearer token)."""
+    """How the worker reaches martian-agents' judge for one request: the approved HTTP target and
+    authorization the judge route checks, and the headers that authenticate the worker (an
+    ``X-API-Key``, or a bearer token).
+
+    ``action_id`` is the saved item a target lease admits the call for. A worker whose judge calls
+    carry a lease (the ``X-Martian-Target-Lease`` header, as the Martian server sends it) sets it,
+    and the request sends it as ``action_id``; with the route's static authorization it is None and
+    the request leaves it out."""
 
     target_id: str
     authorization_ref: str
     headers: Mapping[str, str] = field(default_factory=dict)
+    action_id: str | None = None
 
 
 AGENTS_JUDGE_BUILTINS = ("correctness", "safety", "policy")
@@ -262,13 +270,14 @@ def _accepts(definition: Mapping[str, Any] | None, value: Any) -> bool:
 
 def agents_judge(
     base_url: str,
-    connection: Callable[[Principal], AgentsConnection],
+    connection: Callable[[Principal], AgentsConnection | Awaitable[AgentsConnection]],
     *,
     timeout_seconds: float = 75.0,
 ) -> Judge:
     """martian-agents as the worker's judge. ``base_url`` is Agents' address; ``connection`` gives
-    the target, authorization and headers for a request's principal. One call per request, never
-    retried; Agents bounds its own model call."""
+    the target, authorization, headers and admitted item for a request's principal, and is asked
+    once for each request, just before it is sent, so it may admit each call on its own; it may be
+    a coroutine function. One call per request, never retried; Agents bounds its own model call."""
     origin = base_url.rstrip("/")
 
     async def judge(request: JudgeRequest) -> JudgeResult:
@@ -292,7 +301,8 @@ def agents_judge(
                 errors[scorer.name] = str(reason)
         if not builtins and not definitions:
             return JudgeResult(model="", errors=errors)
-        found = connection(request.principal)
+        answer = connection(request.principal)
+        found = await answer if inspect.isawaitable(answer) else answer
         body: dict[str, Any] = {
             "authorization_ref": found.authorization_ref,
             "campaign_id": request.job_id,
@@ -304,6 +314,8 @@ def agents_judge(
         }
         if definitions:
             body["definitions"] = definitions
+        if found.action_id is not None:
+            body["action_id"] = found.action_id
         path = f"/v1/martian/targets/{quote(found.target_id, safe='')}/judge"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=5), trust_env=False) as client:

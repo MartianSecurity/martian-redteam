@@ -619,18 +619,21 @@ wrong one fails `sdk_judge` itself. A score records the model version the provid
 **`agents_judge(base_url, connection, timeout_seconds=75)`** asks martian-agents instead, as the
 Martian server does today: `POST {base_url}/v1/martian/targets/{target_id}/judge` with the
 built-in scorer names, the policy guidelines and the registered judges' definitions, and the
-scoring job's id as `campaign_id`. `connection(principal)` returns an `AgentsConnection`: the
-approved HTTP target, the `authorization_ref`, and the headers that authenticate the worker
-(`X-API-Key`, or a bearer token). The reply is checked as the server checks it: exactly the
+scoring job's id as `campaign_id`. `connection(principal)`, a function or a coroutine function,
+returns an `AgentsConnection`: the approved HTTP target, the
+`authorization_ref`, the headers that authenticate the worker (`X-API-Key`, or a bearer token),
+and `action_id`, the saved item a target lease admits the call for. It is asked once for each
+request, just before the call. The reply is checked as the server checks it: exactly the
 requested scores, each of its judge's type, a model name, and revision `martian-eval-judge-v1`
 (`v2` with registered judges). Agents judges on the model its operator configured and reports it
 as `bedrock/<model>` with no version, so a request pinned to a model or an endpoint is refused
 before any call ("The Agents judge runs on its operator's model; this judge is pinned to ...").
-An installation on the Agents judge leaves the default judge model unset. It uses the route's
-static authorization; the per-case target lease the Martian server sends
-(`X-Martian-Target-Lease` with an `action_id`) is not part of it, and a server that needs it
-supplies its own `Judge` when it mounts the core (MorningHQ/martian-notes#102). It is separate
-from the worker's `AgentExecutor`, which calls registered agents as targets.
+An installation on the Agents judge leaves the default judge model unset. With no `action_id`
+the call uses the route's static authorization of the target. The Martian server admits each
+call with a target lease instead: its connection returns the lease as an
+`X-Martian-Target-Lease` header and the item it admits as `action_id`, which the request sends
+(`app/evals_worker.py` in MorningHQ/MartianBackend). It is separate from the worker's
+`AgentExecutor`, which calls registered agents as targets.
 
 **What a score says when there is no verdict.** A judge that fails with a message it can show
 (`JudgeError`) puts that message on each score of the request: the SDK judge's failure messages
