@@ -52,6 +52,8 @@ JOB_COMPARISON = {"criteria", "baseline_job_id", "candidate_job_id", "baseline_s
 SCORECARD = {"criteria", "total", "latency", "gate"}
 CARD = {"name", "kind", "categories", "total", "evaluated", "missing", "errors", "coverage", "pass_rate", "passed"}
 CARD |= {"confidence_95", "mean", "p50", "p95", "minimum", "maximum", "gate", "policy"}
+# The core's own addition (martian.evals.stats); the server's scorecard does not have it yet.
+CARD |= {"mean_confidence_95"}
 
 
 @pytest.fixture

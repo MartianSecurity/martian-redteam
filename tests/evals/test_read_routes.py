@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from martian.evals.model import Trace
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, NO_AGENT, SINGLE_USER, create_app, organisation_principal, result_id
+from martian.evals.stats import wilson
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
 from tests.evals.read_fixture import T0, seed
@@ -124,6 +125,8 @@ def test_the_workbench_shows_the_newest_scoring_job_and_its_scores(served):
         1,
         1.0,
     )
+    # The Wilson interval of 2 of 2; a boolean scorer has no mean to give an interval for.
+    assert card["confidence_95"] == list(wilson(2, 2)) and card["mean_confidence_95"] is None
     assert [r["id"] for r in work["latest_reviews"]] == ["review-1"]
     assert work["calibration"][0]["paired"] == 1 and work["calibration"][0]["agreement"] == 1.0
     assert work["members"] == [{"id": "local", "name": "local", "role": "owner"}]

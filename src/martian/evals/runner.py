@@ -36,8 +36,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from martian._version import __version__
 from martian.config import ConfigError
+from martian.evals.stats import proportion_interval
 
 JUDGES = ("rubric", "guidelines", "conditions")
+GROUP_TAG = "martian.group"
+"""The case tag that holds a data file case's ``group``."""
 CHECKS = ("contains", "not_contains", "matches", "not_matches", "is_json")
 
 
@@ -216,7 +219,8 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
     """Read cases from JSONL or CSV into MLflow rows with a stable ``id``.
 
     JSONL: one object per line with ``inputs`` (an object) or ``input`` (a string), and optional
-    ``id``, ``outputs``/``output`` and ``expectations``.
+    ``id``, ``outputs``/``output``, ``expectations`` and ``group`` (a string naming the group of
+    related cases it belongs to, which the summary's intervals allow for).
     CSV: columns ``input``, optional ``id`` and ``output``; every other non-empty column becomes
     an expectation of that name.
     """
@@ -261,6 +265,10 @@ def load_cases(path: str | Path, *, input_key: str = "message") -> list[dict[str
         if not isinstance(expectations, dict):
             raise ConfigError(f"case {identifier}: `expectations` must be an object")
         case: dict[str, Any] = {"id": identifier, "inputs": inputs, "expectations": dict(expectations)}
+        if "group" in record:
+            if not isinstance(record["group"], str) or not record["group"].strip():
+                raise ConfigError(f"case {identifier}: `group` must be a non-empty string")
+            case["group"] = record["group"]
         outputs = record.get("outputs", record.get("output"))
         if outputs is not None:
             case["outputs"] = outputs
@@ -525,24 +533,44 @@ class Results:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
-def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float, invalidated: int) -> dict[str, Any]:
-    per_check = {
-        label: {
-            "passed": sum(r["checks"].get(label, {}).get("passed") is True for r in records),
-            "failed": sum(r["checks"].get(label, {}).get("passed") is False for r in records),
-            "errors": sum(r["checks"].get(label, {}).get("passed") is None for r in records),
+def _pass_rate(verdicts: list[tuple[str, bool | None]], groups: dict[str, str]) -> dict[str, Any]:
+    """The share of cases with a verdict that passed, and its 95% interval (``martian.evals.stats``),
+    allowing for the cases' groups when the data names any. ``verdicts`` holds each case's id and
+    verdict; a case without a verdict is left out."""
+    graded = [(case_id, passed) for case_id, passed in verdicts if passed is not None]
+    if not graded:
+        return {"pass_rate": None, "confidence_95": None}
+    outcomes = [passed for _, passed in graded]
+    labels = [groups.get(case_id) for case_id, _ in graded] if groups else None
+    interval = proportion_interval(outcomes, labels)
+    assert interval is not None  # there is at least one verdict
+    return {"pass_rate": sum(outcomes) / len(outcomes), "confidence_95": [interval[0], interval[1]]}
+
+
+def _summary(
+    records: list[dict[str, Any]], labels: list[str], seconds: float, invalidated: int, groups: dict[str, str]
+) -> dict[str, Any]:
+    per_check = {}
+    for label in labels:
+        verdicts = [(str(r["id"]), r["checks"].get(label, {}).get("passed")) for r in records]
+        per_check[label] = {
+            "passed": sum(passed is True for _, passed in verdicts),
+            "failed": sum(passed is False for _, passed in verdicts),
+            "errors": sum(passed is None for _, passed in verdicts),
+            **_pass_rate(verdicts, groups),
         }
-        for label in labels
-    }
     target_errors: dict[str, int] = {}
     for record in records:
         if record.get("error"):
             target_errors[str(record["error"])] = target_errors.get(str(record["error"]), 0) + 1
+    shown = {groups[str(r["id"])] for r in records if str(r["id"]) in groups}
     return {
         "cases": len(records),
         "passed": sum(r["passed"] is True for r in records),
         "failed": sum(r["passed"] is False for r in records),
         "errors": sum(r["passed"] is None for r in records),
+        **_pass_rate([(str(r["id"]), r["passed"]) for r in records], groups),
+        "groups": len(shown) if shown else None,
         "checks": per_check,
         "target_errors": target_errors,
         "invalidated": invalidated,
@@ -550,13 +578,34 @@ def _summary(records: list[dict[str, Any]], labels: list[str], seconds: float, i
     }
 
 
-def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str) -> None:
-    """JUnit XML for CI systems: a failed check is a failure, a case without a verdict an error."""
+def _junit_properties(summary: dict[str, Any]) -> list[str]:
+    """The run's pass rates and their 95% intervals, overall and per check, as testsuite properties."""
+    values: list[tuple[str, Any]] = []
+    for prefix, rate in [("", summary), *((f"check.{label}.", found) for label, found in summary["checks"].items())]:
+        if rate["pass_rate"] is not None:
+            low, high = rate["confidence_95"]
+            values += [(f"{prefix}pass_rate", rate["pass_rate"]), (f"{prefix}pass_rate_95_low", low)]
+            values += [(f"{prefix}pass_rate_95_high", high)]
+    if summary["groups"] is not None:
+        values.append(("case_groups", summary["groups"]))
+    if not values:
+        return []
+    return [
+        "  <properties>",
+        *(f"    <property name={quoteattr(name)} value={quoteattr(f'{value:.6g}')}/>" for name, value in values),
+        "  </properties>",
+    ]
+
+
+def write_junit(records: list[dict[str, Any]], path: Path, *, suite_name: str, summary: dict[str, Any]) -> None:
+    """JUnit XML for CI systems: a failed check is a failure, a case without a verdict an error. The
+    testsuite's properties hold the summary's pass rates and their intervals."""
     failures = sum(r["passed"] is False for r in records)
     errors = sum(r["passed"] is None for r in records)
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<testsuite name={quoteattr(suite_name)} tests="{len(records)}" failures="{failures}" errors="{errors}">',
+        *_junit_properties(summary),
     ]
     for record in records:
         lines.append(f"  <testcase classname={quoteattr(suite_name)} name={quoteattr(str(record['id']))}>")
@@ -771,9 +820,10 @@ def run_suite(
 
         final = results.records()
         ordered = [final[case["id"]] for case in cases if case["id"] in final]
-        summary = _summary(ordered, labels, time.monotonic() - started, invalidated)
+        groups = {case.id: case.tags[GROUP_TAG] for case in model_cases if GROUP_TAG in case.tags}
+        summary = _summary(ordered, labels, time.monotonic() - started, invalidated, groups)
         summary["output"] = str(folder)
         (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem)
+        write_junit(ordered, folder / "junit.xml", suite_name=Path(path).stem, summary=summary)
         recorder.finish()
     return {**summary, "run": recorder.reference()}

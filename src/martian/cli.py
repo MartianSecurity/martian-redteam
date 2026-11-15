@@ -100,6 +100,7 @@ def _run_suite(
     from martian.evals.evaluate import EvaluationError
     from martian.evals.local import data_folder
     from martian.evals.runner import run_suite
+    from martian.evals.stats import rate_text
 
     console = Console()
     try:
@@ -115,12 +116,22 @@ def _run_suite(
     except (ConfigError, EvaluationError, ValueError) as error:
         typer.echo(f"Eval run failed: {error}", err=True)
         raise typer.Exit(code=2) from None
-    table = Table(title=f"{path.name}: {summary['cases']} cases")
-    for column in ("Check", "Passed", "Failed", "Errors"):
+    groups = summary["groups"]
+    table = Table(
+        title=f"{path.name}: {summary['cases']} cases",
+        caption=f"Intervals allow for {groups} case {'group' if groups == 1 else 'groups'}" if groups else None,
+    )
+    for column in ("Check", "Passed", "Failed", "Errors", "Pass rate (95% CI)"):
         table.add_column(column)
-    for name, counts in summary["checks"].items():
-        table.add_row(name, str(counts["passed"]), str(counts["failed"]), str(counts["errors"]))
-    table.add_row("All checks", str(summary["passed"]), str(summary["failed"]), str(summary["errors"]), style="bold")
+    for name, counts in [*summary["checks"].items(), ("All checks", summary)]:
+        table.add_row(
+            name,
+            str(counts["passed"]),
+            str(counts["failed"]),
+            str(counts["errors"]),
+            rate_text(counts["pass_rate"], counts["confidence_95"]),
+            style="bold" if counts is summary else None,
+        )
     console.print(table)
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} case(s): {reason}", markup=False, highlight=False)

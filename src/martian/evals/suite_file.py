@@ -77,7 +77,7 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
 }
 
 # The fields of a JSONL case that the runner reads.
-_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations"})
+_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations", "group"})
 _DEFAULT_FUNCTION = runner.TargetRef.model_fields["function"].default
 _DEFAULT_INPUT_KEY = runner.Suite.model_fields["input_key"].default
 # Suite fields a suite file does not hold: loading it gives them from its name and its data, and
@@ -119,7 +119,13 @@ def _cases(file: Path, input_key: str) -> list[Case]:
     for position, row in enumerate(rows, 1):
         try:
             cases.append(
-                Case(id=row["id"], inputs=row["inputs"], expectations=row["expectations"], outputs=row.get("outputs"))
+                Case(
+                    id=row["id"],
+                    inputs=row["inputs"],
+                    expectations=row["expectations"],
+                    outputs=row.get("outputs"),
+                    tags={runner.GROUP_TAG: row["group"]} if "group" in row else {},
+                )
             )
         except ValidationError as error:
             raise ConfigError(f"case {position} does not fit the model: {_problems(error)}") from None
@@ -135,7 +141,7 @@ def _refuse_unread_fields(file: Path) -> None:
         if unknown := sorted(set(record) - _CASE_FIELDS):
             raise ConfigError(
                 f"data line {number}: a case has no field {', '.join(unknown)}; "
-                "its fields are id, input or inputs, output or outputs, and expectations"
+                "its fields are id, input or inputs, output or outputs, expectations and group"
             )
         for one, other in (("input", "inputs"), ("output", "outputs")):
             if one in record and other in record:
@@ -257,13 +263,15 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
         raise ConfigError("a data file needs at least one case")
     lines = []
     for position, case in enumerate(cases, 1):
-        if case.tags or case.metadata:
-            raise ConfigError(f"case {position}: a data file has no place for tags or metadata")
+        if set(case.tags) - {runner.GROUP_TAG} or case.metadata:
+            raise ConfigError(f"case {position}: a data file has no place for tags other than its group, or metadata")
         row: dict[str, Any] = {"id": case.id, "inputs": case.inputs}
         if case.expectations:
             row["expectations"] = case.expectations
         if case.outputs is not None:
             row["outputs"] = case.outputs
+        if runner.GROUP_TAG in case.tags:
+            row["group"] = case.tags[runner.GROUP_TAG]
         lines.append(json.dumps(row, ensure_ascii=False) + "\n")
     return "".join(lines)
 

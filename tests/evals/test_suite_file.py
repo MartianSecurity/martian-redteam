@@ -272,6 +272,18 @@ def test_cases_round_trip_through_a_jsonl_data_file(tmp_path):
     assert cases[1].outputs == "Hello" and cases[1].expectations == {}
 
 
+def test_a_cases_group_round_trips_as_its_group_tag(tmp_path):
+    grouped = [{**CASES[0], "group": "refusals"}, *CASES[1:]]
+    suite, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION, cases=grouped))
+    assert cases[0].tags == {"martian.group": "refusals"} and cases[1].tags == {}
+    plain, _ = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
+    assert suite.dataset_digest != plain.dataset_digest
+    assert json.loads(cases_to_jsonl(cases).splitlines()[0])["group"] == "refusals"
+    (tmp_path / "again.jsonl").write_text(cases_to_jsonl(cases), encoding="utf-8")
+    again, again_cases = load_suite_file(write(tmp_path, {**EVERY_FIELD_FUNCTION, "data": "again.jsonl"}))
+    assert again_cases == cases and again.dataset_digest == suite.dataset_digest
+
+
 @pytest.mark.parametrize(
     ("suite", "problem"),
     [
@@ -377,7 +389,7 @@ def test_settings_the_file_cannot_hold_are_refused_on_export(settings, problem, 
 
 def test_cases_with_tags_or_metadata_are_refused_on_export(tmp_path):
     _, cases = load_suite_file(write(tmp_path, EVERY_FIELD_FUNCTION))
-    with pytest.raises(ConfigError, match="case 2: a data file has no place for tags or metadata"):
+    with pytest.raises(ConfigError, match="case 2: a data file has no place for tags other than its group"):
         cases_to_jsonl([cases[0], cases[1].model_copy(update={"tags": {"team": "x"}})])
     with pytest.raises(ConfigError, match="at least one case"):
         cases_to_jsonl([])

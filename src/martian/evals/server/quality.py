@@ -5,7 +5,9 @@ in MorningHQ/MartianBackend), over the shared model's case results, scores and r
 server shapes (``martian.evals.server.projection``). Two differences, because the model holds
 less than the server's rows: a scorer's kind comes from its values (text values are categorical,
 numbers other than booleans numeric, anything else boolean; ``response_length`` is numeric), and a
-scoring job's definition digest is a digest of its pinned scorer versions.
+scoring job's definition digest is a digest of its pinned scorer versions. A scorecard also carries
+``mean_confidence_95``, the t interval of a scorer's mean (``martian.evals.stats``), which the
+server's scorecard does not have; its ``confidence_95`` is the same Wilson interval as the server's.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Any
 from martian.evals.model import Run, Value, digest
 from martian.evals.server.projection import Assessment, ReviewRow, dataset_identity
 from martian.evals.server.schemas import EvalItemOut
+from martian.evals.stats import Interval, mean_interval, wilson
 
 
 def percentile(values: Iterable[Any], fraction: float) -> float | None:
@@ -30,14 +33,9 @@ def percentile(values: Iterable[Any], fraction: float) -> float | None:
     return float(ordered[lo] + (ordered[hi] - ordered[lo]) * (position - lo))
 
 
-def wilson(passed: int, count: int) -> list[float] | None:
-    if not count:
-        return None
-    z = 1.959963984540054
-    p = passed / count
-    mid = (p + z * z / (2 * count)) / (1 + z * z / count)
-    radius = z * math.sqrt(p * (1 - p) / count + z * z / (4 * count * count)) / (1 + z * z / count)
-    return [max(0, mid - radius), min(1, mid + radius)]
+def interval(found: Interval | None) -> list[float] | None:
+    """An interval as the server's responses carry it: ``[low, high]``."""
+    return None if found is None else [found[0], found[1]]
 
 
 def definition_digest(config: dict[str, Any]) -> str:
@@ -109,8 +107,9 @@ def scorecard(
                 "coverage": coverage,
                 "pass_rate": rate,
                 "passed": passed if boolean else None,
-                "confidence_95": wilson(passed, len(values)) if boolean else None,
+                "confidence_95": interval(wilson(passed, len(values))) if boolean else None,
                 "mean": average,
+                "mean_confidence_95": interval(mean_interval(nums)),
                 "p50": percentile(nums, 0.5),
                 "p95": percentile(nums, 0.95),
                 "minimum": min(nums) if nums else None,
