@@ -158,7 +158,7 @@ counts and `target_errors` are counted from scores and case results; `pass_rate`
 the case results' attempts; `false_refusals`, for a suite with a policy check, is counted from
 the cases' `no_refusal` verdicts, with repeats their attempts combined
 ([false refusals](evals.md#false-refusals)); with conversation cases, `conversations` and each check's `scope` and `turns`
-are counted from the case results' turns ([conversations](evals.md#conversations)); with simulated users, `simulator` is the run's `provenance.simulator` model and version and the count of `simulated` case results ([simulated users](evals.md#simulated-users)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
+are counted from the case results' turns ([conversations](evals.md#conversations)); with simulated users, `simulator` is the run's `provenance.simulator` (`model`, `parameters`, `version`), the persona source (the suite's `dataset_location` and the run's `provenance.dataset` digest), and the counts and pass rate of the `simulated` case results ([simulated users](evals.md#simulated-users)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
 

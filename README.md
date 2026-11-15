@@ -31,7 +31,8 @@ checks:
 behind an API needs no Python file. A case can be a conversation of several turns, sent in order
 to a target that keeps it and graded per turn and as a whole, and its user can be simulated: a
 model plays a goal and a persona, which `martian evals personas` can build from real
-conversations.
+conversations. Simulated results are labelled as such, and `martian evals fidelity` compares a
+simulator's conversations with real ones.
 
 The run stays on your machine. It writes `results.jsonl`, `summary.json` and `junit.xml`,
 prints a summary table, can run each case several times, combine the attempts and report the
