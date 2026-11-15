@@ -1062,6 +1062,12 @@ def _trace(info: TraceInfo, project_id: str, *, spans: list[Span] | None = None)
     )
 
 
+def trace_from_mlflow(trace: MlflowTrace, project_id: str) -> Trace:
+    """A trace MLflow recorded, such as one of its evaluation harness's, in the model, with its
+    spans and its feedback assessments as scores. Its ``id`` is MLflow's trace id."""
+    return _trace(trace.info, project_id, spans=[_span(span) for span in trace.data.spans])
+
+
 def _matches(trace: Trace, query: TraceQuery) -> bool:
     if query.run_id is not None and trace.run_id != query.run_id:
         return False

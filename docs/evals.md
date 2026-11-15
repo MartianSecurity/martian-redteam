@@ -2,9 +2,8 @@
 
 An MLflow-style regression gate for Martian dataset evals. It is the pattern from MLflow's
 [Regression Testing and CI/CD](https://mlflow.org/docs/latest/genai/eval-monitor/regression-testing/)
-page (`pytest` + `@mlflow.test` + `mlflow.genai.evaluate()`), pinned to the MLflow version that the
-hosted server runs, with MartianBackend as the scorer and system of record. The CI job never
-connects to MLflow.
+page (`pytest` + `@mlflow.test` + `mlflow.genai.evaluate()`) on a pinned `mlflow-skinny`, with
+MartianBackend as the scorer and system of record. The CI job never connects to an MLflow server.
 
 ```text
 pytest ── load_dataset ──▶ Backend  GET  /v1/evals/ci/datasets/{name}   (pinned prompts + expected)
@@ -45,8 +44,10 @@ output: results
 
 Nothing in this command contacts the Martian platform. A function target runs in your process,
 a URL target is called from it, the judge calls the model you name with credentials from your
-environment, and MLflow writes to a local store in the output folder. Use [`martian ci`](sdk-and-ci.md) when a result must be
-recorded on the platform.
+environment, MLflow's evaluation harness writes to a local store in the output folder, and the
+run is recorded in the data folder of the
+[local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
+[`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
 to the target as keyword arguments), and optional `id`, `output` and `expectations`. CSV takes
@@ -111,15 +112,17 @@ and give repeated check types a `name`.
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict |
 | `summary.json` | Counts of passed, failed and errored cases, overall and per check, how many cases failed for each target error, and how many earlier results were discarded (`invalidated`) |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, a case with no verdict an error |
-| `mlflow.db` | The local MLflow store with traces and judge metadata |
+| `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table and exits `0` when every case passed, `1`
 when a case failed, and `2` when a case has no verdict or the suite file is invalid.
 
-**Options.** `--output DIR`, `--concurrency N`, `--limit N` and `--fresh`. A run that is stopped
-can be started again: finished cases are skipped, and cases that errored are tried again.
-`--fresh` discards earlier results.
+**Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--fresh` and `--data-dir DIR`. A
+run that is stopped can be started again: finished cases are skipped, and cases that errored are
+tried again. `--fresh` discards earlier results. `--data-dir` names the local Evals UI's data
+folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`, else
+`~/.martian/evals`.
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
 comment on the pull request with the result, still with no Martian account. See
@@ -134,16 +137,37 @@ many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `j
 modules the target file imports, or in the service behind a URL target: use `--fresh` after
 those.
 
+**The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
+`martian ui` opens the Evals UI on it, with no login and no other service
+([the local edition](evals-core.md#the-local-edition-martian-ui), which also runs
+[in a container](evals-core.md#the-local-edition-in-a-container) on a small server). The command
+ends by naming the run and the command that opens it:
+
+```text
+Run evals-3 is in the local Evals UI: martian ui
+```
+
+The run is in **Runs**, named after the suite file and numbered among that suite's runs, as a
+**Local run** of the data file's dataset. Its detail shows each case's verdict, reply and check
+reasons, and each case's trace with your target's own spans. **Compare** pairs two runs of the
+same data case by case, and **Traces** lists every case's trace. A case reused from an earlier
+run keeps its verdict but not its trace, which stays with the run that graded it. A run that
+stops early shows as failed, or cancelled when interrupted. How a run maps onto the Evals
+objects is in [command-line runs](evals-core.md#command-line-runs).
+
 **Your own MLflow server.** Add `mlflow: {tracking_uri: "https://your-mlflow", experiment: "name"}`
-to the suite file to log there instead of the local store, then open the run in the MLflow UI.
-For the local store, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
+to the suite file to have MLflow's evaluation harness log there instead of the local store, then
+open the run in the MLflow UI. The run is still recorded for `martian ui`. To browse the local
+store with MLflow's own UI, run `mlflow ui --backend-store-uri sqlite:///results/mlflow.db`
 (`mlflow ui` needs the full `mlflow` package, not `mlflow-skinny`).
 
 **The suite as model objects.** A suite file is the written form of the
 [shared eval model](eval-model.md#the-sdk-suite-file)'s `Suite`. `martian.evals.suite_file`
 loads a suite file and its data into the model's objects and writes them back as a suite file
 and a JSONL data file. A field that either direction would lose is refused with an error naming
-it, including check options and a `judge` that `martian evals run` accepts but ignores.
+it. `martian evals run` loads its suite the same way, so it refuses the same fields before any
+case runs: a check option that does not apply to its check type, such as `pattern` on `is_json`,
+a `judge` that no check uses, and a data line field it does not read.
 
 **Provider setup.** `judge.model` is an MLflow model URI, `<provider>:/<model>`, and the key
 comes from that provider's usual environment variable. Nothing is read from a `.env` file.
@@ -172,7 +196,7 @@ contract with explicit scorer tracking. The combined [Python/CLI runner](sdk-and
 records evals and YAML redteam in one Backend session.
 
 1. An org admin creates an API key with the required evals/CI capabilities (`POST /v1/api-keys`) and stores it as `MARTIAN_API_TOKEN`.
-2. Install `martian-sdk[evals]` (it pins `mlflow-skinny==3.16.1`, the hosted server's version) and write tests like
+2. Install `martian-sdk[evals]` (it pins `mlflow-skinny==3.18.0`) and write tests like
    [`examples/test_support_agent.py`](../examples/evals/test_support_agent.py).
 3. Run `pytest -p martian.evals.plugin --martian-evals-gate tests/evals` (add `-n auto` with
    pytest-xdist), or copy [`workflows/eval-gate.example.yml`](../examples/combined-ci.yml).

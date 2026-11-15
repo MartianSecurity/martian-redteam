@@ -13,15 +13,21 @@ martian --version
 
 Replace `<version>` with a release listed on PyPI.
 
-`evals` includes MLflow-skinny **3.16.1**, matching the current Backend/store,
-and pytest. The base installation supports redteam callbacks and local reports.
-The SDK reaches MLflow internals only through `src/martian/evals/_mlflow.py`,
-which lists each one; when moving the MLflow pin, run
-`tests/evals/test_mlflow_private.py` first, since it names any internal the new
-release removed.
+`evals` includes MLflow-skinny **3.18.0** and pytest. The SDK never connects to
+the hosted MLflow server, so this pin is independent of the server's version,
+which MorningHQ/martian-evals sets. The base installation supports redteam
+callbacks and local reports. The SDK reaches MLflow internals only through
+`src/martian/evals/_mlflow.py`, which lists each one. Before moving the pin, run
+the [MLflow compatibility suite](development.md#mlflow-upgrades) on the
+candidate release.
 The separate `mcp` extra adds the existing customer MCP integration.
 The `postgres` extra adds the Postgres driver for the in-process evals store on Postgres
 (see [evals core](evals-core.md#the-in-process-binding)).
+
+A newer MLflow migrates a local MLflow database in place the first time it opens
+one: a suite run's `mlflow.db`, the pytest kit's store when
+`MARTIAN_EVALS_STORE_DIR` keeps it, or an `MlflowStore` database. An older SDK then refuses that database as out of date, so back up a
+store you keep before upgrading the SDK.
 
 ## Python interfaces
 
@@ -121,6 +127,8 @@ martian ci --redteam-config redteam.yaml --output results
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
 # A suite file, run locally with only a model key (see the eval guide):
 martian evals run evals.yaml
+# The Evals UI on this machine, one user and no login (see the evals core guide):
+martian ui
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml
