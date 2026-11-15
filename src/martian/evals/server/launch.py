@@ -7,7 +7,8 @@ read, and submits it to the worker. The worker calls the target later; the reque
 
 - ``request_id`` identifies the request: the run's id is derived from it, so sending the same
   request again returns the same run, and the same ``request_id`` with other parameters is ``409``.
-- One run at a time per organisation: another queued or running run is ``409``.
+- An organisation has at most its edition's ``concurrent_runs`` queued or running at once: one
+  more is ``409`` (:mod:`martian.evals.server.admission`).
 - Run codes count up from ``EV-1001``, as on the server.
 - Cancelling a queued run finishes it at once. A running one gets ``cancel_requested_at``, which its
   worker reads before the next case, or is cancelled at once when its worker says that nothing is
@@ -36,9 +37,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from martian.evals.model import DatasetVersion, Run, RunLimits, RunState, ScoringJob, StoreRef, Suite, Target
+from martian.evals.model import DatasetVersion, Run, RunLimits, ScoringJob, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
+from martian.evals.server.admission import ACTIVE, ensure_run_place, ensure_scoring_place
 from martian.evals.server.dependencies import (
+    EntitlementsDep,
     OptionalWorkerDep,
     PrincipalDep,
     RecordsDep,
@@ -46,6 +49,7 @@ from martian.evals.server.dependencies import (
     WorkerDep,
     require_capability,
 )
+from martian.evals.server.entitlements import Entitlements
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out, suite_version_id
 from martian.evals.server.runs import find_run, lookup_run, project_keys, project_runs, writable_project
@@ -61,7 +65,6 @@ router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
 RUN_CODE = re.compile(r"^EV-(\d+)$")
 FIRST_CODE = 1001
-ACTIVE: tuple[RunState, ...] = ("queued", "running")
 
 
 def _now() -> datetime:
@@ -81,13 +84,6 @@ async def _next_code(store: EvalStore, records: RecordStore, principal: Principa
     return f"EV-{highest + 1}"
 
 
-async def _active(store: EvalStore, records: RecordStore, principal: Principal) -> bool:
-    for key in await project_keys(store, principal):
-        if (await records.list_runs(principal, key, states=list(ACTIVE), limit=1)).items:
-            return True
-    return False
-
-
 def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
     return (
         run.target is not None
@@ -105,6 +101,7 @@ async def admit_run(
     worker: Worker,
     principal: Principal,
     *,
+    entitlements: Entitlements,
     run_id: str,
     project: str,
     target: Target,
@@ -115,16 +112,16 @@ async def admit_run(
     provenance: Mapping[str, Any] | None = None,
 ) -> Run:
     """Record a queued run of ``target`` over the published ``dataset`` version and submit it to
-    the worker, once the request is checked and the worker has pinned the target (``pin``). One
-    run at a time per organisation: another queued or running run is ``409``.
+    the worker, once the request is checked and the worker has pinned the target (``pin``). The
+    organisation may have its edition's ``concurrent_runs`` (``entitlements``) queued or running at
+    once: one more is ``409``.
 
     A launch admits every run this way. The local edition's launch also names a saved ``suite``
     version, which the run keeps (``suite_id``, ``suite_version``, ``suite_digest`` and
     ``provenance.suite``, which says whether the suite has a model judge), and adds its own
     ``provenance``. The run's limits, ``provenance.limits``, are the ones ``provenance`` gives,
     else the suite's (``Suite.settings.limits``); without either, the worker's apply."""
-    if await _active(store, records, principal):
-        raise HTTPException(409, "An eval run is already in progress")
+    await ensure_run_place(store, records, principal, entitlements)
     provenance = dict(provenance or {})
     if suite is not None and suite.settings.limits is not None and execute.LIMITS_KEY not in provenance:
         provenance[execute.LIMITS_KEY] = suite.settings.limits.model_dump(mode="json")
@@ -172,7 +169,12 @@ async def admit_run(
 
 @router.post("", response_model=EvalRunOut, status_code=202, dependencies=[Depends(require_capability("run"))])
 async def request_run(
-    body: EvalRunRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: WorkerDep
+    body: EvalRunRequest,
+    principal: PrincipalDep,
+    entitlements: EntitlementsDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
 ) -> EvalRunOut:
     run_id = run_id_for(body.request_id)
     if existing := await lookup_run(store, records, principal, run_id):
@@ -190,6 +192,7 @@ async def request_run(
         records,
         worker,
         principal,
+        entitlements=entitlements,
         run_id=run_id,
         project=project,
         target=target,
@@ -209,19 +212,25 @@ NOT_THE_WORKERS = (
 
 
 async def resume_run(
-    store: EvalStore, records: RecordStore, worker: Worker, principal: Principal, run: Run, *, limits: RunLimits | None
+    store: EvalStore,
+    records: RecordStore,
+    worker: Worker,
+    principal: Principal,
+    run: Run,
+    *,
+    entitlements: Entitlements,
+    limits: RunLimits | None,
 ) -> Run:
     """Queue ``run``, which stopped at one of its limits, again and submit it to the worker, which
     resumes it after the cases it finished: their target is not called again. ``limits`` replace
-    the run's own when given, and the run keeps them. One run at a time per organisation, as for a
-    launch (``409``); a run that is not ``stopped`` is ``409`` too, and one the worker did not run,
-    such as a ``martian evals run``, ``422``."""
+    the run's own when given, and the run keeps them. The organisation's ``concurrent_runs`` apply,
+    as for a launch (``409``); a run that is not ``stopped`` is ``409`` too, and one the worker did
+    not run, such as a ``martian evals run``, ``422``."""
     if run.state != "stopped":
         raise HTTPException(409, NOT_STOPPED)
     if run.source != "console":  # recorded by the process that ran it, such as martian evals run
         raise HTTPException(422, NOT_THE_WORKERS)
-    if await _active(store, records, principal):
-        raise HTTPException(409, "An eval run is already in progress")
+    await ensure_run_place(store, records, principal, entitlements)
     provenance = {key: value for key, value in run.provenance.items() if key != execute.STOPPED_KEY}
     if limits is not None:
         provenance[execute.LIMITS_KEY] = limits.model_dump(mode="json")
@@ -240,16 +249,26 @@ async def resume_run(
 
 
 async def resume_scoring(
-    records: RecordStore, worker: Worker, principal: Principal, run: Run, job: ScoringJob, *, limits: RunLimits | None
+    store: EvalStore,
+    records: RecordStore,
+    worker: Worker,
+    principal: Principal,
+    run: Run,
+    job: ScoringJob,
+    *,
+    entitlements: Entitlements,
+    limits: RunLimits | None,
 ) -> ScoringJob:
     """Queue ``job``, a scoring job of ``run`` that stopped at one of its limits, again and submit
     it to the worker, which resumes it after the cases it scored: their judges are not asked
     again. A job runs under its run's limits, so ``limits``, when given, replace the run's. One
-    active scoring job per run (``409``); a job that is not ``stopped`` is ``409`` too."""
+    active scoring job per run, and the organisation's ``concurrent_scoring_jobs``, as for a
+    scoring request (``409``); a job that is not ``stopped`` is ``409`` too."""
     if job.state != "stopped":
         raise HTTPException(409, JOB_NOT_STOPPED)
     if any(other.state in ACTIVE for other in await records.list_scoring_jobs(principal, run.project_id, run.id)):
         raise HTTPException(409, "A scoring job is already active for this run")
+    await ensure_scoring_place(store, records, principal, entitlements)
     if limits is not None:
         provenance = {**run.provenance, execute.LIMITS_KEY: limits.model_dump(mode="json")}
         await records.update_run(principal, run.model_copy(update={"provenance": provenance}), expected_state=run.state)

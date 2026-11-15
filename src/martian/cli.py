@@ -269,6 +269,16 @@ def run_ui(
         ),
     ] = None,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the UI in the default browser.")] = True,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            envvar="MARTIAN_EVALS_CONCURRENCY",
+            min=1,
+            help="How many runs, and how many scoring jobs, may be in progress at once; each runs in a process of "
+            "its own.",
+        ),
+    ] = 1,
 ) -> None:
     """Open the Evals UI on this machine: one user, no login, everything stored locally on SQLite."""
     if any(importlib.util.find_spec(name) is None for name in ("mlflow", "fastapi", "uvicorn")):
@@ -291,7 +301,7 @@ def run_ui(
     try:
         # The container image's settings (see BIND_ENV); unset, the server stays on 127.0.0.1.
         host = listen_address(os.environ.get(BIND_ENV))
-        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)))
+        local = create_local_app(home, ui, host_names(os.environ.get(ALLOWED_HOSTS_ENV)), concurrency=concurrency)
         serve(
             local,
             host=host,

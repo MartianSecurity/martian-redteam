@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from martian.evals.model import RunLimits
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import SINGLE_USER
+from martian.evals.server import COMMUNITY, SINGLE_USER
 from martian.evals.server.launch import resume_run, resume_scoring
 from martian.evals.server.projection import DEFAULT_PROJECT
 from martian.evals.store import MemoryStore
@@ -96,7 +96,13 @@ def test_a_run_stops_at_its_time_limit_and_resumes_after_its_finished_cases(reco
         assert client.portal is not None
         client.portal.call(
             lambda: resume_run(
-                served.store, records, served.worker, SINGLE_USER, found, limits=RunLimits(max_seconds=120)
+                served.store,
+                records,
+                served.worker,
+                SINGLE_USER,
+                found,
+                entitlements=COMMUNITY,
+                limits=RunLimits(max_seconds=120),
             )
         )
         served.drain()
@@ -105,7 +111,9 @@ def test_a_run_stops_at_its_time_limit_and_resumes_after_its_finished_cases(reco
         again = stored_run(served, run["id"])
         with pytest.raises(HTTPException) as refused:
             client.portal.call(
-                lambda: resume_run(served.store, records, served.worker, SINGLE_USER, again, limits=None)
+                lambda: resume_run(
+                    served.store, records, served.worker, SINGLE_USER, again, entitlements=COMMUNITY, limits=None
+                )
             )
     assert (resumed["state"], resumed["passed"], resumed["failed"], resumed["skipped"]) == ("completed", 1, 1, 1)
     assert called == ["faq-1", "faq-2"]
@@ -141,7 +149,14 @@ def test_a_scoring_job_stops_at_its_judge_token_limit_and_resumes_after_its_scor
         jobs = client.portal.call(served.records.list_scoring_jobs, SINGLE_USER, DEFAULT_PROJECT, run["id"])
         client.portal.call(
             lambda: resume_scoring(
-                records, served.worker, SINGLE_USER, found, jobs[0], limits=RunLimits(max_judge_tokens=1000)
+                served.store,
+                records,
+                served.worker,
+                SINGLE_USER,
+                found,
+                jobs[0],
+                entitlements=COMMUNITY,
+                limits=RunLimits(max_judge_tokens=1000),
             )
         )
         served.drain()

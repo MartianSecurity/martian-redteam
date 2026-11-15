@@ -12,8 +12,9 @@ scorers and, through its judge, the model judges. The request calls no model.
   judge.
 - Each judge scorer is pinned to its model when the job is admitted: the judge's own, or the
   default judge model when it names none. Changing the default later does not change the job.
-- One active scoring job per run. The server holds one per organisation, to bound model use; that
-  bound belongs to the worker that runs the jobs.
+- One active scoring job per run, and at most the edition's ``concurrent_scoring_jobs`` queued or
+  running in the organisation at once, which bounds its model use as the server's one per
+  organisation does (:mod:`martian.evals.server.admission`).
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -30,7 +31,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import Policy, Run, ScorerVersion, ScoringJob
 from martian.evals.records import RecordStore
+from martian.evals.server.admission import ACTIVE, ensure_scoring_place
 from martian.evals.server.dependencies import (
+    EntitlementsDep,
     JudgeSettingsDep,
     PrincipalDep,
     RecordsDep,
@@ -62,7 +65,6 @@ from martian.evals.worker.scorers import BUILTIN_SCORERS, CODE_SCORERS, JUDGE_SC
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
-ACTIVE = ("queued", "running")
 LABELS = {
     "exact_match": "Exact match",
     "contains_expected": "Contains expected text",
@@ -196,6 +198,7 @@ async def score(
     run_id: uuid.UUID,
     body: ScoreRequest,
     principal: PrincipalDep,
+    entitlements: EntitlementsDep,
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
@@ -215,6 +218,7 @@ async def score(
         raise HTTPException(422, "Model judges require a judge configured for this installation's worker")
     if any(j.state in ACTIVE for j in await records.list_scoring_jobs(principal, run.project_id, run.id)):
         raise HTTPException(409, "A scoring job is already active for this run")
+    await ensure_scoring_place(store, records, principal, entitlements)
     job = await records.create_scoring_job(
         principal,
         run.project_id,

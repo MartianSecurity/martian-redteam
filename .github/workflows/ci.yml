@@ -159,7 +159,7 @@ jobs:
           tests/evals/test_write_contract.py tests/evals/test_user_ids.py tests/evals/test_worker.py
           tests/evals/test_worker_process.py
           tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py tests/evals/test_worker_queue.py
-          tests/evals/test_no_outbound.py
+          tests/evals/test_no_outbound.py tests/evals/test_worker_concurrency.py
 
   mlflow-compat:
     name: MLflow compatibility

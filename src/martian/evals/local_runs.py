@@ -68,7 +68,14 @@ from martian.evals.local_targets import LocalTargets
 from martian.evals.model import Run, RunLimits, RunState, ScoringJob, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.records.queue import RECORDING, Claim, SqlWorkQueue
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, WorkerDep, require_capability
+from martian.evals.server.dependencies import (
+    EntitlementsDep,
+    PrincipalDep,
+    RecordsDep,
+    StoreDep,
+    WorkerDep,
+    require_capability,
+)
 from martian.evals.server.launch import ACTIVE, admit_run, resume_run, resume_scoring, run_id_for
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
@@ -246,7 +253,8 @@ class LocalWorker:
     process of its own, started by a :class:`~martian.evals.worker.ProcessWorker` whose setup is
     :func:`worker_services`, never in the server's process: MLflow keeps its state for the whole
     process. Its HTTP targets are the local targets (``LocalTargets.http_targets``), read at each
-    use, and its judge is the SDK judge.
+    use, and its judge is the SDK judge. It runs ``concurrency`` pieces of work at once, each in a
+    process of its own: ``martian ui --concurrency``, 1 unless set.
 
     A run admitted with a suite gets a scoring job of that suite version, recorded ``queued`` when
     the run is submitted, so the UI shows it from the start, with each judge that names no model
@@ -264,6 +272,7 @@ class LocalWorker:
         judge_settings: JudgeSettings | None = None,
         *,
         lease_seconds: float | None = None,
+        concurrency: int = 1,
     ) -> None:
         self._home = home
         self._records = records
@@ -280,11 +289,17 @@ class LocalWorker:
             in_process=True,
             lease_seconds=lease_seconds or LEASE_SECONDS,
             poll_seconds=POLL_SECONDS,
+            concurrency=concurrency,
         )
 
     @property
     def judges(self) -> bool:
         return True
+
+    @property
+    def concurrency(self) -> int:
+        """How many pieces of work it runs at once."""
+        return self._queued.concurrency
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         """A local target by its id (``agent_id``), pinned as the worker pins an HTTP target, by
@@ -462,7 +477,12 @@ router = APIRouter(prefix="/v1/local/runs", tags=["local runs"])
 
 @router.post("", response_model=EvalRunOut, status_code=202, dependencies=[Depends(require_capability("run"))])
 async def launch_local_run(
-    body: LocalRunRequest, principal: PrincipalDep, store: StoreDep, records: RecordsDep, worker: WorkerDep
+    body: LocalRunRequest,
+    principal: PrincipalDep,
+    entitlements: EntitlementsDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
 ) -> EvalRunOut:
     run_id = run_id_for(body.request_id)
     if existing := await lookup_run(store, records, principal, run_id):
@@ -486,6 +506,7 @@ async def launch_local_run(
         records,
         worker,
         principal,
+        entitlements=entitlements,
         run_id=run_id,
         project=project,
         target=target,
@@ -508,6 +529,7 @@ async def run_again(
     run_id: uuid.UUID,
     body: RunAgainRequest,
     principal: PrincipalDep,
+    entitlements: EntitlementsDep,
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
@@ -539,6 +561,7 @@ async def run_again(
         records,
         worker,
         principal,
+        entitlements=entitlements,
         run_id=again_id,
         project=project,
         target=target,
@@ -566,18 +589,21 @@ async def resume_local_run(
     run_id: uuid.UUID,
     body: ResumeRequest,
     principal: PrincipalDep,
+    entitlements: EntitlementsDep,
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
 ) -> EvalRunOut:
     run = await find_run(store, records, principal, run_id)
     if run.state == "stopped":
-        return run_out(await resume_run(store, records, worker, principal, run, limits=body.limits))
+        return run_out(
+            await resume_run(store, records, worker, principal, run, entitlements=entitlements, limits=body.limits)
+        )
     jobs = await records.list_scoring_jobs(principal, run.project_id, run.id)
     job = next((job for job in jobs if job.id == _suite_job_id(run.id) and job.state == "stopped"), None)
     if run.state != "completed" or job is None:
         raise HTTPException(409, "Only a run, or its suite's scoring, stopped at one of its limits can be resumed")
-    await resume_scoring(records, worker, principal, run, job, limits=body.limits)
+    await resume_scoring(store, records, worker, principal, run, job, entitlements=entitlements, limits=body.limits)
     found = await lookup_run(store, records, principal, run.id)
     return run_out(found or run)
 
