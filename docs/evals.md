@@ -121,6 +121,10 @@ when a case failed, and `2` when a case has no verdict or the suite file is inva
 can be started again: finished cases are skipped, and cases that errored are tried again.
 `--fresh` discards earlier results.
 
+**On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
+comment on the pull request with the result, still with no Martian account. See
+[gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
+
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, and the SDK version. A function target counts by the

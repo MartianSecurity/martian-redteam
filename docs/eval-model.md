@@ -24,8 +24,9 @@ rejects unknown fields.
   results, scores and reviews refer to.
 - Digests are SHA-256 over canonical JSON (keys sorted, no whitespace, UTF-8), computed by
   `martian.evals.model.digest`. A dataset's digest identifies its content whatever it is called.
-  A suite's digest (`suite_digest`) covers every field but `id`, `version` and `digest`, run
-  settings included, so a store that keeps one version per digest keeps every change.
+  A suite's digest (`suite_digest`) covers every field but `id`, `version`, `digest` and who saved
+  the version when (`created_by`, `created_at`), run settings included, so a store that keeps one
+  version per digest keeps every change.
 - A case result's `fingerprint` is the digest of everything that produced it (see
   [resume](evals.md#run-a-suite-file-locally)), so a resumed run reuses it only while that is unchanged.
 
@@ -41,11 +42,11 @@ rejects unknown fields.
 | `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`, `check`, `code`, `human`), `type`, `version`, judge `model`, `parameters`, `criteria` | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
 | `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds`, `judge_max_retries`, `judge_rate_limit_wait_seconds`, the local `output` folder and the MLflow location. Unset means the runner's default | none |
-| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, and its `settings`. Versioned: a new version for every change | none |
-| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps | Run |
+| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, and its `settings`. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
+| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it | Run |
 | `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint` | Trace |
 | `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `trace_id` | Assessment (feedback) |
-| `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them | none |
+| `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them. A job that applies a saved suite names it (`suite_id`, `suite_version`) and carries its `policies`; `cancel_requested_at` as for a run. A policy judge's guidelines are in its scorer's `criteria` | none |
 | `Trace`, `Span` | A recorded call to the thing under test, from an eval run or from live traffic, and the steps inside it. A case result is a trace of a run. `session_id` and `user_id` are the application's conversation and user. Search results leave `spans` empty | Trace and spans; session and user are the `mlflow.trace.session` and `mlflow.trace.user` metadata MLflow tracing records |
 | `TraceQuery`, `Page` | Which traces to return (run, session, user, ids, text, states, tags, time window, order) and one page of any result with `next_cursor` | none |
 | `Session`, `SessionSearch` | A conversation: the traces that share a session id, each one a turn, with `turns`, `errors`, `started_at`, `last_at`, `preview` and `tokens`. A session search is the sessions among the first `limit` traces (1,000) a query matches, with `has_more`, `traces_examined` and `ungrouped`. Built from traces by `sessions_from_traces`, never stored | none (grouped from traces) |

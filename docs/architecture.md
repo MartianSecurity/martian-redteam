@@ -125,10 +125,10 @@ next to each one creates it.
 | --- | --- | --- |
 | `src/martian/evals/` | SDK: suite runner, suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
-| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists with the read routes; the write routes are MorningHQ/martian-notes#101 |
+| `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes |
 | `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
-| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts), portable to SQLite and Postgres | Exists |
-| `src/martian/evals/worker/` | Run worker, one process per evaluation run | Planned, MorningHQ/martian-notes#140 |
+| `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views), portable to SQLite and Postgres | Exists |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists with an in-process worker; a durable queue is MorningHQ/martian-notes#139, one process per run #140 |
 | `ui/` | Evals UI source: the design system and the Evals app | Planned, MorningHQ/martian-notes#120 and #121 |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel for `martian ui` | Planned, MorningHQ/martian-notes#113 |
 

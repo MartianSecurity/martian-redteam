@@ -16,7 +16,8 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
-| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store and principal, the edition-to-entitlement map and `require_entitlement`, the capability table, `/v1/evals/status`, `/v1/evals/bootstrap` and the read routes (`runs.py`, `traces.py`, `datasets.py`, shaped by `projection.py` and `quality.py`) |
+| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`) and the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), shaped by `projection.py` and `quality.py` |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, the work itself (`execute.py`), the console's built-in scorers (`scorers.py`) and the in-process worker (`inprocess.py`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/checks.py` | Deterministic contains, regex and JSON checks |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
@@ -60,7 +61,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `test` | `uv sync --locked`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `evals-core` | `uv sync --locked --extra postgres`, pytest `-n auto` on the evals core files against a Postgres service | 3.12 |
 | `packaging` | `uv build`, throwaway venv install, `validate examples/config.yaml` | 3.12 |
-| `action-smoke` | `uses: ./.github/actions/validate` | 3.12 |
+| `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
 
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
@@ -74,14 +75,14 @@ The product is a CI/CD SDK. GitHub Actions is the harness; this package is the s
 | Layer | Where | Secrets | Required on PRs |
 | --- | --- | --- | --- |
 | 1. Library | `pytest` + typed operations/legacy recorded fixtures | none | yes |
-| 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate` | none | yes |
+| 2. Packaging / Action | wheel install + `validate`; composite `.github/actions/validate`; composite `.github/actions/evals` on `examples/github-action` (comments with the workflow token, `pull-requests: write`) | none | yes |
 | 3. Live dogfood | `martian redteam run` / root `action.yml` / `red-team.yml` against staging graphs | `MARTIAN_API_TOKEN` | **no** (dispatch + environment, after coordinated single-key service qualification) |
 
 Layer 2 uses a nested validate composite so the customer gate Action (`action.yml`) stays **run-only**. That avoids a `command: validate` switch that could later be forgotten on `pull_request` once a staging key exists.
 
 Third-party actions are SHA-pinned. Concurrency cancels in-progress runs on the same ref.
 
-Customer red-team workflows (reusable workflow, composite action, `validate` / `run -c -a`) are documented in [gate and CI](gate-and-ci.md). They are not this repo’s unit-test pipeline.
+Customer red-team workflows (reusable workflow, composite action, `validate` / `run -c -a`) and the evals pull-request action are documented in [gate and CI](gate-and-ci.md). They are not this repo’s unit-test pipeline.
 
 ## Dependabot
 
@@ -105,6 +106,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
 - The record store contract (`tests/evals/record_contract.py`) runs the same way. On Postgres it
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
+- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.

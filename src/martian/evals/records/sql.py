@@ -36,6 +36,7 @@ from martian.evals.model import (
     ScoringJob,
     Suite,
 )
+from martian.evals.records import SavedView
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
     case_results,
@@ -43,6 +44,7 @@ from martian.evals.records.tables import (
     dataset_drafts,
     reviews,
     runs,
+    saved_views,
     scoring_jobs,
     suites,
 )
@@ -486,7 +488,13 @@ class SqlRecordStore:
             latest = self._latest_suite(connection, space, project_id, suite.id)
             if latest is not None and latest.digest == suite.digest:
                 return latest, False
-            saved = suite.model_copy(update={"version": (latest.version + 1) if latest else 1})
+            saved = suite.model_copy(
+                update={
+                    "version": (latest.version + 1) if latest else 1,
+                    "created_at": suite.created_at or _now(),
+                    "created_by": suite.created_by or principal.user_id,
+                }
+            )
             try:
                 with connection.begin_nested():
                     connection.execute(
@@ -496,7 +504,7 @@ class SqlRecordStore:
                             id=suite.id,
                             version=saved.version,
                             digest=suite.digest,
-                            created_at=_now(),
+                            created_at=saved.created_at,
                             record=_json(saved),
                         )
                     )
@@ -620,6 +628,50 @@ class SqlRecordStore:
             return sorted((DatasetDraft.model_validate(r) for r in rows), key=lambda d: (d.name, d.id))
 
         return await self._run(principal, work)
+
+    async def edit_draft(
+        self,
+        principal: Principal,
+        project_id: str,
+        draft_id: str,
+        *,
+        expected_revision: int,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> DatasetDraft:
+        def work(connection: Connection, space: str) -> DatasetDraft:
+            draft = self._draft(connection, space, project_id, draft_id)
+            self._editable(draft, expected_revision)
+            changes: dict[str, Any] = {
+                "revision": draft.revision + 1,
+                "updated_by": principal.user_id,
+                "updated_at": _now(),
+            }
+            if name is not None:
+                changes["name"] = name
+            if description is not None:
+                changes["description"] = description
+            updated = DatasetDraft.model_validate(_json(draft.model_copy(update=changes)))
+            self._save_draft(connection, space, updated, expected_revision=expected_revision)
+            return updated
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "draft", project_id, draft_id)
+        return saved
+
+    async def delete_draft(self, principal: Principal, project_id: str, draft_id: str) -> None:
+        def work(connection: Connection, space: str) -> None:
+            self._draft(connection, space, project_id, draft_id)
+            for table, key in (
+                (dataset_draft_cases, dataset_draft_cases.c.draft_id),
+                (dataset_drafts, dataset_drafts.c.id),
+            ):
+                connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == draft_id)
+                )
+
+        await self._run(principal, work)
+        self._emit(principal, "draft", project_id, draft_id)
 
     def _count_cases(self, connection: Connection, space: str, project_id: str, draft_id: str) -> int:
         return connection.execute(
@@ -763,3 +815,89 @@ class SqlRecordStore:
         saved = await self._run(principal, work)
         self._emit(principal, "draft", project_id, draft_id)
         return saved
+
+    # --- saved trace views ---------------------------------------------------------------------
+
+    async def save_view(
+        self, principal: Principal, project_id: str, view: SavedView, *, expected_revision: int | None = None
+    ) -> SavedView:
+        if view.project_id != project_id:
+            raise StoreError("invalid", "the view belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[SavedView, bool]:
+            stored = self._one(connection, saved_views, space, project_id, id=view.id)
+            now = _now()
+            if expected_revision is None:
+                if stored is not None:
+                    return SavedView.model_validate(stored), False
+                saved = view.model_copy(update={"revision": 1, "created_at": view.created_at or now, "updated_at": now})
+                connection.execute(
+                    insert(saved_views).values(
+                        space=space, project_id=project_id, id=view.id, revision=1, record=_json(saved)
+                    )
+                )
+                return saved, True
+            if stored is None:
+                raise StoreError("not_found", "view not found")
+            earlier = SavedView.model_validate(stored)
+            saved = view.model_copy(
+                update={"revision": expected_revision + 1, "created_at": earlier.created_at, "updated_at": now}
+            )
+            changed = connection.execute(
+                update(saved_views)
+                .where(
+                    saved_views.c.space == space,
+                    saved_views.c.project_id == project_id,
+                    saved_views.c.id == view.id,
+                    saved_views.c.revision == expected_revision,
+                )
+                .values(revision=saved.revision, record=_json(saved))
+            ).rowcount
+            if changed == 0:
+                raise StoreError("conflict", "the view was changed by someone else; reload it")
+            return saved, True
+
+        saved, changed = await self._run(principal, work)
+        if changed:
+            self._emit(principal, "view", project_id, view.id)
+        return saved
+
+    async def get_view(self, principal: Principal, project_id: str, view_id: str) -> SavedView | None:
+        def work(connection: Connection, space: str) -> SavedView | None:
+            stored = self._one(connection, saved_views, space, project_id, id=view_id)
+            return SavedView.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_views(self, principal: Principal, project_id: str) -> list[SavedView]:
+        def work(connection: Connection, space: str) -> list[SavedView]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(saved_views.c.record).where(
+                        saved_views.c.space == space, saved_views.c.project_id == project_id
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return sorted((SavedView.model_validate(r) for r in rows), key=lambda v: (v.name, v.id))
+
+        return await self._run(principal, work)
+
+    async def delete_view(self, principal: Principal, project_id: str, view_id: str, *, expected_revision: int) -> None:
+        def work(connection: Connection, space: str) -> None:
+            if self._one(connection, saved_views, space, project_id, id=view_id) is None:
+                raise StoreError("not_found", "view not found")
+            removed = connection.execute(
+                delete(saved_views).where(
+                    saved_views.c.space == space,
+                    saved_views.c.project_id == project_id,
+                    saved_views.c.id == view_id,
+                    saved_views.c.revision == expected_revision,
+                )
+            ).rowcount
+            if removed == 0:
+                raise StoreError("conflict", "the view was changed by someone else; reload it")
+
+        await self._run(principal, work)
+        self._emit(principal, "view", project_id, view_id)

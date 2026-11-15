@@ -131,4 +131,24 @@ dataset_draft_cases = Table(
     Index("ix_martian_draft_cases_ordinal", "space", "project_id", "draft_id", "ordinal"),
 )
 
-TABLES = (runs, case_results, scores, scoring_jobs, reviews, suites, dataset_drafts, dataset_draft_cases)
+saved_views = Table(
+    "martian_saved_views",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("revision", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
+TABLES = (
+    runs,
+    case_results,
+    scores,
+    scoring_jobs,
+    reviews,
+    suites,
+    dataset_drafts,
+    dataset_draft_cases,
+    saved_views,
+)
