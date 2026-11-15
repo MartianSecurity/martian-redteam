@@ -326,6 +326,34 @@ class StoreContract:
         alice = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="alice"))
         assert len(alice.items) == 3
 
+    async def test_a_span_s_attributes_read_back_as_they_were_recorded(
+        self, store: EvalStore, project: Project
+    ) -> None:
+        """Text that reads as JSON stays text, and numbers, booleans, objects and lists keep their
+        types (MartianSecurity/martian-notes#349)."""
+        attributes = {
+            "app.text_number": "42",
+            "app.text_boolean": "true",
+            "app.text_null": "null",
+            "app.text_quoted": '"x"',
+            "app.text_object": '{"a": 1}',
+            "app.text": "hello",
+            "app.number": 42,
+            "app.boolean": True,
+            "app.object": {"a": 1, "b": ["c"]},
+            "app.list": [1, "2"],
+        }
+        span = Span(id="s1", name="lookup", kind="TOOL", status="ok", attributes=attributes)
+        await store.record_trace(ORG_A, trace("t1", spans=[span]))
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None
+        (found,) = read.spans
+        kept = {key: found.attributes.get(key) for key in attributes}
+        assert kept == attributes
+        assert {key: type(value) for key, value in kept.items()} == {
+            key: type(value) for key, value in attributes.items()
+        }
+
     async def test_a_trace_s_model_is_stored_and_searched_by_name(self, store: EvalStore, project: Project) -> None:
         """A trace's model, given or mapped from its spans' attributes (the response's model before
         the request's), is kept, comes back in a search and is a filter of its own
