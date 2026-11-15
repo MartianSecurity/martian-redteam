@@ -266,6 +266,46 @@ class StoreContract:
         alice = await store.search_traces(ORG_A, TraceQuery(project_id="p1", user_id="alice"))
         assert len(alice.items) == 3
 
+    async def test_a_trace_s_model_is_stored_and_searched_by_name(self, store: EvalStore, project: Project) -> None:
+        """A trace's model, given or mapped from its spans' attributes (the response's model before
+        the request's), is kept, comes back in a search and is a filter of its own
+        (MorningHQ/martian-notes#200)."""
+        span = Span(id="s1", name="chat", kind="CHAT_MODEL", status="ok")
+
+        def attributes(**values: str) -> list[Span]:
+            return [span.model_copy(update={"attributes": values})]
+
+        await store.record_trace(ORG_A, trace("t0", minutes=0, model="gpt-4o-2024-05-13"))
+        await store.record_trace(
+            ORG_A,
+            trace(
+                "t1",
+                minutes=1,
+                spans=attributes(**{"gen_ai.request.model": "gpt-4o", "gen_ai.response.model": "gpt-4o-2024-08-06"}),
+            ),
+        )
+        await store.record_trace(ORG_A, trace("t2", minutes=2, spans=attributes(**{"gen_ai.request.model": "gpt-4o"})))
+        await store.record_trace(ORG_A, trace("t3", minutes=3, model="it's `quoted`"))
+        await store.record_trace(ORG_A, trace("t4", minutes=4))
+        found = await store.search_traces(ORG_A, TraceQuery(project_id="p1", oldest_first=True))
+        assert [(t.id, t.model) for t in found.items] == [
+            ("t0", "gpt-4o-2024-05-13"),
+            ("t1", "gpt-4o-2024-08-06"),
+            ("t2", "gpt-4o"),
+            ("t3", "it's `quoted`"),
+            ("t4", None),
+        ]
+        for model, ids in (
+            ("gpt-4o-2024-08-06", ["t1"]),
+            ("gpt-4o", ["t2"]),
+            ("it's `quoted`", ["t3"]),
+            ("gpt-4", []),
+        ):
+            page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", model=model))
+            assert [t.id for t in page.items] == ids, model
+        read = await store.get_trace(ORG_A, "p1", "t1")
+        assert read is not None and read.model == "gpt-4o-2024-08-06"
+
     async def test_traces_take_tags_and_join_runs(self, store: EvalStore, project: Project) -> None:
         await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="ci", state="running"))
         await store.record_trace(ORG_A, trace("t1"))

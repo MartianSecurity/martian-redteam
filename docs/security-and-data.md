@@ -89,9 +89,11 @@ See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
 `martian evals export` writes everything the data folder's store and record store hold into the
 folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
-reviews, and run artifacts. It holds no credentials: the local targets and their keys
-(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
-`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
+and webhook URLs and email recipients among them). It holds no credentials: the local targets and
+their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
+threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the
 data folder. See [data export](data-export.md).
 
 ### The cache of model calls
@@ -143,7 +145,7 @@ how long it runs or how much memory it takes.
 | --- | --- | --- |
 | A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process, on a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so a custom scorer never sees a project's production traces: the `Monitor` record refuses a scorer of kind `code` |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -206,6 +208,7 @@ What each part sends without a setting of yours:
 | FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
 | The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
 | Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+| Threshold alerts | Nothing | A threshold's webhook URL and the SMTP server, once the worker's alert settings name them ([below](#threshold-alerts)) |
 
 `tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
 deterministic check, `martian ui` serving the UI and that run, and the core with a process
@@ -214,6 +217,58 @@ which MLflow turns its telemetry off by itself, and no telemetry settings) with 
 and name lookup for an address other than loopback refused. It fails on any such attempt and on
 MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
 loads nothing from another host.
+
+## Threshold alerts
+
+The alerts of [thresholds](evals-core.md#thresholds-and-alerts) on monitor scores are the evals
+core's own outbound calls. An installation makes none until its operator configures them: the
+worker's `AlertSettings` (`martian.evals.alerts`) send no webhook and no email by default, the
+routes refuse a threshold with a channel the worker does not send, and so an on-premises install
+sends nothing for alerts unless it is set up to (`test_no_outbound.py` runs without alert
+settings and still sees no outbound attempt).
+
+What leaves once a channel is configured:
+
+- **A webhook** is one `POST` per alert, and per retry, to the URL a threshold names, which any
+  member with the `score` capability chooses. It carries the threshold's definition and name, the
+  monitor's id, the scorer, and the window's count, estimate and interval: no trace, prompt,
+  response, rationale or user. The URL is `https`, or `http` only to `localhost`; redirects are not
+  followed and proxy settings from the environment are not used. Before each attempt the host is
+  resolved, and a loopback, private, link-local or reserved address is refused unless the
+  installation sets `WebhookSettings(private_addresses=True)`, so on an installation that does not,
+  a member cannot aim alerts at the worker's own network. A name that resolves to another address
+  between that check and the connection is not caught; where that matters, run the worker where it
+  cannot reach internal services.
+- **An email** carries the same content as plain text to the threshold's recipients, through the
+  SMTP server the operator names, with STARTTLS by default.
+
+Secrets:
+
+- **The webhook secret** is given once, by the member who creates the threshold, and signs each
+  request (HMAC-SHA256 over the timestamp and the body; the receiver's check is in
+  [sending alerts](evals-core.md#sending-alerts)). The record store keeps it in a column of its own
+  (`martian_thresholds.secret`), not in the threshold's record, and only `threshold_secret`, which
+  the worker calls to sign, reads it back. No route returns it (a threshold shows
+  `"signed": true`), an alert's stored record and payload do not hold it, no log line holds it, and
+  `martian evals export` exports the threshold without it: a threshold imported into a fresh
+  install shows `"signed": false` and sends no signed webhook until a member gives it a secret
+  again (`POST /v1/evals/thresholds/{id}/secret`, once, for a webhook with none). It is stored as
+  given, not encrypted: whoever can read the record-store database can read it, as they can every
+  record there, and on Postgres row-level security keeps it to its organisation. To change it,
+  delete the threshold and create another.
+- **The SMTP password** is part of the worker's settings, given by the operator in code from their
+  own secret store. No record holds it, so no export does, and the settings' repr and the log
+  lines leave it out.
+- **Logs and errors.** A failed attempt is logged, and kept as the alert's `last_error`, as a status
+  or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`): never the URL, a header, the body,
+  the secret, the password or a recipient. The HTTP client's own request log (HTTPX at `INFO`),
+  if an installation turns it on, names the URL, so a webhook URL holds no credential: the
+  signature authenticates an alert, and a URL with a user name or password is refused.
+
+`tests/evals/test_thresholds.py` checks that the default settings send nothing and open no
+connection, that the loopback receiver is refused without `private_addresses`, that no route
+answer, log line or alert holds the secret, and that failures are logged without the address.
+`tests/evals/test_data_export.py` checks that no file of an export holds a threshold's secret.
 
 ## The local edition has no login
 

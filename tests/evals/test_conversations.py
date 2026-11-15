@@ -671,7 +671,8 @@ def test_the_worker_sends_its_http_targets_conversation_placeholders_as_one_turn
         response_path="reply",
     )
     call = http_call(SINGLE_USER, "chat", target, credentials=None, timeout_seconds=5)
-    assert asyncio.run(call(Case(id="a", inputs={"prompt": "Hello there"}))) == "You said 1 things; first: Hello there"
+    reply = asyncio.run(call(Case(id="a", inputs={"prompt": "Hello there"})))
+    assert (reply.output, reply.model) == ("You said 1 things; first: Hello there", None)
     (sent,) = chat_server["seen"]
     assert sent["messages"] == [{"role": "user", "content": "Hello there"}] and sent["earlier"] == []
     assert len(sent["conversation"]) == 36
@@ -683,5 +684,5 @@ def test_the_worker_skips_a_conversation_case_with_its_reason():
 
     run = Run(id="r", project_id="default", source="console", state="running")
     case = Case(id="c", turns=[Turn(inputs={"message": "hi"})], expectations={"expected_response": "hi"})
-    result, score = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
-    assert (result.status, result.error, score) == ("skipped", execute.CONVERSATION, None)
+    result, score, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
+    assert (result.status, result.error, score, model) == ("skipped", execute.CONVERSATION, None, None)

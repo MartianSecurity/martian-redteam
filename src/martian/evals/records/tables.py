@@ -143,9 +143,102 @@ saved_views = Table(
     Column("record", JSON, nullable=False),
 )
 
+# Monitors (migration 0005): ``record`` is the monitor as its routes write it, ``progress`` how far
+# the worker has read the project's traces, which only the worker writes.
+monitors = Table(
+    "martian_monitors",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("progress", JSON, nullable=False),
+)
+
+# Each trace a monitor took for scoring, once: the key is what keeps a monitor from scoring a trace twice.
+monitored_traces = Table(
+    "martian_monitored_traces",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("monitor_id", String(ID), primary_key=True),
+    Column("trace_id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("pass_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_monitored_traces_created", "space", "project_id", "monitor_id", "created_at"),
+)
+
+# Thresholds (migration 0006): ``record`` is the threshold as its route writes it, ``status`` its
+# state machine, which only its evaluations write, with ``sequence`` the number of its changes of
+# state that a change is conditioned on. ``secret`` signs its webhook alerts; no route reads it.
+thresholds = Table(
+    "martian_thresholds",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("source_kind", String(16), nullable=False),
+    Column("source_id", String(ID), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("status", JSON, nullable=False),
+    Column("secret", String(256), nullable=True),
+    Index("ix_martian_thresholds_source", "space", "project_id", "source_kind", "source_id"),
+)
+
+# Each alert a threshold's change of state raised, one per channel, kept after delivery: the key is
+# what keeps a change from raising an alert twice. A ``pending`` row is tried at ``next_attempt_at``.
+threshold_alerts = Table(
+    "martian_threshold_alerts",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("threshold_id", String(ID), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_threshold_alerts_due", "space", "project_id", "threshold_id", "state", "next_attempt_at"),
+    Index("ix_martian_threshold_alerts_created", "space", "project_id", "threshold_id", "created_at"),
+)
+
+# Schedules (migration 0007): ``record`` is the schedule as its routes write it, ``progress`` when
+# its next run is due, which only the worker writes.
+schedules = Table(
+    "martian_schedules",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("progress", JSON, nullable=False),
+)
+
+# Each slot a schedule ran or skipped, once: the key is what keeps a slot from running twice.
+schedule_runs = Table(
+    "martian_schedule_runs",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("schedule_id", String(ID), primary_key=True),
+    Column("slot", DateTime(timezone=True), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("run_id", String(ID), nullable=True),
+    Column("record", JSON, nullable=False),
+)
+
 # The worker's queue (``martian.evals.records.queue``): one row per run launch or scoring job that
-# no worker has finished, removed when one does. ``work`` is the work as the worker reads it.
-# ``token`` is the current claim's, and the claim holds the row until ``lease_expires_at``.
+# no worker has finished, removed when one does, and one per monitor or schedule while it exists,
+# taken again each time it is due. ``work`` is the work as the worker reads it. ``token`` is the current
+# claim's, and the claim holds the row until ``lease_expires_at``. A row with ``available_at`` in
+# the future is not taken before then (migration 0005).
 work_queue = Table(
     "martian_work_queue",
     metadata,
@@ -159,6 +252,7 @@ work_queue = Table(
     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("work", JSON, nullable=False),
+    Column("available_at", DateTime(timezone=True), nullable=True),
     Index("ix_martian_work_queue_next", "state", "created_at"),
 )
 
@@ -173,4 +267,10 @@ TABLES = (
     dataset_draft_cases,
     saved_views,
     work_queue,
+    monitors,
+    monitored_traces,
+    thresholds,
+    threshold_alerts,
+    schedules,
+    schedule_runs,
 )
