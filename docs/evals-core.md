@@ -182,11 +182,12 @@ version 3 of the server's frozen contract (`contracts/evals-api.json` in Morning
 | `GET /v1/evals/traces/{trace_id}/payload` | The trace as a download: `trace_info` and its spans in the model's form | Store |
 | `GET /v1/evals/datasets`, `/datasets/{name}`, `/datasets/{name}/items` | The published datasets, one and a page of its cases | Store |
 
-The core adds one read route of its own, which the server's contract does not have:
+The core adds two read routes of its own, which the server's contract does not have:
 
 | Route | Answers with | Reads |
 | --- | --- | --- |
 | `GET /v1/evals/{run_id}/attempts` | Every attempt of each case of a run whose suite [repeats its cases](evals.md#repeated-attempts): `run_id`, `repeats` (the run's `provenance.repeats`: attempts per case, the suite's rule and each check's rule with where it came from, or `null` for a run without repeats), `reliability` (the run's [reliability and flaky cases](evals.md#reliability-and-flaky-cases): `passed`, `failed`, `errors`, `pass_rate`, `confidence_95`, Wilson with the cases independent, and `flaky`, the flaky cases' ids in position order; `null` for a run without repeats) and `items`, one per case result in position order, each with the `id`, `dataset_item_id`, `position` and `status` of the run detail's item, `flaky` (its verdict changed between attempts) and its `attempts`: `number`, `status`, `output` (as text), `error`, `latency_ms`, `trace_id` and `checks` (each check's `passed`, `rationale` and `error`). `flaky=true` keeps only the flaky cases' items; `reliability` stays the whole run's. A case that ran once has no attempts and is not flaky | Records |
+| `GET /v1/evals/judge-agreement` | Each judge version's verdicts against people's labels of the same items ([judge agreement](evals.md#judge-agreement-with-human-labels)): `project_id`, `minimum` (the fewest labelled items a report measures, 30), `traces_examined`, `traces_truncated` and `items`, one per judge version by name and then version, each with `judge`, `version`, `kind` (`boolean`, `categorical`, `numeric` or `text`), `models`, `judged`, `labelled`, `incomparable`, `minimum`, `status` (`measured`, `too_few` or `not_comparable`), `agreed`, `agreement` and `agreement_confidence_95`, `kappa`, `confusion` (pass/fail only: `both_pass`, `false_pass`, `false_fail` and `both_fail`), `false_pass_rate`, `false_fail_rate` and their `_confidence_95`, `categories` (categorical only: each `judge`, `human` and `count`), `mean_difference` and its `_confidence_95`, `mean_absolute_difference` and `concordance`. Below `minimum` the counts are given and every rate, interval and coefficient is `null`. `project_id` and `name` narrow it to a project and a judge; a project that does not exist is `404` | Records: every run's judge scores and complete reviews. Store: the registered judges, and the newest 1,000 traces |
 
 How the shared model becomes these responses (`martian.evals.server.projection`):
 
@@ -232,6 +233,17 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
   `provenance.repeats` on the run routes says whether the attempts route has any. The item's trace is the attempt that shows its reply, and
   its scores, the attempts combined, are on no trace (`telemetry_state: unavailable`). A
   comparison pairs these combined statuses.
+- **Judge agreement.** A judge version's verdicts are the judge scores of every run of the
+  project in the record store (a scoring job's, and a suite-file run's own), and the judge scores
+  on the project's traces that are on no case result's trace and name no case result, such as an
+  application's judges on live traffic. The copy each scored value also leaves on its case's
+  trace is not read again. People's labels are each run's complete current reviews and the human
+  feedback on the project's traces, but not the copy of a review's answer on its case's trace
+  (metadata `martian.review_criterion`) nor an expectation annotation. Every version of each judge
+  registered in the project is reported, with its definition's kind, even before it scored
+  anything. Traces are read newest first, at most 1,000 (`traces_examined`); `traces_truncated`
+  says older ones were left out. Runs, their scores and their reviews are read in full. The
+  report is the core's own because the judges' responses are typed in the frozen contract.
 - **Case text.** `prompt` is the first text under `message`, `prompt`, `question` or `content`
   of the inputs, and `expected` the text under `expected_response`, `answer` or `content` of the
   expectations, as the server reads its datasets; inputs or expectations with none of those keys
@@ -286,7 +298,8 @@ How the shared model becomes these responses (`martian.evals.server.projection`)
 The reads that come with their writes (saved views, scorers, judges, suites, review queues and
 questions, dataset drafts and operations, Monitoring) are [write routes](#write-routes).
 
-`tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`.
+`tests/evals/test_read_routes.py` runs every route on `MemoryStore` and on `MlflowStore`;
+`tests/evals/test_agreement.py` runs the agreement route on both and covers its statistics.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
 of the contract (`tests/evals/contracts/evals-api-v3.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
@@ -675,8 +688,8 @@ endpoint, and keeps the local edition's default in its data folder.
 - `martian evals run` records each suite-file run in the local edition's data folder, so it shows
   in the UI: [command-line runs](#command-line-runs).
 - The [read routes](#read-routes) for projects, runs, results, comparison, traces and datasets,
-  and the core's own route for the attempts of repeated cases, with the run's reliability and its
-  flaky cases.
+  and the core's own routes for the attempts of repeated cases, with the run's reliability and its
+  flaky cases, and for each judge version's agreement with people's labels.
 - The [write routes](#write-routes): launch, scoring, Monitoring, suites, judges, reviews, review
   queues and questions, annotations, projects, saved views and dataset authoring, and
   [the worker](#the-worker) interface, with a worker that runs each run in a process of its own
@@ -1297,7 +1310,7 @@ reliability and flaky cases, a resumed run, a run that stops early, and a data f
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,
 `test_local_targets.py`, `test_local_runs.py`, `test_read_routes.py`, `test_read_contract.py`,
-`test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
+`test_agreement.py`, `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_no_outbound.py`, `test_worker_judges.py` and the store and
 record tests run the core
 without the backend. The `Evals core`

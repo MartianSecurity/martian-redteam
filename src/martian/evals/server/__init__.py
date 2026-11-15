@@ -24,7 +24,9 @@ feature declares ``dependencies=[Depends(require_entitlement(key))]``, and a wri
 the capability it needs with ``require_capability(name)``. Every route is in the shape of the
 frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
 ``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
-``projects``, ``views`` and ``drafts``.
+``projects``, ``views`` and ``drafts``. Two read routes are the core's own, which the contract
+does not have: a run's attempts in ``runs`` and the judges' agreement with people in
+``agreement``.
 """
 
 from __future__ import annotations
@@ -36,7 +38,19 @@ from fastapi.responses import JSONResponse
 
 from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
-from martian.evals.server import datasets, drafts, launch, projects, reviews, runs, scoring, suites, traces, views
+from martian.evals.server import (
+    agreement,
+    datasets,
+    drafts,
+    launch,
+    projects,
+    reviews,
+    runs,
+    scoring,
+    suites,
+    traces,
+    views,
+)
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
 from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.dependencies import (
@@ -140,6 +154,7 @@ def create_app(
         reviews.explorer,
         suites.router,
         suites.explorer,
+        agreement.explorer,
         projects.router,
         views.router,
         drafts.router,

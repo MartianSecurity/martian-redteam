@@ -487,6 +487,79 @@ same name. The endpoint's own error text is read to choose the message and is ne
 The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
 providers they name the provider's key and address without a variable.
 
+## Judge agreement with human labels
+
+A judge's pass rate says how often it passes, not how often it is right. `martian.evals.agreement`
+compares a judge version's verdicts with the labels people gave the same items. The evals core
+reports it for every judge version of a project (`GET /v1/evals/judge-agreement`), the Evals UI
+shows it on the Judges page, and the SDK computes it from scores and reviews or from a suite-file
+run's results. No model is called.
+
+**What counts as a label.** A person's answer: a complete review of a case result, which labels
+the criterion its review question names, or human feedback on a trace, such as an annotation or
+feedback an application recorded with MLflow. A review's `human_review` criterion labels the case
+as a whole, so it pairs with no judge, and an expectation says what an output should hold rather
+than judging it, so it is no label.
+
+**How verdicts and labels meet.** A label pairs with the verdicts of the judge of the same name on
+the same item: the case result a verdict or label names, else the case result whose trace it is
+on, else the trace. To label a judge named `polite_tone`, give a review queue a question named
+`polite_tone`, or annotate its traces with feedback named `polite_tone`. On each item a judge
+version counts its newest verdict and the criterion its newest label. A judge version is a judge's
+name and version: a registered judge's version number, or `v1` for a built-in judge. Its verdicts
+are pooled over the models it ran on, which `models` lists.
+
+| Judge's verdicts | What is reported |
+| --- | --- |
+| Pass/fail | `agreement`, the share of items where verdict and label are the same, with its Wilson interval; Cohen's `kappa`; the counts `both_pass`, `false_pass` (the judge passed what people failed), `false_fail` (the judge failed what people passed) and `both_fail`; the `false_pass_rate`, the share of the items people failed that the judge passed, and the `false_fail_rate`, the share of the items people passed that the judge failed, each with its Wilson interval |
+| Categories | `agreement` with its Wilson interval, Cohen's `kappa` over every category, and how many items had each pair of judge's and person's answers |
+| Numbers | `mean_difference`, the mean of verdict minus label (the judge's bias), with its Student t interval; `mean_absolute_difference`; and `concordance`, Lin's concordance correlation coefficient |
+| Free text | Nothing. Two texts that differ can mean the same, so text verdicts are not compared (`not_comparable`) |
+
+- **Kappa** is the agreement corrected for chance: 1 is perfect, 0 no better than chance, below 0
+  worse. A judge that passes everything agrees 90% of the time with people who pass 90% of items,
+  and has a kappa of 0. It is computed exactly from the counts, and is `null` when the judge and
+  the people each gave one answer throughout, which leaves no chance agreement to correct for.
+- **Concordance** is 1 only when every verdict equals its label, and falls with any spread, shift
+  or change of scale between them, which a correlation would forgive.
+- Neither has an interval; read them with the agreement's.
+- A label of another kind than the judge's verdicts, such as a pass/fail answer about a numeric
+  judge, is counted in `incomparable` and not compared. A judge's kind is its definition's when
+  it is registered, else that of its verdicts.
+
+**How many items it rests on.** `labelled` is the number of items compared and `judged` the number
+the judge version gave a verdict. Below 30 labelled items (`minimum`, `MINIMUM_LABELLED`) the
+`status` is `too_few`: the counts are given and every rate, interval and coefficient is `null`.
+At 30 items the 95% interval of an agreement rate is still up to 34 points wide (at 50%; 28 at
+80%), and at 10 up to 53, wide enough to hold any judge from a coin flip to a good one. Thirty is
+the floor for a number worth reading, not enough to correct a pass rate for the judge's errors:
+with 200 labels the interval is 8 to 14 points wide. Items count as independent, as the core's
+case results carry no group.
+
+**From the SDK.**
+
+```python
+from martian.evals.agreement import results_agreement
+
+# A suite-file run's checks against people's labels, by case id and check label.
+labels = {"case-1": {"rubric": False}, "case-2": {"rubric": True}}
+for report in results_agreement("results", labels):     # the output folder, or results.jsonl
+    found = report.agreement
+    print(report.judge, found.status, found.labelled, found.agreement, found.kappa)
+```
+
+`results_agreement` compares every check a label names, judge or not, as pass/fail; a check named
+in the labels that the results do not have is reported as judged by nothing. `judge_agreement`
+takes judge scores and reviews or human scores in the shared model, as the core does; `compare`
+compares any two sets of values item by item, the first the one being checked; and
+`JudgeAgreement.as_dict()` is the core's shape for one judge version.
+
+| Where | What |
+| --- | --- |
+| [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read |
+| The Evals UI's Judges page | An agreement panel with a row per judge version, and each version's agreement in its version history. The Martian server does not serve the route yet, so against the server the page shows neither |
+| `martian evals run` | Nothing: people label after the run. Use `results_agreement` on its results, or review it in `martian ui` |
+
 ## Use
 
 `martian.evals.evaluate(...)` provides the same MLflow prediction/scorer/result
