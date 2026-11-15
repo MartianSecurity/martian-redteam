@@ -1,0 +1,22 @@
+# Run with:  martian evals run examples/evals/tool-calls/evals.yaml
+# This suite grades a support agent by the tools it called, from the conversations stored with
+# each case, so it needs no model key. Each stored output is the agent's chat messages, with the
+# tool calls each model turn made. The first case makes the expected calls and passes. The second
+# issues the refund for the wrong amount, and the third checks the policy and the order's
+# eligibility one after the other rather than together in one turn: both fail tool_trajectory.
+data: cases.jsonl
+
+checks:
+  - type: tool_trajectory        # one turn per step, in order, and no other calls
+    calls:
+      - {name: lookup_order, arguments: {order_id: A-1001}}
+      - [get_policy, {name: check_eligibility, arguments: {order_id: A-1001}}]  # together, in one turn
+      - {name: issue_refund, arguments: {order_id: A-1001, amount: 25.0}}
+  - type: tool_called            # the refund is issued once, for the order the customer names
+    calls:
+      - {name: issue_refund, arguments: {order_id: A-1001}}
+    max_calls: 1
+  - type: tool_not_called        # a refund never closes the account
+    calls: [close_account]
+  - type: step_count             # no more than five model turns
+    max_turns: 5

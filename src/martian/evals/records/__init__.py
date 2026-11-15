@@ -99,7 +99,11 @@ class Monitor(_Record):
     are. ``sampling_rate`` is the share of matching traces it scores, chosen by trace id
     (:func:`martian.evals.worker.monitor.sampled`). ``max_judge_tokens_per_day`` caps its judges'
     tokens per UTC day; ``None`` is no cap. It scores traces whose request time is at or after
-    ``active_since``: when it was created, or last resumed. Every change raises ``revision``."""
+    ``active_since``: when it was created, or last resumed. Every change raises ``revision``.
+
+    A monitor holds no ``code`` scorer, such as a custom Python scorer a worker installs
+    (:data:`~martian.evals.worker.execute.InstalledScorers`): one reads a case's inputs and
+    expectations, and a production trace has a request and a response only."""
 
     id: Identifier
     project_id: Identifier
@@ -114,6 +118,15 @@ class Monitor(_Record):
     created_by: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def no_custom_scorer(self) -> Monitor:
+        if custom := [scorer.name for scorer in self.scorers if scorer.kind == "code"]:
+            raise ValueError(
+                f"A monitor cannot run the custom Python scorer {', '.join(custom)}: it reads a case's inputs "
+                "and expectations, and a production trace has a request and a response only"
+            )
+        return self
 
 
 class MonitorProgress(_Record):
