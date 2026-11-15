@@ -140,7 +140,9 @@ class EvalStore(Protocol):
 
     # Traces.
     async def record_trace(self, principal: Principal, trace: Trace) -> Trace:
-        """Store a trace (with its spans), for a case result or for live traffic."""
+        """Store a trace (with its spans), for a case result or for live traffic, mapped with
+        ``martian.evals.trace_conventions.map_trace``: the fields its spans' GenAI attributes give
+        are filled and the mapping version is kept in its metadata. Attributes are kept as given."""
         ...
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
