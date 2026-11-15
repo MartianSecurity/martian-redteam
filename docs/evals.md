@@ -1002,8 +1002,8 @@ that it is the right passage.
 
 Each judge makes one model call through the same transport as the judges above: provider routing,
 `headers`, the retries of replies that carry no judgment, and the failure codes are the same.
-Missing or empty documents, a request that is not text, an empty response (for `groundedness`) and
-an `expected_response` that is not text are errors before any model call. Feedback metadata
+Missing or empty documents, a missing or empty request, an empty response (for `groundedness`)
+and an `expected_response` that is not text are errors before any model call. Feedback metadata
 records `martian.judge.version` (`groundedness-v1`, `context-relevance-v1` or
 `context-sufficiency-v1`), `verdict`, `evidence`, `documents_sha256`, `prompt_sha256` and
 `model_calls`; `include_judge_prompt=True` also keeps the rendered prompt.
@@ -1030,9 +1030,9 @@ set. Their first form asked for one quote, and 8 of 26 and 12 of 24 quotes were 
 the model quoted the documents where the response or the request was asked for, or joined two
 documents; every verdict it gave was right. The one groundedness error above is a pass whose
 `claim` was copied from the documents instead of the response, which in a gate is a failed case.
-A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, by judge. Calibrate on your own documents and model
-before relying on these rates; a change to a judge's prompt or schema needs the benchmark run
-again.
+A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, by judge.
+Calibrate on your own documents and model before relying on these rates; a change to a judge's
+prompt or schema needs the benchmark run again.
 
 ### Session enforcement
 
