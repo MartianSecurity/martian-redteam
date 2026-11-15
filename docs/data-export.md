@@ -89,7 +89,7 @@ when there is nothing of its kind. An import reads them in this order:
 | `reviews.jsonl` | Review, each after the review it replaces | `project_id`, `review`: `Review` |
 | `queues.jsonl` | Review queue | `project_id`, `queue`: `ReviewQueue`, `items`: a list of `QueueItem`, one per case with its trace and status |
 | `artifacts.jsonl` | Run artifact | `project_id`, `run_id`, `name` (a relative path), `sha256`, `size`; the bytes are `artifacts/<sha256>` |
-| `traces.jsonl` | Trace, oldest first | `project_id`, `trace`: `Trace` with its `spans` and `scores` |
+| `traces.jsonl` | Trace, oldest first | `project_id`, `trace`: `Trace` with its `spans` and `scores`, read one at a time, so its `request` and `response` are whole and not a search's previews |
 
 `manifest.json`:
 

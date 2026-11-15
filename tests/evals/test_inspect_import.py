@@ -12,6 +12,7 @@ import json
 import math
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -206,6 +207,14 @@ def test_an_imported_run_opens_with_its_cases_messages_and_tool_calls(tmp_path):
         ("messages with no model reply", "STATUS_CODE_ERROR"),
     ]
     assert "Traceback" in broken["spans"][0]["attributes"]["inspect.error"]["traceback"]
+    # Its trace starts when the sample did, to the millisecond, and lasts as long, though the
+    # messages' span has no start time.
+    sample = next(s for s in json.loads(GLM5.read_text(encoding="utf-8"))["samples"] if s["id"] == "broken")
+    started = datetime.fromisoformat(sample["started_at"])
+    started = started.replace(microsecond=started.microsecond // 1000 * 1000)
+    info = client.get(f"/v1/evals/traces/{broken['trace_id']}").json()["info"]
+    assert datetime.fromisoformat(info["request_time"]) == started
+    assert float(info["execution_duration"].removesuffix("s")) == pytest.approx(sample["total_time"], abs=0.002)
 
     # The run keeps the log it came from.
     source = client.get(f"/v1/evals/{run.id}/provenance").json()["admission"]["inspect"]
