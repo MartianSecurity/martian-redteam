@@ -2672,8 +2672,10 @@ async def export_traces(request: Request, exporter: Principal = Depends(sign_in_
   for the same arguments, so that spans of one trace sent in several requests, or sent again,
   still make one trace.
 - `max_body_bytes` is the largest body, as sent and decompressed; without it, `MAX_BODY_BYTES`.
-- The application must hold the trace write lock `create_app` sets
-  (`app.state.martian_evals_trace_writes`, an `asyncio.Lock`).
+- The application sets nothing up for writes. `export` keeps its locks for the traces being
+  written on the application's state, made by its first write (`TraceLocks`; see *Spans of one
+  trace in several requests* below). An edition that set `app.state.martian_evals_trace_writes`
+  for an earlier release can drop it: nothing reads it.
 
 Martian Cloud does this ([the Martian server](#the-martian-server)).
 
@@ -2699,8 +2701,11 @@ Martian Cloud does this ([the Martian server](#the-martian-server)).
   status) and scores, and on the in-process binding one root span of the binding's, rewritten
   with the request and response of each recording. Until its root span arrives the trace is
   `IN_PROGRESS`, named by its id, and its detail answers `409`, because its spans are not yet one
-  tree; a trace whose root span is never sent stays so. Writes are serialised within one process.
-  Processes sharing one store do not coordinate theirs.
+  tree; a trace whose root span is never sent stays so. Writes of one trace are serialised within
+  one process, by the principal's organisation, the project and the trace's store id, so two
+  requests carrying spans of one trace cannot lose each other's; writes of different traces, of
+  one organisation or of two, do not wait for each other. The locks exist while a write is
+  waiting or running. Processes sharing one store do not coordinate theirs.
 
 **Answers.**
 
@@ -2725,7 +2730,10 @@ loopback port, each span in a request of its own, and reads the traces back thro
 and Sessions routes in each attribute style. It also exports to a core whose sign-in takes
 bearer tokens, with and without one, and checks spans of one trace in several requests on both
 stores, partial success, the project header and each refusal, and an edition's own route calling
-`export` with a mapping of trace ids per organisation and a smaller body limit. On the in-process binding it sends
+`export` with a mapping of trace ids per organisation and a smaller body limit, on an application
+`create_app` did not make. With a store that holds one trace's write, it checks that a write of
+another organisation's trace or of another trace of the same organisation completes meanwhile,
+and that a second request with spans of the held trace waits and then merges with it. On the in-process binding it sends
 a trace whose root span's request and response are longer than a preview in three batches and
 checks after each that MLflow holds one root span of the binding's with them whole, that a search
 shows the flagged previews, and that an application span carrying the root span's marker
