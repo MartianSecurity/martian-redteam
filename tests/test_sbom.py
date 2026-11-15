@@ -128,10 +128,36 @@ def test_the_wheel_bill_lists_the_dependencies_and_the_uis_bundled_packages(tmp_
     assert by_name["certifi"]["licenses"] == [{"expression": "MPL-2.0", "acknowledgement": "declared"}]
     ui = by_name["@martian/evals"]
     assert {"name": "martian:licence-policy", "value": "first-party"} in ui["properties"]
+    assert ui["licenses"] == [{"expression": "Apache-2.0", "acknowledgement": "declared"}]
     assert [(c["purl"], c["licenses"][0]["expression"]) for c in ui["components"]] == [
         ("pkg:npm/react@19.3.0", "MIT"),
         ("pkg:npm/%40fontsource-variable/inter@5.3.0", "OFL-1.1"),
     ]
+
+
+def test_the_uis_own_packages_are_first_party_apache_2_0():
+    found = sbom.components(probe())
+    assert sbom.check(found, POLICY) == []
+    ui = next(c for c in found if c.key == "npm:@martian/evals")
+    assert (ui.licence, ui.treatment) == ("Apache-2.0", "first-party")
+    sdk = next(c for c in found if c.key == "pypi:martian-sdk")
+    assert (sdk.licence, sdk.treatment) == ("Apache-2.0", "first-party")
+    relicensed = [sbom.Component("npm", "@martian/design-system", "0.1.0", "MIT", "MIT")]
+    assert sbom.check(relicensed, POLICY) == [
+        "npm:@martian/design-system 0.1.0: declares MIT, not its first-party licence Apache-2.0"
+    ]
+    assert relicensed[0].treatment == "refused"
+
+
+def test_notice_attributes_the_evals_ui_and_its_shadcn_code():
+    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+    ui = notice[notice.index("The Evals UI in martian/ui/") :]
+    for package in ("@martian/evals", "@martian/design-system", "@martian/client"):
+        assert package in ui
+    assert "licensed under the Apache License,\nVersion 2.0" in ui
+    assert "martian/ui/third-party-licenses.md" in ui
+    assert "Copyright (c) 2023 shadcn" in ui
+    assert "The above copyright notice and this permission notice shall be included" in ui
 
 
 def test_a_conclusion_applies_only_to_the_licence_text_it_reviewed():
