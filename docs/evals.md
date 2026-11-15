@@ -141,7 +141,7 @@ whether it grades each turn of a [conversation](#conversations) or the conversat
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; and the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)). A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
 
@@ -171,7 +171,7 @@ target:
   timeout_seconds: 60        # each call, function or URL target; default 120
 limits:
   max_seconds: 1800          # the run's wall time
-  max_judge_tokens: 200000   # the tokens its LLM judges may use, input and output together
+  max_judge_tokens: 200000   # the tokens its LLM judges and simulated users may use together
 ```
 
 - **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
@@ -184,14 +184,23 @@ limits:
   result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
   prints the limit and exits `2`, and the run shows as **stopped** in the UI with the limit as its
   error. Limits are checked before each batch and before each target call. A batch's judges finish
-  once it has started, so a run can go past `max_judge_tokens` by up to one batch; lower `batch`
-  for a closer bound.
+  once it has started, and a simulated user's reply counts when it comes back, so a run can go past
+  `max_judge_tokens` by up to one batch's judgments, or one reply of each simulated conversation in
+  flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
-- **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
-  reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
-  batch, and says so. A judge call that fails reports nothing and counts nothing.
-  `max_judge_tokens` needs an LLM judge check.
+- **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
+  each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
+  output together, as the provider reports them. A provider that reports none leaves the limit
+  unkeepable, so with `max_judge_tokens` set the run stops after that batch, or before the turn
+  that simulated user wrote is sent, and says which of the two reported none. A call that fails
+  reports nothing and counts nothing. When the run stops there, the message counts the simulated users' tokens
+  apart from the judges', such as `Stopped at its judge token limit (max_judge_tokens 45) after 60
+  tokens (0 by its judges, 60 by its simulated users)`. `max_judge_tokens` needs an LLM judge
+  check or a simulated user.
+- **Tokens used.** `summary.json` has `tokens_this_run`: the tokens of this run's `judges` and,
+  with simulated users, of its `simulator`, each `null` when one of its calls reported none. A
+  resumed run counts only its own calls, as `seconds_this_run` counts only its own time.
 - **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
   next case, as **cancelled**; the command checks for it every second.
 - **With [repeats](#repeated-attempts)**, each attempt's call has the target's time limit, and a
@@ -403,8 +412,8 @@ run stops at and resumes from:
   check. So the attempts that ran are dropped: the case has no result in `results.jsonl` or the
   local Evals UI, `summary.json` counts it in `not_run`, and running again runs all of its
   attempts.
-- **Their judge tokens count.** The judges of the dropped attempts were asked, so what they used
-  counts towards `max_judge_tokens`.
+- **Their tokens count.** The judges of the dropped attempts, and the simulated users of dropped
+  conversations, were asked, so what they used counts towards `max_judge_tokens`.
 - **An attempt that outlasts `timeout_seconds`** is an attempt whose target call failed, an attempt
   without a verdict, as above; it does not stop the run.
 - **What a stopped run counts.** `cases`, the counts and pass rates, `attempts`, `reliability`, the
@@ -552,8 +561,8 @@ judge tokens of the dropped turns still count towards `max_judge_tokens`, as do 
 are done. Each turn's call has
 the target's `timeout_seconds`; a turn that outlasts it is a failed call, which ends its
 conversation as above. A [simulated user](#simulated-users)'s model calls, the turns it writes and
-its goal verdict, are the simulator's, not a judge's: `max_judge_tokens` does not count them, and
-`max_seconds` stops its conversation at the next target call.
+its goal verdict, count towards `max_judge_tokens` too, and a limit stops its conversation at the
+next target call: the turn it wrote then is not sent.
 
 **Resume.** A conversation's turns are part of what its verdict depends on, so changing a turn's
 input, expectations or checks, or a check's scope, grades it again.
@@ -634,7 +643,8 @@ and a check named `goal_reached`.
 - After each reply it writes the next message, or sets `done` when its stop condition is met.
 - When the user has sent `max_turns` messages, it is asked once more, only whether the goal was
   reached. A conversation costs at most `max_turns + 1` simulator calls, besides the target's and
-  the judges'.
+  the judges'. The run's `max_judge_tokens` counts their tokens with the judges'
+  ([limits](#run-a-suite-file-locally)), so one limit caps what the run spends on models.
 - Each message is a turn, sent as a [conversation](#conversations)'s turns are, and graded by
   every turn check against the case's expectations; the conversation checks then grade the
   replies.
@@ -661,7 +671,7 @@ only the last call, the one after the budget is spent, fails, the goal alone has
 | Where | What |
 | --- | --- |
 | `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
-| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation` |
+| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation`. `tokens_this_run` has the simulator's tokens, `simulator`, beside the judges' |
 | The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
 | The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
