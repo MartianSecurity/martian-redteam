@@ -152,7 +152,8 @@ jobs:
           MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
         run: >
           uv run --extra postgres pytest -q -n auto tests/evals/test_server.py tests/evals/test_store.py
-          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_model.py
+          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_store_errors.py
+          tests/evals/test_model.py
           tests/evals/test_mlflow_private.py tests/evals/test_entitlements.py tests/evals/test_bootstrap.py
           tests/evals/test_local.py tests/evals/test_local_targets.py tests/evals/test_read_routes.py tests/evals/test_read_contract.py
           tests/evals/test_write_routes.py
