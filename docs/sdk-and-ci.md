@@ -2,7 +2,7 @@
 
 `martian-sdk` is the canonical Python 3.12+ distribution. It contains
 `martian.evals`, `martian.redteam`, the `martian` CLI, and the legacy import
-names. The source repository remains `MorningHQ/martian-redteam`. The package
+names. The source repository remains `MartianSecurity/martian-redteam`. The package
 is published on [PyPI](https://pypi.org/project/martian-sdk/). Install an exact
 released version with its `evals` extra for the persisted CI runner:
 
@@ -15,7 +15,7 @@ Replace `<version>` with a release listed on PyPI.
 
 `evals` includes MLflow-skinny **3.18.0** and pytest. The SDK never connects to
 the hosted MLflow server, so this pin is independent of the server's version,
-which MorningHQ/martian-evals sets. The base installation supports redteam
+which MartianSecurity/martian-evals sets. The base installation supports redteam
 callbacks and local reports. The SDK reaches MLflow internals only through
 `src/martian/evals/_mlflow.py`, which lists each one. Before moving the pin, run
 the [MLflow compatibility suite](development.md#mlflow-upgrades) on the

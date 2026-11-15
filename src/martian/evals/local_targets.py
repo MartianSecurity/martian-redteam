@@ -6,7 +6,8 @@ The hosted console starts a run against an agent from its Agents registry. The l
 - ``http``: an HTTP endpoint that takes one JSON ``POST`` per case. ``url``, ``body`` and
   ``response_path`` follow the rules of a suite file's URL target (:class:`martian.evals.runner.TargetRef`).
 - ``model``: a model behind an OpenAI-compatible chat completions endpoint, named by ``base_url``
-  (the endpoint's ``/v1`` address) and ``model``.
+  (the endpoint's ``/v1`` address) and ``model``. A run records the model each reply names in its
+  ``model`` field, so the version the endpoint served is kept with the run.
 
 Either may carry the user's key for the endpoint. The data folder keeps them in two files:
 
@@ -85,6 +86,9 @@ DEFAULT_KEY_HEADER = "Authorization"
 target always does. In ``Authorization`` the key goes as ``Bearer <key>``; in any other header as it is."""
 
 MODEL_RESPONSE_PATH = "choices.0.message.content"
+MODEL_NAME_PATH = "model"
+"""Where an OpenAI-compatible chat completion names the model that answered, which a run of a
+``model`` target records (``Target.model_path``)."""
 
 TargetKind = Literal["http", "model"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -307,8 +311,10 @@ class LocalTargets:
             url = str(target.base_url).rstrip("/") + "/chat/completions"
             body: dict[str, Any] = {"model": target.model, "messages": [{"role": "user", "content": "{{input}}"}]}
             response_path: str | None = MODEL_RESPONSE_PATH
+            model_path: str | None = MODEL_NAME_PATH
             header = DEFAULT_KEY_HEADER
         else:
+            model_path = None
             url, body, response_path, header = (
                 str(target.url),
                 dict(target.body or {}),
@@ -319,7 +325,9 @@ class LocalTargets:
         if self.has_key(target.id):
             reference = f"${{{KEY_REFERENCE}}}"
             headers[header] = f"Bearer {reference}" if header.lower() == "authorization" else reference
-        return Target(kind="http", url=url, body=body, response_path=response_path, headers=headers)
+        return Target(
+            kind="http", url=url, body=body, response_path=response_path, headers=headers, model_path=model_path
+        )
 
     def credential(self, principal: Principal, target_id: str, name: str, /) -> str | None:
         """The value of ``${name}`` in the target ``target_id``'s header: its key when ``name`` is

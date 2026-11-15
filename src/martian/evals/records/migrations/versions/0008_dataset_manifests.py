@@ -1,7 +1,7 @@
 """Dataset manifests: what publishing a dataset version wrote, checked when a run reads it.
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0008
+Revises: 0007
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0005"
-down_revision = "0004"
+revision = "0008"
+down_revision = "0007"
 branch_labels = None
 depends_on = None
 

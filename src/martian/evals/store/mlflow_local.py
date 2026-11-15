@@ -45,7 +45,8 @@ How the shared model sits in MLflow:
   ``runs.artifact_uri``.
 
 A trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow has:
-run, session, user, tags, ids, states and time. This process checks each trace MLflow returns
+run, session, user, model (the ``mlflow.trace.model`` metadata the binding writes), tags, ids,
+states and time. This process checks each trace MLflow returns
 against the whole query, which applies the text filter and a value MLflow's filter syntax cannot
 quote; a search with such a filter reads at most :data:`TRACE_SCAN_LIMIT` traces a call and
 returns what matched among them, with a cursor that reads on. A search for a run's traces is two
@@ -152,6 +153,8 @@ USER_KEY = "mlflow.trace.user"
 """The trace metadata key MLflow tracing records the application's user in (``TraceMetadataKey.TRACE_USER``)."""
 SOURCE_RUN_KEY = "mlflow.sourceRun"
 """The trace metadata key MLflow tracing records the active MLflow run in (``TraceMetadataKey.SOURCE_RUN``)."""
+MODEL_KEY = "mlflow.trace.model"
+"""The trace metadata key the binding keeps a trace's model in, which a search filters on."""
 LONGEST_ARTIFACT_ROOT = RUN_ARTIFACT_URI_LENGTH - len(f"/{'0' * 32}/artifacts")
 """The longest artifact root the store takes on Postgres, 157 characters: a run's artifact folder,
 the root and ``/<MLflow run id>/artifacts``, must fit in MLflow's ``runs.artifact_uri``. SQLite does
@@ -585,7 +588,7 @@ class MlflowStore:
             for key, value in (
                 (SESSION_KEY, trace.session_id),
                 (USER_KEY, trace.user_id),
-                ("mlflow.trace.model", trace.model),
+                (MODEL_KEY, trace.model),
                 (
                     "mlflow.trace.tokenUsage",
                     None if trace.tokens is None else json.dumps({"total_tokens": trace.tokens}),
@@ -663,7 +666,7 @@ class MlflowStore:
         it, so that every trace it returns matches."""
         whole = not query.text
         filters = []
-        for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id)):
+        for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id), (MODEL_KEY, query.model)):
             if value is not None:
                 if _SAFE_FILTER_VALUE.match(value):
                     filters.append(f"metadata.`{key}` = '{value}'")
@@ -1316,7 +1319,7 @@ def _trace(
     known = {
         SESSION_KEY,
         USER_KEY,
-        "mlflow.trace.model",
+        MODEL_KEY,
         "mlflow.trace.tokenUsage",
         "mlflow.trace.cost",
         "martian.request",
@@ -1335,7 +1338,7 @@ def _trace(
         run_id=run_id,
         session_id=metadata.get(SESSION_KEY),
         user_id=metadata.get(USER_KEY),
-        model=metadata.get("mlflow.trace.model"),
+        model=metadata.get(MODEL_KEY),
         tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
         cost=cost.get("total_cost") if isinstance(cost, dict) else None,
         tags={k: v for k, v in tags.items() if not k.startswith("mlflow.")},
@@ -1389,6 +1392,8 @@ def _matches(trace: Trace, query: TraceQuery) -> bool:
     if query.session_id is not None and trace.session_id != query.session_id:
         return False
     if query.user_id is not None and trace.user_id != query.user_id:
+        return False
+    if query.model is not None and trace.model != query.model:
         return False
     if query.trace_ids and trace.id not in query.trace_ids:
         return False

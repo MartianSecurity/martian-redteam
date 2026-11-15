@@ -121,4 +121,4 @@ def test_the_image_is_published_only_with_the_package_and_without_a_rebuild():
     script = "\n".join(steps(publish))
     assert "docker push" in script and "docker load" in script
     assert "docker build" not in script and "uv build" not in script
-    assert jobs["build"]["env"]["IMAGE"] == publish["env"]["IMAGE"] == "ghcr.io/morninghq/martian-evals"
+    assert jobs["build"]["env"]["IMAGE"] == publish["env"]["IMAGE"] == "ghcr.io/martiansecurity/martian-evals"

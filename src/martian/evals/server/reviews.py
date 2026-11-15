@@ -2,7 +2,7 @@
 
 A port of ``POST /{run_id}/items/{item_id}/reviews`` and ``GET /reviews`` of the server's
 ``app/api/evals_workbench.py``, the review queue routes of ``app/api/evals_quality.py`` and the
-question and annotation routes of ``app/api/evals_explorer.py`` (MorningHQ/MartianBackend).
+question and annotation routes of ``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend).
 
 - A review is a new link in its case's chain for one criterion (``human_review``, or a queue
   question). A complete review also stores the person's answer as a human score, on the case's
