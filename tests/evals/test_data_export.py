@@ -2,8 +2,8 @@
 and exported again with nothing lost, on the in-memory store and on the local edition's MLflow
 store; every table of the record store and every kind of object of the two store interfaces either
 exported or left out with a reason; monitors and schedules imported paused, and a threshold's
-webhook secret in no export; an interrupted export resumed to the same files; and what an import
-refuses."""
+webhook secret in no export; a judge calibration's re-check exported unfinished imported failed;
+an interrupted export resumed to the same files; and what an import refuses."""
 
 from __future__ import annotations
 
@@ -40,12 +40,14 @@ from martian.evals.data_export import (
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
 from martian.evals.local_runs import INTERRUPTED
+from martian.evals.manifests import checked_cases, manifest_for
 from martian.evals.mlflow_import import import_mlflow_store
 from martian.evals.model import (
     Case,
     CaseResult,
     Counts,
     DatasetDraft,
+    PanelMember,
     Policy,
     Project,
     Review,
@@ -63,10 +65,14 @@ from martian.evals.model import (
     Trace,
     suite_digest,
 )
+from martian.evals.outbox import save_queue_item
 from martian.evals.records import (
     RECORD_METHODS,
     Alert,
+    CalibrationRecheck,
     EmailChannel,
+    JudgeCalibration,
+    LabelledItem,
     ModelChange,
     ModelWatch,
     ModelWatchProgress,
@@ -90,6 +96,7 @@ from martian.evals.records.sql import SqlRecordStore
 from martian.evals.records.tables import metadata
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.store import STORE_METHODS, EvalStore, MemoryStore
+from tests.evals.store_contract import EmptyFirstPages
 
 ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
@@ -105,6 +112,7 @@ REASSIGNED = {
     "datasets.jsonl": ("dataset", {"created_at", "created_by"}),
     "drafts.jsonl": ("draft", {"revision", "updated_at", "updated_by"}),
     "views.jsonl": ("view", {"revision", "updated_at"}),
+    "manifests.jsonl": ("manifest", {"published_at"}),
     # An import creates monitors and schedules paused, whatever they were (checked on its own).
     "monitors.jsonl": ("monitor", {"revision", "updated_at", "state"}),
     "schedules.jsonl": ("schedule", {"revision", "updated_at", "state"}),
@@ -318,7 +326,9 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
         }
     )
     await records.add_review(principal, project, answered)
-    await store.set_queue_item(principal, project, queue.id, traced[0], "completed")
+    # Through the outbox, as the review routes set it: a delivery the export leaves out.
+    delivered = await save_queue_item(store, records, principal, project, queue.id, traced[0], "completed")
+    assert delivered.state == "delivered"
 
     # A run admitted but never started: in the record store only.
     queued_id, _ = ids()
@@ -337,7 +347,7 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     )
 
     # Live traffic: a session's turns, one annotated by a person.
-    live = []
+    live: list[str] = []
     for turn in range(2):
         _, trace_id = ids()
         live.append(trace_id)
@@ -385,6 +395,15 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
     await records.publish_draft(
         principal, project, done.id, expected_revision=saved_done.revision, digest=second.digest
     )
+    # The manifest that pins the version publishing wrote, and a publication that never finished.
+    second_cases = (await store.read_cases(principal, project, second.id, offset=0, limit=10)).items
+    pinned = manifest_for(
+        str(uuid.uuid4()), project, "support", second_cases, draft_id=done.id, published_by=principal.user_id
+    )
+    await records.begin_publication(principal, project, pinned.model_copy(update={"started_at": T0}))
+    await records.finish_publication(principal, project, pinned.id, second.id)
+    abandoned = manifest_for(str(uuid.uuid4()), project, "support next", cases[:2], draft_id=draft.id)
+    await records.begin_publication(principal, project, abandoned.model_copy(update={"started_at": T0}))
     for visibility in ("private", "organization"):
         await records.save_view(
             principal,
@@ -398,6 +417,71 @@ async def populate(store: EvalStore, records: RecordStore, principal: Principal,
                 definition={"states": ["error"]},
             ),
         )
+
+    # A judge graded by a panel of judge models, and a judge's calibrations against people's labels:
+    # one saved by hand, one a re-check measured, and a re-check still queued.
+    panel = ScorerVersion(
+        name="consensus",
+        kind="llm_judge",
+        type="guidelines",
+        panel=[
+            PanelMember(model="openai:/glm-5"),
+            PanelMember(model="openai:/glm-4", endpoint="http://127.0.0.1:4000/v1"),
+        ],
+        criteria={"guidelines": ["Kind."]},
+    )
+    await store.register_scorer(principal, project, panel)
+    measured = JudgeCalibration(
+        id=str(uuid.uuid4()),
+        project_id=project,
+        judge="politeness",
+        version="2",
+        model="glm-5",
+        definition="d" * 64,
+        labelled=2,
+        items=[
+            LabelledItem(run_id=run_id, case_id="c1", label=False, verdict=False),
+            LabelledItem(trace_id=live[0], label="yes", verdict="no"),
+        ],
+        traces_examined=2,
+        report={"judge": "politeness", "version": "2", "status": "too_few", "labelled": 2, "agreed": 1},
+        created_by=principal.user_id,
+        created_at=T0 + timedelta(days=3),
+    )
+    await records.save_calibration(principal, project, measured)
+    again = measured.model_copy(
+        update={"id": str(uuid.uuid4()), "recheck_of": measured.id, "created_at": T0 + timedelta(days=4, minutes=1)}
+    )
+    await records.save_calibration(principal, project, again)
+    done = CalibrationRecheck(
+        id=str(uuid.uuid4()),
+        project_id=project,
+        judge="politeness",
+        version="2",
+        calibration_id=measured.id,
+        scorer=judge.model_copy(update={"version": "2"}),
+        definition="d" * 64,
+        state="completed",
+        total=2,
+        graded=2,
+        result_id=again.id,
+        requested_by=principal.user_id,
+        created_at=T0 + timedelta(days=4),
+        finished_at=T0 + timedelta(days=4, minutes=1),
+    )
+    await records.create_recheck(principal, project, done)
+    queued = done.model_copy(
+        update={
+            "id": str(uuid.uuid4()),
+            "calibration_id": again.id,
+            "state": "queued",
+            "graded": 0,
+            "result_id": None,
+            "created_at": T0 + timedelta(days=5),
+            "finished_at": None,
+        }
+    )
+    await records.create_recheck(principal, project, queued)
     await store.archive_project(principal, retired.id)
 
 
@@ -664,6 +748,13 @@ def normalised(folder: Path, references: dict[str, dict[str, str]] | None = None
                 line["project"]["archived_at"] = line["project"]["archived_at"] is not None
             if name == "traces.jsonl":
                 line["trace"]["scores"].sort(key=lambda score: json.dumps(score, sort_keys=True))
+            if name == "rechecks.jsonl":
+                # An import fails a re-check exported queued or running, at the time of the import.
+                recheck = line["recheck"]
+                if recheck["state"] in data_export.UNFINISHED:
+                    recheck.update(state="failed", error=data_export.RECHECK_INTERRUPTED)
+                if recheck["error"] == data_export.RECHECK_INTERRUPTED:
+                    recheck.pop("finished_at")
         found[name] = lines
     return found
 
@@ -699,10 +790,12 @@ def table_rows(database: Path, space: str) -> dict[str, int]:
 
 def assert_tables_round_trip(source: Path, target: Path, space: str) -> None:
     """Every table the export carries holds rows in the source, and as many in the fresh install;
-    the import queued nothing, for a run, a monitor or a schedule."""
+    the outbox's deliveries stay behind, and the import queued nothing, for a run, a monitor or a
+    schedule."""
     before, after = table_rows(source, space), table_rows(target, space)
     assert {name: before[name] > 0 for name in EXPORTED_TABLES} == dict.fromkeys(EXPORTED_TABLES, True)
     assert {name: after[name] for name in EXPORTED_TABLES} == {name: before[name] for name in EXPORTED_TABLES}
+    assert (before["martian_deliveries"] > 0, after["martian_deliveries"]) == (True, 0)
     assert after["martian_work_queue"] == 0
 
 
@@ -768,8 +861,17 @@ async def test_an_organisation_comes_back_whole_in_a_fresh_install(tmp_path):
     assert_tables_round_trip(tmp_path / "source.db", tmp_path / "target.db", "org-a")
     assert "b-run" not in (tmp_path / "first" / "runs.jsonl").read_text(encoding="utf-8")
     assert again.lines("runs.jsonl") == 2
+    # The re-check exported queued came back failed, so none blocks the next re-check of its judge.
+    before = [recheck.state for recheck in await source_records.list_rechecks(ORG_A, "default")]
+    after = await target_records.list_rechecks(ORG_A, "default")
+    assert before == ["queued", "completed"]
+    assert [(r.state, r.error) for r in after] == [("failed", data_export.RECHECK_INTERRUPTED), ("completed", "")]
     # The receiving store's dataset ids are new, and the references to them follow, the schedule's too.
     assert set(imported.references["dataset_id"]) != set(imported.references["dataset_id"].values())
+    # The published version is still pinned by its manifest: a run reads it only as published.
+    published = [d for d in await target.list_datasets(ORG_A, "default") if d.version == 2]
+    assert (await target_records.manifest_of(ORG_A, "default", published[0].id)) is not None
+    assert len(await checked_cases(target, target_records, ORG_A, "default", published[0])) == 3
     [schedule] = await target_records.list_schedules(ORG_A, "default")
     assert await target.get_dataset(ORG_A, "default", schedule.dataset_id) is not None
     # The threshold's webhook signs nothing until its secret is given again, once.
@@ -969,8 +1071,9 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     with pytest.raises(ExportError, match="scores.jsonl is not the file the export wrote"):
         await import_data(*fresh, ORG_A, folder)
     found = manifest(folder)
-    (folder / MANIFEST).write_text(json.dumps({**found, "version": 1}), encoding="utf-8")
-    with pytest.raises(ExportError, match="format version 1; this SDK reads version 2"):
+    # An export of the third format, before judge calibrations and their re-checks were in it.
+    (folder / MANIFEST).write_text(json.dumps({**found, "version": 3}), encoding="utf-8")
+    with pytest.raises(ExportError, match="format version 3; this SDK reads version 4"):
         await import_data(*fresh, ORG_A, folder)
     (folder / MANIFEST).unlink()
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
@@ -980,6 +1083,23 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     assert await fresh[0].list_projects(ORG_A) == []
     records.close()
     fresh[1].close()
+
+
+async def test_an_import_finds_the_install_s_traces_past_a_search_page_with_none(tmp_path):
+    source, records = MemoryStore(), SqlRecordStore(f"sqlite:///{tmp_path / 'source.db'}")
+    await populate(source, records, ORG_A, default_exists=False)
+    folder = tmp_path / "export"
+    await export_data(source, records, ORG_A, folder)
+    records.close()
+    # An install whose only data is one trace, behind a binding whose trace search answers a page
+    # with no traces and a next_cursor before the trace, as the store interface allows.
+    install, install_records = EmptyFirstPages(), SqlRecordStore(f"sqlite:///{tmp_path / 'install.db'}")
+    await install.create_project(ORG_A, Project(id="elsewhere", name="Elsewhere"))
+    await install.record_trace(ORG_A, Trace(id="tr-" + uuid.uuid4().hex, project_id="elsewhere", request_time=T0))
+    with pytest.raises(ExportError, match="project elsewhere has traces. Import into a fresh install"):
+        await import_data(install, install_records, ORG_A, folder)
+    assert [project.id for project in await install.list_projects(ORG_A)] == ["elsewhere"]
+    install_records.close()
 
 
 def test_the_commands_export_and_import_a_data_folder(tmp_path):

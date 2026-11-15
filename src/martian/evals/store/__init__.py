@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import (
     SESSION_TRACE_LIMIT,
     Case,
@@ -46,6 +47,22 @@ REQUEST_PREVIEW_TRUNCATED = "martian.request_preview_truncated"
 the trace's request instead of the whole; ``get_trace`` gives it whole. Absent otherwise."""
 RESPONSE_PREVIEW_TRUNCATED = "martian.response_preview_truncated"
 """The same for the trace's response."""
+TEXT_SEARCH_REACH = 1000
+"""How much of a trace's request and of its response a free-text search looks in, in every
+binding: the whole of one up to this many characters, and the first ``TEXT_SEARCH_REACH - 3``
+(997) of a longer one, which is what MLflow's 1,000-character preview holds of it before its
+``...``. Looking further means scanning the content of every span in the project without an
+index (``docs/trace-store-limits.md``)."""
+
+
+def text_matches(text: str, name: str, request: str, response: str) -> bool:
+    """Whether a search's free ``text`` is, ignoring case, in a trace's name or in the part of its
+    request or its response a search looks in (:data:`TEXT_SEARCH_REACH`)."""
+
+    def searched(value: str) -> str:
+        return value if len(value) <= TEXT_SEARCH_REACH else value[: TEXT_SEARCH_REACH - 3]
+
+    return text.lower() in f"{name}\n{searched(request)}\n{searched(response)}".lower()
 
 
 class StoreStatus(BaseModel):
@@ -79,6 +96,20 @@ def check_session_search(query: TraceQuery, max_traces: int) -> None:
         raise StoreError("invalid", "a session search starts from the first trace; leave out the cursor")
     if not 1 <= max_traces <= SESSION_TRACE_LIMIT:
         raise StoreError("invalid", f"a session search reads between 1 and {SESSION_TRACE_LIMIT} traces")
+
+
+CURSOR_DIGITS = 18
+"""The most digits an offset cursor has, so that it fits SQL's 64-bit ``OFFSET``."""
+
+
+def cursor_offset(cursor: str | None) -> int:
+    """The offset an offset cursor names: 0 without one, else the digits 0-9 a ``next_cursor``
+    holds. Any other cursor is refused as ``invalid``, naming the parameter."""
+    if not cursor:
+        return 0
+    if len(cursor) > CURSOR_DIGITS or not ascii_digits(cursor):
+        raise StoreError("invalid", "cursor is not a next_cursor this store returned")
+    return int(cursor)
 
 
 @runtime_checkable
@@ -149,7 +180,8 @@ class EvalStore(Protocol):
         """Traces without their spans. A page may hold fewer than ``limit`` traces, or none, and
         still have a ``next_cursor``: only a ``next_cursor`` of ``None`` ends the search. A binding
         may give a preview of a long request or response, and says so in the trace's metadata
-        (``REQUEST_PREVIEW_TRUNCATED``)."""
+        (``REQUEST_PREVIEW_TRUNCATED``). Free text matches as :func:`text_matches` says: the
+        start of a long request or response only (``TEXT_SEARCH_REACH``)."""
         ...
 
     async def search_sessions(
@@ -239,10 +271,13 @@ __all__ = [
     "REQUEST_PREVIEW_TRUNCATED",
     "RESPONSE_PREVIEW_TRUNCATED",
     "STORE_METHODS",
+    "TEXT_SEARCH_REACH",
     "EvalStore",
     "MemoryStore",
     "StoreError",
     "StoreState",
     "StoreStatus",
     "check_session_search",
+    "cursor_offset",
+    "text_matches",
 ]

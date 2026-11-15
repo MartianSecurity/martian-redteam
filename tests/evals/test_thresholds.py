@@ -457,6 +457,8 @@ async def test_a_delivered_signature_verifies_with_the_documented_method(
     assert not documented(SECRET, body.replace(b"breached", b"recovered"), timestamp, signature)
     assert not documented("another-secret-of-length", body, timestamp, signature)
     assert not documented(SECRET, body, str(int(timestamp) + 1), signature)
+    # Digits int() refuses, which str.isdigit() takes: refused, not an error.
+    assert not documented(SECRET, body, timestamp[:-1] + "²", signature)
     assert not verify(SECRET, body, timestamp, signature, now=int(timestamp) + 301)
 
 
@@ -817,3 +819,4 @@ def test_the_signature_is_hmac_sha256_over_the_timestamp_and_the_body() -> None:
     assert alerts_module.sign("k" * 16, timestamp, body) == expected
     assert verify("k" * 16, body, timestamp, expected, now=1763200000)
     assert not verify("k" * 16, body, "17632e5", expected, now=1763200000)
+    assert not verify("k" * 16, body, "176320000²", expected, now=1763200000)
