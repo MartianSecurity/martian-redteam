@@ -18,6 +18,12 @@
   each attempt's trace is recorded with that attempt's verdicts. The case result's trace is its
   representative attempt's (:func:`martian.evals.repeats.representative`). Its scores are the
   attempts combined, which no one trace carries, so they name no trace.
+- A conversation case's result holds its session id and every turn it sent. Each turn's trace is
+  recorded with that turn's verdicts and the conversation's session id, so the turns group into
+  one session; with repeats each attempt's turns are, under that attempt's own session id. The
+  case result's trace is that of its first turn whose verdict is the conversation's, else of its
+  first turn, its latency the turns' latencies added up. Its scores are the conversation's
+  verdicts, which no one trace carries, so they name no trace.
 
 Results are written after each batch, so a run shows in the UI while it runs. The output folder's
 files are written as before, and nothing here reads them.
@@ -52,6 +58,7 @@ from martian.evals.model import (
     StoreRef,
     Suite,
     Trace,
+    TurnResult,
     from_results_record,
 )
 from martian.evals.repeats import representative
@@ -67,13 +74,17 @@ class GradedCase:
     """One case graded in this run: its position among the run's cases, its ``results.jsonl``
     record, its own expectations, and the JSON of the trace MLflow recorded for it, if any. A
     case run more than once has the JSON of each attempt's trace in ``attempt_traces`` instead,
-    in the order of its record's ``attempts``."""
+    in the order of its record's ``attempts``. A conversation case has the JSON of its turns'
+    traces in ``turn_traces`` instead, one tuple per attempt (one without repeats) in the order of
+    its turns, and each turn's expectations in ``turn_expectations``."""
 
     position: int
     record: dict[str, Any]
     expectations: dict[str, Any]
     trace: str | None = None
     attempt_traces: tuple[str | None, ...] = ()
+    turn_traces: tuple[tuple[str | None, ...], ...] = ()
+    turn_expectations: tuple[dict[str, Any], ...] = ()
 
 
 def _wait[T](work: Coroutine[Any, Any, T]) -> T:
@@ -224,7 +235,12 @@ class RunRecorder:
         traced: list[str] = []
         for case in cases:
             result, case_scores = self._result(case)
-            if traces and case.attempt_traces:
+            if case.turn_expectations:
+                result = self._with_turn_expectations(case, result)
+            if traces and case.turn_traces:
+                result, turn_ids = await self._record_conversation(case, result)
+                traced += turn_ids
+            elif traces and case.attempt_traces:
                 result, attempt_ids = await self._record_attempts(case, result)
                 traced += attempt_ids
             trace = self._trace(case, result, case_scores) if traces and case.trace is not None else None
@@ -304,6 +320,91 @@ class RunRecorder:
             update["store"] = StoreRef(trace_id=chosen.trace_id)
         return result.model_copy(update=update), recorded
 
+    def _with_turn_expectations(self, case: GradedCase, result: CaseResult) -> CaseResult:
+        """The result with each turn's own expectations, which ``results.jsonl`` does not hold."""
+
+        def expected(turns: list[TurnResult]) -> list[TurnResult]:
+            return [
+                turn.model_copy(update={"expectations": dict(case.turn_expectations[turn.number - 1])})
+                for turn in turns
+            ]
+
+        attempts = [attempt.model_copy(update={"turns": expected(attempt.turns)}) for attempt in result.attempts]
+        return result.model_copy(update={"turns": expected(result.turns), "attempts": attempts})
+
+    async def _record_conversation(self, case: GradedCase, result: CaseResult) -> tuple[CaseResult, list[str]]:
+        """Record each turn's trace under its conversation's session id, and give the case result,
+        and each attempt with repeats, the trace of the turn that stands for it and the turns'
+        latency. The conversation's own scores are not on any trace."""
+        if not result.attempts:
+            turns, recorded = await self._record_turns(case.turn_traces[0], result, result.turns, result.session_id)
+            trace_id, latency = self._standing(turns, result.status)
+            update: dict[str, Any] = {"turns": turns, "latency_ms": latency}
+            if trace_id is not None:
+                update["store"] = StoreRef(trace_id=trace_id)
+            return result.model_copy(update=update), recorded
+        attempts = list(result.attempts)
+        recorded = []
+        for position, (attempt, found) in enumerate(zip(attempts, case.turn_traces, strict=True)):
+            turns, ids = await self._record_turns(found, result, attempt.turns, attempt.session_id, attempt.number)
+            recorded += ids
+            trace_id, latency = self._standing(turns, attempt.status)
+            attempts[position] = attempt.model_copy(
+                update={"turns": turns, "trace_id": trace_id, "latency_ms": latency}
+            )
+        verdict = {"passed": True, "failed": False}
+        chosen = attempts[representative([verdict.get(a.status) for a in attempts], verdict.get(result.status))]
+        update = {"attempts": attempts, "turns": chosen.turns, "latency_ms": chosen.latency_ms}
+        if chosen.trace_id is not None:
+            update["store"] = StoreRef(trace_id=chosen.trace_id)
+        return result.model_copy(update=update), recorded
+
+    async def _record_turns(
+        self,
+        found: tuple[str | None, ...],
+        result: CaseResult,
+        turns: list[TurnResult],
+        session_id: str | None,
+        attempt: int | None = None,
+    ) -> tuple[list[TurnResult], list[str]]:
+        """Record one conversation's turns' traces, each with that turn's verdicts."""
+        assert self.run is not None
+        written = list(turns)
+        recorded: list[str] = []
+        prefix = f"{self.run.code} {result.case_id}" + (f" attempt {attempt}" if attempt is not None else "")
+        for position, (turn, trace_json) in enumerate(zip(turns, found, strict=True)):
+            if trace_json is None:
+                continue
+            tags = {"martian.case_id": result.case_id, "martian.turn": str(turn.number)}
+            if attempt is not None:
+                tags["martian.attempt"] = str(attempt)
+            trace = self._as_run_trace(
+                trace_json,
+                result,
+                name=f"{prefix} turn {turn.number}",
+                output=turn.output,
+                error=turn.error,
+                scores=[self._attempt_score(result, label, verdict) for label, verdict in turn.checks.items()],
+                tags=tags,
+                inputs=turn.inputs,
+                session_id=session_id,
+            )
+            saved = await self.store.record_trace(SINGLE_USER, trace)
+            written[position] = turn.model_copy(update={"trace_id": saved.id, "latency_ms": trace.latency_ms})
+            recorded.append(saved.id)
+        return written, recorded
+
+    @staticmethod
+    def _standing(turns: list[TurnResult], status: CaseStatus) -> tuple[str | None, float | None]:
+        """The trace of the turn that stands for a conversation, the first whose verdict is the
+        conversation's, else its first; and the conversation's latency, its turns' added up."""
+        if not turns:
+            return None, None
+        verdict = {"passed": True, "failed": False}
+        chosen = turns[representative([verdict.get(turn.status) for turn in turns], verdict.get(status))]
+        latencies = [turn.latency_ms for turn in turns if turn.latency_ms is not None]
+        return chosen.trace_id, round(sum(latencies), 3) if latencies else None
+
     def _attempt_score(self, result: CaseResult, label: str, verdict: CheckVerdict) -> Score:
         """One check's verdict on one attempt, as a score its trace carries."""
         scorer = self._scorers.get(label)
@@ -346,9 +447,13 @@ class RunRecorder:
         error: str,
         scores: list[Score],
         tags: dict[str, str],
+        inputs: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> Trace:
         """A trace MLflow's evaluation harness recorded (its JSON), as a trace of this run under a
-        new id, with ``output`` as its response and ``scores`` as its assessments."""
+        new id, with ``output`` as its response and ``scores`` as its assessments. Its request is
+        the input under ``input_key`` of ``inputs`` (a conversation turn's), else of the case's.
+        A conversation turn's trace has its conversation's ``session_id``."""
         from mlflow.entities import Trace as MlflowTrace
 
         from martian.evals.store.mlflow_local import trace_from_mlflow
@@ -356,21 +461,23 @@ class RunRecorder:
         assert self.run is not None
         trace = trace_from_mlflow(MlflowTrace.from_json(found), DEFAULT_PROJECT)
         trace_id = "tr-" + uuid.uuid4().hex
-        message = result.inputs.get(self.suite.input_key)
-        return trace.model_copy(
-            update={
-                "id": trace_id,
-                "name": name,
-                "state": "error" if error else trace.state,
-                "request": message
-                if isinstance(message, str)
-                else json.dumps(result.inputs, ensure_ascii=False, sort_keys=True, default=str),
-                "response": output or "",
-                "run_id": self.run.id,
-                "tags": tags,
-                "scores": [score.model_copy(update={"trace_id": trace_id}) for score in scores],
-            }
-        )
+        given = result.inputs if inputs is None else inputs
+        message = given.get(self.suite.input_key)
+        update: dict[str, Any] = {
+            "id": trace_id,
+            "name": name,
+            "state": "error" if error else trace.state,
+            "request": message
+            if isinstance(message, str)
+            else json.dumps(given, ensure_ascii=False, sort_keys=True, default=str),
+            "response": output or "",
+            "run_id": self.run.id,
+            "tags": tags,
+            "scores": [score.model_copy(update={"trace_id": trace_id}) for score in scores],
+        }
+        if session_id is not None:
+            update["session_id"] = session_id
+        return trace.model_copy(update=update)
 
     def reference(self) -> dict[str, str]:
         """Where the run was recorded: its id, its code and the data folder."""

@@ -149,6 +149,13 @@ def _run_suite(
             "security check (security), or the suite's rule (suite). Reliability counts the cases that "
             "passed every attempt"
         )
+    talks = summary.get("conversations")
+    if talks:
+        notes.append(
+            f"{talks['cases']} of the cases {'is a conversation' if talks['cases'] == 1 else 'are conversations'}: "
+            "each counts once, passing when each turn check passed every turn it grades and each conversation "
+            "check passed. Turns counts the conversations' turns"
+        )
     table = Table(
         title=f"{path.name}: {summary['cases']} cases" + (f", {plan['attempts']} attempts each" if plan else ""),
         caption="; ".join(notes) or None,
@@ -158,16 +165,20 @@ def _run_suite(
         table.add_column(column)
     # With repeats, the share of cases that passed every attempt sits under the pass rate.
     reliable = summary.get("reliability")
+    turns = talks["turns"] if talks else None
     totals = [("All checks", summary), *([("Reliability", reliable)] if reliable else [])]
-    for name, counts in [*summary["checks"].items(), *totals]:
+    for name, counts in [*summary["checks"].items(), *totals, *([("Turns", turns)] if turns else [])]:
         row = [
             name,
             str(counts["passed"]),
             str(counts["failed"]),
             str(counts["errors"]),
-            rate_text(counts["pass_rate"], counts["confidence_95"]),
+            # Turns are parts of their conversations, so their share has no interval of its own.
+            "—" if counts is turns else rate_text(counts["pass_rate"], counts["confidence_95"]),
         ]
-        if plan and counts is reliable:
+        if plan and counts is turns:
+            row.append("each turn")
+        elif plan and counts is reliable:
             row.append("every attempt")
         elif plan and counts is summary:
             row.append("every check")

@@ -11,6 +11,11 @@ no check uses, a data row field the runner does not read, or a suite the file ca
 an agent target, pass policies or two judge models. ``martian evals run`` loads its suite through
 :func:`load_suite_file`, so it refuses the same fields. Header values stay as written, ``${NAME}``
 unexpanded.
+
+A JSONL row with ``turns`` is a conversation case (``Case.turns``), and a check's ``scope`` is its
+scorer's (:mod:`martian.evals.conversations`). Loading refuses a conversation the suite cannot run:
+no target, a turn that names a check the suite does not have or one that grades the whole
+conversation, or a conversation that no check grades.
 """
 
 from __future__ import annotations
@@ -25,7 +30,8 @@ from pydantic import ValidationError
 
 from martian.config import ConfigError
 from martian.evals import runner
-from martian.evals.model import Case, Repeats, RunSettings, ScorerVersion, Suite, Target, digest, suite_digest
+from martian.evals.conversations import graded_turns
+from martian.evals.model import Case, Repeats, RunSettings, ScorerVersion, Suite, Target, Turn, digest, suite_digest
 
 # Every field of a suite file, and where the model keeps it.
 SUITE_FILE_FIELDS = {
@@ -77,6 +83,7 @@ SUITE_FILE_FIELDS = {
     "checks.kinds": "ScorerVersion.parameters.kinds",
     "checks.allow": "ScorerVersion.parameters.allow",
     "checks.combine": "Suite.repeats.checks, by the check's label",
+    "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
     "concurrency": "RunSettings.concurrency",
@@ -88,8 +95,9 @@ SUITE_FILE_FIELDS = {
     "mlflow.experiment": "RunSettings.mlflow_experiment",
 }
 
-# The fields every check type takes: its type, its label and the rule its attempts combine by.
-COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine"})
+# The fields every check type takes: its type, its label, the rule its attempts combine by and what
+# it grades in a conversation.
+COMMON_CHECK_FIELDS = frozenset({"type", "name", "combine", "scope"})
 
 # The check fields each check type uses besides COMMON_CHECK_FIELDS, as the file names them.
 # Loading refuses the others.
@@ -129,8 +137,9 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "no_refusal": frozenset({"expectation"}),
 }
 
-# The fields of a JSONL case that the runner reads.
-_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations", "group"})
+# The fields of a JSONL case that the runner reads, and of one turn of a conversation case.
+_CASE_FIELDS = frozenset({"id", "input", "inputs", "output", "outputs", "expectations", "group", "turns"})
+_TURN_FIELDS = frozenset({"input", "inputs", "expectations", "checks"})
 _DEFAULT_FUNCTION = runner.TargetRef.model_fields["function"].default
 _DEFAULT_INPUT_KEY = runner.Suite.model_fields["input_key"].default
 # Suite fields a suite file does not hold: loading it gives them from its name and its data, and
@@ -178,6 +187,7 @@ def _cases(file: Path, input_key: str) -> list[Case]:
                     expectations=row["expectations"],
                     outputs=row.get("outputs"),
                     tags={runner.GROUP_TAG: row["group"]} if "group" in row else {},
+                    turns=[Turn(**turn) for turn in row.get("turns", [])],
                 )
             )
         except ValidationError as error:
@@ -194,14 +204,51 @@ def _refuse_unread_fields(file: Path) -> None:
         if unknown := sorted(set(record) - _CASE_FIELDS):
             raise ConfigError(
                 f"data line {number}: a case has no field {', '.join(unknown)}; "
-                "its fields are id, input or inputs, output or outputs, expectations and group"
+                "its fields are id, input or inputs, output or outputs, expectations, group and turns"
             )
         for one, other in (("input", "inputs"), ("output", "outputs")):
             if one in record and other in record:
                 raise ConfigError(f"data line {number}: give {one} or {other}, not both")
+        # load_cases has refused turns that are not a list of objects.
+        for turn_number, turn in enumerate(record.get("turns") or [], 1):
+            if unknown := sorted(set(turn) - _TURN_FIELDS):
+                raise ConfigError(
+                    f"data line {number}, turn {turn_number}: a turn has no field {', '.join(unknown)}; "
+                    "its fields are input or inputs, expectations and checks"
+                )
+            if "input" in turn and "inputs" in turn:
+                raise ConfigError(f"data line {number}, turn {turn_number}: give input or inputs, not both")
+
+
+def _check_conversations(file_suite: runner.Suite, cases: list[Case]) -> None:
+    """Refuse a conversation case the suite cannot run or grade."""
+    talks = [case for case in cases if case.turns]
+    if not talks:
+        return
+    if file_suite.target is None:
+        raise ConfigError(f"case {talks[0].id} is a conversation, which runs against a target; name a target")
+    scopes = {check.label: check.scope for check in file_suite.checks}
+    turn_labels = [label for label, scope in scopes.items() if scope == "turn"]
+    for case in talks:
+        for number, turn in enumerate(case.turns, 1):
+            for label in turn.checks or []:
+                if label not in scopes:
+                    raise ConfigError(f"case {case.id}, turn {number}: checks names {label!r}, which the suite has not")
+                if scopes[label] == "conversation":
+                    raise ConfigError(
+                        f"case {case.id}, turn {number}: {label} grades the whole conversation (scope: conversation), "
+                        "not a turn; remove it from the turn's checks"
+                    )
+        graded = graded_turns([turn.checks for turn in case.turns], turn_labels)
+        if len(turn_labels) == len(scopes) and not any(graded.values()):
+            raise ConfigError(
+                f"case {case.id}: no check grades this conversation; name a check in a turn's checks, "
+                "or give a check scope: conversation"
+            )
 
 
 def _suite(file_suite: runner.Suite, *, name: str, suite_id: str | None, cases: list[Case]) -> Suite:
+    _check_conversations(file_suite, cases)
     fields = _definition(file_suite)
     fields.update(
         id=suite_id or name,
@@ -275,9 +322,14 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
             model=judge.model,
             parameters=dict(judge.inference_params),
             criteria={} if criterion is None else {check.type: criterion},
+            scope=check.scope,
         )
     return ScorerVersion(
-        name=check.label, kind="check", type=check.type, parameters={key: options[key] for key in sorted(options)}
+        name=check.label,
+        kind="check",
+        type=check.type,
+        parameters={key: options[key] for key in sorted(options)},
+        scope=check.scope,
     )
 
 
@@ -330,7 +382,11 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
     for position, case in enumerate(cases, 1):
         if set(case.tags) - {runner.GROUP_TAG} or case.metadata:
             raise ConfigError(f"case {position}: a data file has no place for tags other than its group, or metadata")
-        row: dict[str, Any] = {"id": case.id, "inputs": case.inputs}
+        row: dict[str, Any] = {"id": case.id}
+        if case.turns:
+            row["turns"] = [_turn_file(turn) for turn in case.turns]
+        else:
+            row["inputs"] = case.inputs
         if case.expectations:
             row["expectations"] = case.expectations
         if case.outputs is not None:
@@ -339,6 +395,15 @@ def cases_to_jsonl(cases: Sequence[Case]) -> str:
             row["group"] = case.tags[runner.GROUP_TAG]
         lines.append(json.dumps(row, ensure_ascii=False) + "\n")
     return "".join(lines)
+
+
+def _turn_file(turn: Turn) -> dict[str, Any]:
+    written: dict[str, Any] = {"inputs": turn.inputs}
+    if turn.expectations:
+        written["expectations"] = turn.expectations
+    if turn.checks is not None:
+        written["checks"] = list(turn.checks)
+    return written
 
 
 def _label(check_type: str) -> str:
@@ -460,6 +525,8 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         written["name"] = scorer.name
     if combine is not None:
         written["combine"] = combine
+    if scorer.scope != "turn":
+        written["scope"] = scorer.scope
     return written | options
 
 

@@ -63,7 +63,7 @@ EVERY_FIELD_URL = {
             "case_sensitive": True,
         },
         {"type": "matches", "pattern": "^[A-Z]"},
-        {"type": "not_matches", "name": "no_api_key", "pattern": "sk-[A-Za-z0-9]{8,}"},
+        {"type": "not_matches", "name": "no_api_key", "scope": "conversation", "pattern": "sk-[A-Za-z0-9]{8,}"},
         {"type": "is_json", "required_keys": ["answer", "lang"]},
         {"type": "contains_any", "values": ["sorry", "cannot"], "case_sensitive": True},
         {"type": "contains_all", "name": "both_words", "expectation": "must_say"},
