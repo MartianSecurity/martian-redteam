@@ -2349,7 +2349,9 @@ store keeps the watch, its progress and the noted changes on both databases.
   immutable dataset versions identified by content, archived projects refusing new work, trace
   search filters, latency and verdict filters and latency order, and paging, how far free text
   looks into a long request and response, alone and with those filters, sessions and users, traces in each attribute style mapped with their
-  attributes kept, a trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
+  attributes kept, a span's attributes read back as recorded (text that reads as JSON, such as
+  `"42"` or `"true"`, stays text; numbers, booleans, objects and lists keep their types), a
+  trace's model kept and searched by name, scores kept with their trace, the times given to traces and scores kept as
   given, versioned scorers,
   review queues, artifact names, traces deleted for good by id and before a cutoff
   ([deleting runs and traces](#deleting-runs-and-traces)), and organisations never seeing each
