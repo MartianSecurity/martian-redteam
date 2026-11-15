@@ -1,5 +1,5 @@
 """What a route of the evals core reads from its request: the edition's principal, entitlements,
-store, record store and worker, bound by :func:`martian.evals.server.create_app`, and the checks a
+store, record store, worker and judge settings, bound by :func:`martian.evals.server.create_app`, and the checks a
 write route makes of the principal's role and edition."""
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
 from martian.evals.server.capabilities import CAPABILITIES, ROLE_RANK, highest_role
 from martian.evals.server.entitlements import EDITION_NAMES, FEATURES, Entitlements
@@ -36,6 +37,12 @@ def current_worker(request: Request) -> Worker:
     if worker is None:
         raise HTTPException(503, "This installation runs no evaluation worker")
     return worker
+
+
+def current_judge_settings(request: Request) -> JudgeSettings | None:
+    """Where the edition keeps the default judge model, or ``None`` when it keeps none."""
+    settings: JudgeSettings | None = request.app.state.martian_evals_judge_settings
+    return settings
 
 
 def current_principal() -> Principal:
@@ -98,3 +105,4 @@ EntitlementsDep = Annotated[Entitlements, Depends(current_entitlements)]
 StoreDep = Annotated[EvalStore, Depends(current_store)]
 RecordsDep = Annotated[RecordStore, Depends(current_records)]
 WorkerDep = Annotated[Worker, Depends(current_worker)]
+JudgeSettingsDep = Annotated[JudgeSettings | None, Depends(current_judge_settings)]

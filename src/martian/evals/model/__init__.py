@@ -14,7 +14,7 @@ import math
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 MODEL_VERSION = "martian-eval-model-v1"
 
@@ -145,15 +145,29 @@ class Target(_Object):
 
 
 class ScorerVersion(_Object):
-    """One way of scoring a case, pinned to the version that produced the score."""
+    """One way of scoring a case, pinned to the version that produced the score.
+
+    A judge's ``model`` is an MLflow model URI (``openai:/<model>``); ``endpoint`` is the base
+    address of the OpenAI-compatible endpoint that serves it, or None for the provider's own. Keys
+    are never part of the model. An unset ``endpoint`` is left out when the scorer is written, so
+    a scorer without one has the digest it had before the field existed.
+    """
 
     name: Identifier
     kind: ScorerKind
     type: str = Field(min_length=1, max_length=80)
     version: str = ""
     model: str | None = None
+    endpoint: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     criteria: dict[str, Any] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def _without_unset_endpoint(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and written.get("endpoint", "") is None:
+            del written["endpoint"]
+        return written
 
 
 class Policy(_Object):
@@ -174,6 +188,8 @@ class RunSettings(_Object):
     target_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     judge_max_retries: int | None = Field(default=None, ge=0)
     judge_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Headers added to every judge request, values as written with ${NAME} unexpanded.
+    judge_headers: dict[str, str] | None = None
     output: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None

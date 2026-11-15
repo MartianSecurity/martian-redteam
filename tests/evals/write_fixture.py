@@ -15,11 +15,21 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from martian.evals.judge_settings import JudgeSettings, MemoryJudgeSettings
 from martian.evals.model import Case, Project
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, SINGLE_USER, Entitlements, Principal, create_app
 from martian.evals.store import EvalStore
-from martian.evals.worker import InProcessWorker, JudgeRequest, JudgeResult, Verdict, Work
+from martian.evals.worker import (
+    AgentExecutor,
+    Credentials,
+    InProcessWorker,
+    Judge,
+    JudgeRequest,
+    JudgeResult,
+    Verdict,
+    Work,
+)
 
 AGENT = str(uuid.UUID(int=7))
 ANSWERS = {"How do I reset my password?": "Use the reset link on the sign-in page."}
@@ -45,10 +55,13 @@ async def agent(case: Case) -> str:
 
 
 async def judge(request: JudgeRequest) -> JudgeResult:
-    """A judge that passes an output only when it repeats the expected text."""
+    """A judge that passes an output only when it repeats the expected text. It answers from the
+    model the request names, which reports the version ``2026-11``, or from ``JUDGE_MODEL``, which
+    reports none."""
     passed = request.expected.casefold() in request.output.casefold()
     return JudgeResult(
-        model=JUDGE_MODEL,
+        model=request.model or JUDGE_MODEL,
+        model_version="2026-11" if request.model else "",
         verdicts={
             s.name: Verdict(passed, "Repeats the expected text." if passed else "Differs.") for s in request.scorers
         },
@@ -66,6 +79,7 @@ class Served:
     records: SqlRecordStore
     worker: InProcessWorker
     principal: dict[str, Principal] = field(default_factory=dict)
+    judge_settings: JudgeSettings | None = None
 
     def drain(self) -> None:
         """Wait for every run and scoring job the worker was given."""
@@ -102,24 +116,43 @@ def serve(
     with_judge: bool = True,
     targets: dict[str, Any] | None = None,
     principal: Principal = SINGLE_USER,
+    judge_with: Judge = judge,
+    judge_settings: JudgeSettings | None = None,
+    credentials: Credentials | None = None,
+    executor: AgentExecutor | None = None,
+    target_timeout_seconds: float = 2,
 ) -> tuple[TestClient, Served]:
     """The core with a dataset published for ``principal``, who makes the requests until
     ``act_as`` names another. Use the client as a context manager, so the worker's tasks run
-    between requests."""
+    between requests. The default judge model is kept in memory unless ``judge_settings`` names
+    other settings."""
     asyncio.run(publish(store, principal))
     worker = InProcessWorker(
         store,
         records,
         organisation_id=principal.organisation_id,
         targets=targets or {AGENT: agent},
-        judge=judge if with_judge else None,
-        target_timeout_seconds=2,
+        judge=judge_with if with_judge else None,
+        target_timeout_seconds=target_timeout_seconds,
+        credentials=credentials,
+        executor=executor,
     )
     holder: dict[str, Principal] = {"current": principal}
     options: dict[str, Any] = {} if entitlements is None else {"entitlements": entitlements}
-    app = create_app(store=store, records=records, principal=lambda: holder["current"], worker=worker, **options)
+    settings = judge_settings if judge_settings is not None else MemoryJudgeSettings()
+    app = create_app(
+        store=store,
+        records=records,
+        principal=lambda: holder["current"],
+        worker=worker,
+        judge_settings=settings,
+        **options,
+    )
     client = TestClient(app)
-    return client, Served(client=client, store=store, records=records, worker=worker, principal=holder)
+    served = Served(
+        client=client, store=store, records=records, worker=worker, principal=holder, judge_settings=settings
+    )
+    return client, served
 
 
 class Inert:

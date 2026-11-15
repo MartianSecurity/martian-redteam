@@ -247,6 +247,7 @@ def test_the_fingerprint_follows_the_judge_and_the_sdk_version_only(tmp_path, mo
     # Settings that change how a run is carried out, not what it grades, keep earlier results.
     assert fingerprint(extra="concurrency: 9\nbatch: 3\noutput: elsewhere\n") == base
     assert fingerprint(model="openai:/a\n  max_retries: 2\n  rate_limit_wait_seconds: 60") == base
+    assert fingerprint(model="openai:/a\n  headers: {X-Gateway-Key: '${GATEWAY_KEY}'}") == base
     monkeypatch.setattr(runner, "__version__", "9.9.9")
     assert fingerprint() != base
 
@@ -456,7 +457,7 @@ def test_url_target_without_a_response_path_uses_the_response_text(tmp_path, age
         ("status", "the target returned HTTP 500"),
         ("missing_path", "the target's response has no value at response_path"),
         ("not_json", "the target's response has no value at response_path"),
-        ("unreachable", "the target could not be reached: ConnectError"),
+        ("unreachable", "the target could not be reached: ConnectError; check target.url"),
     ],
 )
 def test_a_failing_url_target_is_an_error_not_a_pass(tmp_path, agent_server, monkeypatch, fault, reason):

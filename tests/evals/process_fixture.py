@@ -13,6 +13,12 @@ Run as ``python -m tests.evals.process_fixture FOLDER WORK...``, this module run
 work (JSON) on a thread of its own in this one process, each thread fixing its organisation's
 workspace as a run's process has it from its start: the threaded worker that one process per run
 replaces.
+
+The target tests' setups are here too. :func:`http_services` gives a run's process only the
+stores and the credentials of HTTP targets, read from ``target-keys.json`` in the folder as the
+local edition keeps them; the worker sends the HTTP targets themselves with the work.
+:func:`agent_services` adds :class:`FakeMartianAgents`, a stand-in for the Martian server's
+martian-agents path, which appends each call it makes to ``chats.jsonl`` in the folder.
 """
 
 from __future__ import annotations
@@ -23,20 +29,28 @@ import os
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 import mlflow
 
-from martian.evals.model import Case
+from martian.evals.model import Case, Run
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server import DEFAULT_PROJECT, Principal, organisation_principal
+from martian.evals.server.projection import prompt_text
+from martian.evals.store import StoreError
 from martian.evals.store.mlflow_local import MlflowStore, workspace_name
-from martian.evals.worker import Work, WorkerServices, load_work
+from martian.evals.worker import Credentials, Work, WorkerServices, load_work
 from martian.evals.worker.process import WORKSPACE_ENV, _run_work
-from tests.evals.write_fixture import AGENT, judge
+from tests.evals.write_fixture import AGENT, ANSWERS, judge
 
 ORGANISATIONS = ("org-a", "org-b")
 ARRIVAL_SECONDS = 30
+HTTP_TARGET = str(uuid.UUID(int=8))
+REGISTERED_AGENT = str(uuid.UUID(int=9))
+KEY_NAME = "TARGET_KEY"
+LEASE_PREFIX = "fake-target-lease-"
 
 
 def member(organisation: str) -> Principal:
@@ -95,6 +109,74 @@ def services(folder: str) -> WorkerServices:
 def broken(folder: str) -> WorkerServices:
     """A setup that fails in the run's process before the work starts."""
     raise RuntimeError("the run's process could not open its stores")
+
+
+def stored_keys(folder: Path) -> Credentials:
+    """Credentials from ``target-keys.json`` in ``folder``: each target's key by its id, as
+    ``${TARGET_KEY}``. The file is read when the worker asks, as ``LocalTargets.key`` reads it."""
+
+    def credentials(principal: Principal, target_id: str, name: str, /) -> str | None:
+        keys: dict[str, str] = json.loads((folder / "target-keys.json").read_text(encoding="utf-8"))["keys"]
+        return keys.get(target_id) if name == KEY_NAME else None
+
+    return credentials
+
+
+def http_services(folder: str) -> WorkerServices:
+    """The stores and the HTTP targets' credentials: no function, no judge, no martian-agents."""
+    home = Path(folder)
+    store, records = open_stores(home)
+    return WorkerServices(store, records, credentials=stored_keys(home), target_timeout_seconds=ARRIVAL_SECONDS)
+
+
+class FakeMartianAgents:
+    """Registered agents through a stand-in for the Martian server's martian-agents path.
+
+    Admission pins the agent's approved connection, as ``select_eval_target`` does on the server.
+    Each call carries a target lease minted for that run and case, which martian-agents would
+    exchange for the agent's credential; it is appended, with the rest of the chat, to
+    ``chats.jsonl`` and never returned. The agent answers as the write route tests' agent does."""
+
+    def __init__(self, folder: Path, agents: tuple[str, ...] = (REGISTERED_AGENT,)) -> None:
+        self._chats = folder / "chats.jsonl"
+        self._agents = agents
+
+    async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
+        if agent_id not in self._agents:
+            raise StoreError("not_found", "Agent not found")
+        return {"kind": "dynamic", "target_id": f"agent-{agent_id}", "connection_id": "connection-1", "revision": 1}
+
+    async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
+        message = prompt_text(case.inputs)
+        chat = {
+            "organisation": principal.organisation_id,
+            "target_id": run.provenance["target"]["target_id"],
+            "conversation_id": f"eval:{run.id}:{case.id}",
+            "message": message,
+            "target_lease": f"{LEASE_PREFIX}{uuid.uuid4().hex}",
+            "timeout_seconds": timeout_seconds,
+        }
+        with self._chats.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(chat) + "\n")
+        return ANSWERS.get(message, "I am not sure.")
+
+    def chats(self) -> list[dict[str, Any]]:
+        if not self._chats.exists():
+            return []
+        return [json.loads(line) for line in self._chats.read_text(encoding="utf-8").splitlines()]
+
+
+def agent_services(folder: str) -> WorkerServices:
+    """:func:`http_services` with registered agents through :class:`FakeMartianAgents`."""
+    home = Path(folder)
+    store, records = open_stores(home)
+    return WorkerServices(
+        store,
+        records,
+        credentials=stored_keys(home),
+        executor=FakeMartianAgents(home),
+        target_timeout_seconds=ARRIVAL_SECONDS,
+    )
 
 
 def run_on_threads(folder: str, works: list[Work]) -> None:
