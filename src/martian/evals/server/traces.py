@@ -39,6 +39,7 @@ from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
     TRACE_STATE_BACK,
+    is_expectation,
     project_key,
     trace_info,
     trace_row,
@@ -94,7 +95,11 @@ def _filter(body: TraceQuery) -> Callable[[Trace], bool] | None:
         wanted = body.assessment_value == "true"
         tests.append(
             lambda t: any(
-                s.scorer == body.assessment and isinstance(s.value, bool) and s.value is wanted for s in t.scores
+                s.scorer == body.assessment
+                and not is_expectation(s)
+                and isinstance(s.value, bool)
+                and s.value is wanted
+                for s in t.scores
             )
         )
     if not tests:

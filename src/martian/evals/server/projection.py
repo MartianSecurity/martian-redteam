@@ -355,21 +355,30 @@ def queue_out(queue: ReviewQueue) -> dict[str, Any]:
 # --- traces ---------------------------------------------------------------------------------
 
 
+def is_expectation(score: Score) -> bool:
+    """Whether a score is a person's expectation on a trace rather than a verdict. The core records
+    an expectation annotation as a score whose metadata has ``martian.annotation: expectation``, and
+    a store binding reads MLflow's expectation assessments the same way."""
+    return score.metadata.get("martian.annotation") == "expectation"
+
+
 def mlflow_assessment(score: Score, trace_id: str) -> dict[str, Any]:
-    """A score as an MLflow feedback assessment."""
-    feedback: dict[str, Any] = {"value": score.value}
-    if score.error:
-        feedback["error"] = {"error_message": score.error}
+    """A score as an MLflow assessment: an expectation for an expectation, feedback otherwise."""
     found: dict[str, Any] = {
         "assessment_id": score.store.assessment_id,
         "assessment_name": score.scorer,
         "trace_id": trace_id,
         "source": {"source_type": SCORE_SOURCE[score.source], "source_id": score.source_id},
-        "feedback": feedback,
         "create_time": iso(score.created_at),
         "last_update_time": iso(score.created_at),
         "valid": True,
     }
+    if is_expectation(score):
+        found["expectation"] = {"value": score.value}
+    else:
+        found["feedback"] = {"value": score.value}
+        if score.error:
+            found["feedback"]["error"] = {"error_message": score.error}
     if score.rationale:
         found["rationale"] = score.rationale
     if score.metadata:
@@ -403,6 +412,7 @@ def trace_row(trace: Trace) -> dict[str, Any]:
                 "error": score.error or None,
             }
             for score in trace.scores
+            if not is_expectation(score)
         ],
         "triage": _triage(trace.tags.get("martian.evals.triage")),
         "run_id": trace.run_id,

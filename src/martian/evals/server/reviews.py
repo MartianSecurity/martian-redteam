@@ -531,13 +531,6 @@ async def question_version(body: QuestionVersionRequest, principal: PrincipalDep
 # --- trace annotations ----------------------------------------------------------------------
 
 
-def annotation_out(score: Score, trace_id: str, kind: str) -> dict[str, Any]:
-    found = mlflow_assessment(score, trace_id)
-    if kind == "expectation":
-        found["expectation"] = {"value": found.pop("feedback")["value"]}
-    return found
-
-
 @explorer.post(
     "/traces/{trace_id}/annotations",
     status_code=201,
@@ -588,7 +581,7 @@ async def create_trace_annotation(
         or found.metadata.get("martian.annotation") != body.kind
     ):
         raise HTTPException(409, "This annotation request already has different content")
-    return annotation_out(found, trace_id, body.kind)
+    return mlflow_assessment(found, trace_id)
 
 
 __all__ = ["accepts", "explorer", "router", "sync_queue_item"]
