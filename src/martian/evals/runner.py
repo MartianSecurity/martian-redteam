@@ -40,7 +40,11 @@ from martian.evals import _numeric
 from martian.evals._endpoint_errors import names_unknown_model
 from martian.evals._json_schema import check_schema
 
-JUDGES = ("rubric", "guidelines", "conditions")
+# LLM judges graded by criteria the suite or the case gives, under the judge's own type name.
+CRITERIA_JUDGES = ("rubric", "guidelines", "conditions")
+# LLM judges of the case's documents (inputs.context) that take no criteria.
+GROUNDING_JUDGES = ("groundedness", "context_relevance", "context_sufficiency")
+JUDGES = CRITERIA_JUDGES + GROUNDING_JUDGES
 CHECKS = (
     "contains",
     "not_contains",
@@ -171,6 +175,9 @@ class CheckSpec(_Model):
         "rubric",
         "guidelines",
         "conditions",
+        "groundedness",
+        "context_relevance",
+        "context_sufficiency",
         "contains",
         "not_contains",
         "contains_any",
@@ -308,7 +315,7 @@ class Suite(_Model):
             raise ValueError("check names must be unique; give repeated check types a name")
         kinds = [check.type for check in self.checks if check.type in JUDGES]
         if len(set(kinds)) != len(kinds):
-            raise ValueError("use at most one check of each judge type (rubric, guidelines, conditions)")
+            raise ValueError(f"use at most one check of each judge type ({', '.join(JUDGES)})")
         if kinds and self.judge is None:
             raise ValueError("LLM judge checks need a judge.model")
         calls = [check.label for check in self.checks if check.type in CALL_CHECKS]
@@ -577,21 +584,25 @@ def _load_target(reference: TargetRef, base: Path, input_key: str = "message") -
 
 
 def _build_scorers(suite: Suite) -> list[Any]:
-    from martian.evals import judges
+    from martian.evals import grounding, judges
 
     built = []
     judge_headers = {
         name: _from_environment(value, f"judge.headers.{name}")
         for name, value in (suite.judge.headers if suite.judge else {}).items()
     }
+    factories: dict[str, Callable[..., Any]] = {
+        "rubric": judges.response_rubric,
+        "guidelines": judges.response_guidelines,
+        "conditions": judges.response_conditions,
+        "groundedness": grounding.groundedness,
+        "context_relevance": grounding.context_relevance,
+        "context_sufficiency": grounding.context_sufficiency,
+    }
     for check in suite.checks:
         if check.type in JUDGES:
             assert suite.judge is not None
-            factory = {
-                "rubric": judges.response_rubric,
-                "guidelines": judges.response_guidelines,
-                "conditions": judges.response_conditions,
-            }[check.type]
+            factory = factories[check.type]
             built.append(
                 factory(
                     model=suite.judge.model,

@@ -112,11 +112,13 @@ A URL target cannot be combined with `file` or `function`. Use a function target
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
 secret in the body.
 
-**Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge);
-every other type is one of the nineteen [deterministic checks](#deterministic-checks), each with
-its options and an example. Criteria written in the suite file apply to every case that does
-not carry its own in `expectations`. Use at most one check of each judge type, and give repeated
-check types a `name`.
+**Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
+graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
+[grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
+`inputs.context` and take no options; every other type is one of the nineteen
+[deterministic checks](#deterministic-checks), each with its options and an example. Criteria
+written in the suite file apply to every case that does not carry its own in `expectations`. Use
+at most one check of each judge type, and give repeated check types a `name`.
 
 **Results.** The output folder receives:
 
@@ -754,6 +756,88 @@ identifies the first stage. Input/output token totals include both stages when
 both report usage. Review costs two model calls and can increase latency, so
 compare correctness, errors and cost on frozen examples with separate development
 and validation sets before adopting a change.
+
+### Grounding and retrieval judges
+
+Three judges grade an answer against the documents a case supplies, and the documents against the
+request. The documents are the case's `inputs.context`: one string, or a list of strings, one per
+document. Each judge is a suite-file `type` and a function of the same name in `martian.evals`.
+
+| Type | Reads | Passes when | A pass quotes | A fail quotes |
+| --- | --- | --- | --- | --- |
+| `groundedness` | Request, documents, response | Every factual claim in the response is stated in the documents or follows directly from them | `passage`: the support, from the documents; `claim`: the response's main claim, if it makes one | `claim`: the unsupported claim, from the response; `passage`: what the documents say about it, if anything |
+| `context_relevance` | Request, documents | At least one document bears on what the request asks | `quote`: the most relevant passage | `quote`: the part of the request no document addresses |
+| `context_sufficiency` | Request, documents, `expectations.expected_response` if given | The documents hold every fact the answer needs, and every fact of the expected response | `passage`: the passages that give the answer | `missing`: what the documents lack, from the expected response, else the request; `passage`: the closest passage, if any |
+
+```python
+from martian.evals import assert_checks, context_relevance, context_sufficiency, evaluate, groundedness
+
+model = "openai:/YOUR_JUDGE_MODEL"
+result = evaluate(
+    data=[{
+        "inputs": {"message": "When does the shop close?", "context": ["The shop closes at 6 pm on weekdays."]},
+        "outputs": "It closes at 6 pm on weekdays.",
+        "expectations": {"expected_response": "At 6 pm on weekdays."},
+    }],
+    scorers=[groundedness(model=model), context_relevance(model=model), context_sufficiency(model=model)],
+)
+assert_checks(result)
+```
+
+In a suite file, list them under `checks` (`- type: groundedness`) with a `judge`, and give each
+data line its documents: `{"input": ...}` cannot hold them, so use
+`{"inputs": {"message": "...", "context": ["..."]}, "output": "..."}`. A function target is
+called with `context` as a keyword argument beside `message`. The judges read only the documents
+the case carries, not documents a target retrieves while it runs, so for a retrieval eval store
+the retrieved documents with each case. `context_relevance` and `context_sufficiency` grade the
+documents, not the response. `input_key` and `context_key` select other input fields in Python.
+
+**The quotes are checked.** A verdict is one flat JSON object of strings (a reason, the quotes,
+and `pass`, `fail` or `uncertain`), because some models, GLM 5 among them, break nested JSON in
+structured output. The SDK then finds each quote in the text it must come from, letting only runs
+of whitespace differ: no case folding, paraphrase or ellipsis. A quote may join whole sentences
+from different documents, and each sentence must then be a passage on its own. The rationale gives
+each passage as its source has it, and `martian.judge.evidence` its field, source, document number
+and code-point offsets. When a quote is not a passage of its text, a quote the verdict needs is
+empty, or the verdict is `uncertain`, the judge raises (`judge_invalid_quote`,
+`judge_missing_quote`, `judge_uncertain`): the case has no verdict, and `assert_checks` and
+`martian evals run` count it as an error, so the gate fails closed. The SDK never repairs a quote,
+matches it loosely or asks the model again. The check proves the quoted text is really there, not
+that it is the right passage.
+
+Each judge makes one model call through the same transport as the judges above: provider routing,
+`headers`, the retries of replies that carry no judgment, and the failure codes are the same.
+Missing or empty documents, a request that is not text, an empty response (for `groundedness`) and
+an `expected_response` that is not text are errors before any model call. Feedback metadata
+records `martian.judge.version` (`groundedness-v1`, `context-relevance-v1` or
+`context-sufficiency-v1`), `verdict`, `evidence`, `documents_sha256`, `prompt_sha256` and
+`model_calls`; `include_judge_prompt=True` also keeps the rendered prompt.
+
+**Measured error rates.** Each judge was scored once against a hand-written labelled set,
+[`tests/evals/benchmarks/grounding_judges.jsonl`](../tests/evals/benchmarks/grounding_judges.jsonl)
+(invented texts, half of each judge's cases labelled pass), by
+[`scripts/benchmark_grounding_judges.py`](../scripts/benchmark_grounding_judges.py), with GLM 5
+(`zai.glm-5` on Amazon Bedrock, us-west-2, through a LiteLLM proxy as `openai:/glm-5`) at
+temperature 0, on 15 November 2026. A false pass is a case labelled fail that the judge passed, out
+of the cases labelled fail; a false fail is a case labelled pass that it failed, out of the cases
+labelled pass. An error is a case it gave no verdict.
+
+| Judge | Cases (pass / fail) | False pass | False fail | Errors | Mean latency |
+| --- | --- | --- | --- | --- | --- |
+| `groundedness` | 26 (13 / 13) | 0 of 13 | 0 of 13 | 1 of 26 (`judge_invalid_quote`) | 2.2 s |
+| `context_relevance` | 24 (12 / 12) | 0 of 12 | 0 of 12 | 0 | 1.8 s |
+| `context_sufficiency` | 24 (12 / 12) | 0 of 12 | 0 of 12 | 0 | 1.5 s |
+
+These are small samples: with 12 or 13 cases a side, observing no error still allows a true rate
+of up to about 25% (the 95% upper bound). One run per judge measures no run-to-run variation, and
+the results are in-sample: the groundedness and sufficiency prompts were revised once on this
+set. Their first form asked for one quote, and 8 of 26 and 12 of 24 quotes were refused, because
+the model quoted the documents where the response or the request was asked for, or joined two
+documents; every verdict it gave was right. The one groundedness error above is a pass whose
+`claim` was copied from the documents instead of the response, which in a gate is a failed case.
+A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, by judge. Calibrate on your own documents and model
+before relying on these rates; a change to a judge's prompt or schema needs the benchmark run
+again.
 
 ### Session enforcement
 

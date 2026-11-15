@@ -32,6 +32,7 @@ from martian.evals.config import EvalsConfig
 from martian.evals.dataset import EvalDataset, load_dataset
 from martian.evals.evaluate import EvaluationError, evaluate
 from martian.evals.gate import GateFailure, assert_checks, assert_gate
+from martian.evals.grounding import context_relevance, context_sufficiency, groundedness
 from martian.evals.judges import (
     response_conditions,
     response_guidelines,
@@ -52,11 +53,14 @@ __all__ = [
     "contains",
     "contains_all",
     "contains_any",
+    "context_relevance",
+    "context_sufficiency",
     "cost",
     "ends_with",
     "equals",
     "exact_match",
     "evaluate",
+    "groundedness",
     "is_json",
     "json_schema",
     "latency",

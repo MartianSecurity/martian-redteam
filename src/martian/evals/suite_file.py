@@ -45,7 +45,7 @@ SUITE_FILE_FIELDS = {
     "judge.rate_limit_wait_seconds": "RunSettings.judge_rate_limit_wait_seconds",
     "judge.headers": "RunSettings.judge_headers, values as written",
     "checks": "Suite.scorers, in order",
-    "checks.type": "ScorerVersion.type; kind llm_judge for rubric, guidelines and conditions, check otherwise",
+    "checks.type": "ScorerVersion.type; kind llm_judge for the LLM judges (runner.JUDGES), check otherwise",
     "checks.name": "ScorerVersion.name (the check's label)",
     "checks.rubric": "ScorerVersion.criteria.rubric",
     "checks.guidelines": "ScorerVersion.criteria.guidelines",
@@ -91,6 +91,10 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "rubric": frozenset({"rubric"}),
     "guidelines": frozenset({"guidelines"}),
     "conditions": frozenset({"conditions"}),
+    # The grounding judges read each case's inputs.context and take no options.
+    "groundedness": frozenset(),
+    "context_relevance": frozenset(),
+    "context_sufficiency": frozenset(),
     "contains": _TEXT_OPTIONS | {"any_of"},
     "not_contains": _TEXT_OPTIONS,
     "contains_any": _TEXT_OPTIONS,
@@ -198,7 +202,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
     """Everything a suite file says, as the model's suite fields."""
     if file_suite.judge is not None and not any(check.type in runner.JUDGES for check in file_suite.checks):
         raise ConfigError(
-            "judge: no check is an LLM judge (rubric, guidelines or conditions), so nothing uses it; remove it"
+            f"judge: no check is an LLM judge ({', '.join(runner.JUDGES)}), so nothing uses it; remove it"
         )
     try:
         return {
@@ -239,7 +243,7 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
         raise ConfigError(f"checks.{position}: {', '.join(unused)} does not apply to {check.type} checks; remove it")
     if check.type in runner.JUDGES:
         assert judge is not None  # the runner refuses a judge check without a judge
-        criterion = getattr(check, check.type)
+        criterion = getattr(check, check.type) if check.type in runner.CRITERIA_JUDGES else None
         return ScorerVersion(
             name=check.label,
             kind="llm_judge",
@@ -403,6 +407,8 @@ def _check_file(position: int, scorer: ScorerVersion) -> dict[str, Any]:
     if scorer.kind == "llm_judge":
         if scorer.type not in runner.JUDGES:
             raise ConfigError(f"{where}: a suite file's LLM judges are {', '.join(runner.JUDGES)}")
+        if scorer.type in runner.GROUNDING_JUDGES and scorer.criteria:
+            raise ConfigError(f"{where}: {scorer.type} judges have no criteria")
         if set(scorer.criteria) - {scorer.type}:
             raise ConfigError(f"{where}: {scorer.type} judges keep their criteria under {scorer.type} only")
         options = dict(scorer.criteria)

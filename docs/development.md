@@ -112,6 +112,12 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   connects as an ordinary role that owns its schema, so row-level security is enforced; the URL's
   user must be able to create roles.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
+- `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
+  checks the shape of their labelled set, `tests/evals/benchmarks/grounding_judges.jsonl`.
+  Scoring the judges on that set needs a real model, so it is not part of CI:
+  `scripts/benchmark_grounding_judges.py --model openai:/<model> --out results.jsonl` (with the
+  provider's key and address in the environment) makes one call per case, about 75 in all, and
+  prints each judge's false pass and false fail rates for [the evals guide](evals.md#grounding-and-retrieval-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
