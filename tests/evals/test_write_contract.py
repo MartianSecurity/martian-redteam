@@ -87,6 +87,8 @@ OWN_NAMES |= {
     ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
     ("delete", "/v1/evals/thresholds/{threshold_id}"),
 }
+# And the route that gives an imported threshold's webhook its secret again (MorningHQ/martian-notes#361).
+OWN_NAMES |= {("post", "/v1/evals/thresholds/{threshold_id}/secret")}
 # And its schedule routes (MorningHQ/martian-notes#197).
 OWN_NAMES |= {
     ("get", "/v1/evals/schedules"),

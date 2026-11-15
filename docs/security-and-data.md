@@ -78,9 +78,11 @@ See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
 `martian evals export` writes everything the data folder's store and record store hold into the
 folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
-reviews, and run artifacts. It holds no credentials: the local targets and their keys
-(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
-`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
+and webhook URLs and email recipients among them). It holds no credentials: the local targets and
+their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
+threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the
 data folder. See [data export](data-export.md).
 
 ## Custom Python scorers
@@ -202,12 +204,15 @@ Secrets:
   (`martian_thresholds.secret`), not in the threshold's record, and only `threshold_secret`, which
   the worker calls to sign, reads it back. No route returns it (a threshold shows
   `"signed": true`), an alert's stored record and payload do not hold it, no log line holds it, and
-  `martian evals export` does not export thresholds. It is stored as given, not encrypted: whoever
-  can read the record-store database can read it, as they can every record there, and on Postgres
-  row-level security keeps it to its organisation. To change it, delete the threshold and create
-  another.
+  `martian evals export` exports the threshold without it: a threshold imported into a fresh
+  install shows `"signed": false` and sends no signed webhook until a member gives it a secret
+  again (`POST /v1/evals/thresholds/{id}/secret`, once, for a webhook with none). It is stored as
+  given, not encrypted: whoever can read the record-store database can read it, as they can every
+  record there, and on Postgres row-level security keeps it to its organisation. To change it,
+  delete the threshold and create another.
 - **The SMTP password** is part of the worker's settings, given by the operator in code from their
-  own secret store. No record holds it, and the settings' repr and the log lines leave it out.
+  own secret store. No record holds it, so no export does, and the settings' repr and the log
+  lines leave it out.
 - **Logs and errors.** A failed attempt is logged, and kept as the alert's `last_error`, as a status
   or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`): never the URL, a header, the body,
   the secret, the password or a recipient. The HTTP client's own request log (HTTPX at `INFO`),
@@ -217,6 +222,7 @@ Secrets:
 `tests/evals/test_thresholds.py` checks that the default settings send nothing and open no
 connection, that the loopback receiver is refused without `private_addresses`, that no route
 answer, log line or alert holds the secret, and that failures are logged without the address.
+`tests/evals/test_data_export.py` checks that no file of an export holds a threshold's secret.
 
 ## The local edition has no login
 

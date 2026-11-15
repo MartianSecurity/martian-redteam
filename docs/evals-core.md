@@ -1358,6 +1358,7 @@ server's frozen contract has none.
 | `POST /v1/evals/thresholds` | Create a threshold (`201`) |
 | `GET /v1/evals/thresholds/{threshold_id}` | One threshold and its status |
 | `GET /v1/evals/thresholds/{threshold_id}/alerts` | Its alerts, newest first, with their delivery (`limit`, `cursor`) |
+| `POST /v1/evals/thresholds/{threshold_id}/secret` | Give a webhook that has no secret, as an [import](data-export.md#importing) leaves it, its secret: `{"secret": "..."}`, once. `409` for one that has a secret, `422` for a threshold without a webhook |
 | `DELETE /v1/evals/thresholds/{threshold_id}` | Remove it, its secret and its alerts (`204`) |
 
 ```json
@@ -1396,6 +1397,11 @@ server's frozen contract has none.
   channel; an installation sends neither until it is configured
   ([sending alerts](#sending-alerts)), and asking for one before then is `422`. With neither, the
   threshold still changes state, and its status shows it.
+- The webhook's **`secret`**, 16 to 256 printable ASCII characters, signs its alerts. It is
+  written once and no route returns it: a threshold shows `"webhook": {"url": ..., "signed":
+  true}`. An export never holds it, so a threshold imported into a fresh install
+  ([data export](data-export.md#importing)) shows `"signed": false` and its webhook alerts fail
+  ("The threshold has no webhook secret") until `POST .../secret` gives it one.
 - The id is derived from `request_id`: the same request again returns the same threshold, and
   another one with that `request_id` is `409`. A project has at most 50 thresholds (`409`), and an
   archived project takes none (`409`). A threshold cannot be changed; delete it and create another.
@@ -1573,10 +1579,11 @@ without the address; that email goes through a fake SMTP server with its subject
 alert id; that default settings send nothing and connect to nothing, and that webhooks without
 `private_addresses` refuse the loopback receiver before any call; that a breach through the routes
 and the queue sends one signed webhook over several passes, and that no route answer, log line or
-alert holds the secret; and the routes' entitlement, role, validation, idempotency and deletion
-with the monitor. A loopback webhook receiver and a fake SMTP server stand in for the receivers.
-The record contract checks the threshold records, their conditioned changes of state and the
-taking of due alerts on SQLite and Postgres.
+alert holds the secret; that a webhook with no secret, as an import writes it, shows unsigned until
+its secret is given, once, and then signs with it; and the routes' entitlement, role, validation,
+idempotency and deletion with the monitor. A loopback webhook receiver and a fake SMTP server stand in for the receivers.
+The record contract checks the threshold records, their conditioned changes of state, the secret
+given once to a webhook without one and the taking of due alerts on SQLite and Postgres.
 
 ## Schedules
 
@@ -2346,7 +2353,9 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   in `martian.evals.records`) are the core's own records too. Migration `0006` adds
   `martian_thresholds`, one row per threshold with the threshold as its route writes it, its
   status as its evaluations write it, the `sequence` a change of state is conditioned on, and its
-  webhook's secret in a column of its own that only `threshold_secret` reads; and
+  webhook's secret in a column of its own that only `threshold_secret` reads (`threshold_signed`
+  says whether there is one, and `set_threshold_secret` gives one, once, to a webhook an import
+  wrote without it); and
   `martian_threshold_alerts`, one row per alert, keyed by an id derived from the change and the
   channel. `create_threshold`, `get_threshold`, `list_thresholds` and `delete_threshold` keep the
   thresholds; `threshold_status` and `set_threshold_status` (a change of state with its alerts, in
@@ -3184,14 +3193,15 @@ Postgres. It belongs to the [MLflow compatibility suite](development.md#mlflow-u
 ## Data export
 
 `martian evals export <folder>` exports everything the local edition's store and record store
-hold (not the worker's queue, the local targets and their keys, or `settings.json`), and
+hold (not the worker's queue, a threshold's webhook secret, the local targets and their keys, or
+`settings.json`), and
 `martian evals import martian <folder>` loads an export into a data folder that holds no data
 yet (`martian.evals.data_export`); `--data-dir` names the data folder as for `martian ui`. An
 interrupted export resumes when it is run again into the same folder. An install that runs the
 core in its own process calls `export_data` and `import_data` with its store, record store and the
-organisation's principal. Both work only through `EvalStore` and `RecordStore`. The format, what
-an export holds, resuming, and what the receiving store assigns are in
-[data export](data-export.md).
+organisation's principal. Both work only through `EvalStore` and `RecordStore`. Monitors and
+schedules come back paused, and a threshold's webhook without its secret. The format, what an
+export holds, resuming, and what the receiving store assigns are in [data export](data-export.md).
 
 ## Not built yet
 
@@ -3204,8 +3214,7 @@ an export holds, resuming, and what the receiving store assigns are in
 | LLM judges of a whole conversation | MorningHQ/martian-notes#176 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
-| Monitors, schedules and their thresholds in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
-| Changing a threshold or its webhook secret in place, rather than deleting it and creating another | Not filed yet |
+| Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
 `tests/evals/test_server.py`, `test_entitlements.py`, `test_bootstrap.py`, `test_local.py`,

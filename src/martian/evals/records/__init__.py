@@ -711,8 +711,9 @@ class RecordStore(Protocol):
     ) -> Threshold:
         """Create the threshold, with status ``unknown``, or return the stored one with the same
         id. ``webhook_secret`` is kept beside it for signing its webhook alerts, and only
-        :meth:`threshold_secret` returns it: a threshold with a webhook has one, and one without
-        has none."""
+        :meth:`threshold_secret` returns it. A threshold without a webhook has none. One with a
+        webhook has one, unless an import wrote it (``martian.evals.data_export``), which leaves
+        the secret out: it is given again with :meth:`set_threshold_secret`."""
         ...
 
     async def get_threshold(self, principal: Principal, project_id: str, threshold_id: str) -> Threshold | None: ...
@@ -752,6 +753,17 @@ class RecordStore(Protocol):
     async def threshold_secret(self, principal: Principal, project_id: str, threshold_id: str) -> str | None:
         """The secret the threshold's webhook alerts are signed with, for the worker that signs
         them. No route calls it."""
+        ...
+
+    async def threshold_signed(self, principal: Principal, project_id: str, threshold_id: str) -> bool:
+        """Whether the threshold has a webhook secret, without reading it: False for a threshold
+        an import wrote until its secret is given again, and for one that is gone."""
+        ...
+
+    async def set_threshold_secret(self, principal: Principal, project_id: str, threshold_id: str, secret: str) -> bool:
+        """Give a threshold with a webhook and no secret, such as one an import wrote, the secret
+        its alerts are signed with. True when it did; False when the threshold is gone, has no
+        webhook or has a secret already, which stays: a secret is written once."""
         ...
 
     async def take_due_alerts(
