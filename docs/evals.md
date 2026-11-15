@@ -533,5 +533,5 @@ signal. It is not a release attestation.
 
 ```bash
 uv sync --locked --extra evals
-uv run --extra evals pytest -q tests/evals
+uv run --extra evals pytest -q -n auto tests/evals
 ```
