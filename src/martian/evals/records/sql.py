@@ -61,6 +61,9 @@ from martian.evals.records import (
     MonitoredTrace,
     MonitorProgress,
     SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleProgress,
     Threshold,
     ThresholdStatus,
 )
@@ -74,6 +77,8 @@ from martian.evals.records.tables import (
     reviews,
     runs,
     saved_views,
+    schedule_runs,
+    schedules,
     scoring_jobs,
     suites,
     threshold_alerts,
@@ -1092,22 +1097,7 @@ class SqlRecordStore:
         def work(connection: Connection, space: str) -> list[str]:
             if self._one(connection, monitors, space, project_id, id=monitor_id) is None:
                 raise StoreError("not_found", "monitor not found")
-            on_it = (
-                thresholds.c.space == space,
-                thresholds.c.project_id == project_id,
-                thresholds.c.source_kind == "monitor",
-                thresholds.c.source_id == monitor_id,
-            )
-            gone: list[str] = list(connection.execute(select(thresholds.c.id).where(*on_it)).scalars().all())
-            if gone:
-                connection.execute(
-                    delete(threshold_alerts).where(
-                        threshold_alerts.c.space == space,
-                        threshold_alerts.c.project_id == project_id,
-                        threshold_alerts.c.threshold_id.in_(gone),
-                    )
-                )
-                connection.execute(delete(thresholds).where(*on_it))
+            gone = self._delete_thresholds_on(connection, space, project_id, "monitor", monitor_id)
             for table, key in ((monitored_traces, monitored_traces.c.monitor_id), (monitors, monitors.c.id)):
                 connection.execute(
                     delete(table).where(table.c.space == space, table.c.project_id == project_id, key == monitor_id)
@@ -1529,3 +1519,264 @@ class SqlRecordStore:
             return _page([Alert.model_validate(r) for r in rows], offset, limit, total)
 
         return await self._run(principal, work)
+
+    # --- schedules -----------------------------------------------------------------------------
+
+    async def create_schedule(self, principal: Principal, project_id: str, schedule: Schedule) -> Schedule:
+        if schedule.project_id != project_id:
+            raise StoreError("invalid", "the schedule belongs to another project")
+
+        def work(connection: Connection, space: str) -> tuple[Schedule, bool]:
+            if stored := self._one(connection, schedules, space, project_id, id=schedule.id):
+                return Schedule.model_validate(stored), False
+            now = _now()
+            saved = schedule.model_copy(
+                update={
+                    "revision": 1,
+                    "created_at": schedule.created_at or now,
+                    "updated_at": now,
+                    "active_since": schedule.active_since or schedule.created_at or now,
+                    "created_by": schedule.created_by or principal.user_id,
+                }
+            )
+            connection.execute(
+                insert(schedules).values(
+                    space=space,
+                    project_id=project_id,
+                    id=schedule.id,
+                    state=saved.state,
+                    revision=1,
+                    record=_json(saved),
+                    progress=_json(ScheduleProgress()),
+                )
+            )
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "schedule", project_id, schedule.id)
+        return saved
+
+    async def get_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> Schedule | None:
+        def work(connection: Connection, space: str) -> Schedule | None:
+            stored = self._one(connection, schedules, space, project_id, id=schedule_id)
+            return Schedule.model_validate(stored) if stored else None
+
+        return await self._run(principal, work)
+
+    async def list_schedules(self, principal: Principal, project_id: str) -> list[Schedule]:
+        def work(connection: Connection, space: str) -> list[Schedule]:
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(schedules.c.record).where(schedules.c.space == space, schedules.c.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+            return sorted((Schedule.model_validate(r) for r in rows), key=lambda s: (s.name, s.id))
+
+        return await self._run(principal, work)
+
+    async def update_schedule(
+        self, principal: Principal, project_id: str, schedule: Schedule, *, expected_revision: int
+    ) -> Schedule:
+        def work(connection: Connection, space: str) -> Schedule:
+            stored = self._one(connection, schedules, space, project_id, id=schedule.id)
+            if stored is None:
+                raise StoreError("not_found", "schedule not found")
+            earlier = Schedule.model_validate(stored)
+            saved = schedule.model_copy(
+                update={
+                    "revision": expected_revision + 1,
+                    "created_at": earlier.created_at,
+                    "created_by": earlier.created_by,
+                    "updated_at": _now(),
+                }
+            )
+            changed = connection.execute(
+                update(schedules)
+                .where(
+                    schedules.c.space == space,
+                    schedules.c.project_id == project_id,
+                    schedules.c.id == schedule.id,
+                    schedules.c.revision == expected_revision,
+                )
+                .values(state=saved.state, revision=saved.revision, record=_json(saved))
+            ).rowcount
+            if changed == 0:
+                raise StoreError("conflict", "the schedule was changed by someone else; reload it")
+            return saved
+
+        saved = await self._run(principal, work)
+        self._emit(principal, "schedule", project_id, schedule.id)
+        return saved
+
+    async def delete_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> None:
+        def work(connection: Connection, space: str) -> list[str]:
+            if self._one(connection, schedules, space, project_id, id=schedule_id) is None:
+                raise StoreError("not_found", "schedule not found")
+            gone = self._delete_thresholds_on(connection, space, project_id, "gate", schedule_id)
+            for table, key in ((schedule_runs, schedule_runs.c.schedule_id), (schedules, schedules.c.id)):
+                connection.execute(
+                    delete(table).where(table.c.space == space, table.c.project_id == project_id, key == schedule_id)
+                )
+            return gone
+
+        for threshold_id in await self._run(principal, work):
+            self._emit(principal, "threshold", project_id, threshold_id)
+        self._emit(principal, "schedule", project_id, schedule_id)
+
+    @staticmethod
+    def _delete_thresholds_on(
+        connection: Connection, space: str, project_id: str, source_kind: str, source_id: str
+    ) -> list[str]:
+        """Remove the thresholds on one source, with their alerts; their ids."""
+        on_it = (
+            thresholds.c.space == space,
+            thresholds.c.project_id == project_id,
+            thresholds.c.source_kind == source_kind,
+            thresholds.c.source_id == source_id,
+        )
+        gone: list[str] = list(connection.execute(select(thresholds.c.id).where(*on_it)).scalars().all())
+        if gone:
+            connection.execute(
+                delete(threshold_alerts).where(
+                    threshold_alerts.c.space == space,
+                    threshold_alerts.c.project_id == project_id,
+                    threshold_alerts.c.threshold_id.in_(gone),
+                )
+            )
+            connection.execute(delete(thresholds).where(*on_it))
+        return gone
+
+    async def schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str
+    ) -> ScheduleProgress | None:
+        def work(connection: Connection, space: str) -> ScheduleProgress | None:
+            stored = connection.execute(
+                select(schedules.c.progress).where(
+                    schedules.c.space == space, schedules.c.project_id == project_id, schedules.c.id == schedule_id
+                )
+            ).scalar_one_or_none()
+            return ScheduleProgress.model_validate(stored) if stored is not None else None
+
+        return await self._run(principal, work)
+
+    async def set_schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str, progress: ScheduleProgress
+    ) -> None:
+        def work(connection: Connection, space: str) -> int:
+            return connection.execute(
+                update(schedules)
+                .where(schedules.c.space == space, schedules.c.project_id == project_id, schedules.c.id == schedule_id)
+                .values(progress=_json(progress))
+            ).rowcount
+
+        if await self._run(principal, work):
+            self._emit(principal, "schedule", project_id, schedule_id)
+
+    def _scheduled_run(
+        self, connection: Connection, space: str, project_id: str, schedule_id: str, slot: datetime
+    ) -> ScheduledRun | None:
+        stored = connection.execute(
+            select(schedule_runs.c.record).where(
+                schedule_runs.c.space == space,
+                schedule_runs.c.project_id == project_id,
+                schedule_runs.c.schedule_id == schedule_id,
+                schedule_runs.c.slot == slot,
+            )
+        ).scalar_one_or_none()
+        return ScheduledRun.model_validate(stored) if stored is not None else None
+
+    async def add_scheduled_run(self, principal: Principal, project_id: str, entry: ScheduledRun) -> ScheduledRun:
+        def work(connection: Connection, space: str) -> tuple[ScheduledRun, bool]:
+            if self._one(connection, schedules, space, project_id, id=entry.schedule_id) is None:
+                raise StoreError("not_found", "schedule not found")
+            if found := self._scheduled_run(connection, space, project_id, entry.schedule_id, entry.slot):
+                return found, False
+            saved = entry.model_copy(update={"created_at": entry.created_at or _now()})
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(schedule_runs).values(
+                            space=space,
+                            project_id=project_id,
+                            schedule_id=entry.schedule_id,
+                            slot=entry.slot,
+                            state=entry.state,
+                            run_id=entry.run_id,
+                            record=_json(saved),
+                        )
+                    )
+            except IntegrityError:  # another turn recorded the slot at the same moment
+                found = self._scheduled_run(connection, space, project_id, entry.schedule_id, entry.slot)
+                if found is None:
+                    raise
+                return found, False
+            return saved, True
+
+        saved, created = await self._run(principal, work)
+        if created:
+            self._emit(principal, "schedule", project_id, entry.schedule_id)
+        return saved
+
+    async def get_scheduled_run(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime
+    ) -> ScheduledRun | None:
+        def work(connection: Connection, space: str) -> ScheduledRun | None:
+            return self._scheduled_run(connection, space, project_id, schedule_id, slot)
+
+        return await self._run(principal, work)
+
+    async def list_scheduled_runs(
+        self, principal: Principal, project_id: str, schedule_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[ScheduledRun]:
+        offset = int(cursor) if cursor and cursor.isdigit() else 0
+        _bounds(offset, limit)
+
+        def work(connection: Connection, space: str) -> Page[ScheduledRun]:
+            where = [
+                schedule_runs.c.space == space,
+                schedule_runs.c.project_id == project_id,
+                schedule_runs.c.schedule_id == schedule_id,
+            ]
+            total = connection.execute(select(func.count()).select_from(schedule_runs).where(*where)).scalar_one()
+            rows: Sequence[Any] = (
+                connection.execute(
+                    select(schedule_runs.c.record)
+                    .where(*where)
+                    .order_by(schedule_runs.c.slot.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            return _page([ScheduledRun.model_validate(r) for r in rows], offset, limit, total)
+
+        return await self._run(principal, work)
+
+    async def set_scheduled_run_gate(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime, gate: str
+    ) -> ScheduledRun | None:
+        def work(connection: Connection, space: str) -> ScheduledRun | None:
+            found = self._scheduled_run(connection, space, project_id, schedule_id, slot)
+            if found is None:
+                return None
+            gated = ScheduledRun.model_validate({**found.model_dump(mode="json"), "gate": gate})
+            connection.execute(
+                update(schedule_runs)
+                .where(
+                    schedule_runs.c.space == space,
+                    schedule_runs.c.project_id == project_id,
+                    schedule_runs.c.schedule_id == schedule_id,
+                    schedule_runs.c.slot == slot,
+                )
+                .values(record=_json(gated))
+            )
+            return gated
+
+        gated = await self._run(principal, work)
+        if gated is not None:
+            self._emit(principal, "schedule", project_id, schedule_id)
+        return gated

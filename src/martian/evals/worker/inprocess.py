@@ -23,7 +23,9 @@ built, so one that reads an argument a worker does not give is refused before an
 monitor's work is one pass over its project's new traces (:mod:`martian.evals.worker.monitor`),
 which reads a trace ``monitor_settle_seconds`` after its request time, then evaluates the
 thresholds on the monitor's scores and delivers their alerts with ``alerts``, an installation's
-:class:`~martian.evals.alerts.AlertSettings`, which send nothing unless given.
+:class:`~martian.evals.alerts.AlertSettings`, which send nothing unless given. After a scheduled
+run's suite job, it records the run's gate result and does the same for the thresholds on the
+schedule's gate results (:func:`~martian.evals.worker.schedule.record_gate`).
 """
 
 from __future__ import annotations
@@ -40,12 +42,14 @@ from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import InstalledScorers, execute_run, execute_scoring
 from martian.evals.worker.monitor import SETTLE_SECONDS, execute_monitor
+from martian.evals.worker.schedule import record_gate
 from martian.evals.worker.targets import http_target, target_call, target_pin
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
 OTHER_ORGANISATION = "This worker runs one organisation's work; another organisation's work needs a process of its own"
+NOT_A_RUNNERS = "A schedule's turn admits a run; the queue's worker takes it itself and never hands it to a runner"
 
 
 class InProcessWorker:
@@ -150,7 +154,10 @@ class InProcessWorker:
             await execute_scoring(
                 self._store, self._records, work, judge=self._judge, scorers=self._scorers, limits=self._limits
             )
-        else:
+            await record_gate(self._records, work, alerts=self._alerts)
+        elif work.kind == "monitor":
             await execute_monitor(
                 self._store, self._records, work, judge=self._judge, settle_seconds=self._settle, alerts=self._alerts
             )
+        else:
+            raise ValueError(NOT_A_RUNNERS)

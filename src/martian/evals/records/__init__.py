@@ -4,7 +4,8 @@ MLflow (through ``martian.evals.store``) keeps datasets, traces, assessments, re
 and review queues. The evals core also needs runs with their lifecycle, case results, the scores
 it gates on, scoring jobs, the human review chain, versioned suites, editable dataset drafts, the
 Traces page's saved views, the monitors that score a project's live traces with what each has
-scored, and the thresholds on their scores with the alerts they raise.
+scored, the thresholds on their scores with the alerts they raise, and the schedules that run a
+suite against a target with the slots each has run.
 ``RecordStore`` is that interface, and ``SqlRecordStore`` keeps them in SQLite or Postgres with
 one migration history (``martian.evals.records.sql``), which also creates the worker's queue
 (``martian.evals.records.queue``). Projects live in MLflow, as experiments.
@@ -26,17 +27,22 @@ from martian.evals.model import (
     Case,
     CaseResult,
     DatasetDraft,
+    Digest,
     Identifier,
     Page,
+    Policy,
     Review,
     Run,
+    RunLimits,
     RunState,
     Score,
     ScorerVersion,
     ScoringJob,
     Suite,
+    Target,
 )
 from martian.evals.records.events import Event, EventBus, EventsLost, InProcessEvents, Subscription
+from martian.evals.slots import timing
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -163,14 +169,92 @@ class MonitoredTrace(_Record):
     finished_at: datetime | None = None
 
 
+class Schedule(_Record):
+    """A saved suite version run against a target on a schedule (MorningHQ/martian-notes#197): a
+    regression run, admitted by the worker at each slot as a launch is admitted. The core's own
+    record, so it is not part of the shared model.
+
+    Its slots are every ``every_seconds`` or on ``cron``, in UTC (:mod:`martian.evals.slots`).
+    ``suite_id`` and ``suite_version`` name the saved suite version each run is scored with, and
+    ``scorers`` and ``policies`` are that version's, each judge pinned to its model when the
+    schedule was created. ``dataset_id`` and ``dataset_digest`` pin the published dataset version
+    every run reads, so the schedule's runs compare with each other. ``target`` is pinned again
+    at each run's admission, as a launch pins it: a changed target is what a regression run is
+    for. ``limits`` are each run's own (``RunLimits``), or None for the worker's. Its runs are due
+    from ``active_since``: when it was created or last resumed. Every change raises
+    ``revision``."""
+
+    id: Identifier
+    project_id: Identifier
+    name: str = Field(min_length=1, max_length=120)
+    every_seconds: int | None = Field(default=None, ge=1)
+    cron: str | None = Field(default=None, max_length=200)
+    suite_id: Identifier
+    suite_version: int = Field(ge=1)
+    suite_name: str = ""
+    scorers: list[ScorerVersion] = Field(min_length=1)
+    policies: list[Policy] = Field(default_factory=list)
+    target: Target
+    dataset_name: str = Field(min_length=1, max_length=200)
+    dataset_id: Identifier
+    dataset_digest: Digest | None = None
+    max_cases: int = Field(ge=1)
+    limits: RunLimits | None = None
+    state: Literal["active", "paused"] = "active"
+    revision: int = Field(default=1, ge=1)
+    active_since: datetime | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def one_timing(self) -> Schedule:
+        timing(every_seconds=self.every_seconds, cron=self.cron)
+        return self
+
+
+class ScheduleProgress(_Record):
+    """Where a schedule stands, written only by the worker: ``next_slot``, when its next run is
+    due, ``last_slot``, the slot it last ran or skipped, and ``error``, why its last turn failed,
+    or empty."""
+
+    next_slot: datetime | None = None
+    last_slot: datetime | None = None
+    error: str = ""
+    last_turn_at: datetime | None = None
+
+
+class ScheduledRun(_Record):
+    """One slot of a schedule, as its turn left it: ``admitted`` with the run it started
+    (``run_id``), or ``skipped`` with the ``reason`` the run was not admitted. ``missed`` counts
+    the later slots that were also due when the turn came, run by this one turn instead of one
+    each, and ``created_at`` is when the turn came. ``gate`` is its run's gate result once the
+    run's suite has scored it: the suite scorecard's gate, ``passed``, ``failed``,
+    ``insufficient_coverage`` or ``unconfigured``; None until then, and for a run that did not
+    complete."""
+
+    schedule_id: Identifier
+    slot: datetime
+    state: Literal["admitted", "skipped"]
+    run_id: Identifier | None = None
+    reason: str = ""
+    missed: int = Field(default=0, ge=0)
+    created_at: datetime | None = None
+    gate: Literal["passed", "failed", "insufficient_coverage", "unconfigured"] | None = None
+
+    @model_validator(mode="after")
+    def run_when_admitted(self) -> ScheduledRun:
+        if (self.state == "admitted") != (self.run_id is not None):
+            raise ValueError("an admitted slot names its run, and a skipped one none")
+        return self
+
+
 THRESHOLD_WINDOW_BOUND = 5000
 """The most scores one evaluation of a threshold reads from its window: the newest."""
 
 
 class MonitorScores(_Record):
-    """What a threshold judges: the scores one scorer of a monitor stored in the window. The kind
-    of source scheduled regression runs add (MorningHQ/martian-notes#197) is ``gate``, their gate
-    results, as a second member of this field's union."""
+    """What a threshold judges: the scores one scorer of a monitor stored in the window."""
 
     kind: Literal["monitor"] = "monitor"
     monitor_id: Identifier
@@ -179,6 +263,20 @@ class MonitorScores(_Record):
     @property
     def source_id(self) -> str:
         return self.monitor_id
+
+
+class ScheduleGates(_Record):
+    """What a threshold judges, the second kind of source (MorningHQ/martian-notes#197): the gate
+    results of a schedule's runs whose slots are in the window, each ``passed`` as True and
+    ``failed`` or ``insufficient_coverage`` as False (:class:`ScheduledRun`). A pass rate is the
+    share of its runs that passed their suite's gate."""
+
+    kind: Literal["gate"] = "gate"
+    schedule_id: Identifier
+
+    @property
+    def source_id(self) -> str:
+        return self.schedule_id
 
 
 class WebhookChannel(_Record):
@@ -220,7 +318,7 @@ class Threshold(_Record):
     id: Identifier
     project_id: Identifier
     name: str = Field(min_length=1, max_length=120)
-    source: MonitorScores
+    source: MonitorScores | ScheduleGates
     measure: Literal["pass_rate", "mean"]
     direction: Literal["at_least", "at_most"]
     value: float = Field(allow_inf_nan=False)
@@ -613,6 +711,62 @@ class RecordStore(Protocol):
         """The threshold's alerts, newest first."""
         ...
 
+    # Schedules: suites run against a target on a schedule, and the slots each has run.
+    async def create_schedule(self, principal: Principal, project_id: str, schedule: Schedule) -> Schedule:
+        """Create the schedule, or return the stored one with the same id."""
+        ...
+
+    async def get_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> Schedule | None: ...
+
+    async def list_schedules(self, principal: Principal, project_id: str) -> list[Schedule]:
+        """By name."""
+        ...
+
+    async def update_schedule(
+        self, principal: Principal, project_id: str, schedule: Schedule, *, expected_revision: int
+    ) -> Schedule:
+        """Replace the stored schedule while it is at ``expected_revision``, and raise the
+        revision. Its progress is left as it is."""
+        ...
+
+    async def delete_schedule(self, principal: Principal, project_id: str, schedule_id: str) -> None:
+        """Remove the schedule, its progress, its slots, and the thresholds on its gate results with
+        their alerts. The runs it started stay."""
+        ...
+
+    async def schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str
+    ) -> ScheduleProgress | None:
+        """The schedule's progress, or None for a schedule that does not exist."""
+        ...
+
+    async def set_schedule_progress(
+        self, principal: Principal, project_id: str, schedule_id: str, progress: ScheduleProgress
+    ) -> None:
+        """Replace the schedule's progress. Nothing happens once the schedule is gone."""
+        ...
+
+    async def add_scheduled_run(self, principal: Principal, project_id: str, entry: ScheduledRun) -> ScheduledRun:
+        """Record a slot of the schedule, or return the one recorded for that slot already, so a
+        slot is recorded once. Raises ``StoreError`` (``not_found``) once the schedule is gone."""
+        ...
+
+    async def get_scheduled_run(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime
+    ) -> ScheduledRun | None: ...
+
+    async def list_scheduled_runs(
+        self, principal: Principal, project_id: str, schedule_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[ScheduledRun]:
+        """The schedule's slots, the latest first."""
+        ...
+
+    async def set_scheduled_run_gate(
+        self, principal: Principal, project_id: str, schedule_id: str, slot: datetime, gate: str
+    ) -> ScheduledRun | None:
+        """Record the gate result of the slot's run, or None when the slot or the schedule is gone."""
+        ...
+
 
 RECORD_METHODS = frozenset(
     name for name in vars(RecordStore) if not name.startswith("_") and callable(getattr(RecordStore, name))
@@ -635,6 +789,10 @@ __all__ = [
     "Observation",
     "RecordStore",
     "SavedView",
+    "Schedule",
+    "ScheduleGates",
+    "ScheduleProgress",
+    "ScheduledRun",
     "Subscription",
     "Threshold",
     "ThresholdStatus",

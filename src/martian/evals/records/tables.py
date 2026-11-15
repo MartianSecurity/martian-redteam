@@ -207,9 +207,36 @@ threshold_alerts = Table(
     Index("ix_martian_threshold_alerts_created", "space", "project_id", "threshold_id", "created_at"),
 )
 
+# Schedules (migration 0007): ``record`` is the schedule as its routes write it, ``progress`` when
+# its next run is due, which only the worker writes.
+schedules = Table(
+    "martian_schedules",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+    Column("progress", JSON, nullable=False),
+)
+
+# Each slot a schedule ran or skipped, once: the key is what keeps a slot from running twice.
+schedule_runs = Table(
+    "martian_schedule_runs",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("schedule_id", String(ID), primary_key=True),
+    Column("slot", DateTime(timezone=True), primary_key=True),
+    Column("state", String(16), nullable=False),
+    Column("run_id", String(ID), nullable=True),
+    Column("record", JSON, nullable=False),
+)
+
 # The worker's queue (``martian.evals.records.queue``): one row per run launch or scoring job that
-# no worker has finished, removed when one does, and one per monitor while it exists, taken again
-# each time it is due. ``work`` is the work as the worker reads it. ``token`` is the current
+# no worker has finished, removed when one does, and one per monitor or schedule while it exists,
+# taken again each time it is due. ``work`` is the work as the worker reads it. ``token`` is the current
 # claim's, and the claim holds the row until ``lease_expires_at``. A row with ``available_at`` in
 # the future is not taken before then (migration 0005).
 work_queue = Table(
@@ -244,4 +271,6 @@ TABLES = (
     monitored_traces,
     thresholds,
     threshold_alerts,
+    schedules,
+    schedule_runs,
 )

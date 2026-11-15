@@ -627,6 +627,40 @@ curl -X POST "$EVALS_CORE/v1/evals/thresholds" -H 'Content-Type: application/jso
 The routes, the payload, the retry schedule and the settings are in
 [thresholds and alerts](evals-core.md#thresholds-and-alerts).
 
+## Run a suite on a schedule
+
+On an edition with monitoring, a schedule runs a saved suite version against a target unattended,
+as a regression run, and keeps the history of its runs. Create one on the evals core:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/schedules" -H 'Content-Type: application/json' -d '{
+  "request_id": "6f1c0d9e-3a52-4b8e-8f2d-1c7b9a4e5d20", "name": "Nightly regression",
+  "suite_version_id": "<suite version id>", "agent_id": "<target id>",
+  "dataset_name": "support-faq", "cron": "0 2 * * *", "acknowledge_model_cost": true}'
+```
+
+- **When**: `every_seconds` (at least 60, counted from the Unix epoch, so `3600` is on the hour)
+  or `cron`, five fields (minute, hour, day of the month, month, day of the week), always in UTC.
+- **What it runs**: the suite version and the published dataset version it was created with,
+  each judge on the model it had then, against the target as it is at each slot. Each run is
+  scored by the suite once it completes.
+- **Admission** is a launch's: a slot due while the organisation already has as many runs in
+  progress as its edition allows, or whose target the worker no longer knows, is recorded as
+  `skipped` with the reason, and is not run later.
+- **Missed slots**: when no worker took the schedule's turn in time, such as a worker that was
+  down, the slots that passed are run once when it returns, not once each.
+- **History**: `GET .../schedules/{id}/runs` lists each slot, the latest first, with its run's
+  state, pass rate, suite scorecard and gate result, and the paired comparison with the
+  schedule's previous completed run ([comparing two runs](#comparing-two-runs)).
+- **Alerts**: a threshold with `"source": {"kind": "gate", "schedule_id": ...}` watches the pass
+  rate of the schedule's gate results and alerts when it breaches and when it recovers, as a
+  threshold on a monitor's scores does.
+- `POST .../schedules/{id}/pause`, `.../resume` and `DELETE .../schedules/{id}` stop and restart
+  it; slots that pass while it is paused are not run.
+
+The local edition is Community, so it runs no schedules. The routes, how the worker admits each
+run and what the history holds are in [schedules](evals-core.md#schedules).
+
 ## Use
 
 `martian.evals.evaluate(...)` provides the same MLflow prediction/scorer/result

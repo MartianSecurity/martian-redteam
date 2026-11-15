@@ -84,6 +84,16 @@ OWN_NAMES |= {
     ("get", "/v1/evals/thresholds/{threshold_id}/alerts"),
     ("delete", "/v1/evals/thresholds/{threshold_id}"),
 }
+# And its schedule routes (MorningHQ/martian-notes#197).
+OWN_NAMES |= {
+    ("get", "/v1/evals/schedules"),
+    ("post", "/v1/evals/schedules"),
+    ("get", "/v1/evals/schedules/{schedule_id}"),
+    ("get", "/v1/evals/schedules/{schedule_id}/runs"),
+    ("post", "/v1/evals/schedules/{schedule_id}/pause"),
+    ("post", "/v1/evals/schedules/{schedule_id}/resume"),
+    ("delete", "/v1/evals/schedules/{schedule_id}"),
+}
 NOT_SERVED = {
     ("get", "/v1/evals/capabilities"),
     ("get", "/v1/evals/ci-sessions"),

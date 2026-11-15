@@ -19,6 +19,7 @@ from martian.evals.model import (
     ScorerVersion,
     ScoringJob,
     Suite,
+    Target,
     digest,
 )
 from martian.evals.records import (
@@ -30,6 +31,10 @@ from martian.evals.records import (
     MonitorScores,
     RecordStore,
     SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleGates,
+    ScheduleProgress,
     Threshold,
     ThresholdStatus,
     WebhookChannel,
@@ -59,6 +64,22 @@ def threshold(threshold_id: str, *, name: str = "Safety rate", webhook: bool = T
         window_seconds=3600,
         min_count=20,
         webhook=WebhookChannel(url="https://alerts.example/hook") if webhook else None,
+    )
+
+
+def schedule(schedule_id: str, *, name: str = "Nightly") -> Schedule:
+    return Schedule(
+        id=schedule_id,
+        project_id="p1",
+        name=name,
+        cron="0 2 * * *",
+        suite_id="s1",
+        suite_version=1,
+        scorers=[JUDGE],
+        target=Target(kind="agent", agent_id="agent-1"),
+        dataset_name="faq",
+        dataset_id="d1",
+        max_cases=10,
     )
 
 
@@ -450,6 +471,68 @@ class RecordContract:
         # Deleting the monitor deletes the thresholds on its scores.
         await records.delete_monitor(ORG_A, "p1", "m1")
         assert await records.list_thresholds(ORG_A, "p1") == []
+
+    async def test_a_schedule_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_schedule(ORG_A, "p1", schedule("sc1", name="Other")) == made
+        await records.create_schedule(ORG_A, "p1", schedule("sc0", name="A first"))
+        assert [s.id for s in await records.list_schedules(ORG_A, "p1")] == ["sc0", "sc1"]
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == ScheduleProgress()
+        progress = ScheduleProgress(next_slot=T0, last_slot=T0 - timedelta(days=1))
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)
+        paused = await records.update_schedule(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_schedule(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == progress
+        assert await records.get_schedule(ORG_A, "p1", "sc1") == paused
+        assert await records.get_schedule(ORG_B, "p1", "sc1") is None
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert await records.get_schedule(ORG_A, "p1", "sc1") is None
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") is None
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_schedule(ORG_A, "p1", "sc1"))
+        await refused("not_found", records.update_schedule(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_schedule_records_each_slot_once_latest_first(self, records: RecordStore) -> None:
+        await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        first = ScheduledRun(schedule_id="sc1", slot=T0, state="admitted", run_id="r1", missed=2)
+        saved = await records.add_scheduled_run(ORG_A, "p1", first)
+        assert saved.created_at is not None and saved.missed == 2
+        # The same slot again keeps what was recorded first.
+        again = ScheduledRun(schedule_id="sc1", slot=T0, state="skipped", reason="An eval run is already in progress")
+        assert await records.add_scheduled_run(ORG_A, "p1", again) == saved
+        for day in (1, 2):
+            skipped = again.model_copy(update={"slot": T0 + timedelta(days=day)})
+            await records.add_scheduled_run(ORG_A, "p1", skipped)
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == saved
+        gated = await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0, "failed")
+        assert gated == saved.model_copy(update={"gate": "failed"})
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == gated
+        saved = gated
+        assert await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0 + timedelta(days=9), "passed") is None
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0 + timedelta(days=9)) is None
+        page = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2)
+        assert [e.slot for e in page.items] == [T0 + timedelta(days=2), T0 + timedelta(days=1)] and page.next_cursor
+        rest = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2, cursor=page.next_cursor)
+        assert rest.items == [saved] and rest.next_cursor is None
+        # Another organisation's schedule of the same id is its own; a deleted schedule takes no slot.
+        assert (await records.list_scheduled_runs(ORG_B, "p1", "sc1")).items == []
+        await refused("not_found", records.add_scheduled_run(ORG_B, "p1", first))
+        # Deleting it removes the thresholds on its gate results, and leaves those on other sources.
+        gates = threshold("t-gate", webhook=False).model_copy(update={"source": ScheduleGates(schedule_id="sc1")})
+        await records.create_threshold(ORG_A, "p1", gates, webhook_secret=None)
+        await records.create_threshold(ORG_A, "p1", threshold("t-monitor", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1", source_kind="gate", source_id="sc1")] == [
+            "t-gate"
+        ]
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert (await records.list_scheduled_runs(ORG_A, "p1", "sc1")).items == []
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t-monitor"]
+        await refused("not_found", records.add_scheduled_run(ORG_A, "p1", first))
 
     async def test_changes_reach_listeners_of_the_same_organisation_only(self, records: RecordStore) -> None:
         mine, theirs = records.events.subscribe(ORG_A), records.events.subscribe(ORG_B)

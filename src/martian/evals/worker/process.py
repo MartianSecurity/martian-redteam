@@ -119,6 +119,7 @@ def dump_work(work: Work) -> dict[str, Any]:
         "run_id": work.run_id,
         "job_id": work.job_id,
         "monitor_id": work.monitor_id,
+        "schedule_id": work.schedule_id,
     }
 
 
@@ -132,6 +133,7 @@ def load_work(data: Mapping[str, Any]) -> Work:
         run_id=data["run_id"],
         job_id=data["job_id"],
         monitor_id=data.get("monitor_id"),
+        schedule_id=data.get("schedule_id"),
     )
 
 

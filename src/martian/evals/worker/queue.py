@@ -51,6 +51,15 @@ or a :class:`~martian.evals.worker.ProcessWorker`, which gives each piece a proc
   its next pass. A monitor whose worker stopped
   during its pass ``max_attempts`` times is paused, with :data:`MONITOR_STOPPED_TOO_OFTEN` as its
   progress's error.
+- **Schedules.** A schedule's work also stays in the queue for as long as the schedule exists
+  (:class:`~martian.evals.worker.RunsSchedules`). The worker takes each of its turns itself, with
+  the ``schedules`` it was given, not with its runner: a turn admits the schedule's run when its
+  slot is due, as the API process admits a launch, and queues it here
+  (:mod:`martian.evals.worker.schedule`). The worker then gives the row back, due at the
+  schedule's next slot. After each run's work ends, the worker queues or cancels the suite
+  scoring job of a run a schedule admitted. A schedule whose turn failed ``max_attempts`` times
+  is paused, with :data:`SCHEDULE_STOPPED_TOO_OFTEN` as its progress's error. A worker given no
+  ``schedules`` that takes a schedule's row gives it back for another worker, one lease later.
 
 So restarting the API process loses no queued or running run, whether its worker runs in that
 process or in another. Progress events are the record store's (``records.events``), as with any
@@ -73,6 +82,7 @@ from martian.evals.store import StoreError
 from martian.evals.worker import Runner, Work, alert_channels
 from martian.evals.worker.execute import fail_unfinished, interrupt, take_over
 from martian.evals.worker.process import dump_work, load_work
+from martian.evals.worker.schedule import ScheduleServices, after_scheduled_run, execute_schedule, next_due
 
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
@@ -88,13 +98,16 @@ MONITOR_SECONDS = 10.0
 """How long after a monitor's pass ends its next pass is due, unless the worker is given another."""
 STOPPED_TOO_OFTEN = "The worker stopped before this work finished, too many times; it is not taken again"
 MONITOR_STOPPED_TOO_OFTEN = "The worker stopped during this monitor's pass too many times; the monitor is paused"
+SCHEDULE_STOPPED_TOO_OFTEN = "This schedule's turn failed too many times; the schedule is paused"
 
 
 def entry_id(work: Work) -> str:
-    """The work's id in the queue: ``run:<run id>``, ``scoring:<scoring job id>`` or
-    ``monitor:<monitor id>``."""
+    """The work's id in the queue: ``run:<run id>``, ``scoring:<scoring job id>``,
+    ``monitor:<monitor id>`` or ``schedule:<schedule id>``."""
     if work.kind == "monitor":
         return f"monitor:{work.monitor_id}"
+    if work.kind == "schedule":
+        return f"schedule:{work.schedule_id}"
     return f"scoring:{work.job_id}" if work.kind == "scoring" else f"run:{work.run_id}"
 
 
@@ -106,8 +119,9 @@ class QueueWorker:
     while the app does. ``lease_seconds`` is how long a claim holds work without being renewed,
     ``poll_seconds`` how often an idle worker looks for work another process queued,
     ``max_attempts`` how many workers may take one piece of work before it is failed,
-    ``concurrency`` how many pieces this worker runs at once, of any organisations, and
-    ``monitor_seconds`` how long after a monitor's pass ends its next pass is due."""
+    ``concurrency`` how many pieces this worker runs at once, of any organisations,
+    ``monitor_seconds`` how long after a monitor's pass ends its next pass is due, and
+    ``schedules`` what it admits schedules' runs with, or None to run no schedules."""
 
     def __init__(
         self,
@@ -121,6 +135,7 @@ class QueueWorker:
         max_attempts: int = MAX_ATTEMPTS,
         concurrency: int = CONCURRENCY,
         monitor_seconds: float = MONITOR_SECONDS,
+        schedules: ScheduleServices | None = None,
     ) -> None:
         if lease_seconds <= 0 or poll_seconds <= 0 or monitor_seconds <= 0 or max_attempts < 1 or concurrency < 1:
             raise ValueError(
@@ -136,6 +151,7 @@ class QueueWorker:
         self._max_attempts = max_attempts
         self._concurrency = concurrency
         self._monitor_seconds = monitor_seconds
+        self._schedules = schedules
         self._wake = asyncio.Event()
         self._serving: asyncio.Task[None] | None = None
 
@@ -157,6 +173,11 @@ class QueueWorker:
     def monitor_seconds(self) -> float:
         """How long after a monitor's pass ends its next pass is due (``RunsMonitors``)."""
         return self._monitor_seconds
+
+    @property
+    def schedules(self) -> ScheduleServices | None:
+        """What this worker admits schedules' runs with, or None when it runs none (``RunsSchedules``)."""
+        return self._schedules
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         return await self._runner.check_target(principal, target)
@@ -241,10 +262,17 @@ class QueueWorker:
             await self._interrupted(work)
             await self._queue.done(claim)
             return
-        if claim.attempt > self._max_attempts and work.kind == "monitor":
-            log.error("Monitor %s: its worker stopped %d times during a pass", work.monitor_id, claim.attempt - 1)
+        if work.kind == "schedule" and self._schedules is None:
+            log.error("This worker runs no schedules; schedule %s is given back for another worker", work.schedule_id)
+            await self._queue.reschedule(claim, datetime.now(UTC) + timedelta(seconds=self._lease))
+            return
+        if claim.attempt > self._max_attempts and work.kind in ("monitor", "schedule"):
+            if work.kind == "monitor":
+                log.error("Monitor %s: its worker stopped %d times during a pass", work.monitor_id, claim.attempt - 1)
+            else:
+                log.error("Schedule %s: its turn failed %d times", work.schedule_id, claim.attempt - 1)
             await self._pause(work)
-            await self._next_pass(claim, work)
+            await self._again(claim, work)
             return
         if claim.attempt > self._max_attempts:
             log.error("%s work on run %s: its worker stopped %d times", work.kind, work.run_id, claim.attempt - 1)
@@ -259,10 +287,24 @@ class QueueWorker:
             await asyncio.gather(running, return_exceptions=True)
             await self._queue.release(claim)
             raise
-        if ended and work.kind == "monitor":
-            await self._next_pass(claim, work)
+        if ended and work.kind in ("monitor", "schedule"):
+            await self._again(claim, work)
         elif ended:
             await self._queue.done(claim)
+
+    async def _again(self, claim: Claim, work: Work) -> None:
+        """Give a monitor's or a schedule's row back for its next turn; remove it once the monitor
+        or the schedule is gone."""
+        if work.kind == "monitor":
+            await self._next_pass(claim, work)
+            return
+        schedule_id = work.schedule_id or ""
+        schedule = await self._records.get_schedule(work.principal, work.project_id, schedule_id)
+        if schedule is None:
+            await self._queue.done(claim)
+            return
+        progress = await self._records.schedule_progress(work.principal, work.project_id, schedule_id)
+        await self._queue.reschedule(claim, next_due(schedule, progress, datetime.now(UTC)))
 
     async def _next_pass(self, claim: Claim, work: Work) -> None:
         """Give a monitor's row back for its next pass, due ``monitor_seconds`` from now, or at once
@@ -278,17 +320,29 @@ class QueueWorker:
         await self._queue.reschedule(claim, due)
 
     async def _pause(self, work: Work) -> None:
-        """Pause a monitor whose worker stopped during its pass too many times, and say so."""
+        """Pause a monitor whose worker stopped during its pass too many times, or a schedule whose
+        turn failed too many times, and say so."""
+        principal, project = work.principal, work.project_id
+        if work.kind == "schedule":
+            schedule = await self._records.get_schedule(principal, project, work.schedule_id or "")
+            if schedule is None:
+                return
+            if schedule.state == "active":
+                with contextlib.suppress(StoreError):  # changed meanwhile: its next turn sees it as it is
+                    stopped = schedule.model_copy(update={"state": "paused"})
+                    await self._records.update_schedule(
+                        principal, project, stopped, expected_revision=schedule.revision
+                    )
+            await fail_unfinished(self._records, work, SCHEDULE_STOPPED_TOO_OFTEN)
+            return
         monitor_id = work.monitor_id or ""
-        monitor = await self._records.get_monitor(work.principal, work.project_id, monitor_id)
+        monitor = await self._records.get_monitor(principal, project, monitor_id)
         if monitor is None:
             return
         if monitor.state == "active":
             with contextlib.suppress(StoreError):  # changed meanwhile: its next pass sees it as it is
                 paused = monitor.model_copy(update={"state": "paused"})
-                await self._records.update_monitor(
-                    work.principal, work.project_id, paused, expected_revision=monitor.revision
-                )
+                await self._records.update_monitor(principal, project, paused, expected_revision=monitor.revision)
         await fail_unfinished(self._records, work, MONITOR_STOPPED_TOO_OFTEN)
 
     async def _interrupted(self, work: Work) -> None:
@@ -304,8 +358,14 @@ class QueueWorker:
         log.warning("Run %s was interrupted: the process recording it stopped", run.code or run.id)
 
     async def _run(self, work: Work) -> None:
+        if work.kind == "schedule":
+            assert self._schedules is not None  # a worker without them gives the row back unrun
+            await execute_schedule(self._schedules, self._records, self, work)
+            return
         await take_over(self._records, work)
         await self._runner.run(work)
+        if work.kind == "run":
+            await after_scheduled_run(self._records, self, work)
 
     async def _hold(self, claim: Claim, running: asyncio.Task[None]) -> bool:
         """Renew the claim while the work runs. True once the work has ended; False when it stopped
@@ -337,6 +397,7 @@ __all__ = [
     "MONITOR_SECONDS",
     "MONITOR_STOPPED_TOO_OFTEN",
     "POLL_SECONDS",
+    "SCHEDULE_STOPPED_TOO_OFTEN",
     "STOPPED_TOO_OFTEN",
     "QueueWorker",
     "entry_id",

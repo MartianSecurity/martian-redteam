@@ -54,7 +54,7 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | Feature key | Covers | Community | Enterprise | On-Premises |
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
-| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, and [thresholds](#thresholds-and-alerts) on their scores, which send alerts | No | Yes | Yes |
+| `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended | No | Yes | Yes |
 
 Annotating a single item or trace, and scoring one run, stay in every edition.
 
@@ -99,9 +99,9 @@ sign-in has been checked:
 
 The refusal adds no parameters or responses to the route's OpenAPI operation. The core gates its
 own routes this way: the review queue routes, the question library and answering a queue's item
-need `review_queues`, and `GET /v1/evals/monitoring` and every monitor and threshold route need
-`monitoring` ([write routes](#write-routes), [monitors](#monitors),
-[thresholds](#thresholds-and-alerts)). The Martian server gates its own routes the same way until it
+need `review_queues`, and `GET /v1/evals/monitoring` and every monitor, threshold and schedule
+route need `monitoring` ([write routes](#write-routes), [monitors](#monitors),
+[thresholds](#thresholds-and-alerts), [schedules](#schedules)). The Martian server gates its own routes the same way until it
 mounts the core (MorningHQ/martian-notes#102); its copy of the map is `app/entitlements.py` in
 MorningHQ/MartianBackend, and the two change together. Its copy has no limit keys yet: adding
 `concurrent_runs` and `concurrent_scoring_jobs` there, with the values above, is the server's
@@ -428,7 +428,8 @@ All paths are under `/v1/evals`. How the core carries them out:
 Not served: the CI gate's routes (`/ci/...`, `/ci-sessions/...`), which stay with the server's CI
 gate, and four explorer routes not ported yet (`GET /capabilities`, `POST /overview`,
 `POST /quality-issues/search` and `/triage`, `POST /traces/export`). Beside the contract, the core
-serves its own `/monitors` routes ([monitors](#monitors)).
+serves its own `/monitors` routes ([monitors](#monitors)) and `/schedules` routes
+([schedules](#schedules)).
 
 `tests/evals/test_write_routes.py` launches, scores and reviews a run on `MemoryStore` and on
 `MlflowStore`, and covers every write route on `MemoryStore`, with a fake agent and a
@@ -449,7 +450,7 @@ then calls `Worker.submit(Work(...))`:
 
 | Member | What it does |
 | --- | --- |
-| `Work` | `kind` (`run`, `scoring` or `monitor`), the `principal`, `project_id`, `run_id` for a run or scoring, `job_id` for scoring, and `monitor_id` for a monitor's pass ([monitors](#monitors)) |
+| `Work` | `kind` (`run`, `scoring`, `monitor` or `schedule`), the `principal`, `project_id`, `run_id` for a run or scoring, `job_id` for scoring, `monitor_id` for a monitor's pass ([monitors](#monitors)) and `schedule_id` for a schedule's turn ([schedules](#schedules)) |
 | `Worker.judges` | Whether the worker can run model judges |
 | `Worker.check_target(principal, target)` | Before a run is recorded: whether the worker can call the target, and what pins it, which the run keeps as `provenance.target`. Raises `StoreError`; never calls the target. The worker that runs the run pins the target again before each start ([the same target](#the-same-target-on-every-start)) |
 | `Worker.submit(work)` | Accept the work and return before any of it runs |
@@ -457,6 +458,7 @@ then calls `Worker.submit(Work(...))`:
 | `Lifecycle.start()`, `Lifecycle.stop()` | A worker that runs beside the app, as a `QueueWorker` serving in the API process does: `create_app` starts it when the app starts serving and stops it when the app stops |
 | `InterruptedRuns.cancel_interrupted(principal, run)` | Optional, for a worker that can tell when nothing is working on a run any more, as `QueueWorker` and `LocalWorker` can ([the durable queue](#the-durable-queue)). The cancel route asks it about a running run: it cancels the run at once and returns it, with the reason as its `error`, or returns `None` while something may still be working on it |
 | `RunsMonitors.monitor_seconds` | Optional, for a worker that takes a monitor's work again after each pass, as `QueueWorker` does: how long after a pass ends the next is due. The routes that create and resume a monitor need it ([monitors](#monitors)) |
+| `RunsSchedules.schedules` | Optional, for a worker that takes a schedule's work again at each of its slots and admits its runs, as a `QueueWorker` given `schedules` does: the `ScheduleServices` it admits them with, or `None`. The routes that create and resume a schedule need one ([schedules](#schedules)) |
 
 `execute_run` and `execute_scoring` are the work itself, for any worker to call. `execute_run`
 takes the worker's `call_for(run)`, the call for the run's target, and `pin_for(run)`, the
@@ -493,12 +495,13 @@ sends one request per model its judges are pinned to ([judge models](#judge-mode
   and so does the local edition's `LocalWorker` ([local runs](#local-runs)), because a run's
   MLflow state would otherwise be the server's.
 - `QueueWorker(queue, runner, records, in_process=False, lease_seconds=30, poll_seconds=1,
-  max_attempts=3, concurrency=1, monitor_seconds=10)` puts each piece of work in a durable queue in
-  the record store's database, and a worker takes it from there and runs it with `runner`, either
-  of the two above, `concurrency` pieces at once, so that a restart loses no queued or running work
-  ([the durable queue](#the-durable-queue)), and takes each monitor's work again every
-  `monitor_seconds` ([monitors](#monitors)). The local edition's `LocalWorker` is one, served
-  beside the app.
+  max_attempts=3, concurrency=1, monitor_seconds=10, schedules=None)` puts each piece of work in a
+  durable queue in the record store's database, and a worker takes it from there and runs it with
+  `runner`, either of the two above, `concurrency` pieces at once, so that a restart loses no queued
+  or running work ([the durable queue](#the-durable-queue)), takes each monitor's work again every
+  `monitor_seconds` ([monitors](#monitors)), and, given `schedules`, takes each schedule's work again
+  at its slots and admits its runs itself ([schedules](#schedules)). The local edition's
+  `LocalWorker` is one, served beside the app, with no schedules.
 
 ### Targets
 
@@ -718,16 +721,20 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   stopped](#runs-whose-process-stopped)). Otherwise the API process only queues
   work, and a worker process of its own builds the same `QueueWorker`, usually with a
   `ProcessWorker` runner, and runs `await worker.serve()`.
-- **One row per piece of work**, `run:<run id>` or `scoring:<scoring job id>`, holding the work as
+- **One row per piece of work**, `run:<run id>`, `scoring:<scoring job id>`, `monitor:<monitor id>`
+  or `schedule:<schedule id>`, holding the work as
   `dump_work` writes it, its principal included. Submitting the same work again while it is in
   the queue changes nothing. The row is removed once the work has ended.
-- **Monitors' rows come back.** A monitor's row, `monitor:<monitor id>`, stays in the queue for as
-  long as the monitor exists. Each claim of it is one pass ([monitors](#monitors)); when the pass
-  ends the worker gives the row back (`SqlWorkQueue.reschedule`) with no attempt counted, due
-  `monitor_seconds` later, or at once when the pass stopped at its read bound. No claim takes a
-  row before its `available_at`, it then waits behind the work queued before that time, and
-  `pending()`, which `drain()` waits on, leaves out rows not due yet. A deleted monitor's row is
-  removed at its next pass. A monitor whose worker stopped during its pass `max_attempts` times
+- **Monitors' and schedules' rows come back.** A monitor's row stays in the queue for as long as
+  the monitor exists. Each claim of it is one pass ([monitors](#monitors)); when the pass ends the
+  worker gives the row back (`SqlWorkQueue.reschedule`) with no attempt counted, due
+  `monitor_seconds` later, or at once when the pass stopped at its read bound. A schedule's row
+  stays the same way; each claim of it is one turn, which the worker takes itself rather than
+  hand it to its runner, and it is given back due at the schedule's next slot
+  ([schedules](#schedules)). No claim takes a row before its `available_at`, it then waits behind
+  the work queued before that time, and `pending()`, which `drain()` waits on, leaves out rows not
+  due yet. A deleted monitor's or schedule's row is removed at its next turn. A monitor whose
+  worker stopped during its pass `max_attempts` times, or a schedule whose turn failed that often,
   is paused, saying so in its progress's `error`, instead of failed.
 - **Claims and leases.** A worker takes a row that is queued, or claimed by a lease that ran out,
   and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
@@ -1232,23 +1239,23 @@ What builds on it:
 
 | Issue | Change |
 | --- | --- |
-| MorningHQ/martian-notes#197 | Scheduled regression runs, whose gate results become a second [threshold](#thresholds-and-alerts) source |
 | MorningHQ/martian-notes#199 | Monitors, their thresholds and their trends on the Monitoring page |
 | MorningHQ/martian-notes#200 | Evaluating again when a model changes |
 
 ## Thresholds and alerts
 
-A threshold watches one scorer of a [monitor](#monitors): it is healthy while the scorer's pass
-rate, or its mean score, over a window is at least, or at most, a value. The worker judges it after
-each of the monitor's passes and sends one alert when it breaches and one when it recovers, by
-signed webhook, by email, or both. Thresholds are part of the `monitoring` feature key, so every
+A threshold watches one scorer of a [monitor](#monitors), or the gate results of a
+[schedule](#schedules)'s runs: it is healthy while the pass rate, or the mean score, over a window
+is at least, or at most, a value. The worker judges it after each of the monitor's passes, or each
+time the schedule's suite has scored one of its runs, and sends one alert when it breaches and one
+when it recovers, by signed webhook, by email, or both. Thresholds are part of the `monitoring` feature key, so every
 route needs an edition that includes it (`403` on Community), and the routes that change one need
 the `score` capability. The routes are the core's own (`martian.evals.server.thresholds`); the
 server's frozen contract has none.
 
 | Route | What it does |
 | --- | --- |
-| `GET /v1/evals/thresholds` | The project's thresholds (`project_id`, the default project without it), by name, each with its status; `monitor_id` keeps those on one monitor |
+| `GET /v1/evals/thresholds` | The project's thresholds (`project_id`, the default project without it), by name, each with its status; `monitor_id` keeps those on one monitor, `schedule_id` those on one schedule's gate results |
 | `POST /v1/evals/thresholds` | Create a threshold (`201`) |
 | `GET /v1/evals/thresholds/{threshold_id}` | One threshold and its status |
 | `GET /v1/evals/thresholds/{threshold_id}/alerts` | Its alerts, newest first, with their delivery (`limit`, `cursor`) |
@@ -1269,17 +1276,20 @@ server's frozen contract has none.
 }
 ```
 
-- **`source`** names the monitor and one of its scorers. A deleted monitor takes its thresholds
-  and their alerts with it.
+- **`source`** names the monitor and one of its scorers, or, as `{"kind": "gate", "schedule_id":
+  ...}`, a schedule's gate results ([gate results](#gate-results)). A deleted monitor or schedule
+  takes its thresholds and their alerts with it.
 - **`measure`**: `pass_rate` counts the scorer's boolean scores (`valid_json`, `safety`, `policy`,
   and registered judges that answer yes or no); `mean` averages its numeric ones
   (`response_length`, and judges that answer with a number). A score without a verdict counts for
-  neither. A built-in scorer takes the measure it has (`422` otherwise).
+  neither. A built-in scorer takes the measure it has, and a schedule's gate results `pass_rate`
+  (`422` otherwise).
 - **`direction`** and **`value`**: healthy while the measure is `at_least` (the default) or
   `at_most` the value. A pass rate's value is strictly between 0 and 1: no interval can clear 0
   or 1, so such a threshold could never be decided.
 - **`window_seconds`**, 60 seconds to 30 days (3600 by default): the scores of the traces the
-  monitor took for scoring in that time before the evaluation. One evaluation reads at most the
+  monitor took for scoring in that time before the evaluation, or the gate results of the
+  schedule's slots in it. One evaluation reads at most the
   newest 5,000 (`THRESHOLD_WINDOW_BOUND`), and says so (`truncated`).
 - **`min_count`**, at least 1 (30 by default; at least 2 for a mean): with fewer scores in the
   window there is no verdict.
@@ -1338,10 +1348,10 @@ channel.
 
 `evaluate_thresholds` (`martian.evals.thresholds`) takes its scores from a `Source`, which finds
 each threshold's window. `MonitorSource` reads a monitor's scored traces
-(`scored_monitored_traces`), once per monitor for the widest window. Scheduled regression runs
-(MorningHQ/martian-notes#197) add a second source, `kind: "gate"`, whose windows are their gate
-results as booleans, judged by the same state machine, and whichever merges second renumbers its
-record-store migration.
+(`scored_monitored_traces`), once per monitor for the widest window. `GateSource` reads a
+schedule's slots (`list_scheduled_runs`), newest first, at most the newest 5,000 for the widest
+window, and takes each slot's gate result as a boolean ([gate results](#gate-results)), judged by
+the same state machine.
 
 ### Sending alerts
 
@@ -1469,6 +1479,191 @@ with the monitor. A loopback webhook receiver and a fake SMTP server stand in fo
 The record contract checks the threshold records, their conditioned changes of state and the
 taking of due alerts on SQLite and Postgres.
 
+## Schedules
+
+A schedule runs a saved suite version against a target unattended, every so many seconds or on a
+cron expression, always in UTC, and keeps a history of its runs. Schedules are part of the
+`monitoring` feature key, so every route below needs an edition that includes it (Enterprise,
+On-Premises; Community is `403`), and the routes that change a schedule need the `run` capability,
+as a launch does. The routes are the core's own (`martian.evals.server.schedules`); the server's
+frozen contract has none.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/evals/schedules` | The project's schedules (`project_id`, the default project without it) by name, each with its progress |
+| `POST /v1/evals/schedules` | Create a schedule (`201`) and hand its work to the worker |
+| `GET /v1/evals/schedules/{schedule_id}` | One schedule and its progress |
+| `GET /v1/evals/schedules/{schedule_id}/runs` | Its history: each slot it ran or skipped, the latest first (`page`, `limit` up to 100) |
+| `POST /v1/evals/schedules/{schedule_id}/pause` | Admit no more runs; a run in progress goes on |
+| `POST /v1/evals/schedules/{schedule_id}/resume` | Admit runs again, at the slots from now on; the slots that passed while it was paused are not run |
+| `DELETE /v1/evals/schedules/{schedule_id}` | Remove it, its progress and its history (`204`); the runs it started stay |
+
+```json
+{
+  "request_id": "6f1c0d9e-3a52-4b8e-8f2d-1c7b9a4e5d20",
+  "project_id": null,
+  "name": "Nightly regression",
+  "suite_version_id": "<suite version id>",
+  "agent_id": "<target id>",
+  "dataset_name": "support-faq",
+  "max_items": 100,
+  "cron": "0 2 * * *",
+  "limits": {"max_seconds": 1800, "max_judge_tokens": 200000},
+  "acknowledge_model_cost": true
+}
+```
+
+- **When it is due** is `every_seconds` or `cron`, exactly one (`martian.evals.slots`).
+  `every_seconds`, at least 60, is due on its multiples since the Unix epoch, in UTC: `3600` on
+  the hour, `86400` at midnight UTC, whenever the schedule was created. `cron` is five fields,
+  minute (0-59), hour (0-23), day of the month (1-31), month (1-12) and day of the week (0-7, 0
+  and 7 Sunday), read in UTC, with no time zone of its own. Each field is `*`, a number, a range
+  `a-b`, either with a step (`*/15`, `8-18/2`), or a list of them; names (`MON`) and shortcuts
+  (`@daily`) are not read. When both day fields are restricted, a day is due when either
+  matches, as in cron. An expression it cannot read, or one never due (`0 0 31 2 *`), is `422`
+  naming why. A response says `"timezone": "UTC"`.
+- **What it pins.** The suite version (`suite_version_id`, a version's id from `GET /suites`) with
+  its scorers and policies, each judge pinned to its model when the schedule is created, its own
+  or the default judge model ([judge models](#judge-models)); the published dataset version that
+  is the newest of `dataset_name` then; `max_items`; and `limits`, each run's own
+  ([limits](#limits-stopping-and-resuming)), or the worker's without them. So the schedule's runs
+  compare with each other; a newer suite or dataset version needs a new schedule. The target is
+  not pinned: each run pins it when it is admitted, as a launch does
+  ([the same target](#the-same-target-on-every-start)), since a changed target is what a
+  regression schedule is for.
+- **Refused when it is created:** a suite version not saved (`404`), a dataset not published
+  (`422`), a target the worker does not know (`404`), a suite with a model judge without
+  `acknowledge_model_cost` or on a worker without a judge (`422`), an archived project (`409`), a
+  21st schedule in a project (`409`), and a worker that does not run schedules (`503`, "This
+  installation's worker does not run schedules"). The schedule's id is derived from `request_id`:
+  the same request again returns the same schedule, and another with that `request_id` is `409`.
+
+A schedule in a response carries its definition, `timezone`, `next_slot` (when its next run is
+due; `null` while it is paused, and in the past while no worker has taken its turn), its `state`
+(`active` or `paused`), `revision`, `active_since` (when it was created or last resumed), and its
+`progress`: `next_slot`, `last_slot` (the slot it last ran or skipped), `error` (why its last turn
+failed, else empty) and `last_turn_at`.
+
+### How the worker runs a schedule
+
+A schedule's work (`Work(kind="schedule")`) is a row of the durable queue that comes back at each
+of its slots ([the durable queue](#the-durable-queue)). A `QueueWorker` given
+`schedules=ScheduleServices(store, entitlements)`, the store and the edition's entitlements
+function that `create_app` is given, takes each turn itself, not through its runner and in no
+process of its own, as the API process admits a launch: a turn calls no target and no model
+(`execute_schedule` in `martian.evals.worker.schedule`).
+
+```python
+from martian.evals.worker import QueueWorker, ScheduleServices
+
+worker = QueueWorker(queue, runner, records, in_process=True, schedules=ScheduleServices(store, entitlements))
+app = create_app(store=store, records=records, principal=principal, worker=worker, entitlements=entitlements)
+```
+
+1. **The slot due** is its `next_slot`, or the first slot after `active_since`, whichever is later.
+   Before then a turn does nothing, and the row is given back due at that slot.
+2. **One run per turn.** When a turn comes after its slot, it admits one run, for the earliest slot
+   due, and counts the later slots due by then in `missed`: they are not run. A worker that was
+   down for an hour on a schedule due every minute runs it once when it returns, not 60 times. The
+   same holds when every place of the queue's workers was taken at the slot, since a turn takes a
+   place like any work. The next slot is then the first after the turn.
+3. **Admitted as a launch is** (`admit_run`): the edition must include `monitoring` then, the
+   project must not be archived, the worker pins the target as it is now (`check_target`), the
+   pinned dataset and suite versions must still be there, a model judge needs a worker with a
+   judge, and the organisation must have a place under `concurrent_runs`
+   ([editions and entitlements](#editions-and-entitlements)). A run that is not admitted is
+   recorded as `skipped` with the refusal as its `reason`, such as "An eval run is already in
+   progress", "Agent not found", "The Community edition does not include monitoring" or "The
+   schedule's dataset version is no longer in the store". Nothing waits for a place: the next run
+   is the next slot's. The run is the schedule creator's, the principal its queue row was put
+   with, under that organisation's entitlements at the slot.
+4. **Scored by its suite.** The run keeps its suite version, as a local run does
+   ([local runs](#local-runs)), its limits, and `provenance.schedule`: the schedule's `id` and
+   `name` and the `slot`. Its suite scoring job is recorded `queued`, with the schedule's pinned
+   scorers and policies, before the run is queued. Once the run's work has ended, the worker
+   queues the job if the run completed, and cancels it otherwise ("The run did not complete, so
+   its suite did not score it"), a run stopped at one of its limits included, since nothing
+   resumes a scheduled run. The job is admitted with its run, under `concurrent_runs`, and queued
+   even when `concurrent_scoring_jobs` is reached, as the local edition's suite job is.
+5. **Each slot once.** The history keeps one entry per slot, and the run's id is derived from the
+   schedule and the slot, so a turn whose worker stopped after admitting the run records it at
+   the next turn without admitting another. A turn that fails is taken again once its lease runs
+   out, for the same slot; a schedule whose turn failed `max_attempts` times is paused, with "This
+   schedule's turn failed too many times; the schedule is paused" in its progress's `error`.
+
+Every worker of a queue that holds schedules needs `schedules`: one without it that takes a
+schedule's row gives it back, due one lease later, for another worker. A deleted schedule's row
+leaves the queue at its next slot. Pausing stops the next turn admitting a run; resuming moves
+`active_since` to then, so the slots of the pause are not run.
+
+### A schedule's history
+
+`GET /v1/evals/schedules/{schedule_id}/runs` answers `items`, the latest slot first, with `page`,
+`limit` and `has_more`. Each item:
+
+| Field | Value |
+| --- | --- |
+| `slot` | The slot it ran or skipped, in UTC |
+| `missed` | The later slots that were also due when its turn came, which this run stood for (counted up to 1,000) |
+| `fired_at` | When its turn came |
+| `state` | `skipped`, or its run's state |
+| `reason` | Why it was skipped, else empty |
+| `error` | Its run's `error`, else empty |
+| `run_id`, `run_code` | Its run, or `null` when skipped |
+| `pass_rate`, `counts` | Its run's exact-match pass rate, `passed / (passed + failed)`, or `null` with neither, and its `passed`, `failed`, `skipped` and `errored` cases |
+| `gate` | Its run's gate result, once its suite has scored it ([gate results](#gate-results)), else `null` |
+| `scoring` | Its suite scoring job: `job_id`, `state`, `error`, and the scorecard's `gate` and each criterion's `name`, `kind`, `pass_rate`, `mean` and `gate`, as the Monitoring page's scorecard has them ([read routes](#read-routes)) |
+| `comparison` | For a completed run, its paired comparison with the schedule's latest earlier run that completed, among the 100 slots before it, or `null` |
+
+A comparison is the one `GET /v1/evals/compare` makes, without the pairs and the scorecards:
+`baseline_id`, `candidate_id`, `compatible`, `reason`, `coverage`, `changes` and `significance`,
+the paired test of the exact-match verdicts; once both runs' suite jobs have finished, also
+`baseline_job_id`, `candidate_job_id`, `criteria` and `criteria_significance`, the same for each of
+the suite's scorers ([read routes](#read-routes), [comparing two
+runs](evals.md#comparing-two-runs)). Since the schedule pins its dataset and suite versions, its
+runs pair by case.
+
+The history is not pruned: it keeps every slot until the schedule is deleted.
+
+### Gate results
+
+Once a scheduled run's suite job has scored it, the worker that ran the job records the run's
+gate result on its slot: the suite scorecard's `gate`, `passed`, `failed`, `insufficient_coverage`
+or `unconfigured` ([read routes](#read-routes)). A [threshold](#thresholds-and-alerts) whose
+source is `{"kind": "gate", "schedule_id": ...}` judges them: its window is the slots in the last `window_seconds`, a `passed` gate is a pass and a
+`failed` or `insufficient_coverage` one a failure, and its measure is the `pass_rate` (`422`
+otherwise). A suite without a policy gates nothing (`unconfigured`), and a skipped slot, a run
+that did not complete and a run its suite has not scored yet have no gate result, so none of them
+count. The same worker then evaluates the thresholds on the schedule's gate results and delivers
+their due alerts (`record_gate` in `martian.evals.worker.schedule`), as a monitor's pass does for
+the thresholds on its scores, with the alert settings of the process that ran the job. So a gate
+threshold is judged once per scored run, and an alert whose delivery failed is tried again when
+the schedule's next run is scored. The interval rules are a threshold's
+([how a threshold is judged](#how-a-threshold-is-judged)): with few runs in the window the
+interval is wide, so `min_count` and `window_seconds` decide how many runs a breach or a recovery
+takes.
+
+`tests/evals/test_schedules.py` reads intervals and cron expressions in UTC, cron's day rule and
+the expressions it refuses; runs one turn at a time at fixed times: a turn before its first slot
+admits nothing, a turn five minutes late admits one run for the first slot and counts five missed,
+a slot due while that run is in progress is skipped with the launch's reason, a slot is skipped
+for an edition without monitoring, an unknown target, a worker without a judge and an archived
+project, a turn whose
+worker stopped after admitting its run admits no second, a paused schedule admits nothing and
+resumed skips the slots of its pause, and a scheduled run stopped at its limit has its suite job
+cancelled while a completed one has it queued. Through the routes and the queue, on SQLite and on
+Postgres as an ordinary role, with a fake target and a fake judge and a schedule due every second:
+the entitlement and capability refusals and the refusals above; a suite that runs unattended,
+with a slot skipped while a run is in progress and two runs scored by their suite, the second
+compared with the first, every case regressed and labelled `worse`; slots missed while no worker
+served the queue run once when it returns; pausing, resuming and deleting a schedule, after
+which its row leaves the queue and its runs stay; and a threshold on a schedule's gate results
+through the threshold routes, deleted with the schedule. Directly, at fixed times, a threshold on
+the gate results of a schedule whose target fails four runs and is then fixed breaches after the
+fourth failed gate and recovers once nine of the ten gates in its window passed, with one alert
+each. The record contract checks the schedule records, their slots and gates, and that deleting a
+schedule deletes the thresholds on its gate results, on both databases.
+
 ## What exists
 
 - `GET /v1/evals/status`: the store's readiness for the principal, in the shape of
@@ -1510,6 +1705,10 @@ taking of due alerts on SQLite and Postgres.
 - [Monitors](#monitors): judges and checks attached to a project's live traces with a sampling
   rate, a trace filter and a daily judge token cap, scored by the queue's worker in passes over the
   new traces and stored on each trace.
+- [Schedules](#schedules): a saved suite run against a target unattended, every so many seconds or
+  on a cron expression in UTC, admitted by the queue's worker at each slot under a launch's rules,
+  with a history of each slot's run, its pass rate and its paired comparison with the schedule's
+  previous completed run.
 - [Thresholds and alerts](#thresholds-and-alerts): a pass rate or mean of a monitor's scorer over a
   window, judged on its 95% interval once it has enough scores, with a persisted state machine
   that sends one alert per breach and one per recovery by signed webhook or email, retried with
@@ -1949,6 +2148,15 @@ records = SqlRecordStore("postgresql+psycopg://user:password@host/db", schema="m
   read) and `delete_monitor` keep the monitors; `monitor_progress` and `set_monitor_progress` the
   progress; `claim_monitored_trace`, `finish_monitored_trace` and `list_monitored_traces` the
   traces taken, and `scored_monitored_traces` the window a threshold reads.
+- [Schedules](#schedules) (`Schedule`, `ScheduleProgress` and `ScheduledRun` in
+  `martian.evals.records`) are the core's own records too. Migration `0007` adds
+  `martian_schedules`, one row per schedule holding the schedule as its routes write it and its
+  progress as the worker writes it, in separate columns, and `martian_schedule_runs`, one row per
+  slot a schedule ran or skipped, keyed by schedule and slot, so a slot is recorded once, with
+  its run's gate result once its suite has scored it. `create_schedule`, `get_schedule`,
+  `list_schedules`, `update_schedule` (naming the revision it read) and `delete_schedule` keep the
+  schedules; `schedule_progress` and `set_schedule_progress` the progress; `add_scheduled_run`,
+  `get_scheduled_run`, `list_scheduled_runs` and `set_scheduled_run_gate` the slots.
 - [Thresholds](#thresholds-and-alerts) (`Threshold`, `ThresholdStatus`, `Observation` and `Alert`
   in `martian.evals.records`) are the core's own records too. Migration `0006` adds
   `martian_thresholds`, one row per threshold with the threshold as its route writes it, its
@@ -2800,8 +3008,7 @@ an export holds, resuming, and what the receiving store assigns are in
 | Mounting the core in the Martian server | MorningHQ/martian-notes#102 |
 | A launch field for a run's limits and a resume route in the frozen contract, which is version 3 and has neither; the Evals UI's controls for limits and resume (MorningHQ/MartianFrontend) | Not filed yet |
 | The limit keys `concurrent_runs` and `concurrent_scoring_jobs` in the server's copy of the edition map (`app/entitlements.py` in MorningHQ/MartianBackend), and a record-store query for an organisation's active scoring jobs in place of reading each completed run's | Not filed yet |
-| Monitors and their thresholds in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
-| Thresholds on scheduled runs' gate results, a second threshold source | MorningHQ/martian-notes#197 |
+| Monitors, schedules and their thresholds in `martian evals export` and `martian evals import martian`, which leave them out ([data export](data-export.md#what-an-export-holds)) | Not filed yet |
 | Changing a threshold or its webhook secret in place, rather than deleting it and creating another | Not filed yet |
 
 The objects the routes serve are the [shared eval data model](eval-model.md).
@@ -2810,6 +3017,6 @@ The objects the routes serve are the [shared eval data model](eval-model.md).
 `test_write_routes.py`, `test_write_contract.py`, `test_user_ids.py`, `test_worker.py`,
 `test_worker_process.py`, `test_worker_targets.py`, `test_trace_conventions.py`,
 `test_worker_judges.py`, `test_otlp.py`, `test_worker_queue.py`, `test_worker_limits.py`,
-`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_no_outbound.py` and the store and record
+`test_worker_concurrency.py`, `test_monitors.py`, `test_thresholds.py`, `test_schedules.py`, `test_no_outbound.py` and the store and record
 tests run the core without the backend. The `Evals core` job in CI runs them with the model
 tests, on Postgres as well as SQLite.

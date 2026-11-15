@@ -33,9 +33,9 @@ restarts reads the state it left and raises nothing again. Delivering the alerts
 window of values. :class:`MonitorSource` reads a monitor's scores: the traces the monitor scored in
 the window, by when it took them, newest first, at most
 :data:`~martian.evals.records.THRESHOLD_WINDOW_BOUND`, with the value of the threshold's scorer on
-each (a score without a verdict counts for nothing). Scheduled regression runs
-(MorningHQ/martian-notes#197) add their gate results as a second source, ``kind="gate"``, whose
-window is the scheduled runs' gate outcomes as booleans, judged by the same state machine.
+each (a score without a verdict counts for nothing). :class:`GateSource` reads a schedule's gate
+results (MorningHQ/martian-notes#197): the scheduled runs whose slots are in the window and whose
+suite has scored them, each gate as a boolean, judged by the same state machine.
 """
 
 from __future__ import annotations
@@ -53,8 +53,11 @@ from martian.evals.model import Value
 from martian.evals.records import (
     THRESHOLD_WINDOW_BOUND,
     Alert,
+    MonitorScores,
     Observation,
     RecordStore,
+    ScheduledRun,
+    ScheduleGates,
     Threshold,
     ThresholdStatus,
 )
@@ -112,6 +115,7 @@ class MonitorSource:
     ) -> Mapping[str, Window]:
         by_monitor: dict[str, list[Threshold]] = {}
         for threshold in thresholds:
+            assert isinstance(threshold.source, MonitorScores)
             by_monitor.setdefault(threshold.source.monitor_id, []).append(threshold)
         found: dict[str, Window] = {}
         for monitor_id, group in by_monitor.items():
@@ -126,15 +130,79 @@ class MonitorSource:
             )
             oldest = rows[-1].created_at if len(rows) >= THRESHOLD_WINDOW_BOUND else None
             for threshold in group:
+                assert isinstance(threshold.source, MonitorScores)
+                scorer = threshold.source.scorer
                 start = now - timedelta(seconds=threshold.window_seconds)
                 values = [
                     score.value
                     for row in rows
                     if row.created_at is not None and row.created_at >= start
                     for score in row.scores
-                    if score.scorer == threshold.source.scorer and score.value is not None and not score.error
+                    if score.scorer == scorer and score.value is not None and not score.error
                 ]
                 # The bound cut the read inside this window: older scores in it were not read.
+                truncated = oldest is not None and oldest >= start
+                found[threshold.id] = Window(start=start, end=now, values=values, truncated=truncated)
+        return found
+
+
+GATE_VALUES: Mapping[str, bool] = {"passed": True, "failed": False, "insufficient_coverage": False}
+"""A scheduled run's gate result as a threshold on gate results reads it. A suite with no policy
+(``unconfigured``) gates nothing, so its runs count for nothing."""
+
+
+class GateSource:
+    """A schedule's gate results (``kind="gate"``): the scheduled runs whose slots are in each
+    threshold's window and whose suite has scored them (``ScheduledRun.gate``), as
+    :data:`GATE_VALUES` reads them. A skipped slot, and a run that did not complete or that its
+    suite has not scored yet, has no gate result. The newest
+    :data:`~martian.evals.records.THRESHOLD_WINDOW_BOUND` slots of the widest window are read once
+    per schedule."""
+
+    kind = "gate"
+    PAGE = 1000
+
+    def __init__(self, records: RecordStore) -> None:
+        self._records = records
+
+    async def _slots(
+        self, principal: Principal, project_id: str, schedule_id: str, since: datetime
+    ) -> list[ScheduledRun]:
+        found: list[ScheduledRun] = []
+        cursor: str | None = None
+        while len(found) < THRESHOLD_WINDOW_BOUND:
+            page = await self._records.list_scheduled_runs(
+                principal,
+                project_id,
+                schedule_id,
+                limit=min(self.PAGE, THRESHOLD_WINDOW_BOUND - len(found)),
+                cursor=cursor,
+            )
+            found.extend(page.items)
+            if page.next_cursor is None or not page.items or page.items[-1].slot < since:
+                break
+            cursor = page.next_cursor
+        return found
+
+    async def windows(
+        self, principal: Principal, project_id: str, thresholds: Sequence[Threshold], *, now: datetime
+    ) -> Mapping[str, Window]:
+        by_schedule: dict[str, list[Threshold]] = {}
+        for threshold in thresholds:
+            assert isinstance(threshold.source, ScheduleGates)
+            by_schedule.setdefault(threshold.source.schedule_id, []).append(threshold)
+        found: dict[str, Window] = {}
+        for schedule_id, group in by_schedule.items():
+            widest = max(t.window_seconds for t in group)
+            entries = await self._slots(principal, project_id, schedule_id, now - timedelta(seconds=widest))
+            oldest = entries[-1].slot if len(entries) >= THRESHOLD_WINDOW_BOUND else None
+            for threshold in group:
+                start = now - timedelta(seconds=threshold.window_seconds)
+                values = [
+                    GATE_VALUES[entry.gate]
+                    for entry in entries
+                    if start <= entry.slot < now and entry.gate is not None and entry.gate in GATE_VALUES
+                ]
                 truncated = oldest is not None and oldest >= start
                 found[threshold.id] = Window(start=start, end=now, values=values, truncated=truncated)
         return found
@@ -306,6 +374,8 @@ async def evaluate_thresholds(
 
 
 __all__ = [
+    "GATE_VALUES",
+    "GateSource",
     "MonitorSource",
     "Source",
     "Window",
