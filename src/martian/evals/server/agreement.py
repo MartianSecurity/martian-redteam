@@ -1,5 +1,6 @@
-"""The judges' agreement with people: ``GET /v1/evals/judge-agreement``, the core's own route, which
-the server's contract does not have.
+"""The judges' agreement with people, ``GET /v1/evals/judge-agreement``, and people's agreement with
+each other, ``GET /v1/evals/reviewer-agreement``: the core's own routes, which the server's
+contract does not have.
 
 For each judge version of a project it reports how the judge's verdicts agree with the labels
 people gave the same items (:func:`martian.evals.agreement.judge_agreement`):
@@ -22,6 +23,14 @@ Traces are read newest first, at most ``TRACE_LIMIT`` of them (``traces_examined
 ``traces_truncated`` says there were more, whose labels and verdicts are left out. Runs, their
 scores and their reviews are read in full.
 
+Reviewers' agreement (:func:`martian.evals.agreement.queue_agreement` and
+:func:`~martian.evals.agreement.question_agreement`) is read from the review queues of every run of
+the project and every link of each run's review chains, since a second reviewer's answer replaces
+the first in the chain. The reviewer route reports it per queue and question and per question
+across the queues, and needs the ``review_queues`` feature, as the queues do. The judge report
+gives, beside its items, the reviewers' agreement on each question named like one of its judges
+(``reviewer_agreement``): the most a judge can be expected to agree with people on it.
+
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
 
@@ -30,15 +39,22 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from martian.evals.agreement import KINDS, MINIMUM_LABELLED, Kind, judge_agreement
-from martian.evals.model import Review, Score, TraceQuery
+from martian.evals.agreement import (
+    KINDS,
+    MINIMUM_LABELLED,
+    Kind,
+    judge_agreement,
+    question_agreement,
+    queue_agreement,
+)
+from martian.evals.model import Review, ReviewQueue, Score, TraceQuery
 from martian.evals.records import RecordStore
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep
+from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, require_entitlement
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, project_key, project_out
-from martian.evals.server.runs import project_runs, run_results
+from martian.evals.server.runs import EPOCH, project_runs, run_queues, run_results
 from martian.evals.server.suites import is_judge
 from martian.evals.server.traces import READ_LIMIT
 from martian.evals.store import EvalStore
@@ -119,6 +135,20 @@ async def _registered(
     return found
 
 
+async def queue_reviews(
+    store: EvalStore, records: RecordStore, principal: Principal, key: str
+) -> tuple[list[ReviewQueue], list[Review]]:
+    """Every review queue of the project's runs, newest first, and every link of each run's review
+    chains."""
+    queues: list[ReviewQueue] = []
+    reviews: list[Review] = []
+    for run in await project_runs(records, principal, key):
+        queues += await run_queues(store, records, principal, run)
+        reviews += await records.list_reviews(principal, key, run.id, current_only=False)
+    queues.sort(key=lambda queue: (queue.created_at or EPOCH, queue.id), reverse=True)
+    return queues, reviews
+
+
 async def project_agreement(
     store: EvalStore, records: RecordStore, principal: Principal, key: str, name: str | None = None
 ) -> dict[str, Any]:
@@ -130,12 +160,16 @@ async def project_agreement(
     kinds = await _registered(store, principal, key, name)
     found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
     reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
+    judges = {r.judge for r in reports}
+    queues, chains = await queue_reviews(store, records, principal, key)
+    between = [q for q in question_agreement(chains, queues) if q.question in judges]
     return {
         "project_id": project_out(key),
         "minimum": MINIMUM_LABELLED,
         "traces_examined": examined,
         "traces_truncated": truncated,
         "items": [r.as_dict() for r in reports],
+        "reviewer_agreement": [q.as_dict() for q in between],
     }
 
 
@@ -157,8 +191,36 @@ async def judge_agreement_report(
             "traces_examined": 0,
             "traces_truncated": False,
             "items": [],
+            "reviewer_agreement": [],
         }
     return await project_agreement(store, records, principal, key, name)
 
 
-__all__ = ["TRACE_LIMIT", "explorer", "is_label", "project_agreement"]
+@explorer.get("/reviewer-agreement", response_model=None, dependencies=[Depends(require_entitlement("review_queues"))])
+async def reviewer_agreement_report(
+    principal: PrincipalDep,
+    store: StoreDep,
+    records: RecordsDep,
+    project_id: uuid.UUID | None = None,
+    queue_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    key = project_key(project_id)
+    queues: list[ReviewQueue] = []
+    reviews: list[Review] = []
+    if await store.get_project(principal, key) is not None:
+        queues, reviews = await queue_reviews(store, records, principal, key)
+    elif key != DEFAULT_PROJECT:
+        raise HTTPException(404, "Not found")
+    if queue_id is not None:
+        queues = [queue for queue in queues if queue.id == str(queue_id)]
+        if not queues:
+            raise HTTPException(404, "Not found")
+    return {
+        "project_id": project_out(key),
+        "minimum": MINIMUM_LABELLED,
+        "queues": [report.as_dict() for report in queue_agreement(reviews, queues)],
+        "questions": [report.as_dict() for report in question_agreement(reviews, queues)],
+    }
+
+
+__all__ = ["TRACE_LIMIT", "explorer", "is_label", "project_agreement", "queue_reviews"]
