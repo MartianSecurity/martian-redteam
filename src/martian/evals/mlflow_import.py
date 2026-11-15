@@ -288,11 +288,13 @@ class Skipped:
 @dataclass(frozen=True)
 class CopiedCase:
     """One trace of a run as a case: its result, the scores the run gave it, and the trace, which
-    is ``None`` when an earlier run holds it."""
+    is ``None`` when an earlier run holds it. ``skipped`` are the trace's assessments the case
+    leaves to the trace: a second of one name and source, or a second expectation of one name."""
 
     result: CaseResult
     scores: list[Score]
     trace: Trace | None
+    skipped: list[Skipped] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -540,6 +542,7 @@ class _Reader:
             else:  # an earlier run holds the trace as its case; this run's case has no trace
                 trace, mlflow_trace = self._trace(linked_info, project.id, info.run_id, note=False)
             case = _case(trace, mlflow_trace, run_id=run_id, records=records, taken=taken)
+            self.plan.skipped += [skipped for skipped in case.skipped if skipped not in self.plan.skipped]
             ordered.append(((case.result.position, arrival), case if holds else replace(case, trace=None)))
         ordered.sort(key=lambda pair: pair[0])
         cases = [
@@ -554,12 +557,12 @@ class _Reader:
             errors=statuses.count("error"),
             skipped=statuses.count("skipped"),
         )
-        scorers: dict[str, ScorerVersion] = {}
+        scorers: dict[tuple[str, ScoreSource], ScorerVersion] = {}
         for case in cases:
             for score in case.scores:
                 judge = score.source == "llm_judge"
                 scorers.setdefault(
-                    score.scorer,
+                    (score.scorer, score.source),
                     ScorerVersion(
                         name=score.scorer,
                         kind=score.source,
@@ -740,6 +743,14 @@ def assessment_score(assessment: Any, *, run_id: str | None = None) -> Score:
     )
 
 
+def assessment_key(score: Score) -> tuple[str, ScoreSource, str | None]:
+    """Which MLflow assessment a copied score is: its name, its source and the source's own
+    assessment id (``metadata["mlflow_source.assessment_id"]``). A trace may hold a code scorer's,
+    a judge's and a person's feedback of one name, so a name alone does not say which."""
+    found = score.metadata.get(f"{SOURCE}assessment_id")
+    return score.scorer, score.source, found if isinstance(found, str) else None
+
+
 def verdict(value: Value) -> bool | None:
     """A feedback value's verdict: a boolean's own, MLflow judges' ``yes`` and ``no``; none for
     numbers and other text."""
@@ -772,7 +783,12 @@ def _case(trace: Trace, mlflow_trace: Any, *, run_id: str, records: list[Any], t
     """A trace of a run as a case, with the trace's scores that name the run. The case's id is the
     id of the dataset record with the same inputs, when the run evaluated an evaluation dataset of
     the store, else ``case-`` and a digest of the inputs, so that runs over the same inputs pair;
-    a repeat within the run adds `` (2)``. Its position is the record's, else after the records."""
+    a repeat within the run adds `` (2)``. Its position is the record's, else after the records.
+
+    A case holds one score of a name and source, and one expectation of a name: of two assessments
+    of one name and source the run made on the trace, such as two judges' feedback both named
+    ``correct``, the case keeps the first, and of two expectations of one name, the first. The
+    others stay on the trace, and the case names them in ``skipped`` for the copy's report."""
     root = next((span for span in mlflow_trace.data.spans if span.parent_id is None), None)
     found = root.inputs if root is not None else trace.request
     inputs: dict[str, Any] = found if isinstance(found, dict) else {"request": found}
@@ -781,13 +797,29 @@ def _case(trace: Trace, mlflow_trace: Any, *, run_id: str, records: list[Any], t
     base = records[record].dataset_record_id if record is not None else "case-" + digest(inputs)[:12]
     taken[base] = taken.get(base, 0) + 1
     case_id = base if taken[base] == 1 else f"{base} ({taken[base]})"
-    expectations = {
-        score.scorer: score.value for score in trace.scores if score.metadata.get("martian.annotation") == "expectation"
-    }
+    source_trace = str(trace.metadata.get(f"{SOURCE}trace_id", trace.id))
+    skipped: list[Skipped] = []
+    expectations: dict[str, Any] = {}
+    for score in trace.scores:
+        if score.metadata.get("martian.annotation") != "expectation":
+            continue
+        if score.scorer in expectations:
+            skipped.append(Skipped("assessment", _assessment_name(score, source_trace), SECOND_EXPECTATION))
+        else:
+            expectations[score.scorer] = score.value
     marked = [
         score.model_copy(update={"case_id": case_id}) if score.run_id == run_id else score for score in trace.scores
     ]
-    scores = [score for score in marked if score.run_id == run_id]
+    scores: list[Score] = []
+    seen: set[tuple[str, ScoreSource]] = set()
+    for score in marked:
+        if score.run_id != run_id:
+            continue
+        if (score.scorer, score.source) in seen:
+            skipped.append(Skipped("assessment", _assessment_name(score, source_trace), SECOND_SCORE))
+            continue
+        seen.add((score.scorer, score.source))
+        scores.append(score)
     error = ""
     if trace.state == "error":
         description = getattr(getattr(root, "status", None), "description", "") if root is not None else ""
@@ -808,7 +840,16 @@ def _case(trace: Trace, mlflow_trace: Any, *, run_id: str, records: list[Any], t
         finished_at=finished,
     )
     held = trace.model_copy(update={"tags": {**trace.tags, "martian.case_id": case_id}, "scores": marked})
-    return CopiedCase(result=result, scores=scores, trace=held)
+    return CopiedCase(result=result, scores=scores, trace=held, skipped=skipped)
+
+
+SECOND_SCORE = "the case of its run keeps the first assessment of its name and source; the trace keeps this one"
+SECOND_EXPECTATION = "the case of its run keeps the first expectation of its name; the trace keeps this one"
+
+
+def _assessment_name(score: Score, trace_id: str) -> str:
+    """An assessment as the copy's report names it: its name, its id in the source and its trace."""
+    return f"{score.scorer} ({score.metadata.get(f'{SOURCE}assessment_id')}) on {trace_id}"
 
 
 def _status(trace: Trace, scores: list[Score]) -> CaseStatus:
@@ -989,9 +1030,9 @@ async def _cases(
             scores += case.scores
             continue
         saved = await _trace(store, principal, case.trace, report)
-        stored = {score.scorer: score.store for score in saved.scores}
+        stored = {assessment_key(score): score.store for score in saved.scores}
         scores += [
-            score.model_copy(update={"trace_id": saved.id, "store": stored.get(score.scorer, StoreRef())})
+            score.model_copy(update={"trace_id": saved.id, "store": stored.get(assessment_key(score), StoreRef())})
             for score in case.scores
         ]
         results.append(case.result.model_copy(update={"store": StoreRef(trace_id=saved.id)}))
@@ -1104,6 +1145,7 @@ __all__ = [
     "Plan",
     "Skipped",
     "SourceCheck",
+    "assessment_key",
     "assessment_score",
     "check_source",
     "copy_mlflow_store",

@@ -86,9 +86,10 @@ async def _deliver_score(store: EvalStore, records: RecordStore, principal: Prin
         return
     # Keep the store's id with the record store's score, unless a newer answer has replaced it.
     for kept in await records.list_scores(principal, project, score.run_id, case_id=score.case_id):
-        same = (kept.scorer, kept.scoring_job_id, kept.created_at, kept.value) == (
+        same = (kept.scorer, kept.scoring_job_id, kept.source, kept.created_at, kept.value) == (
             score.scorer,
             score.scoring_job_id,
+            score.source,
             score.created_at,
             score.value,
         )
@@ -146,7 +147,8 @@ async def save_score(
     delivery = await attempt(store, records, principal, waiting)
     if delivery.state == "delivered" and score.run_id is not None and score.case_id is not None:
         kept = await records.list_scores(principal, project_id, score.run_id, case_id=score.case_id)
-        score = next((s for s in kept if (s.scorer, s.scoring_job_id) == (score.scorer, score.scoring_job_id)), score)
+        key = (score.scorer, score.scoring_job_id, score.source)
+        score = next((s for s in kept if (s.scorer, s.scoring_job_id, s.source) == key), score)
     return score, delivery
 
 
