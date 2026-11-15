@@ -33,7 +33,7 @@ async def use_connections(trusted_runtime_config: dict):
         return definitions, trace.snapshot()
 ```
 
-`parse_session_payload` validates a raw dict or `AssessmentSession` and verifies `ensure_active()`, while `bind_sandbox_mcp` combines validation with `bind_tools`. Each session requires session_id, campaign_id, target_id, expires_at and mcp_connections. Each connection requires a unique name, HTTP(S) url, explicit allowed_tools and optional headers. Headers use SecretStr in models and full runtime values on the wire. Do not pass model-generated connection configuration; the host application must authenticate the caller and approve destination hosts. URLs cannot contain embedded user credentials or fragments. This version supports Streamable HTTP, not stdio/OAuth login flows. These helpers validate and consume an existing trusted session; they do not provision twins or mint capabilities. The backend binding-bundle endpoint returns a configuration template. Actual bearer capabilities are issued for admitted runs at `/v1/assessment-sessions/{run_id}/mcp/{system}` and delivered to the approved customer session API. A local live SDK check exercised tool discovery/read, allowlist rejection, expiry and trace redaction against this gateway. See [backend binding limits](https://github.com/MorningHQ/MartianBackend/blob/main/docs/usage.md#connect-running-sandbox-mcp-services).
+`parse_session_payload` validates a raw dict or `AssessmentSession` and verifies `ensure_active()`, while `bind_sandbox_mcp` combines validation with `bind_tools`. Each session requires session_id, campaign_id, target_id, expires_at and mcp_connections. Each connection requires a unique name, HTTP(S) url, explicit allowed_tools and optional headers. Headers use SecretStr in models and full runtime values on the wire. Do not pass model-generated connection configuration; the host application must authenticate the caller and approve destination hosts. URLs cannot contain embedded user credentials or fragments. This version supports Streamable HTTP, not stdio/OAuth login flows. These helpers validate and consume an existing trusted session; they do not provision twins or mint capabilities. The backend binding-bundle endpoint returns a configuration template. Actual bearer capabilities are issued for admitted runs at `/v1/assessment-sessions/{run_id}/mcp/{system}` and delivered to the approved customer session API. A local live SDK check exercised tool discovery/read, allowlist rejection, expiry and trace redaction against this gateway. See [backend binding limits](https://github.com/MartianSecurity/MartianBackend/blob/main/docs/usage.md#connect-running-sandbox-mcp-services).
 
 The binding discovers all listed servers, follows bounded tool-list pagination and rejects missing selected tools. Aliases combine the connection name with a stable hash of the remote name, allowing duplicate remote names across servers. Definitions retain the actual JSON schemas; arguments are validated locally without retrieving remote schema references. Business-schema conversion is not implemented. Protocol/application errors never trigger a switch to real services.
 
@@ -43,14 +43,14 @@ The context must be entered, used and exited in the same async task. All clients
 
 TraceRecorder holds bounded events locally (default 1000). Tool calls record start/end/error, server/tool/call/action identifiers, duration and MCP error status. Applications may add model/request events with record(). Payloads require capture_payloads=True; the binding automatically registers connection-header credentials for redaction. Additional secrets supplied to the recorder and common credential fields are also redacted. Payloads are bounded to 16000 characters per event. This is not comprehensive PII detection. Bindings do not automatically capture LLM inputs or export traces to a backend.
 
-The [Mars Market refund customer agent](https://github.com/MorningHQ/MartianCustomerAgents/tree/main/refund-support-acceptance) demonstrates Bedrock model instrumentation, authenticated runtime configuration, customer-scoped commerce tools and a trace retrieval endpoint. Session authentication, expiry, replay protection and trace export remain responsibilities of the host application. No replacement service-specific MCP servers are bundled with this SDK.
+The [Mars Market refund customer agent](https://github.com/MartianSecurity/MartianCustomerAgents/tree/main/refund-support-acceptance) demonstrates Bedrock model instrumentation, authenticated runtime configuration, customer-scoped commerce tools and a trace retrieval endpoint. Session authentication, expiry, replay protection and trace export remain responsibilities of the host application. No replacement service-specific MCP servers are bundled with this SDK.
 
 Its standalone Docker build consumes this SDK as a named source context. The SDK's .dockerignore includes only package metadata, the lockfile, README, license files and source; local credentials, environments and caches are excluded from the build context.
 
 Private customer repositories can materialize a reviewed SDK revision without a personal access token when this repository is shared with the organization for Actions access:
 
 ```yaml
-- uses: MorningHQ/martian-redteam/source@<full-reviewed-commit-sha>
+- uses: MartianSecurity/martian-redteam/source@<full-reviewed-commit-sha>
   with:
     destination: martian-redteam
 ```
@@ -161,7 +161,7 @@ must be recollected before they can match. The Sources credential workflow is un
 metadata export queue and the CI release gate. First enroll the deployment under
 Discovery → Kill switch. Download its non-secret assignment and separate `mg_`
 credential; mount the credential as a private file. Backend migration 0020 and the
-[gate v1 API](https://github.com/MorningHQ/MartianBackend/blob/main/docs/discovery.md#sdk-call-gate-v1) are required.
+[gate v1 API](https://github.com/MartianSecurity/MartianBackend/blob/main/docs/discovery.md#sdk-call-gate-v1) are required.
 
 ```python
 from pathlib import Path

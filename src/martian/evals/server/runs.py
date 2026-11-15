@@ -1,6 +1,6 @@
 """Read routes for projects, runs, their results and comparisons: a port of the server's
 ``app/api/evals.py``, ``app/api/evals_workbench.py`` and ``GET /projects`` of
-``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store and the record store.
+``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store and the record store.
 
 Runs, case results, scores, scoring jobs and reviews come from the record store; projects, traces,
 run telemetry and review queues from the store. A run is found by its id in the default project,
@@ -276,8 +276,8 @@ async def attempts(
     run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, flaky: bool = False
 ) -> dict[str, Any]:
     # The core's own route, not the contract's: every attempt of each case of a run whose suite
-    # repeats its cases, with the run's repeats (MorningHQ/martian-notes#180) and its reliability
-    # and flaky cases (MorningHQ/martian-notes#183). `flaky=true` keeps only the flaky cases; the
+    # repeats its cases, with the run's repeats (MartianSecurity/martian-notes#180) and its reliability
+    # and flaky cases (MartianSecurity/martian-notes#183). `flaky=true` keeps only the flaky cases; the
     # reliability is the whole run's. A run without repeats answers `repeats: null`,
     # `reliability: null` and no attempts. Reliability is here, not on the run routes, because
     # their responses are typed in the frozen contract.
@@ -297,7 +297,7 @@ async def attempts(
 async def turns(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> dict[str, Any]:
     # The core's own route, not the contract's: each conversation case of the run, with its
     # verdict on each check, the session its turns' traces share and every turn it sent with that
-    # turn's verdicts (MorningHQ/martian-notes#191). A run without conversation cases answers no
+    # turn's verdicts (MartianSecurity/martian-notes#191). A run without conversation cases answers no
     # items. The run routes' responses are typed in the frozen contract, whose `EvalItemOut` has no
     # place for turns.
     run = await find_run(store, records, principal, run_id)

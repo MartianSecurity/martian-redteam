@@ -117,12 +117,16 @@ is independent (`CATALOG_VERSION`); graph/policy revisions come from the service
 
 ## Open-source evals core
 
-This repository is the home of the open-source evals core. The names stay as they are: the
+This public repository is the home of the open-source evals core. The names stay as they are: the
 repository `martian-redteam`, the PyPI distribution `martian-sdk`, the import package `martian`
-and the command `martian`. Everything here is Apache-2.0, except `src/martian/ui/`: a build of the
-Evals app from the private frontend, whose packages carry no licence yet
-(MorningHQ/martian-notes#220). Paid Enterprise features live in the private Martian backend and
-console, which use the core; this repository holds no commercially licensed code. The repository is private until the open-source launch.
+and the command `martian`. Everything here is Apache-2.0 except the third-party code bundled in
+`src/martian/ui/`, a build of the Evals app from the private frontend: the app's own packages are
+Apache-2.0, and the third-party packages and the Inter font bundled with them keep their licences,
+which the build's `third-party-licenses.md` lists. `NOTICE` attributes both. The core is the same
+code in every edition, its paid features behind feature keys; Martian Cloud and On-Premises serve
+it, and the features made only for them are built in the private Martian backend and console,
+outside this repository, which holds no commercially licensed code
+([editions](evals-core.md#editions-and-entitlements)).
 
 The core grows into this layout. Paths marked as planned do not exist yet; the issue named
 next to each one creates it.
@@ -132,7 +136,7 @@ next to each one creates it.
 | `src/martian/evals/` | SDK: suite runner (conversations, and [simulated users](evals.md#simulated-users) with personas from real conversations and a [fidelity report](evals.md#simulator-fidelity)), suite file to and from the model, judges, checks, gate | Exists |
 | `src/martian/evals/model/` | Shared eval data model used by the SDK and the server ([eval model](eval-model.md)) | Exists |
 | `src/martian/evals/server/` | Evals core: API routers and services, identity and tenancy injected ([evals core](evals-core.md)) | Exists: the read and write routes and the OpenTelemetry traces endpoint |
-| `src/martian/evals/store/` | Store interface with in-process and REST bindings on `mlflow-skinny` | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; the server's REST binding is MorningHQ/martian-notes#105 |
+| `src/martian/evals/store/` | Store interface with its in-process bindings | The interface, the in-memory reference store and the in-process `mlflow-skinny` binding (SQLite and Postgres) exist; Martian Cloud's binding is its own, outside this repository |
 | `src/martian/evals/records/` | The core's own records (runs, results, scores, reviews, suites, drafts, saved views) and the worker's queue, portable to SQLite and Postgres | Exists |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the core on SQLite for one user with no login, the session call and the built UI from one process ([evals core](evals-core.md#the-local-edition-martian-ui)) | Exists |
 | `src/martian/evals/local_targets.py` | The local edition's targets in place of an Agents registry: an HTTP endpoint or an OpenAI-compatible model, with the user's key in a file only the user can read, and their `/v1/local/targets` routes ([local targets](evals-core.md#local-targets)) | Exists |
@@ -143,8 +147,8 @@ next to each one creates it.
 | `src/martian/evals/mlflow_import.py` | `martian evals import mlflow` checking an MLflow tracking store's schema revision, reading it over a connection that cannot write, and copying its experiments, traces, datasets, assessments and evaluation runs through the store and the record store ([copied MLflow stores](evals-core.md#copied-mlflow-stores)) | Exists for SQLite and Postgres stores; the hosted MLflow server's REST API is not read |
 | `src/martian/evals/data_export.py` | `martian evals export` and `martian evals import martian`: an organisation's data written as JSON Lines files with a manifest, resumable step by step, and imported into a fresh install, through the store and the record store ([data export](data-export.md)) | Exists, for the local edition's data folder and for installs that call it with their own stores |
 | `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; a release builds it from the wheel it publishes and pushes it to GitHub Container Registry ([releasing](releasing.md#the-local-editions-image)) |
-| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; HTTP targets called by the worker itself, with credentials from its own process, and registered agents through a martian-agents executor interface; and a durable queue in the record store's database (`QueueWorker`), whose worker serves beside the app or in a process of its own, so that a restart loses no queued or running run. The Martian server's worker process is MorningHQ/martian-notes#139's backend part |
-| `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MorningHQ/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; HTTP targets called by the worker itself, with credentials from its own process, and registered agents through a martian-agents executor interface; and a durable queue in the record store's database (`QueueWorker`), whose worker serves beside the app or in a process of its own, so that a restart loses no queued or running run. The Martian server's worker process is MartianSecurity/martian-notes#139's backend part |
+| `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MartianSecurity/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
 
 ## CI and scoring
 

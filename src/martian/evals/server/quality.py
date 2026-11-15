@@ -1,7 +1,7 @@
 """Scorecards, judge calibration and run comparison: summaries over stored results, no model calls.
 
 A port of the server's ``app/evals_quality.py`` and ``compare_runs`` (``app/evals_workbench.py``
-in MorningHQ/MartianBackend), over the shared model's case results, scores and reviews in their
+in MartianSecurity/MartianBackend), over the shared model's case results, scores and reviews in their
 server shapes (``martian.evals.server.projection``). Two differences, because the model holds
 less than the server's rows: a scorer's kind comes from its values (text values are categorical,
 numbers other than booleans numeric, anything else boolean; ``response_length`` is numeric), and a

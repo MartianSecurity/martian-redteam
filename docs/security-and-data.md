@@ -78,9 +78,11 @@ See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
 `martian evals export` writes everything the data folder's store and record store hold into the
 folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
-reviews, and run artifacts. It holds no credentials: the local targets and their keys
-(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
-`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
+and webhook URLs and email recipients among them). It holds no credentials: the local targets and
+their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
+threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the
 data folder. See [data export](data-export.md).
 
 ## Custom Python scorers
@@ -97,7 +99,7 @@ how long it runs or how much memory it takes.
 | --- | --- | --- |
 | A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process, on a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so a custom scorer never sees a project's production traces: the `Monitor` record refuses a scorer of kind `code` |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -109,7 +111,7 @@ path that could reach one:
 - **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
   scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
   scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
-  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+  custom scorer there needs a contract change (MartianSecurity/martian-notes#334).
 - **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
   custom scorer.
 - **The worker's setup** is imported by module in the API process, to check that a new process can
@@ -160,6 +162,7 @@ What each part sends without a setting of yours:
 | FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
 | The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
 | Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+| Threshold alerts | Nothing | A threshold's webhook URL and the SMTP server, once the worker's alert settings name them ([below](#threshold-alerts)) |
 
 `tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
 deterministic check, `martian ui` serving the UI and that run, and the core with a process
@@ -168,6 +171,58 @@ which MLflow turns its telemetry off by itself, and no telemetry settings) with 
 and name lookup for an address other than loopback refused. It fails on any such attempt and on
 MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
 loads nothing from another host.
+
+## Threshold alerts
+
+The alerts of [thresholds](evals-core.md#thresholds-and-alerts) on monitor scores are the evals
+core's own outbound calls. An installation makes none until its operator configures them: the
+worker's `AlertSettings` (`martian.evals.alerts`) send no webhook and no email by default, the
+routes refuse a threshold with a channel the worker does not send, and so an on-premises install
+sends nothing for alerts unless it is set up to (`test_no_outbound.py` runs without alert
+settings and still sees no outbound attempt).
+
+What leaves once a channel is configured:
+
+- **A webhook** is one `POST` per alert, and per retry, to the URL a threshold names, which any
+  member with the `score` capability chooses. It carries the threshold's definition and name, the
+  monitor's id, the scorer, and the window's count, estimate and interval: no trace, prompt,
+  response, rationale or user. The URL is `https`, or `http` only to `localhost`; redirects are not
+  followed and proxy settings from the environment are not used. Before each attempt the host is
+  resolved, and a loopback, private, link-local or reserved address is refused unless the
+  installation sets `WebhookSettings(private_addresses=True)`, so on an installation that does not,
+  a member cannot aim alerts at the worker's own network. A name that resolves to another address
+  between that check and the connection is not caught; where that matters, run the worker where it
+  cannot reach internal services.
+- **An email** carries the same content as plain text to the threshold's recipients, through the
+  SMTP server the operator names, with STARTTLS by default.
+
+Secrets:
+
+- **The webhook secret** is given once, by the member who creates the threshold, and signs each
+  request (HMAC-SHA256 over the timestamp and the body; the receiver's check is in
+  [sending alerts](evals-core.md#sending-alerts)). The record store keeps it in a column of its own
+  (`martian_thresholds.secret`), not in the threshold's record, and only `threshold_secret`, which
+  the worker calls to sign, reads it back. No route returns it (a threshold shows
+  `"signed": true`), an alert's stored record and payload do not hold it, no log line holds it, and
+  `martian evals export` exports the threshold without it: a threshold imported into a fresh
+  install shows `"signed": false` and sends no signed webhook until a member gives it a secret
+  again (`POST /v1/evals/thresholds/{id}/secret`, once, for a webhook with none). It is stored as
+  given, not encrypted: whoever can read the record-store database can read it, as they can every
+  record there, and on Postgres row-level security keeps it to its organisation. To change it,
+  delete the threshold and create another.
+- **The SMTP password** is part of the worker's settings, given by the operator in code from their
+  own secret store. No record holds it, so no export does, and the settings' repr and the log
+  lines leave it out.
+- **Logs and errors.** A failed attempt is logged, and kept as the alert's `last_error`, as a status
+  or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`): never the URL, a header, the body,
+  the secret, the password or a recipient. The HTTP client's own request log (HTTPX at `INFO`),
+  if an installation turns it on, names the URL, so a webhook URL holds no credential: the
+  signature authenticates an alert, and a URL with a user name or password is refused.
+
+`tests/evals/test_thresholds.py` checks that the default settings send nothing and open no
+connection, that the loopback receiver is refused without `private_addresses`, that no route
+answer, log line or alert holds the secret, and that failures are logged without the address.
+`tests/evals/test_data_export.py` checks that no file of an export holds a threshold's secret.
 
 ## The local edition has no login
 
@@ -190,8 +245,8 @@ They can still remove targets and define new ones. See [local targets](evals-cor
 
 ## What store errors contain
 
-An error of the evals store or the record store never quotes what was written. When either
-refuses a request, its `StoreError` names the operation, the store method such as
+An error of the evals store, the record store or the work queue never quotes what was written.
+When any of them refuses a request, its `StoreError` names the operation, the store method such as
 `record_trace`, and what was refused. For a write the database refused, that is the table, the
 column or constraint when Postgres names one, and the driver's error class and code:
 `record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
@@ -206,10 +261,14 @@ line.
 - A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
   so no traceback or error reporter reaches the values. The names above are what an operator
   debugs with.
-- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+- The work queue (`SqlWorkQueue`, in the record store's database) maps its refusals the same way:
+  `put: the database refused a value for martian_work_queue (...)`. Holding an entry that is in the
+  queue already raises `AlreadyHeld`, a `conflict` `StoreError` of the same kind, never the
+  driver's `IntegrityError`, which Postgres fills with the entry's id and organisation.
+- The stores' and the queue's database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
   database failure that is not a refusal holds none either. The record store raises such a
   failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
-  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  such as SQLite's "database is locked". The queue raises such a failure as SQLAlchemy's own error too. What they carry is the statement, with placeholders, and
   the database's own message for the failure.
 - Not covered: MLflow shortens a trace tag value over 8,000 characters given to
   `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
@@ -220,8 +279,9 @@ line.
 database refuses, directly for a metadata value over 8,000 characters and through a run of the
 worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
 refuses, a case result, a run two writers create at once, a draft case through its route, and a
-score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
-included, on SQLite and on Postgres.
+score whose write fails. `tests/evals/test_queue_errors.py` does the same for a duplicate `hold` and
+a kind the database refuses, in the queue's errors and in an API answer carrying them. Each finds
+the canary in no error, API answer or log line, MLflow's included, on SQLite and on Postgres.
 
 ## Runtime reporting data boundary
 
@@ -289,17 +349,20 @@ The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes
   `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
   (`tr-` and 32 hex digits) and derives one from any other id.
   `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
-- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+- **The hosted MLflow server** (MartianSecurity/martian-evals) runs its own pinned release on Postgres,
   not the file store. Only Backend holds credentials for it, and Backend sends only derived
-  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
+  `tr-` ids; MartianSecurity/MartianBackend's evals workbench guide states that side.
 
 ## Licence, attribution and vulnerability reports
 
-Every file in this repository is Apache-2.0 (`LICENSE`); no file carries another licence.
+Every file in this repository is Apache-2.0 (`LICENSE`) except the third-party code bundled in the
+Evals UI build in `src/martian/ui/`: its JavaScript bundles hold third-party packages under MIT, ISC
+and Apache-2.0, and its Inter font files are OFL-1.1, each listed with its licence text in
+`src/martian/ui/third-party-licenses.md`. The UI's own code is Apache-2.0.
 Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
-`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 

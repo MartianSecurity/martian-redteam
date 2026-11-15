@@ -1,5 +1,5 @@
 """Saved trace views: a port of the ``/views`` routes of the server's ``app/api/evals_explorer.py``
-(MorningHQ/MartianBackend) onto the record store.
+(MartianSecurity/MartianBackend) onto the record store.
 
 A view belongs to a project (the default one when ``project_id`` is null) and to the person who
 saved it. A private view is seen only by its owner; an organisation view by everyone. Only the

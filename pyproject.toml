@@ -45,9 +45,9 @@ postgres = ["martian-sdk[evals]", "psycopg[binary]>=3.2"]
 
 [project.urls]
 Homepage = "https://martiansecurity.ai/"
-Repository = "https://github.com/MorningHQ/martian-redteam"
-Documentation = "https://github.com/MorningHQ/martian-redteam/tree/main/docs"
-Issues = "https://github.com/MorningHQ/martian-redteam/issues"
+Repository = "https://github.com/MartianSecurity/martian-redteam"
+Documentation = "https://github.com/MartianSecurity/martian-redteam/tree/main/docs"
+Issues = "https://github.com/MartianSecurity/martian-redteam/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -65,7 +65,7 @@ include = [
     "/README.md", "/LICENSE", "/NOTICE", "/uv.lock", "/Dockerfile", "/.dockerignore",
 ]
 
-# The Evals UI the wheel ships in src/martian/ui/: a build of the Evals app in MorningHQ/MartianFrontend
+# The Evals UI the wheel ships in src/martian/ui/: a build of the Evals app in MartianSecurity/MartianFrontend
 # (`npm run build:evals`) at `commit`. scripts/vendor_ui.py replaces the folder and writes this table;
 # scripts/check_release.py refuses distributions whose UI is not this build. See docs/releasing.md.
 [tool.martian.ui]
@@ -75,7 +75,7 @@ digest = "sha256:1dfd87c419d0a93200f07b91aa434a8f950336af4ee280b4cd650b8cdb62989
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

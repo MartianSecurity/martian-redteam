@@ -1,4 +1,4 @@
-"""Simulated users (MorningHQ/martian-notes#192): a conversation case that names a goal, a persona, a
+"""Simulated users (MartianSecurity/martian-notes#192): a conversation case that names a goal, a persona, a
 turn budget and a stop condition instead of scripted turns, played by a model on the judges'
 provider path, recorded turn by turn as a scripted conversation is, with its goal verdict beside
 the conversation's checks; and personas built from real transcripts with personal data removed.
@@ -410,8 +410,8 @@ def test_the_worker_skips_a_simulated_case_with_its_reason():
 
     run = Run(id="r", project_id="default", source="console", state="running")
     case = Case(id="c", simulated_user=SimulatedUser(**SIMULATED))
-    result, score = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
-    assert (result.status, result.error, score) == ("skipped", execute.CONVERSATION, None)
+    result, score, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
+    assert (result.status, result.error, score, model) == ("skipped", execute.CONVERSATION, None, None)
 
 
 # ---------- personas from real transcripts ----------

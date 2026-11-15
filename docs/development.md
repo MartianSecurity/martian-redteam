@@ -17,9 +17,10 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/stats.py` | Confidence intervals for pass rates and mean scores, grouped or not ([evals](evals.md#pass-rates-and-confidence-intervals)), and the paired tests and label of a comparison of two runs ([comparing two runs](evals.md#comparing-two-runs)) |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
-| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`) and OpenTelemetry's `POST /v1/traces` (`otlp.py`), shaped by `projection.py` and `quality.py` |
+| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), OpenTelemetry's `POST /v1/traces` (`otlp.py`), and the core's own monitor and threshold routes (`monitors.py`, `thresholds.py`), shaped by `projection.py` and `quality.py` |
 | `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, the work itself (`execute.py`), the console's built-in scorers (`scorers.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
+| `src/martian/evals/thresholds.py`, `alerts.py` | Thresholds on monitor scores judged on their 95% intervals, with the state machine that raises one alert per breach and recovery, and the alerts' delivery by signed webhook and SMTP ([evals core](evals-core.md#thresholds-and-alerts)) |
 | `src/martian/evals/trace_conventions.py` | The versioned table that maps OpenTelemetry GenAI, OpenInference and MLflow span attributes onto the trace fields ([evals core](evals-core.md#trace-conventions)) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
 | `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run queued in the data folder and run in a process of its own |
@@ -141,7 +142,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   ([telemetry](security-and-data.md#telemetry)). The child processes import
   `tests/evals/no_outbound_fixture.py`, so run it from the repository root.
 - `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
-- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
+- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, the Evals UI is recorded as first-party Apache-2.0 and `NOTICE` attributes it, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - `tests/evals/test_policy_checks.py` measures each policy check on its labelled set in `tests/evals/policy_sets/` and fails unless the error-rate table in `docs/evals.md` gives the same numbers; when a check or its set changes, copy the row the failure prints into that table. Every value in the sets is synthetic, and each secret in `no_secrets.jsonl` has one character written as a JSON escape so the file holds no secret shape.
 - `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
   checks the shape of their labelled set, `tests/evals/benchmarks/grounding_judges.jsonl`.
@@ -218,7 +219,7 @@ the second step checked on `main` before.
 To move the pin, run the suite on the candidate, change `mlflow-skinny==` in `pyproject.toml`, run
 `uv lock`, and update the version in [SDK and CI](sdk-and-ci.md) and
 [release preparation](releasing.md). The hosted MLflow server's version is set separately in
-MorningHQ/martian-evals.
+MartianSecurity/martian-evals.
 
 ## Adding a vulnerability
 
@@ -264,6 +265,6 @@ now covers both SDK modules; no eval typing exemption remains.
 
 | Repo | Role |
 | --- | --- |
-| [MorningHQ/martian-redteam](https://github.com/MorningHQ/martian-redteam) | This SDK |
-| [MorningHQ/martian-agents](https://github.com/MorningHQ/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
+| [MartianSecurity/martian-redteam](https://github.com/MartianSecurity/martian-redteam) | This SDK |
+| [MartianSecurity/martian-agents](https://github.com/MartianSecurity/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
 | confident-ai/deepteam (local checkout only) | Taxonomy reference, not a publishable fork |
