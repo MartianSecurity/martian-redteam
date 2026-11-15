@@ -51,6 +51,10 @@ PROVIDER_RETRIES_KEY = "martian.judge.provider_retries"
 # "json_schema" when the reply was requested with structured output, "none" when the endpoint
 # declined it and the stage asked again without.
 RESPONSE_FORMAT_KEY = "martian.judge.response_format"
+# The model the provider says answered, from the reply's own ``model`` field
+# (``gpt-4o-mini-2024-07-18`` for ``openai:/gpt-4o-mini``). Absent when the reply names none.
+MODEL_VERSION_KEY = "martian.judge.model_version"
+ENDPOINT_SETTING = "the judge's endpoint"
 _sleep = time.sleep
 _clock = time.monotonic
 
@@ -134,12 +138,14 @@ def _gateway_completion(
     schema: type[BaseModel],
     params: dict[str, Any] | None,
     extra_headers: Mapping[str, str],
+    base_url: str | None = None,
 ) -> tuple[Any, bool]:
-    """The completion, and whether it was requested with structured output."""
+    """The completion, and whether it was requested with structured output. ``base_url`` is an
+    OpenAI-compatible endpoint's base address, used instead of the one in the environment."""
     # The pinned helper is annotated with BaseProvider, whose HTTP implementations
     # add the wire adapter and headers used by MLflow's own Gateway judge.
     provider: Any = provider_instance(provider_name, model)
-    endpoint = provider.get_endpoint_url("llm/v1/chat")
+    endpoint = f"{base_url.rstrip('/')}/chat/completions" if base_url else provider.get_endpoint_url("llm/v1/chat")
     headers = dict(provider.headers or {})
     if provider_name == "gateway":
         headers[MLFLOW_GATEWAY_CALLER_HEADER] = GatewayCaller.JUDGE.value
@@ -198,16 +204,19 @@ def _litellm_completion(
         return send(structured=False), False
 
 
-def _setting_names(provider: str) -> tuple[str, str]:
+def _setting_names(provider: str, base_url: str | None = None) -> tuple[str, str]:
     """The settings that hold the provider's key and address, named in failure messages. The
-    openai provider reads them as MLflow does: ``OPENAI_API_BASE``, else ``OPENAI_BASE_URL``."""
+    openai provider reads them as MLflow does: ``OPENAI_API_BASE``, else ``OPENAI_BASE_URL``,
+    unless the judge names its endpoint."""
+    if base_url:
+        return "OPENAI_API_KEY", ENDPOINT_SETTING
     if provider == "openai":
         unset = os.environ.get("OPENAI_API_BASE") is None and os.environ.get("OPENAI_BASE_URL")
         return "OPENAI_API_KEY", "OPENAI_BASE_URL" if unset else "OPENAI_API_BASE"
     return f"the {provider} provider's key", f"the {provider} provider's address"
 
 
-def _provider_failure(stage: str, error: Exception, provider: str) -> ValueError:
+def _provider_failure(stage: str, error: Exception, provider: str, base_url: str | None = None) -> ValueError:
     """The judge's own message for a failed request, naming the setting to check.
 
     MLflow's outer retry classifier inspects type, status attributes and text, so only these
@@ -215,7 +224,7 @@ def _provider_failure(stage: str, error: Exception, provider: str) -> ValueError
     choose one and is never repeated. Suite file settings are named as ``judge.<name>``; in
     Python they are the judge's argument of the same name.
     """
-    key, address = _setting_names(provider)
+    key, address = _setting_names(provider, base_url)
     status = getattr(error, "status_code", None)
 
     def failed(code: str, hint: str) -> ValueError:
@@ -275,7 +284,11 @@ def invoke_response_judge(
     max_retries: int = 0,
     rate_limit_wait_seconds: float = 0.0,
     headers: Mapping[str, str] | None = None,
+    endpoint: str | None = None,
 ) -> Feedback:
+    """One judge stage's request and its validated judgment. ``endpoint`` is the base address of
+    the OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``."""
     # Reuse routing, credentials and wire transforms from the pinned MLflow.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
     try:
@@ -290,6 +303,11 @@ def invoke_response_judge(
             f"Judge {stage} failed [judge_provider_config]. "
             "Check judge.model: its provider must return a direct chat completion."
         )
+    if endpoint is not None and (provider != "openai" or not isinstance(adapter, GatewayAdapter)):
+        raise ValueError(
+            f"Judge {stage} failed [judge_provider_config]. "
+            "An endpoint serves openai:/ models: check the judge's model and endpoint."
+        )
     # MLflow's openai provider refuses to start without a key, so say which one before it does.
     if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
         raise ValueError(f"Judge {stage} failed [judge_provider_key]. Set OPENAI_API_KEY.")
@@ -302,7 +320,7 @@ def invoke_response_judge(
         try:
             if isinstance(adapter, GatewayAdapter):
                 completion, structured = _gateway_completion(
-                    provider, model, prompt, response_format, inference_params, extra_headers
+                    provider, model, prompt, response_format, inference_params, extra_headers, endpoint
                 )
             else:
                 completion, structured = _litellm_completion(
@@ -313,7 +331,7 @@ def invoke_response_judge(
             # Only a failure that returned no judgment is retried. A reply that was received is
             # final, valid or not: a second attempt at it would be a retry towards a pass.
             if not _no_judgment_received(error):
-                raise _provider_failure(stage, error, provider) from None
+                raise _provider_failure(stage, error, provider, endpoint) from None
             asked = _asked_wait(error)
             backoff = min(_MAX_BACKOFF_SECONDS, 2.0**retries + random.uniform(0.0, 0.5))
             if getattr(error, "status_code", None) in _RATE_LIMIT_STATUS:
@@ -321,10 +339,10 @@ def invoke_response_judge(
                 remaining = rate_limit_wait_seconds - (_clock() - started)
                 wait = asked if asked is not None else min(backoff, remaining)
                 if remaining <= 0 or wait > remaining:
-                    raise _provider_failure(stage, error, provider) from None
+                    raise _provider_failure(stage, error, provider, endpoint) from None
             else:
                 if failures >= max_retries:
-                    raise _provider_failure(stage, error, provider) from None
+                    raise _provider_failure(stage, error, provider, endpoint) from None
                 failures += 1
                 wait = min(asked, _MAX_BACKOFF_SECONDS) if asked is not None else backoff
             _sleep(wait)
@@ -376,6 +394,9 @@ def invoke_response_judge(
         PROVIDER_RETRIES_KEY: retries,
         RESPONSE_FORMAT_KEY: "json_schema" if structured else "none",
     }
+    reported = getattr(completion, "model", None)
+    if isinstance(reported, str) and reported.strip():
+        metadata[MODEL_VERSION_KEY] = reported.strip()[:200]
     if (usage := completion.usage) is not None:
         prompt_tokens = usage.prompt_tokens
         completion_tokens = usage.completion_tokens

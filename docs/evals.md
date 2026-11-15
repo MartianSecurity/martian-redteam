@@ -462,6 +462,8 @@ fails closed.
 
 Feedback metadata includes prompt version/hash, guidelines hash, model, requested
 inference parameters, validated checks, and token usage when reported by the adapter.
+`martian.judge.model_version` is the model the provider says answered, from the `model` field
+of its reply (`gpt-4o-mini-2024-07-18` for `openai:/gpt-4o-mini`), when it names one.
 `martian.judge.citation_format` is `response-segments-v1`;
 `martian.judge.citations` contains each cited guideline index, segment IDs and
 the enclosing `start`/`end` offsets in the original response. Offsets count Python
