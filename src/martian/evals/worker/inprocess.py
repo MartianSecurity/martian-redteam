@@ -7,11 +7,17 @@ whole process, so two organisations' evaluations must never share one
 each run's own process, where :class:`~martian.evals.worker.process.ProcessWorker` uses it; an
 installation that serves organisations uses ``ProcessWorker``.
 
-Work runs while the process does and is lost with it; a durable queue is MorningHQ/martian-notes#139.
-``targets`` are the targets it calls itself, by id: a ``TargetCall``, or an HTTP target whose
+Work it is given with ``submit`` runs while the process does and is lost with it. Under a
+:class:`~martian.evals.worker.queue.QueueWorker`, which calls :meth:`InProcessWorker.run`, the
+work stays in the queue until it has ended, and a worker takes it again if this process stops
+first. ``targets`` are the targets it calls itself, by id: a ``TargetCall``, or an HTTP target whose
 ``${NAME}`` values come from ``credentials``. ``executor`` calls the registered agents, through
-martian-agents, for any other id (:mod:`martian.evals.worker.targets`). The judge, if any, is one
-``Judge`` for every model scorer. ``scorers`` are the custom Python scorers it runs, by name
+martian-agents, for any other id (:mod:`martian.evals.worker.targets`). Before each start of a
+run it pins the run's target again, as :meth:`InProcessWorker.check_target` pinned it when the
+run was admitted, and fails the run without calling a target whose pin changed. The judge, if
+any, is one ``Judge`` for every model scorer. ``target_timeout_seconds`` bounds every target call, and
+``limits`` are the installation's limits for a run that has none of its own
+(:class:`~martian.evals.model.RunLimits`). ``scorers`` are the custom Python scorers it runs, by name
 (:data:`~martian.evals.worker.execute.InstalledScorers`); each is checked when the worker is
 built, so one that reads an argument a worker does not give is refused before any work.
 """
@@ -23,7 +29,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from martian.evals import _custom
-from martian.evals.model import Run, Target
+from martian.evals.model import Run, RunLimits, Target
 from martian.evals.records import RecordStore
 from martian.evals.store import EvalStore
 from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
@@ -49,6 +55,7 @@ class InProcessWorker:
         credentials: Credentials | None = None,
         executor: AgentExecutor | None = None,
         scorers: InstalledScorers | None = None,
+        limits: RunLimits | None = None,
     ) -> None:
         self._store = store
         self._records = records
@@ -64,6 +71,7 @@ class InProcessWorker:
         self._scorers = dict(scorers or {})
         for function in self._scorers.values():
             _custom.arguments(function, _custom.WORKER_ARGUMENTS)
+        self._limits = limits
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -76,6 +84,11 @@ class InProcessWorker:
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         self._check_organisation(principal)
+        return await self._pin(principal, target)
+
+    async def _pin(self, principal: Principal, target: Target | None) -> dict[str, Any]:
+        """The pin of ``target`` as this worker has it now: when a run is admitted, and again
+        before each start of the run, which fails when the two differ."""
         http = {key: value for key, value in self._targets.items() if isinstance(value, Target)}
         return await target_pin(principal, target, calls=self._targets.keys(), http=http, executor=self._executor)
 
@@ -84,6 +97,11 @@ class InProcessWorker:
         task = asyncio.get_running_loop().create_task(self._execute(work))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    async def run(self, work: Work) -> None:
+        """Do the work in this task and return once it has ended (:class:`~martian.evals.worker.Runner`)."""
+        self._check_organisation(work.principal)
+        await self._execute(work)
 
     async def drain(self) -> None:
         """Wait until every piece of work submitted so far, and any it led to, has finished."""
@@ -107,7 +125,11 @@ class InProcessWorker:
                 self._records,
                 work,
                 call_for=lambda run: self._call_for(work.principal, run),
+                pin_for=lambda run: self._pin(work.principal, run.target),
                 timeout_seconds=self._timeout,
+                limits=self._limits,
             )
         else:
-            await execute_scoring(self._store, self._records, work, judge=self._judge, scorers=self._scorers)
+            await execute_scoring(
+                self._store, self._records, work, judge=self._judge, scorers=self._scorers, limits=self._limits
+            )

@@ -14,20 +14,19 @@ one of two places:
   ``function_call``.
 - The trace (``source="trace"``): the spans MLflow records for the target's call. Each model
   span (``LLM`` or ``CHAT_MODEL``) is a turn, and each tool span (``TOOL``) is a call, as
-  MLflow's own tool-call scorers read them: the tool ``gen_ai.tool.name`` (or OpenInference's
-  ``tool.name``) names, else the span's name, with the span's inputs as its arguments. A span
-  MLflow left untyped takes its kind from ``gen_ai.operation.name`` or
-  ``openinference.span.kind``. A tool span is in the turn of the model span that started last
-  before it. Spans inside a tool span are that tool's own work, not the agent's, and are not read.
+  MLflow's own tool-call scorers read them. A span's kind and its tool's name and arguments are
+  read through the trace mapping (:func:`martian.evals.trace_conventions.map_span`): the kind is
+  MLflow's span type, else, for a span MLflow left untyped, ``gen_ai.operation.name`` or
+  ``openinference.span.kind``; the tool is the one ``gen_ai.tool.name`` (or OpenInference's
+  ``tool.name``) names, else the span's name, with the span's inputs as its arguments, else the
+  arguments its attributes record (``gen_ai.tool.call.arguments``). A tool span is in the turn of
+  the model span that started last before it. Spans inside a tool span are that tool's own work,
+  not the agent's, and are not read.
 
 What cannot be read is a scorer error, never an empty trajectory: a reply that is not messages or
 holds an item that is not a chat message (such as a Responses API ``function_call`` item), a
 tool call without a name, a trace with no model or tool span, and a trace whose model spans ask
 for tools while no tool span records one.
-
-The span kind and tool name read here are what the trace mapping (``trace_conventions.py``,
-MorningHQ/martian-notes#150) gives as ``map_span(...).kind`` and ``.tool`` for these
-conventions; once it is on this branch, :func:`from_trace` can read each span through it.
 """
 
 from __future__ import annotations
@@ -40,6 +39,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from martian.evals import _json_schema
+from martian.evals.model import Span
+from martian.evals.trace_conventions import SpanFields, map_span
 
 TOOL_CHECKS = ("tool_called", "tool_not_called", "tool_trajectory", "step_count")
 SOURCES = ("reply", "trace")
@@ -47,13 +48,6 @@ ARGUMENT_MATCHES = ("exact", "subset", "schema", "pattern")
 ORDERS = ("exact", "in_order", "any_order")
 
 _MODEL_KINDS = frozenset({"LLM", "CHAT_MODEL"})
-# The kinds of a span MLflow left untyped, from the OpenTelemetry GenAI operation it records.
-_OPERATIONS = {
-    "chat": "CHAT_MODEL",
-    "text_completion": "LLM",
-    "generate_content": "LLM",
-    "execute_tool": "TOOL",
-}
 # Google ADK adds a tool span that merges the results of the calls one model turn made; it is not
 # a call itself, and MLflow's own reader leaves it out too.
 _MERGED_TOOLS = "(merged tools)"
@@ -199,32 +193,18 @@ def from_reply(parsed: bool, value: Any) -> Trajectory:
 # --- reading the trace ------------------------------------------------------------------------
 
 
-def _attribute(span: Any, key: str) -> Any:
-    value = (span.attributes or {}).get(key)
-    if isinstance(value, str) and value.startswith('"'):  # an attribute kept as JSON text
-        try:
-            return json.loads(value)
-        except ValueError:
-            return value
-    return value
-
-
-def _kind(span: Any) -> str:
-    kind = str(span.span_type or "")
-    if kind and kind != "UNKNOWN":
-        return kind
-    operation = _attribute(span, "gen_ai.operation.name")
-    if isinstance(operation, str) and operation in _OPERATIONS:
-        return _OPERATIONS[operation]
-    found = _attribute(span, "openinference.span.kind")
-    return found if isinstance(found, str) and found else kind
-
-
-def _tool_name(span: Any) -> str:
-    for key in ("gen_ai.tool.name", "tool.name"):
-        if isinstance(name := _attribute(span, key), str) and name.strip():
-            return name
-    return str(span.name or "")
+def _mapped(span: Any) -> SpanFields:
+    """An MLflow span's trace fields through the trace mapping, read as the store reads its spans."""
+    return map_span(
+        Span(
+            id=str(span.span_id),
+            name=span.name or "",
+            kind=str(span.span_type or ""),
+            inputs=span.inputs,
+            outputs=span.outputs,
+            attributes=dict(span.attributes or {}),
+        )
+    )
 
 
 def _asks_for_tools(outputs: Any) -> bool:
@@ -237,12 +217,16 @@ def from_trace(trace: Any) -> Trajectory:
     """The trajectory the spans of the target's call record."""
     spans = list(trace.data.spans)
     by_id = {span.span_id: span for span in spans}
+    mapped = {id(span): _mapped(span) for span in spans}
+
+    def kind_of(span: Any) -> str:
+        return mapped[id(span)].kind or ""
 
     def in_tool(span: Any) -> bool:
         seen, parent = set(), span.parent_id
         while parent in by_id and parent not in seen:
             seen.add(parent)
-            if _kind(by_id[parent]) == "TOOL":
+            if kind_of(by_id[parent]) == "TOOL":
                 return True
             parent = by_id[parent].parent_id
         return False
@@ -251,7 +235,7 @@ def from_trace(trace: Any) -> Trajectory:
     before: list[Call] = []
     asked = traced_tools = False
     for _, span in sorted(enumerate(spans), key=lambda pair: (pair[1].start_time_ns or 0, pair[0])):
-        kind = _kind(span)
+        kind = kind_of(span)
         if (kind not in _MODEL_KINDS and kind != "TOOL") or in_tool(span):
             continue
         if kind in _MODEL_KINDS:
@@ -259,9 +243,10 @@ def from_trace(trace: Any) -> Trajectory:
             asked = asked or _asks_for_tools(span.outputs)
             continue
         traced_tools = True
-        if (name := _tool_name(span)) == _MERGED_TOOLS:
+        tool = mapped[id(span)].tool
+        name, arguments = (tool.name, tool.arguments) if tool is not None else (str(span.name or ""), span.inputs)
+        if name == _MERGED_TOOLS:
             continue
-        arguments = span.inputs if span.inputs is not None else _attribute(span, "gen_ai.tool.call.arguments")
         (turns[-1] if turns else before).append(Call(name=name, arguments=_decoded(arguments)))
     if not turns and not traced_tools:
         raise ValueError(
