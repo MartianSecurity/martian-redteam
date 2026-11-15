@@ -23,9 +23,10 @@ organisation's work, and exits. Whatever MLflow selects inside it stays with tha
 Each process builds what it runs the work with by calling the worker's *setup*: a module-level
 function, named by its import path so that the new process can import it, which takes the
 worker's ``options`` (JSON) as keyword arguments and returns :class:`WorkerServices`. The work
-reaches the process as JSON on its standard input (:func:`dump_work`), never on its command line.
-A process that exits with an error leaves no work queued or running: the worker marks it
-``failed``.
+reaches the process as JSON on its standard input (:func:`dump_work`), never on its command line,
+with the worker's HTTP targets as written. Their credentials come from the setup's
+``credentials``, in that process. A process that exits with an error leaves no work queued or
+running: the worker marks it ``failed``.
 """
 
 from __future__ import annotations
@@ -39,18 +40,17 @@ import os
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from martian.evals.model import Target
 from martian.evals.records import RecordStore
 from martian.evals.server.principal import Principal
-from martian.evals.store import EvalStore, StoreError
+from martian.evals.store import EvalStore
 from martian.evals.store.mlflow_local import workspace_name
-from martian.evals.worker import Judge, TargetCall, Work
+from martian.evals.worker import AgentExecutor, Credentials, Judge, TargetCall, Work
 from martian.evals.worker.execute import fail_unfinished
 from martian.evals.worker.inprocess import InProcessWorker
-
-if TYPE_CHECKING:
-    from martian.evals.model import Target
+from martian.evals.worker.targets import http_target, target_pin
 
 log = logging.getLogger("martian.evals.worker")
 
@@ -70,13 +70,16 @@ WRONG_WORKSPACE = (
 @dataclass(frozen=True)
 class WorkerServices:
     """What a run's process runs its work with, built in that process by the worker's setup: the
-    store and the record store, the agents it can call by id, and the judge, if any."""
+    store and the record store, the targets it calls itself by id, the judge, if any, the
+    credentials of HTTP targets, and the executor of registered agents, if any."""
 
     store: EvalStore
     records: RecordStore
-    targets: Mapping[str, TargetCall] = field(default_factory=dict)
+    targets: Mapping[str, TargetCall | Target] = field(default_factory=dict)
     judge: Judge | None = None
     target_timeout_seconds: float = 120.0
+    credentials: Credentials | None = None
+    executor: AgentExecutor | None = None
 
 
 def dump_work(work: Work) -> dict[str, Any]:
@@ -131,9 +134,12 @@ class ProcessWorker:
     """Runs each piece of work in a new process of its own, which ends with it.
 
     ``setup`` builds the :class:`WorkerServices` in each process from ``options``. ``agents`` are
-    the agent ids its targets call, which :meth:`check_target` accepts, and ``judges`` says whether
-    it gives a judge. ``records`` is this process's record store, used only to mark work failed
-    when its process exits with an error.
+    the ids of the functions its targets call, which :meth:`check_target` accepts, and ``judges``
+    says whether it gives a judge. ``targets`` are the HTTP targets the worker calls itself, by
+    id; they are read at each check and each run, so they may be a live view, and each run's
+    process receives them with its work. ``executor`` admits the registered agents, which each
+    run's process calls through its setup's executor. ``records`` is this process's record store,
+    used only to mark work failed when its process exits with an error.
     """
 
     def __init__(
@@ -144,12 +150,18 @@ class ProcessWorker:
         agents: Iterable[str] = (),
         judges: bool = False,
         options: Mapping[str, Any] | None = None,
+        targets: Mapping[str, Target] | None = None,
+        executor: AgentExecutor | None = None,
     ) -> None:
         self._setup = _import_path(setup)
         self._options = dict(options or {})
         json.dumps(self._options)  # each process reads them as JSON
         self._records = records
         self._agents = frozenset(agents)
+        self._targets: Mapping[str, Target] = targets if targets is not None else {}
+        if both := sorted(self._agents & set(self._targets)):
+            raise ValueError(f"{', '.join(both)} cannot be both an agent and an http target")
+        self._executor = executor
         self._judges = judges
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -158,13 +170,19 @@ class ProcessWorker:
         return self._judges
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
-        if target.kind != "agent" or target.agent_id not in self._agents:
-            raise StoreError("not_found", "Agent not found")
-        return {"kind": target.kind, "agent_id": target.agent_id}
+        return await target_pin(principal, target, calls=self._agents, http=self._targets, executor=self._executor)
 
     async def submit(self, work: Work) -> None:
         """Start the work's process and return; the process runs the work."""
-        request = json.dumps({"setup": self._setup, "options": self._options, "work": dump_work(work)})
+        targets = {key: http_target(value).model_dump(mode="json") for key, value in self._targets.items()}
+        request = json.dumps(
+            {
+                "setup": self._setup,
+                "options": self._options,
+                "work": dump_work(work),
+                "targets": targets if work.kind == "run" else {},
+            }
+        )
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -188,15 +206,21 @@ class ProcessWorker:
             await fail_unfinished(self._records, work, ENDED_EARLY)
 
 
-async def _run_work(services: WorkerServices, work: Work) -> None:
-    """Run one piece of work in this process, with a worker that takes only its organisation's."""
+async def _run_work(services: WorkerServices, work: Work, http: Mapping[str, Target] | None = None) -> None:
+    """Run one piece of work in this process, with a worker that takes only its organisation's.
+    ``http`` are the HTTP targets the work arrived with, beside the setup's own targets."""
+    http = dict(http or {})
+    if both := sorted(set(services.targets) & set(http)):
+        raise ValueError(f"the setup's targets and the worker's http targets both name {', '.join(both)}")
     worker = InProcessWorker(
         services.store,
         services.records,
         organisation_id=work.principal.organisation_id,
-        targets=services.targets,
+        targets={**services.targets, **http},
         judge=services.judge,
         target_timeout_seconds=services.target_timeout_seconds,
+        credentials=services.credentials,
+        executor=services.executor,
     )
     await worker.submit(work)
     await worker.drain()
@@ -211,8 +235,9 @@ def main() -> int:
     if os.environ.get(WORKSPACE_ENV) != workspace_name(work.principal):
         print(WRONG_WORKSPACE, file=sys.stderr)
         return 2
+    http = {key: Target.model_validate(value) for key, value in request["targets"].items()}
     services = _resolve(request["setup"])(**request["options"])
     if not isinstance(services, WorkerServices):
         raise TypeError("the worker's setup must return WorkerServices")
-    asyncio.run(_run_work(services, work))
+    asyncio.run(_run_work(services, work, http))
     return 0

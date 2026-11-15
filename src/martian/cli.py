@@ -124,6 +124,9 @@ def _run_suite(
     console.print(table)
     for reason, count in list(summary.get("target_errors", {}).items())[:5]:
         console.print(f"{count} case(s): {reason}", markup=False, highlight=False)
+    for label, reasons in summary.get("check_errors", {}).items():
+        for reason, count in list(reasons.items())[:5]:
+            console.print(f"{count} case(s), {label}: {reason}", markup=False, highlight=False)
     console.print(f"Results: {summary['output']}/results.jsonl, summary.json, junit.xml")
     recorded = summary["run"]
     ui = (
