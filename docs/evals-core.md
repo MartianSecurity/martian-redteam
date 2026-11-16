@@ -779,8 +779,8 @@ leaves the three responses untyped, and the core answers with the server's field
   as the bootstrap names them) and `at`, and answers `{"persisted": <traces>, "state": <state>}`.
   Each trace search row and quality issue trace shows it as `triage`. Triage again replaces it.
 
-The Martian server answers these three routes with its own code and does not mount this router
-yet. `tests/evals/test_explorer.py` checks the answers on `MemoryStore` and `MlflowStore`, the
+The Martian server mounts this router behind its own plug points and answers these three routes
+with the core's code, as the local edition does. `tests/evals/test_explorer.py` checks the answers on `MemoryStore` and `MlflowStore`, the
 bound of 1,000 traces, triage and its refusals; `tests/evals/test_read_contract.py` and
 `test_write_contract.py` check the operations and `IssueTriageRequest` against the contract.
 
@@ -4259,9 +4259,8 @@ sequence its CI gate shares,
 scoring job, with the agent's target lease; not the durable queue yet), `current_judge_settings`
 each organisation's default judge model, and `current_agent_names` its agent registry. It
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
-names (so its bootstrap has no `hostedRoutes`), keeps its CI gate and its own explorer routes
-(`GET /capabilities`, `POST /overview`, `/quality-issues/*` and `POST /traces/export`; it does not
-mount the core's `explorer` router yet), and leaves out the core's routes outside the
+names (so its bootstrap has no `hostedRoutes`), keeps its CI gate and its own `GET /capabilities` and `POST /traces/export`, mounts the core's
+`explorer` router for `POST /overview` and `/quality-issues/*`, and leaves out the core's routes outside the
 contract (`GET /v1/evals/{run_id}/attempts` and `/turns`). It serves OpenTelemetry's
 `POST /v1/traces` on a route of its own that calls `otlp.export` ([an edition's own
 route](#opentelemetry-traces)): exporters sign in with an organisation's API key or a service

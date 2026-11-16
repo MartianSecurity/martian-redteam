@@ -22,7 +22,7 @@ the first trace, so a ``cursor`` is ``422``.
   row's ``triage``. It needs the ``review`` capability and a project that takes writes, and names
   only traces of the project: one the project lacks is ``404`` before any trace is changed.
 
-The Martian server answers these routes with its own code and does not mount this router yet.
+The Martian server mounts this router behind its own plug points, as the local edition does.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
