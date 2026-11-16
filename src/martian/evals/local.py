@@ -57,7 +57,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, FastAPI
 from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
@@ -211,6 +213,24 @@ async def refresh(principal: Annotated[Principal, Depends(current_principal)]) -
     return LocalToken(access_token=ACCESS_TOKEN, session=session)
 
 
+REVALIDATE = "no-cache"
+"""``Cache-Control`` of the UI's page and its other unhashed files: the browser asks again on every
+load, so after an SDK upgrade it never keeps a page that names the previous build's assets."""
+KEEP = "public, max-age=31536000, immutable"
+"""``Cache-Control`` of the build's hashed files under ``assets/``: a new build gives them new names."""
+
+
+class UiFiles(StaticFiles):
+    """The built Evals UI, with the caching each kind of file allows (:data:`REVALIDATE`, :data:`KEEP`)."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            hashed = path.replace("\\", "/").startswith("assets/")
+            response.headers["Cache-Control"] = KEEP if hashed else REVALIDATE
+        return response
+
+
 def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS, *, concurrency: int = 1) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
     user, with a worker that serves the folder's queue beside the app and runs each run in a
@@ -253,7 +273,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     app.include_router(session_router)
     app.include_router(local_targets.router)
     app.include_router(local_runs.router)
-    app.mount("/", StaticFiles(directory=ui, html=True), name="ui")
+    app.mount("/", UiFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
     return app
 

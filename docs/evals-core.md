@@ -3346,6 +3346,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   the session call, and the local targets and runs under `/v1/local`. Every other path is a file
   of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
   origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
+  The page and the other unhashed files are sent with `Cache-Control: no-cache`, so a browser
+  asks again on every load and never keeps a page that names a previous build's files after an
+  SDK upgrade; the build's hashed files under `assets/` are kept for a year (`immutable`).
 - Every page of the UI works against the local edition or is left out of it. The bootstrap's
   `hostedRoutes` is `false` ([bootstrap response](#bootstrap-response)), so the runs page has no CI
   sessions or API keys views and the Traces page no export: those read the Martian server's CI
