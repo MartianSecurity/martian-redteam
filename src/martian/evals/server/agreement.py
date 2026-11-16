@@ -52,6 +52,7 @@ from martian.evals.agreement import (
 )
 from martian.evals.model import Review, ReviewQueue, Score, TraceQuery
 from martian.evals.records import RecordStore
+from martian.evals.server.blind import blind_queue_ids
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, require_entitlement
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, project_key, project_out
@@ -172,7 +173,8 @@ async def project_agreement(
     reports, examined, truncated = await agreement_reports(store, records, principal, key, name)
     judges = {r.judge for r in reports}
     queues, chains = await queue_reviews(store, records, principal, key)
-    between = [q for q in question_agreement(chains, queues) if q.question in judges]
+    blind = await blind_queue_ids(records, principal, key)
+    between = [q for q in question_agreement(chains, queues, blind=blind) if q.question in judges]
     return {
         "project_id": project_out(key),
         "minimum": MINIMUM_LABELLED,
@@ -217,8 +219,10 @@ async def reviewer_agreement_report(
     key = project_key(project_id)
     queues: list[ReviewQueue] = []
     reviews: list[Review] = []
+    blind: set[str] = set()
     if await store.get_project(principal, key) is not None:
         queues, reviews = await queue_reviews(store, records, principal, key)
+        blind = await blind_queue_ids(records, principal, key)
     elif key != DEFAULT_PROJECT:
         raise HTTPException(404, "Not found")
     if queue_id is not None:
@@ -228,8 +232,8 @@ async def reviewer_agreement_report(
     return {
         "project_id": project_out(key),
         "minimum": MINIMUM_LABELLED,
-        "queues": [report.as_dict() for report in queue_agreement(reviews, queues)],
-        "questions": [report.as_dict() for report in question_agreement(reviews, queues)],
+        "queues": [report.as_dict() for report in queue_agreement(reviews, queues, blind=blind)],
+        "questions": [report.as_dict() for report in question_agreement(reviews, queues, blind=blind)],
     }
 
 

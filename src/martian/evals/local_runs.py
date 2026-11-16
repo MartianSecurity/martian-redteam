@@ -76,18 +76,28 @@ from martian.evals.server.dependencies import (
     WorkerDep,
     require_capability,
 )
-from martian.evals.server.launch import ACTIVE, admit_run, resume_run, resume_scoring, run_id_for
+from martian.evals.server.launch import (
+    ACTIVE,
+    admit_run,
+    limits_provenance,
+    pin_target,
+    resume_run,
+    resume_scoring,
+    run_id_for,
+    same_limits,
+)
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, derived_id, project_key, run_out
 from martian.evals.server.runs import find_run, lookup_run, project_keys, writable_key, writable_project
 from martian.evals.server.schemas import EvalRunOut
 from martian.evals.server.scoring import find_suite_version, with_models
-from martian.evals.server.write_schemas import EvalRunRequest
+from martian.evals.server.write_schemas import EvalRunRequest, ResumeRequest
 from martian.evals.store import EvalStore, StoreError
 from martian.evals.worker import ProcessWorker, QueueWorker, Work, WorkerServices, dump_work, sdk_judge
 from martian.evals.worker.execute import INTERRUPTED, LIMITS_KEY, interrupt
+from martian.evals.worker.hooks import is_installed
 from martian.evals.worker.queue import entry_id
-from martian.evals.worker.targets import http_pin
+from martian.evals.worker.targets import TargetRefused, http_pin
 
 log = logging.getLogger("martian.evals.worker")
 
@@ -303,11 +313,17 @@ class LocalWorker:
 
     async def check_target(self, principal: Principal, target: Target) -> dict[str, Any]:
         """A local target by its id (``agent_id``), pinned as the worker pins an HTTP target, by
-        its id and a digest of it as written (``http_pin``), and by its name, which the run shows."""
+        its id and a digest of it as written (``http_pin``), and by its name, which the run shows.
+        One the worker would not call, such as a ``response_path`` it refuses, is
+        :class:`~martian.evals.worker.targets.TargetRefused`, naming the target by name and id."""
         found = self._targets.get(target.agent_id) if target.kind == "agent" and target.agent_id else None
         if found is None:
             raise StoreError("not_found", "Target not found")
-        return {**http_pin(found.id, self._targets.model_target(found)), "name": found.name}
+        try:
+            pin = http_pin(found.id, self._targets.model_target(found))
+        except ValueError as error:  # the refusal names the setting, never a value
+            raise TargetRefused(f'The target "{found.name}" ({found.id}) is refused: {error}') from None
+        return {**pin, "name": found.name}
 
     async def submit(self, work: Work) -> None:
         """Record a run's suite scoring job, then queue the work and return. If the work cannot be
@@ -423,7 +439,6 @@ async def _cancel_job(
 class LocalRunRequest(EvalRunRequest):
     suite_version_id: uuid.UUID | None = None
     acknowledge_model_cost: bool = False
-    limits: RunLimits | None = None
 
 
 class RunAgainRequest(BaseModel):
@@ -432,17 +447,6 @@ class RunAgainRequest(BaseModel):
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     acknowledge_model_cost: bool = False
     limits: RunLimits | None = None
-
-
-class ResumeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    limits: RunLimits | None = None
-
-
-def _limits(limits: RunLimits | None) -> dict[str, Any]:
-    """The provenance that keeps a run's own limits, when it is given some."""
-    return {} if limits is None else {LIMITS_KEY: limits.model_dump(mode="json")}
 
 
 def _suite_version_id(run: Run) -> str | None:
@@ -458,8 +462,7 @@ def _same_launch(run: Run, body: LocalRunRequest, principal: Principal) -> bool:
         and run.project_id == project_key(body.project_id)
         and run.max_cases == body.max_items
         and _suite_version_id(run) == (str(body.suite_version_id) if body.suite_version_id else None)
-        # Without limits of its own the run has its suite's or the worker's, which the request did not name.
-        and (body.limits is None or run.provenance.get(LIMITS_KEY) == _limits(body.limits)[LIMITS_KEY])
+        and same_limits(run, body.limits)
         and run.requested_by == principal.user_id
         and "repeat_of" not in run.provenance
     )
@@ -491,7 +494,7 @@ async def launch_local_run(
         return run_out(existing)
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    pin = await worker.check_target(principal, target)
+    pin = await pin_target(worker, principal, target)
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
@@ -514,7 +517,7 @@ async def launch_local_run(
         dataset=dataset,
         max_cases=body.max_items,
         suite=suite,
-        provenance=_limits(body.limits),
+        provenance=limits_provenance(body.limits),
     )
     return run_out(run)
 
@@ -546,7 +549,7 @@ async def run_again(
     if target is None or target.kind != "agent" or dataset_id is None or original.max_cases is None:
         raise HTTPException(422, "This run was not started in the UI, so it has no saved settings to run again")
     project = await writable_key(store, principal, original.project_id)
-    pin = await worker.check_target(principal, target)
+    pin = await pin_target(worker, principal, target)
     dataset = await store.get_dataset(principal, DEFAULT_PROJECT, dataset_id)
     if dataset is None or dataset.digest != original.dataset_digest:
         raise HTTPException(422, "The run's dataset version is no longer in the store")
@@ -569,7 +572,8 @@ async def run_again(
         dataset=dataset,
         max_cases=original.max_cases,
         suite=suite,
-        provenance={"repeat_of": original.id, **_limits(body.limits or _own_limits(original))},
+        provenance={"repeat_of": original.id, **limits_provenance(body.limits or _own_limits(original))},
+        checks=[scorer for scorer in original.scorers if is_installed(scorer)],  # a required one still decides
     )
     return run_out(run)
 

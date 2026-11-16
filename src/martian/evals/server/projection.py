@@ -43,6 +43,7 @@ from martian.evals.model import (
     ReviewQueue,
     Run,
     Score,
+    ScorerVersion,
     ScoringJob,
     Trace,
     TraceState,
@@ -124,10 +125,12 @@ def suite_version_id(suite_id: str, version: int) -> uuid.UUID:
 
 
 def score_id(score: Score) -> uuid.UUID:
-    """The API id of a stored score."""
-    return uuid.uuid5(
-        _IDS, f"score\x00{score.run_id}\x00{score.case_id}\x00{score.scorer}\x00{score.scoring_job_id or ''}"
-    )
+    """The API id of a stored score, derived from its key in the record store: run, case, scorer,
+    scoring job and source. A person's score leaves its source out, so the id each review recorded
+    for its answer (``Review.score_id``) before the source joined the key still names it; a check's
+    or a judge's names it, so it differs from a person's answer of the same name."""
+    key = f"score\x00{score.run_id}\x00{score.case_id}\x00{score.scorer}\x00{score.scoring_job_id or ''}"
+    return uuid.uuid5(_IDS, key if score.source == "human" else f"{key}\x00{score.source}")
 
 
 def iso(when: datetime | None) -> str | None:
@@ -269,11 +272,11 @@ def turn_out(turn: TurnResult) -> dict[str, Any]:
 
 def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, Any]:
     """A conversation case's result, for the core's own turns route: its verdict and each check's
-    verdict on the whole conversation (``scores``, the run's own scores of the case), its session
-    id, which its turns' traces share, its latency, its turns, and whether a simulator wrote its
-    user's turns (``simulated``). With repeats these are the attempt's that stands for the case;
-    the attempts route has every attempt's."""
-    own = [score for score in scores if score.scoring_job_id is None]
+    verdict on the whole conversation (``scores``, the run's own scores of the case, not a
+    person's answer of the same name), its session id, which its turns' traces share, its latency,
+    its turns, and whether a simulator wrote its user's turns (``simulated``). With repeats these
+    are the attempt's that stands for the case; the attempts route has every attempt's."""
+    own = [score for score in scores if score.scoring_job_id is None and score.source != "human"]
     return {
         "id": result_id(result.run_id, result.case_id),
         "dataset_item_id": result.case_id,
@@ -312,6 +315,14 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
     # A run's limits and the one it stopped at (martian.evals.limits).
     "limits": ("max_seconds", "max_judge_tokens"),
     "stopped": ("limit", "value", "used", "message"),
+    # A suite-file run's combination of its matrix (martian.evals.matrix), the registered prompt
+    # version each of its values matched, one object per axis (martian.evals.prompts), and its use
+    # of the cache of model calls (martian.evals.cache): that it was on, and the hits, calls made
+    # and replies stored of the target's and the judges' calls. Never the cache's settings, such as
+    # its folder, a path on the machine that ran it.
+    "matrix": ("id", "values", "axes", "invocation"),
+    "prompts": ("axis", "value", "name", "version", "digest"),
+    "cache": ("on", "target", "judge"),
     # The model a run's target reported (martian.evals.worker.execute), and the schedule and slot a
     # run was admitted for (martian.evals.worker.schedule).
     "model": ("name", "cases"),
@@ -367,12 +378,12 @@ READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
         "datasets",
     ),
 }
-"""What of a run's provenance its readers see: each key, with the keys of its object, or None for a
-key whose value is text, a number, a boolean or null. Anything else a run's provenance holds stays
-in the record store for the server's own use: a CI run's ``ci``, with the CI token's id and name and
-the digests of the upload request and its items (the run routes show its public keys as ``ci``),
-and whatever else a worker pins with a target, such as a registered agent's connection and
-approval."""
+"""What of a run's provenance its readers see: each key, with the keys of its object (or of each
+object of its list), or None for a key whose value is text, a number, a boolean or null. Anything
+else a run's provenance holds stays in the record store for the server's own use: a CI run's
+``ci``, with the CI token's id and name and the digests of the upload request and its items (the
+run routes show its public keys as ``ci``), and whatever else a worker pins with a target, such as
+a registered agent's connection and approval."""
 
 
 def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
@@ -387,6 +398,10 @@ def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
             shown[key] = value
         elif keys is not None and isinstance(value, dict):
             shown[key] = {name: value[name] for name in keys if name in value}
+        elif keys is not None and isinstance(value, list):
+            shown[key] = [
+                {name: item[name] for name in keys if name in item} for item in value if isinstance(item, dict)
+            ]
     return shown
 
 
@@ -494,6 +509,7 @@ class ReviewRow:
     state: str
     value: Value
     comment: str
+    blind: bool
     created_at: datetime | None
 
     @classmethod
@@ -510,6 +526,7 @@ class ReviewRow:
             state=review.state,
             value=review.value,
             comment=review.comment,
+            blind=review.blind,
             created_at=review.created_at,
         )
 
@@ -527,6 +544,15 @@ def policy_out(policy: Policy) -> dict[str, Any]:
     }
 
 
+def checks_out(scorers: Sequence[ScorerVersion]) -> dict[str, Any]:
+    """The deterministic checks among ``scorers`` as a request names them, ``{"checks": [...]}``, or nothing
+    when there are none, so that what has no checks is answered as it was before they existed."""
+    from martian.evals.worker.checks import is_check
+
+    found = sorted((scorer for scorer in scorers if is_check(scorer)), key=lambda scorer: scorer.name)
+    return {"checks": [{"type": s.type, "name": s.name, "options": dict(s.parameters)} for s in found]} if found else {}
+
+
 def job_config(job: ScoringJob) -> dict[str, Any]:
     """The server's ``config`` of a scoring job: its scorers by name, the policy judge's guidelines,
     the policies that gate it and the suite version it applies, and a digest of the pinned scorer
@@ -541,6 +567,7 @@ def job_config(job: ScoringJob) -> dict[str, Any]:
         "guidelines": next((str(s.criteria.get("guidelines", "")) for s in job.scorers if s.name == "policy"), ""),
         "policies": [policy_out(policy) for policy in policies],
         "definition_digest": digest(pinned),
+        **checks_out(job.scorers),
     }
     if job.suite_id is not None and job.suite_version is not None:
         config["suite_id"] = job.suite_id

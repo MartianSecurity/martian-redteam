@@ -64,6 +64,9 @@ scores = Table(
     Column("scorer", String(ID), primary_key=True),
     # Empty for a run's own scores; a scoring job's scores sit beside them, never replacing them.
     Column("scoring_job_id", String(ID), primary_key=True),
+    # The score's source (migration 0012): a person's answer named like a check or a judge sits
+    # beside that scorer's score, never replacing it.
+    Column("source", String(16), primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
 )
@@ -106,6 +109,18 @@ suites = Table(
     Column("id", String(ID), primary_key=True),
     Column("version", Integer, primary_key=True),
     Column("digest", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
+# The latest audit of each saved suite version (martian.evals.audit).
+suite_audits = Table(
+    "martian_suite_audits",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("suite_id", String(ID), primary_key=True),
+    Column("suite_version", Integer, primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
 )
@@ -314,6 +329,19 @@ calibration_rechecks = Table(
     Index("ix_martian_calibration_rechecks_judge", "space", "project_id", "judge", "created_at"),
 )
 
+# Review queues with blind double review (migration 0014): one row per queue, never changed.
+blind_queues = Table(
+    "martian_blind_queues",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("run_id", String(ID), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_blind_queues_run", "space", "project_id", "run_id"),
+)
+
 TABLES = (
     runs,
     case_results,
@@ -321,12 +349,14 @@ TABLES = (
     scoring_jobs,
     reviews,
     suites,
+    suite_audits,
     dataset_drafts,
     dataset_draft_cases,
     saved_views,
     work_queue,
     judge_calibrations,
     calibration_rechecks,
+    blind_queues,
     monitors,
     monitored_traces,
     thresholds,

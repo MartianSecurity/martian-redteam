@@ -13,8 +13,9 @@ from typing import Any
 import pytest
 from starlette.requests import Request
 
-from martian.evals import _digits
+from martian.evals import _digits, audit
 from martian.evals._json_schema import check_schema
+from martian.evals._numeric import at
 from martian.evals.agreement import judge_agreement
 from martian.evals.mlflow_import import _Reader
 from martian.evals.model import Score
@@ -45,12 +46,11 @@ def request(length: str, body: bytes = b"{}") -> Request:
 
 # A header is read as Latin-1, so the digits that can arrive in one are ¹, ² and ³.
 @pytest.mark.parametrize("length", ["²", "¹", "³"])
-def test_a_content_length_of_other_digits_is_not_a_declared_size(monkeypatch, length):
+def test_a_content_length_of_other_digits_is_not_a_declared_size(length):
     # Not a size: the body is counted as it arrives, as for a missing or non-numeric Content-Length.
-    monkeypatch.setattr(otlp, "MAX_BODY_BYTES", 64)
-    assert asyncio.run(otlp._body(request(length))) == b"{}"
+    assert asyncio.run(otlp._body(request(length), 64)) == b"{}"
     with pytest.raises(otlp.HTTPException) as refused:
-        asyncio.run(otlp._body(request(length, b" " * 65)))
+        asyncio.run(otlp._body(request(length, b" " * 65), 64))
     assert refused.value.status_code == 413
 
 
@@ -110,6 +110,20 @@ def test_a_panel_size_of_other_digits_names_no_members_and_does_not_raise(bad):
         metadata={"martian.panel.size": bad, **members},
     )
     assert [report.models for report in judge_agreement([score], [])] == [()]
+
+
+@pytest.mark.parametrize("step", BAD)
+def test_a_suite_audit_builds_a_path_step_of_other_digits_as_a_key_as_a_check_reads_it(step):
+    # A suite audit's cheating replies put a check's expected value at its path, and its hollow
+    # replies zeros at its paths (martian.evals.audit); a check reads a list position only for 0-9.
+    assert audit.value_at("items.1", 3) == {"items": [None, 3]}
+    placed = audit.value_at(f"items.{step}", 3)
+    assert placed == {"items": {step: 3}}
+    assert at(placed, ["items", step]) == [(f"items.{step}", 3)]
+    assert audit.zeros_at([f"totals.{step}.amount", f"{step}.amount"]) == {
+        "totals": {step: {"amount": 0}},
+        step: {"amount": 0},
+    }
 
 
 def test_only_the_digits_0_to_9_count():

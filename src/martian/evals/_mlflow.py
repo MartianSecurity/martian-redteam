@@ -1,17 +1,26 @@
-"""Every MLflow internal the SDK depends on, and nothing else.
+"""Every MLflow internal the SDK depends on.
 
 MLflow's public API (``mlflow.set_tracking_uri``, ``mlflow.genai.evaluate``, ``mlflow.entities``,
 ``mlflow.genai.scorers``, ``mlflow.types.llm``, ``mlflow.environment_variables``) may be imported
 anywhere. Anything else MLflow does not promise to keep is reached only through this module, so
 an MLflow upgrade breaks one file and ``tests/evals/test_mlflow_private.py`` names what went
-missing. ``PRIVATE_DEPENDENCIES`` lists each internal name.
+missing. ``PRIVATE_DEPENDENCIES`` lists each internal name. The span calls the suite runner makes
+for a function target in a process of its own (:func:`start_span`, :func:`add_spans`) are public,
+and are kept here beside the internal that process's setup reads (:func:`autologged_modules`).
+
+One process cannot come here: the one a function target runs in (``martian.evals._target_process``)
+never imports the evals package, which this module is part of. It imports the two internals its
+tracing needs itself; they are listed here too, and the guard allows them in that file only.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
+import mlflow
 from mlflow.entities import Trace as MlflowTrace
 from mlflow.entities import TraceData
 from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
@@ -30,7 +39,12 @@ from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
 from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
+from mlflow.ml_package_versions import FLAVOR_TO_MODULE_NAME
+from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from mlflow.store.db.utils import _all_tables_exist, _get_alembic_config, _get_latest_schema_revision
+from mlflow.store.model_registry.sqlalchemy_workspace_store import (
+    WorkspaceAwareSqlAlchemyStore as WorkspaceAwareRegistryStore,
+)
 from mlflow.store.tracking.dbmodels.models import SqlRun, SqlTraceInfo
 from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
@@ -64,6 +78,10 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.genai.utils.llm_utils", "_lookup_model_cost"),
     ("mlflow.metrics.genai.model_utils", "_get_provider_instance"),
     ("mlflow.metrics.genai.model_utils", "_parse_model_uri"),
+    ("mlflow.ml_package_versions", "FLAVOR_TO_MODULE_NAME"),
+    # imported by the function target's process (martian.evals._target_process), not here
+    ("mlflow.models.evaluation.utils.trace", "configure_autologging_for_evaluation"),
+    ("mlflow.prompt.constants", "IS_PROMPT_TAG_KEY"),
     ("mlflow.pytest.decorator", "MLFLOW_TEST_ATTR"),
     ("mlflow.pytest.plugin", ""),  # loaded by name as a pytest plugin
     ("mlflow.store.db.utils", "_all_tables_exist"),
@@ -73,11 +91,24 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.tracing.constant", "TraceTagKey.SPANS_LOCATION"),
     ("mlflow.tracing.constant", "SpansLocation.TRACKING_STORE"),
     ("mlflow.tracing.constant", "SpansLocation.ARCHIVE_REPO"),
+    # imported by the function target's process (martian.evals._target_process), not here
+    ("mlflow.tracing.trace_manager", "InMemoryTraceManager.get_instance"),
+    ("mlflow.tracing.trace_manager", "InMemoryTraceManager.get_trace"),
+    ("mlflow.tracing.trace_manager", "InMemoryTraceManager.pop_trace"),
     ("mlflow.tracing.utils.artifact_utils", "TRACE_DATA_FILE_NAME"),
     ("mlflow.tracing.utils.artifact_utils", "get_artifact_uri_for_trace"),
     ("mlflow.tracking.fluent", "_active_experiment_id"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore._workspaces_enabled"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.create_prompt"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.get_prompt"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_prompts"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.create_prompt_version"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.get_prompt_version"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_prompt_versions"),
+    ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore.search_model_versions"),
     ("mlflow.store.tracking.dbmodels.models", "SqlRun.artifact_uri"),
     ("mlflow.store.tracking.dbmodels.models", "SqlTraceInfo.request_preview"),
     ("mlflow.store.tracking.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
@@ -146,13 +177,43 @@ class WorkspaceStore(WorkspaceAwareSqlAlchemyStore):
         return root
 
 
-def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore) -> None:
+class PromptRegistryStore(WorkspaceAwareRegistryStore):
+    """MLflow's SQL model registry store, which keeps MLflow's prompt registry, with workspaces on
+    for this store only, as :class:`WorkspaceStore` has them for tracking. Its tables are in the
+    same database as the tracking store's; every query requires a workspace in the request
+    context. The SDK uses only its prompt methods (``create_prompt``, ``create_prompt_version``,
+    ``search_prompts``, ``search_prompt_versions``, ``get_prompt``, ``get_prompt_version``),
+    ``search_model_versions`` over prompt versions, which MLflow searches only when the filter
+    names :data:`IS_PROMPT_TAG_KEY`, and :meth:`keep_prompt_times`."""
+
+    @staticmethod
+    def _workspaces_enabled() -> bool:
+        return True
+
+    def keep_prompt_times(self, name: str, created: int | None, versions: Mapping[int, int | None]) -> None:
+        """Set the creation time of the prompt ``name`` and of each of its ``versions``, by number,
+        in epoch milliseconds, which MLflow sets to the current time when it creates them, so a data
+        import keeps the times its export holds. None leaves MLflow's own; each changed row's
+        last-updated time follows it, and the prompt's is its newest version's."""
+        with self.ManagedSessionMaker(read_only=False) as session:
+            model = self._get_registered_model(session, name)  # type: ignore[no-untyped-call]
+            if created is not None:
+                model.creation_time = model.last_updated_time = created
+            for number, at in versions.items():
+                if at is not None:
+                    row = self._get_sql_model_version(session, name, number)  # type: ignore[no-untyped-call]
+                    row.creation_time = row.last_updated_time = at
+                    model.last_updated_time = max(model.last_updated_time, at)
+
+
+def hide_sql_parameters(store: WorkspaceAwareSqlAlchemyStore | WorkspaceAwareRegistryStore) -> None:
     """Keep the values of the store's SQL statements out of SQLAlchemy's errors and log lines.
 
     MLflow's SQL store creates its engine itself (``engine``, one per database URL, shared by every
-    MLflow store in the process on that URL), and SQLAlchemy writes a failed statement's values
-    into its error, which MLflow passes on in its own and logs for some database failures. The
-    values of a trace are its request and its response.
+    MLflow store of its kind in the process on that URL: the tracking stores share one, the model
+    registry stores another), and SQLAlchemy writes a failed statement's values into its error,
+    which MLflow passes on in its own and logs for some database failures. The values of a trace
+    are its request and its response; those of a prompt version, its text.
     """
     store.engine.hide_parameters = True
 
@@ -245,6 +306,28 @@ def mlflow_test_attr() -> str:
     return name
 
 
+# --- a function target in a process of its own (martian.evals.isolation, martian.evals.runner) ---
+
+
+def autologged_modules() -> list[str]:
+    """The modules MLflow's autologging traces, such as ``openai`` and ``anthropic``, each once and
+    sorted. The target's process loads MLflow only when the target's module imported MLflow or one
+    of them."""
+    return sorted(set(FLAVOR_TO_MODULE_NAME.values()))
+
+
+def start_span(name: str) -> AbstractContextManager[Any]:
+    """A span named ``name`` under the current one, open while the context lasts, which yields
+    MLflow's live span (``mlflow.start_span``)."""
+    return mlflow.start_span(name=name)
+
+
+def add_spans(trace: dict[str, Any], span: Any) -> None:
+    """Put the spans of ``trace``, a trace the target's process recorded, in MLflow's dictionary
+    form, under ``span``, a live span of this process (``mlflow.add_trace``)."""
+    mlflow.add_trace(trace, target=span)
+
+
 __all__ = [
     "MLFLOW_GATEWAY_CALLER_HEADER",
     "MLFLOW_PYTEST_PLUGIN",
@@ -259,13 +342,17 @@ __all__ = [
     "EvaluationResult",
     "GatewayAdapter",
     "GatewayCaller",
+    "IS_PROMPT_TAG_KEY",
     "LiteLLMAdapter",
+    "PromptRegistryStore",
     "ServerWorkspaceContext",
     "SpansLocation",
     "TraceTagKey",
     "WorkspaceSqlAlchemyStore",
     "WorkspaceStore",
     "active_experiment_id",
+    "add_spans",
+    "autologged_modules",
     "build_chat_request",
     "error_text",
     "get_adapter",
@@ -283,6 +370,7 @@ __all__ = [
     "restore_active_experiment_id",
     "schema_head",
     "schema_history",
+    "start_span",
     "trace_artifact_file",
     "trace_from_file",
     "trace_page_token",

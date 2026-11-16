@@ -1,0 +1,1595 @@
+{
+  "evalId": "eval-lJZ-2026-11-15T15:58:42",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-11-15T15:58:42.653Z",
+    "prompts": [
+      {
+        "id": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "raw": "Answer the customer briefly. Question: {{question}}",
+        "label": "Answer the customer briefly. Question: {{question}}",
+        "provider": "bot-v1",
+        "metrics": {
+          "score": 1.5,
+          "testPassCount": 1,
+          "testFailCount": 1,
+          "testErrorCount": 1,
+          "testCacheHitCount": 0,
+          "assertPassCount": 3,
+          "assertFailCount": 1,
+          "totalLatencyMs": 113,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 3,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "namedScoreWeights": {},
+          "cost": 0
+        }
+      },
+      {
+        "id": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "raw": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+        "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+        "provider": "bot-v1",
+        "metrics": {
+          "score": 1.5,
+          "testPassCount": 1,
+          "testFailCount": 1,
+          "testErrorCount": 1,
+          "testCacheHitCount": 0,
+          "assertPassCount": 3,
+          "assertFailCount": 1,
+          "totalLatencyMs": 15,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 3,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "namedScoreWeights": {},
+          "cost": 0
+        }
+      },
+      {
+        "id": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "raw": "Answer the customer briefly. Question: {{question}}",
+        "label": "Answer the customer briefly. Question: {{question}}",
+        "provider": "bot-v2",
+        "metrics": {
+          "score": 3,
+          "testPassCount": 3,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "testCacheHitCount": 0,
+          "assertPassCount": 6,
+          "assertFailCount": 0,
+          "totalLatencyMs": 91,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 3,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "namedScoreWeights": {},
+          "cost": 0
+        }
+      },
+      {
+        "id": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "raw": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+        "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+        "provider": "bot-v2",
+        "metrics": {
+          "score": 3,
+          "testPassCount": 3,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "testCacheHitCount": 0,
+          "assertPassCount": 6,
+          "assertFailCount": 0,
+          "totalLatencyMs": 15,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 3,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "namedScoreWeights": {},
+          "cost": 0
+        }
+      }
+    ],
+    "results": [
+      {
+        "cost": 0,
+        "error": "Expected output to contain \"9am\"",
+        "gradingResult": {
+          "pass": false,
+          "score": 0.5,
+          "reason": "Expected output to contain \"9am\"",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Expected output to contain \"9am\"",
+              "assertion": {
+                "type": "icontains",
+                "value": "9am"
+              }
+            }
+          ]
+        },
+        "id": "566a7bdf-7cbd-4044-867b-a3ba3a67f946",
+        "latencyMs": 102,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: When do you open?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 0,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "output": "We open at 10am.",
+          "cached": false
+        },
+        "score": 0.5,
+        "success": false,
+        "testCase": {
+          "description": "opening hours",
+          "vars": {
+            "question": "When do you open?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "9am"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "When do you open?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 1
+      },
+      {
+        "cost": 0,
+        "error": "Expected output to contain \"9am\"",
+        "gradingResult": {
+          "pass": false,
+          "score": 0.5,
+          "reason": "Expected output to contain \"9am\"",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": false,
+              "score": 0,
+              "reason": "Expected output to contain \"9am\"",
+              "assertion": {
+                "type": "icontains",
+                "value": "9am"
+              }
+            }
+          ]
+        },
+        "id": "3eb26dda-b10f-4392-8986-81851b319386",
+        "latencyMs": 5,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: When do you open?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 1,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "output": "We open at 10am.",
+          "cached": false
+        },
+        "score": 0.5,
+        "success": false,
+        "testCase": {
+          "description": "opening hours",
+          "vars": {
+            "question": "When do you open?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "9am"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "When do you open?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 1
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "9am"
+              }
+            }
+          ]
+        },
+        "id": "e888cc5c-4510-400a-b7f1-6ed4448d7fcc",
+        "latencyMs": 81,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: When do you open?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 2,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "We open at 9am, Monday to Saturday.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "opening hours",
+          "vars": {
+            "question": "When do you open?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "9am"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "When do you open?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "9am"
+              }
+            }
+          ]
+        },
+        "id": "73addbe3-3301-4a2f-871f-4bfe1797862d",
+        "latencyMs": 5,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: When do you open?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 3,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "We open at 9am, Monday to Saturday.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "opening hours",
+          "vars": {
+            "question": "When do you open?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "9am"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "When do you open?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "regex",
+                "value": "\\d+ km"
+              }
+            }
+          ]
+        },
+        "id": "2f856181-1d1a-424d-b324-7f757f5aff3f",
+        "latencyMs": 6,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: Do you deliver?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 0,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "output": "Yes, within 5 km.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "delivery",
+          "vars": {
+            "question": "Do you deliver?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "regex",
+              "value": "\\d+ km"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Do you deliver?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "regex",
+                "value": "\\d+ km"
+              }
+            }
+          ]
+        },
+        "id": "039fc860-d494-494e-8183-8e841686fb97",
+        "latencyMs": 6,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: Do you deliver?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 1,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "output": "Yes, within 5 km.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "delivery",
+          "vars": {
+            "question": "Do you deliver?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "regex",
+              "value": "\\d+ km"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Do you deliver?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "regex",
+                "value": "\\d+ km"
+              }
+            }
+          ]
+        },
+        "id": "f1735d31-e5e3-4526-8fb8-ca01eaa12143",
+        "latencyMs": 6,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: Do you deliver?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 2,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "Yes, we deliver within 5 km.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "delivery",
+          "vars": {
+            "question": "Do you deliver?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "regex",
+              "value": "\\d+ km"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Do you deliver?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "regex",
+                "value": "\\d+ km"
+              }
+            }
+          ]
+        },
+        "id": "73b02344-a796-41fe-86dd-6942109de9f4",
+        "latencyMs": 5,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: Do you deliver?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 3,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "Yes, we deliver within 5 km.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "delivery",
+          "vars": {
+            "question": "Do you deliver?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "regex",
+              "value": "\\d+ km"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Do you deliver?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "error": "no reply for 'Can I pay by card?'",
+        "gradingResult": null,
+        "id": "a7f525ab-2ea3-4bca-b595-368815ddcbdc",
+        "latencyMs": 5,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: Can I pay by card?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 0,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "error": "no reply for 'Can I pay by card?'",
+          "cached": false
+        },
+        "score": 0,
+        "success": false,
+        "testCase": {
+          "description": "card payments",
+          "vars": {
+            "question": "Can I pay by card?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "card"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 2,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Can I pay by card?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 2
+      },
+      {
+        "cost": 0,
+        "error": "no reply for 'Can I pay by card?'",
+        "gradingResult": null,
+        "id": "437f638d-a17e-4fbd-87ca-25c5374a4503",
+        "latencyMs": 4,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: Can I pay by card?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 1,
+        "provider": {
+          "id": "file://provider.py:bot_v1",
+          "label": "bot-v1"
+        },
+        "response": {
+          "error": "no reply for 'Can I pay by card?'",
+          "cached": false
+        },
+        "score": 0,
+        "success": false,
+        "testCase": {
+          "description": "card payments",
+          "vars": {
+            "question": "Can I pay by card?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "card"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 2,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Can I pay by card?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 2
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "card"
+              }
+            }
+          ]
+        },
+        "id": "eab16123-f624-4153-8db7-37c9d72a424d",
+        "latencyMs": 4,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Answer the customer briefly. Question: Can I pay by card?",
+          "label": "Answer the customer briefly. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "b32291414c047afc23a50a301f42a1418ebf87fc8bcd1b17522a3200ec091a99",
+        "promptIdx": 2,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "Yes, we take all major cards.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "card payments",
+          "vars": {
+            "question": "Can I pay by card?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "card"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 2,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Can I pay by card?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "not-icontains",
+                "value": "as an AI"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "icontains",
+                "value": "card"
+              }
+            }
+          ]
+        },
+        "id": "2ef497e9-7d79-430e-bfd4-579ee289d892",
+        "latencyMs": 5,
+        "namedScores": {},
+        "prompt": {
+          "raw": "You are a shop assistant. Reply in one sentence. Question: Can I pay by card?",
+          "label": "You are a shop assistant. Reply in one sentence. Question: {{question}}",
+          "config": {}
+        },
+        "promptId": "814bed662e62ae8f01cf14c74158da36dc48908a2447bc8b546c18407f063686",
+        "promptIdx": 3,
+        "provider": {
+          "id": "file://provider.py:bot_v2",
+          "label": "bot-v2"
+        },
+        "response": {
+          "output": "Yes, we take all major cards.",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "card payments",
+          "vars": {
+            "question": "Can I pay by card?"
+          },
+          "assert": [
+            {
+              "type": "not-icontains",
+              "value": "as an AI"
+            },
+            {
+              "type": "icontains",
+              "value": "card"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 2,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "question": "Can I pay by card?"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      }
+    ],
+    "stats": {
+      "successes": 8,
+      "failures": 2,
+      "errors": 2,
+      "tokenUsage": {
+        "prompt": 0,
+        "completion": 0,
+        "cached": 0,
+        "total": 0,
+        "numRequests": 12,
+        "completionDetails": {
+          "reasoning": 0,
+          "acceptedPrediction": 0,
+          "rejectedPrediction": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "assertions": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 0,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      },
+      "durationMs": 321,
+      "evaluationDurationMs": 321
+    }
+  },
+  "config": {
+    "tags": {},
+    "description": "FAQ bot",
+    "prompts": [
+      "Answer the customer briefly. Question: {{question}}",
+      "You are a shop assistant. Reply in one sentence. Question: {{question}}"
+    ],
+    "providers": [
+      {
+        "id": "file://provider.py:bot_v1",
+        "label": "bot-v1"
+      },
+      {
+        "id": "file://provider.py:bot_v2",
+        "label": "bot-v2"
+      }
+    ],
+    "tests": [
+      {
+        "description": "opening hours",
+        "vars": {
+          "question": "When do you open?"
+        },
+        "assert": [
+          {
+            "type": "icontains",
+            "value": "9am"
+          }
+        ]
+      },
+      {
+        "description": "delivery",
+        "vars": {
+          "question": "Do you deliver?"
+        },
+        "assert": [
+          {
+            "type": "regex",
+            "value": "\\d+ km"
+          }
+        ]
+      },
+      {
+        "description": "card payments",
+        "vars": {
+          "question": "Can I pay by card?"
+        },
+        "assert": [
+          {
+            "type": "icontains",
+            "value": "card"
+          }
+        ]
+      }
+    ],
+    "env": {},
+    "sharing": false,
+    "outputPath": [
+      "results.json"
+    ],
+    "extensions": [],
+    "metadata": {},
+    "evaluateOptions": {
+      "maxConcurrency": 1
+    },
+    "defaultTest": {
+      "assert": [
+        {
+          "type": "not-icontains",
+          "value": "as an AI"
+        }
+      ],
+      "vars": {},
+      "options": {},
+      "metadata": {}
+    },
+    "basePath": "/home/user/faq-bot"
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.125.1",
+    "nodeVersion": "v24.20.0",
+    "platform": "linux",
+    "arch": "x64",
+    "exportedAt": "2026-11-15T15:58:43.017Z",
+    "evaluationCreatedAt": "2026-11-15T15:58:42.653Z"
+  },
+  "vars": [
+    "question"
+  ],
+  "runtimeOptions": {
+    "maxConcurrency": 1,
+    "showProgressBar": false,
+    "eventSource": "cli",
+    "repeat": 1,
+    "cache": false
+  }
+}

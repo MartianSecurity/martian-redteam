@@ -21,7 +21,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
 | `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`, and the core's own `agreement.py` and `calibration.py`, which also saves a calibration and asks for its re-check), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), OpenTelemetry's `POST /v1/traces` (`otlp.py`), and the core's own monitor and threshold routes (`monitors.py`, `thresholds.py`), shaped by `projection.py` and `quality.py` |
-| `src/martian/evals/worker/` | The worker interface the write routes hand runs, scoring jobs and re-checks to, the work itself (`execute.py`, and `recheck.py` for a calibration's re-check), the console's built-in scorers (`scorers.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs, scoring jobs and re-checks to, the work itself (`execute.py`, and `recheck.py` for a calibration's re-check), the console's built-in scorers (`scorers.py`), the per-case hooks and installed checks an edition adds (`hooks.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
 | `src/martian/evals/thresholds.py`, `alerts.py` | Thresholds on monitor scores judged on their 95% intervals, with the state machine that raises one alert per breach and recovery, and the alerts' delivery by signed webhook and SMTP ([evals core](evals-core.md#thresholds-and-alerts)) |
 | `src/martian/evals/trace_conventions.py` | The versioned table that maps OpenTelemetry GenAI, OpenInference and MLflow span attributes onto the trace fields ([evals core](evals-core.md#trace-conventions)) |
@@ -29,21 +29,23 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run queued in the data folder and run in a process of its own |
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `src/martian/evals/inspect_import.py` | Inspect AI `.eval` and `.json` logs read against Inspect's log schema and recorded in the data folder as runs, the same way |
-| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results |
+| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results, and `tests/evals/promptfoo/` results promptfoo 0.125.1 wrote for two providers |
 | `src/martian/evals/data_export.py` | An organisation's data exported through the store and the record store as JSON Lines files with a manifest, resumed after an interruption, and imported into a fresh install ([data export](data-export.md)) |
 | `src/martian/evals/mlflow_import.py` | An MLflow tracking store's schema revision checked, the store read without writing, and its experiments, traces, datasets, assessments and evaluation runs copied into an organisation |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `scripts/sbom.py`, `scripts/licence-policy.json` | The release's CycloneDX bills of materials for the wheel and the image, and the licence check against the allowed list ([releasing](releasing.md#bills-of-materials-and-the-licence-check)) |
-| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, `_policy.py` the patterns, checksums and refusal reading of the policy checks, and `_tool_calls.py` the reading of an agent's tool calls, turn by turn, from its reply or its trace, and their matching; the suite file runner checks options with all four. `_custom.py` holds the rules of a custom Python check, shared by `python_check`, the runner's `type: python` and the worker's installed scorers |
+| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, `_policy.py` the patterns, checksums and refusal reading of the policy checks, and `_tool_calls.py` the reading of an agent's tool calls, turn by turn, from its reply or its trace, and their matching; the suite file runner checks options with all four. `_custom.py` holds the rules of a custom Python check, shared by `python_check`, the runner's `type: python`, the worker's installed scorers and its installed checks, and the `required` option of an installed check |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
-| `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
+| `src/martian/evals/cache.py` | The cache of model calls a suite-file run replays: keys without credentials, entries on disk, an attempt number per identical request ([evals](evals.md#a-cache-of-model-calls)) |
+| `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and the span calls of a function target in a process of its own; `tests/evals/test_mlflow_private.py` names any internal a new MLflow release removes. The one exception is that process itself (`_target_process.py`), which never imports the evals package: it imports the two internals its tracing needs, which `_mlflow.py` lists and the guard allows in that file only (`OWN_IMPORTS`, with the reason) |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
 | `src/martian_redteam/catalog/` | IDs only |
 | `tests/fixtures/` | Recorded `/runs/wait` graph state; Inspect AI logs and the task that wrote them (`inspect/`); the script that writes a test MLflow tracking store with MLflow itself (`mlflow/write_store.py`) |
 | `docs/` | Architecture and contracts |
+| `cla/` | The individual and corporate Contributor License Agreements with MartianSecurity, and the corporations that signed (`corporations.md`); [CONTRIBUTING.md](../CONTRIBUTING.md#contributor-license-agreement) describes signing |
 
 ## Commands
 
@@ -84,6 +86,61 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
 
 `test` uploads `coverage.xml` and `junit.xml` as artifacts (including on failure). It does **not** call Martian Agents, does **not** set `MARTIAN_API_TOKEN` or `OPENAI_API_KEY`, and does not run `martian redteam run`.
+
+## Contributor License Agreement check
+
+`.github/workflows/cla.yml` asks the author of every commit in a pull request to sign the
+[individual agreement](../cla/individual.md) and records the signatures;
+[CONTRIBUTING.md](../CONTRIBUTING.md#how-signing-works) describes it from the contributor's side.
+It runs `contributor-assistant/github-action` v2.6.1, pinned to
+`ca4a40a7d1004f18d9960b404b97e5f30a505a08`. That repository is archived and read-only, so the
+pinned code cannot change and no later release will come. The action declares `node20`; runners
+no longer have Node 20 and run JavaScript actions on Node 24.
+
+- **Events.** `pull_request_target` (opened, synchronize, closed) and `issue_comment` (created).
+  A comment starts the job only on a pull request, and only when it is the signature line or
+  `recheck`. On `closed` the action locks the pull request's conversation instead of checking.
+- **Default branch only.** Both events run the workflow file from `main`, whatever the pull
+  request's base or changes, so the check exists once this file is on `main`, and a pull request
+  cannot change what it runs.
+- **Never the pull request's code.** The job has a write token, so it has no checkout, no script
+  and no other action: the pinned action reads the pull request's commits and comments through the
+  API and writes its comment and the signatures file. Keep it that way.
+- **Permissions.** None at workflow level. The job has `contents: write` for the signatures file,
+  `pull-requests: write` to comment and lock, and `actions: write` to re-run the failed check after
+  a signature. It needs no `statuses` permission and no personal access token.
+- **Signatures.** `signatures/cla.json` on the `cla-signatures` branch, written with the workflow
+  token. Branch protection or a ruleset on that branch blocks the writes.
+- **Allowlist.** `kloudd`, `dependabot[bot]` and `github-actions[bot]`, by exact name. The
+  action's `*` pattern is unanchored, so do not use one. The action matches a commit's GitHub
+  login, or its git author name when the commit's e-mail is linked to no account, so a commit with
+  an unlinked e-mail and an allowlisted name skips the check: check that such commits on a pull
+  request are linked to the account (GitHub shows an unlinked author without a profile link).
+- **Agreement versions.** A signature records when it was made, not which text it signed; the Git
+  history of `cla/individual.md` gives the text at that time. To have everyone sign a changed
+  agreement, point `path-to-signatures` at a new file.
+
+Before the first outside pull request, a maintainer sets up two things once:
+
+1. **The signatures branch, with an empty file.** v2.6.1 does not create a missing file: it fails
+   with `Could not retrieve repository contents. Status: 404`
+   ([contributor-assistant/github-action#155](https://github.com/contributor-assistant/github-action/issues/155)).
+
+   ```bash
+   git switch --orphan cla-signatures
+   mkdir -p signatures
+   printf '{\n  "signedContributors": []\n}\n' > signatures/cla.json
+   git add signatures/cla.json
+   git commit -m "Start the CLA signatures file"
+   git push origin cla-signatures
+   git switch main
+   ```
+
+2. **An Actions policy that allows `pull_request_target`.** GitHub blocks `pull_request_target`
+   in public repositories unless an Actions policy allows it (enforced from 2 December 2026). In the
+   repository's **Settings**, **Actions**, **Policies**, add an active policy that targets
+   `.github/workflows/cla.yml` and whose event rule allows `pull_request_target` and
+   `issue_comment`.
 
 ## Testing this library
 
@@ -143,8 +200,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   telemetry client if it starts; the test fails on any record. Its processes get a clean
   environment, because MLflow turns its telemetry off by itself under CI or pytest variables
   ([telemetry](security-and-data.md#telemetry)). The child processes import
-  `tests/evals/no_outbound_fixture.py`, so run it from the repository root.
-- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
+  `tests/evals/no_outbound_fixture.py` and `tests/evals/judged_call_fixture.py` (one judged call at a
+  loopback endpoint, with and without an address policy), so run it from the repository root.
+- `tests/evals/test_judge_address_pin.py` covers a judge's address policy
+  (`martian.evals._pinned_address`): loopback servers on `127.0.0.1` and `127.0.0.2` stand for the
+  public and the internal address of one name, whose lookups the test scripts, and count the
+  connections they accept. Its TLS tests generate a certificate with `cryptography`, which the
+  `evals` extra brings in through MLflow.
+- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, the failing one again with the passing one's output folder as its baseline, and the matrix example `examples/evals/matrix`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the four sample comments when the comment format changes. `tests/evals/test_baseline.py` covers `--baseline` (`martian.evals.baseline`): what `verdicts.json` keeps and leaves out, a seeded regression beyond noise that fails the gate, a few broken cases within noise that do not, one case that newly fails a security check, which fails it on its own, the failed cases with no result to compare with that do, and a check's digest, which leaves out the scope and panel it does not set and counts a panel's members, not `judge.model`. `tests/evals/test_matrix.py` covers a suite's matrix (`martian.evals.matrix`): one result and one recorded run per combination, the values in a URL target's body and a function target's arguments, resume and repeats per combination, each combination compared with its own baseline, and the matrices refused before any case. `tests/evals/test_cache.py` covers the cache of model calls (`martian.evals.cache`) against one counting loopback server that stands in for a URL target and an OpenAI-compatible judge: a second identical run makes no call to either, a changed prompt misses, failed calls are never stored, each attempt of a repeated case keeps its own entry, credentials stay out of the key and the entries, function targets are cached only when the suite says so, entries expire, a replayed judgment spends none of `max_judge_tokens`, nor does a panel whose members were all replayed, each member cached by its own model, and a run stopped at a limit still records its use of the cache, and the summary, the printed line, the pull-request comment and the recorded run's provenance say the run used the cache. The action's cache steps run only on GitHub.
 - `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, the Evals UI is recorded as first-party Apache-2.0 and `NOTICE` attributes it, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - `tests/evals/test_policy_checks.py` measures each policy check on its labelled set in `tests/evals/policy_sets/` and fails unless the error-rate table in `docs/evals.md` gives the same numbers; when a check or its set changes, copy the row the failure prints into that table. Every value in the sets is synthetic, and each secret in `no_secrets.jsonl` has one character written as a JSON escape so the file holds no secret shape.
 - `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
@@ -162,6 +225,10 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   a real model, one call per case, 30 in all, outside CI, for
   [the evals guide](evals.md#conversation-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
+- `tests/test_cla_workflow.py` reads `.github/workflows/cla.yml`: its two events and the comments
+  that start it, one step that is the SHA-pinned action with no checkout or script, its
+  permissions, the signatures branch and the exact allowlist, and that the agreements the bot links
+  are in `cla/` and give its signature line ([the check](#contributor-license-agreement-check)).
 
 Keep typed Backend operation tests separate from retained legacy envelope/heartbeat cases. Real model/API qualification is required after contract changes; loopback fixtures do not qualify it.
 
@@ -184,6 +251,13 @@ so a test keeps its state to itself:
 - The MLflow tracking URI and active experiment, `martian.evals.state.STATE` and environment
   variables are process-wide, so each worker has its own. Fixtures that change them restore them
   afterwards.
+- A busy machine runs every test slower, so a test does not sleep for a lease to run out or a
+  retry to come due in its own process: it moves the clock the code reads (`_now` in
+  `martian.evals.records.queue`, `martian.evals.alerts` and the other modules that have one). It
+  waits for the event it asserts rather than sleeping a fixed time, and holds a hung target until
+  the run has ended rather than bounding how long the run took. Waiting on the wall clock is left
+  to what only it can show, such as another process's lease or a monitor's scoring delay, with a
+  wide margin.
 
 For debugging (`--pdb`, `-s`) or a failure that appears only in parallel, run serially by leaving
 out `-n auto` or passing `-n 0`. Each worker imports MLflow, and some tests start further pytest

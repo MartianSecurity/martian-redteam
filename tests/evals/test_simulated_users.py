@@ -398,6 +398,34 @@ def test_a_simulator_that_reports_no_usage_stops_a_run_with_a_token_limit(tmp_pa
     assert summary["tokens_this_run"] == {"judges": 0, "simulator": None}
 
 
+def test_each_combination_of_a_matrix_plays_its_simulated_users_under_its_own_token_limit(tmp_path, fake):
+    path = example(tmp_path)
+    agent = tmp_path / "agent.py"
+    agent.write_text(agent.read_text().replace("def reply(message, history):", "def reply(message, history, tone):"))
+    path.write_text(path.read_text() + "matrix:\n  tone: [plain, warm]\n", encoding="utf-8")
+    # Each combination is a run of its own with its limits afresh, and its simulated users spend
+    # them: in each, the users write 60 tokens, past the limit of 45, and one conversation is not run.
+    summary = run_suite(path, max_judge_tokens=45)
+    assert len(fake.simulated()) == 8
+    entries = summary["combinations"]
+    assert [entry["id"] for entry in entries] == ["tone=plain", "tone=warm"]
+    for entry in entries:
+        own = entry["summary"]
+        assert (own["cases"], own["passed"], own["not_run"], entry["gate"]) == (1, 1, 1, "error")
+        assert own["tokens_this_run"] == {"judges": 0, "simulator": 60}
+        assert own["stopped"]["message"].endswith("after 60 tokens (0 by its judges, 60 by its simulated users)")
+        assert own["simulator"]["model"] == f"openai:/{MODEL}"
+    # Each combination's run is recorded stopped, with its combination and its simulator.
+    client = local_ui(tmp_path)
+    runs = client.get("/v1/evals").json()
+    assert sorted(run["run_code"] for run in runs) == ["evals[tone=plain]-1", "evals[tone=warm]-1"]
+    for run in runs:
+        provenance = client.get(f"/v1/evals/{run['id']}").json()["provenance"]
+        assert run["state"] == "stopped" and provenance["stopped"]["used"] == 60
+        assert provenance["matrix"]["values"] in ({"tone": "plain"}, {"tone": "warm"})
+        assert provenance["simulator"]["model"] == f"openai:/{MODEL}"
+
+
 # ---------- the suite file and the model ----------
 
 
@@ -463,8 +491,9 @@ def test_the_worker_skips_a_simulated_case_with_its_reason():
 
     run = Run(id="r", project_id="default", source="console", state="running")
     case = Case(id="c", simulated_user=SimulatedUser(**SIMULATED))
-    result, score, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
-    assert (result.status, result.error, score, model) == ("skipped", execute.CONVERSATION, None, None)
+    grading = execute._Grading()
+    result, scores, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5, grading))  # type: ignore[arg-type]
+    assert (result.status, result.error, scores, model) == ("skipped", execute.CONVERSATION, [], None)
 
 
 # ---------- personas from real transcripts ----------

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from martian.evals import response_rubric
+from martian.evals import _judge_transport, response_rubric
 from martian.evals.judges import RESPONSE_RUBRICS_VERSION
 from martian.evals.model import ScorerVersion
 from martian.evals.records.sql import SqlRecordStore
@@ -252,6 +252,54 @@ def test_the_sdk_judge_records_the_model_version_the_provider_reported(endpoint,
     feedback = judge(inputs={"message": "Hello?"}, outputs="Hello!", expectations={"rubric": "Greets the user."})
     assert feedback.value is True
     assert feedback.metadata["martian.judge.model_version"] == REPORTED
+
+
+COST = "mlflow.assessment.judgeCost"
+
+
+def rubric_feedback(endpoint, monkeypatch):
+    """One rubric judgment at the loopback endpoint, which reports 10 prompt and 5 completion tokens."""
+    monkeypatch.setenv("OPENAI_API_BASE", endpoint.origin + "/v1")
+    judge = response_rubric(model="openai:/your-model")
+    return judge(inputs={"message": "Hello?"}, outputs="Hello!", expectations={"rubric": "Greets the user."})
+
+
+@pytest.mark.parametrize("catalogue", [None, ""], ids=["unset", "empty"])
+def test_a_judged_call_prices_nothing_and_downloads_no_catalogue_unless_the_operator_names_one(
+    endpoint, monkeypatch, catalogue
+):
+    # MLflow's catalogue is a download from github.com, which a judged call must not make.
+    if catalogue is None:
+        monkeypatch.delenv("MLFLOW_MODEL_CATALOG_URI", raising=False)
+    else:
+        monkeypatch.setenv("MLFLOW_MODEL_CATALOG_URI", catalogue)
+    looked_up: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(_judge_transport, "lookup_model_cost", lambda *args: looked_up.append(args) or 1.0)
+    feedback = rubric_feedback(endpoint, monkeypatch)
+    assert feedback.value is True
+    assert looked_up == [] and COST not in feedback.metadata
+    # The rest of the call's record does not depend on the price.
+    assert int(feedback.metadata["mlflow.assessment.judgeInputTokens"]) == 10
+    assert feedback.metadata["martian.judge.model_version"] == REPORTED
+
+
+def test_a_judged_call_is_priced_when_the_operator_names_a_catalogue(endpoint, monkeypatch, tmp_path):
+    monkeypatch.setenv("MLFLOW_MODEL_CATALOG_URI", tmp_path.as_uri())
+    looked_up: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(_judge_transport, "lookup_model_cost", lambda *args: looked_up.append(args) or 0.5)
+    feedback = rubric_feedback(endpoint, monkeypatch)
+    # The reply's usage, 10 prompt and 5 completion tokens, is what MLflow is asked to price.
+    assert looked_up == [("openai:/your-model", 10, 5)]
+    assert float(feedback.metadata[COST]) == 0.5
+
+
+def test_a_catalogue_the_operator_names_is_read_from_a_folder_and_not_downloaded(monkeypatch, tmp_path):
+    # A provider of its own, so that no catalogue MLflow cached earlier in the process answers instead.
+    prices = {"priced-model": {"pricing": {"input_per_million_tokens": 2.0, "output_per_million_tokens": 4.0}}}
+    (tmp_path / "fixture-judge-provider.json").write_text(json.dumps({"schema_version": "1", "models": prices}))
+    monkeypatch.setenv("MLFLOW_MODEL_CATALOG_URI", tmp_path.as_uri())  # a folder, not a download
+    price = _judge_transport._price("fixture-judge-provider:/priced-model", 10, 5)
+    assert price == pytest.approx(10 * 2.0 / 1_000_000 + 5 * 4.0 / 1_000_000)
 
 
 def test_a_judge_that_needs_the_expected_response_fails_without_one(endpoint):

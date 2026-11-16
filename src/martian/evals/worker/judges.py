@@ -57,6 +57,7 @@ from martian.evals.worker import Judge, JudgeError, JudgeRequest, JudgeResult, V
 from martian.evals.worker.scorers import is_builtin, scorer_source
 
 if TYPE_CHECKING:
+    from martian.evals._pinned_address import AddressPolicy
     from martian.evals.server.principal import Principal
 
 REGISTERED = "instructions"
@@ -124,6 +125,7 @@ def sdk_judge(
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     headers: Mapping[str, str] | None = None,
+    address_policy: AddressPolicy | None = None,
 ) -> Judge:
     """The SDK judge as the worker's judge.
 
@@ -131,6 +133,16 @@ def sdk_judge(
     request's scores are errors. ``inference_params``, ``max_retries``, ``rate_limit_wait_seconds``
     and ``headers`` are the SDK judges' arguments of the same names, and are checked now. The
     provider's key comes from the environment (``OPENAI_API_KEY`` for ``openai:/`` models).
+
+    ``address_policy(host, address)`` is for an installation that calls endpoints other people name.
+    With it the judge resolves an endpoint's name when each connection opens, asks the policy about
+    every address the name answers, and connects to one of those addresses by number, so a name that
+    changes its answer after it was checked (DNS rebinding) is not followed; the name stays the
+    request's ``Host`` and TLS name. A name the policy refuses fails the score
+    (``judge_provider_address_refused``) with no call, and the judge never falls back to an unpinned
+    connection: it follows no redirect, uses no proxy from the environment, and runs only at an
+    OpenAI-compatible endpoint (:mod:`martian.evals._pinned_address`). :func:`public_addresses_only`
+    is the usual policy. Without one, the judge calls the endpoint as a local run does.
     """
     options: dict[str, Any] = {
         "inference_params": dict(inference_params) if inference_params is not None else None,
@@ -149,6 +161,7 @@ def sdk_judge(
             mode="rubrics",
             verify=False,
             endpoint=endpoint,
+            address_policy=address_policy,
             **options,
         )
 

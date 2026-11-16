@@ -15,13 +15,22 @@ read, and submits it to the worker. The worker calls the target later; the reque
   working on it any more (:class:`~martian.evals.worker.InterruptedRuns`).
 
 :func:`admit_run` is the admission itself, which the local edition's launch and run again share
-(:mod:`martian.evals.local_runs`).
+(:mod:`martian.evals.local_runs`). An edition's own launch may also name checks its worker installs,
+which the run grades each case with (:mod:`martian.evals.worker.hooks`); the contract's launch
+names none.
+
+Every route and turn that pins a target asks :func:`pin_target`: the launch, the local edition's
+launch and run again, a schedule's creation and each turn of a schedule. A target the worker has
+but refuses is ``422``, naming it (a schedule's turn records that as the slot's skip reason), and
+never a ``500``.
 
 A run, or a scoring job, that stopped at one of its limits (``stopped``) is resumed by
 :func:`resume_run` or :func:`resume_scoring`: queued again, optionally under new limits, so that
-the worker goes on after the cases it finished (``execute_run``'s checkpoints). The frozen contract
-has no route for either and its launch body no field for limits, so a launch through it runs under
-the worker's limits; the local edition's routes take both (:mod:`martian.evals.local_runs`).
+the worker goes on after the cases it finished (``execute_run``'s checkpoints). The contract's
+launch body takes optional ``limits`` (``RunLimits``, kept in ``provenance.limits``, without them
+the worker's apply) and ``POST /{run_id}/resume`` resumes a stopped run, optionally under new
+limits (version 4); neither route exists for a scoring job, and the local edition's own routes
+take both (:mod:`martian.evals.local_runs`).
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -31,14 +40,14 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from martian.evals.manifests import PAUSED, publishing
-from martian.evals.model import DatasetVersion, Run, RunLimits, ScoringJob, StoreRef, Suite, Target
+from martian.evals.model import DatasetVersion, Run, RunLimits, ScorerVersion, ScoringJob, StoreRef, Suite, Target
 from martian.evals.records import RecordStore
 from martian.evals.server.admission import ACTIVE, ensure_run_place, ensure_scoring_place
 from martian.evals.server.dependencies import (
@@ -61,14 +70,16 @@ from martian.evals.server.runs import (
     name_of,
     project_keys,
     project_runs,
+    writable_key,
     writable_project,
 )
 from martian.evals.server.schemas import EvalRunOut
-from martian.evals.server.write_schemas import EvalRunRequest
+from martian.evals.server.write_schemas import EvalRunRequest, ResumeRequest
 from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
 from martian.evals.worker import InterruptedRuns, Work, Worker, execute
+from martian.evals.worker.hooks import is_installed, is_required
 from martian.evals.worker.scorers import builtin_scorer
 from martian.evals.worker.targets import TargetRefused
 
@@ -95,6 +106,17 @@ async def _next_code(store: EvalStore, records: RecordStore, principal: Principa
     return f"EV-{highest + 1}"
 
 
+def limits_provenance(limits: RunLimits | None) -> dict[str, Any]:
+    """The provenance that keeps a run's own limits, when it is given some."""
+    return {} if limits is None else {execute.LIMITS_KEY: limits.model_dump(mode="json")}
+
+
+def same_limits(run: Run, limits: RunLimits | None) -> bool:
+    """Whether a repeated request's ``limits`` are the run's. Without limits of its own the run has
+    its suite's or the worker's, which the request did not name, so a request without any matches."""
+    return limits is None or run.provenance.get(execute.LIMITS_KEY) == limits_provenance(limits)[execute.LIMITS_KEY]
+
+
 def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
     return (
         run.target is not None
@@ -102,8 +124,21 @@ def _same_request(run: Run, body: EvalRunRequest, principal: Principal) -> bool:
         and run.dataset_name == body.dataset_name
         and run.project_id == project_key(body.project_id)
         and run.max_cases == body.max_items
+        and same_limits(run, body.limits)
         and run.requested_by == principal.user_id
     )
+
+
+async def pin_target(worker: Worker, principal: Principal, target: Target) -> dict[str, Any]:
+    """What pins a run of ``target``, as ``worker`` has it now (``Worker.check_target``), before
+    anything is recorded. An id the worker does not know is ``404``. A target it has but refuses
+    (:class:`~martian.evals.worker.targets.TargetRefused`) is ``422`` with the refusal, which names
+    the target and never repeats a value of it; a schedule's turn records it as the slot's skip
+    reason."""
+    try:
+        return await worker.check_target(principal, target)
+    except TargetRefused as error:
+        raise HTTPException(422, str(error)) from None
 
 
 async def admit_run(
@@ -121,6 +156,7 @@ async def admit_run(
     max_cases: int,
     suite: Suite | None = None,
     provenance: Mapping[str, Any] | None = None,
+    checks: Sequence[ScorerVersion] = (),
 ) -> Run:
     """Record a queued run of ``target`` over the published ``dataset`` version and submit it to
     the worker, once the request is checked and the worker has pinned the target (``pin``). The
@@ -132,7 +168,16 @@ async def admit_run(
     ``provenance.suite``, which says whether the suite has a model judge), and adds its own
     ``provenance``. The run's limits, ``provenance.limits``, are the ones ``provenance`` gives,
     else the suite's (``Suite.settings.limits``); without either, the worker's apply. While a
-    dataset of the project is being published, no run is admitted (``409``, ``PAUSED``)."""
+    dataset of the project is being published, no run is admitted (``409``, ``PAUSED``).
+
+    ``checks`` are checks the worker installs (:func:`~martian.evals.worker.hooks.installed_check`),
+    which the run keeps beside exact match in its ``scorers`` and grades each answered case with,
+    with the case's state from the worker's hooks. One marked ``required: true`` in its options
+    decides the case's status as well. No route of the contract names one."""
+    if not all(is_installed(check) for check in checks):
+        raise ValueError("a run's checks are installed checks: code scorers of type installed")
+    for check in checks:
+        is_required(check)  # raises when its required option is not true or false, before the run is recorded
     await ensure_run_place(store, records, principal, entitlements)
     if await publishing(records, principal, DEFAULT_PROJECT, _now()):
         raise HTTPException(409, PAUSED)
@@ -167,7 +212,7 @@ async def admit_run(
         dataset_name=dataset.name,
         dataset_digest=dataset.digest,
         target=target,
-        scorers=[builtin_scorer("exact_match")],
+        scorers=[builtin_scorer("exact_match"), *checks],
         max_cases=max_cases,
         provenance={**admitted, **provenance},
         requested_by=principal.user_id,
@@ -198,10 +243,7 @@ async def request_run(
         return run_out(existing, name_of(await agent_names(names, principal, [existing]), existing))
     project = await writable_project(store, principal, body.project_id)
     target = Target(kind="agent", agent_id=str(body.agent_id))
-    try:
-        pin = await worker.check_target(principal, target)
-    except TargetRefused as error:
-        raise HTTPException(422, str(error)) from None
+    pin = await pin_target(worker, principal, target)
     dataset = await store.find_dataset(principal, DEFAULT_PROJECT, body.dataset_name)
     if dataset is None:
         raise HTTPException(422, "Unknown dataset")
@@ -217,6 +259,7 @@ async def request_run(
         pin=pin,
         dataset=dataset,
         max_cases=body.max_items,
+        provenance=limits_provenance(body.limits),
     )
     return run_out(run, name_of(await agent_names(names, principal, [run]), run))
 
@@ -242,9 +285,10 @@ async def resume_run(
     """Queue ``run``, which stopped at one of its limits, again and submit it to the worker, which
     resumes it after the cases it finished: their target is not called again. ``limits`` replace
     the run's own when given, and the run keeps them. The organisation's ``concurrent_runs`` apply,
-    as for a launch (``409``), and so does a launch's pause while a dataset is being published
-    (``409``, ``PAUSED``); a run that is not ``stopped`` is ``409`` too, and one the worker did not
-    run, such as a ``martian evals run``, ``422``."""
+    as for a launch (``409``), and so do a launch's pause while a dataset is being published
+    (``409``, ``PAUSED``) and the record store's admission, which may refuse the resume as it
+    refuses a launch but takes no code for it; a run that is not ``stopped`` is ``409`` too, and
+    one the worker did not run, such as a ``martian evals run``, ``422``."""
     if run.state != "stopped":
         raise HTTPException(409, NOT_STOPPED)
     if run.source != "console":  # recorded by the process that ran it, such as martian evals run
@@ -252,6 +296,10 @@ async def resume_run(
     await ensure_run_place(store, records, principal, entitlements)
     if await publishing(records, principal, DEFAULT_PROJECT, _now()):
         raise HTTPException(409, PAUSED)
+    # A server's own pause holds a resume as it holds a launch: the store's admission, if it has one,
+    # may refuse it by raising (:meth:`~martian.evals.records.RunAdmission.resume`). It numbers nothing.
+    if records.admission is not None:
+        await records.admission.resume(principal, run)
     provenance = {key: value for key, value in run.provenance.items() if key != execute.STOPPED_KEY}
     if limits is not None:
         provenance[execute.LIMITS_KEY] = limits.model_dump(mode="json")
@@ -267,6 +315,28 @@ async def resume_run(
     work = Work(kind="run", principal=principal, project_id=run.project_id, run_id=run.id)
     await execute.submit_or_fail(worker, records, work)
     return queued
+
+
+@router.post(
+    "/{run_id:uuid}/resume",
+    response_model=EvalRunOut,
+    status_code=202,
+    dependencies=[Depends(require_capability("run"))],
+)
+async def resume_eval(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    entitlements: EntitlementsDep,
+    store: StoreDep,
+    records: RecordsDep,
+    worker: WorkerDep,
+    names: AgentNamesDep,
+    body: Annotated[ResumeRequest, Body(default_factory=ResumeRequest)],
+) -> EvalRunOut:
+    run = await find_run(store, records, principal, run_id)
+    await writable_key(store, principal, run.project_id)
+    queued = await resume_run(store, records, worker, principal, run, entitlements=entitlements, limits=body.limits)
+    return run_out(queued, name_of(await agent_names(names, principal, [queued]), queued))
 
 
 async def resume_scoring(
@@ -354,4 +424,14 @@ async def cancel_eval(
     raise HTTPException(409, "The run changed while stopping it; try again")
 
 
-__all__ = ["ACTIVE", "admit_run", "resume_run", "resume_scoring", "router", "run_id_for"]
+__all__ = [
+    "ACTIVE",
+    "admit_run",
+    "limits_provenance",
+    "pin_target",
+    "resume_run",
+    "resume_scoring",
+    "router",
+    "run_id_for",
+    "same_limits",
+]

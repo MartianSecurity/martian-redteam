@@ -11,7 +11,10 @@ no check uses, a data row field the runner does not read, or a suite the file ca
 an agent target, pass policies or two judge models. ``martian evals run`` loads its suite through
 :func:`load_suite_file`, so it refuses the same fields. Header values stay as written, ``${NAME}``
 unexpanded. A ``python`` check is a ``code`` scorer whose parameters name its file and function;
-neither loading nor writing imports that file.
+neither loading nor writing imports that file. An ``installed`` check is a ``code`` scorer named
+after the check a worker installs, with its ``options`` in its parameters, ``required: true``
+among them when it decides its case; the file says nothing else about it, and ``martian evals run``
+refuses to run it.
 
 A JSONL row with ``turns`` is a conversation case (``Case.turns``), and a check's ``scope`` is its
 scorer's (:mod:`martian.evals.conversations`). Loading refuses a conversation the suite cannot run:
@@ -41,6 +44,7 @@ from martian.config import ConfigError
 from martian.evals import runner
 from martian.evals.conversations import graded_turns
 from martian.evals.model import (
+    CacheSettings,
     Case,
     PanelMember,
     Repeats,
@@ -77,9 +81,9 @@ SUITE_FILE_FIELDS = {
     "checks": "Suite.scorers, in order",
     "checks.type": (
         "ScorerVersion.type; kind llm_judge for the LLM judges (runner.JUDGES), code for a python check "
-        "(runner.CODE_CHECKS), check otherwise"
+        "(runner.CODE_CHECKS) and an installed check (runner.INSTALLED_CHECKS), check otherwise"
     ),
-    "checks.name": "ScorerVersion.name (the check's label)",
+    "checks.name": "ScorerVersion.name (the check's label; an installed check's the name a worker installs it under)",
     "checks.rubric": "ScorerVersion.criteria.rubric",
     "checks.guidelines": "ScorerVersion.criteria.guidelines",
     "checks.conditions": "ScorerVersion.criteria.conditions",
@@ -123,10 +127,12 @@ SUITE_FILE_FIELDS = {
     "checks.min_score": "ScorerVersion.parameters.min_score",
     "checks.max_score": "ScorerVersion.parameters.max_score",
     "checks.security": "ScorerVersion.parameters.security",
+    "checks.options": "ScorerVersion.parameters.options (an installed check), as written, required: true included",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
     "repeats": "Suite.repeats.attempts",
     "combine": "Suite.repeats.combine",
+    "matrix": "Suite.matrix, as written: each axis a list of values or a mapping of names to values",
     "concurrency": "RunSettings.concurrency",
     "batch": "RunSettings.batch",
     "output": "RunSettings.output",
@@ -137,6 +143,10 @@ SUITE_FILE_FIELDS = {
     "limits": "RunSettings.limits",
     "limits.max_seconds": "RunSettings.limits.max_seconds (RunLimits)",
     "limits.max_judge_tokens": "RunSettings.limits.max_judge_tokens (RunLimits)",
+    "cache": "RunSettings.cache; a cache block, even an empty one, turns the cache of model calls on",
+    "cache.folder": "RunSettings.cache.folder, as written",
+    "cache.ttl_seconds": "RunSettings.cache.ttl_seconds",
+    "cache.functions": "RunSettings.cache.functions (function target only)",
     "simulator": "Suite.simulator, the model that plays the data's simulated users",
     "simulator.model": "Simulator.model",
     "simulator.inference_params": "Simulator.parameters",
@@ -197,6 +207,8 @@ CHECK_OPTIONS: dict[str, frozenset[str]] = {
     "step_count": frozenset({"min_turns", "max_turns", "min_calls", "max_calls", "source"}),
     # A team's own Python function; the file is imported only when a run starts.
     "python": frozenset({"file", "function", "min_score", "max_score", "security"}),
+    # A check a worker installs under the check's name, given its options as written.
+    "installed": frozenset({"options"}),
 }
 
 # The fields of a JSONL case that the runner reads, and of one turn of a conversation case.
@@ -404,6 +416,7 @@ def _definition(file_suite: runner.Suite) -> dict[str, Any]:
                 combine=file_suite.combine,
                 checks={check.label: check.combine for check in file_suite.checks if check.combine is not None},
             ),
+            "matrix": dict(file_suite.matrix),
             "simulator": None
             if file_suite.simulator is None
             else Simulator(model=file_suite.simulator.model, parameters=dict(file_suite.simulator.inference_params)),
@@ -453,7 +466,7 @@ def _scorer(position: int, check: runner.CheckSpec, judge: runner.JudgeConfig | 
         )
     return ScorerVersion(
         name=check.label,
-        kind="code" if check.type in runner.CODE_CHECKS else "check",
+        kind="code" if check.type in runner.CODE_CHECKS + runner.INSTALLED_CHECKS else "check",
         type=check.type,
         parameters={key: options[key] for key in sorted(options)},
         scope=check.scope,
@@ -475,6 +488,8 @@ def _settings(file_suite: runner.Suite) -> RunSettings:
             values[f"mlflow_{name}"] = getattr(mlflow, name)
     if limits := {name: getattr(file_suite.limits, name) for name in file_suite.limits.model_fields_set}:
         values["limits"] = RunLimits(**limits)
+    if (cache := file_suite.cache) is not None:
+        values["cache"] = CacheSettings(**{name: getattr(cache, name) for name in cache.model_fields_set})
     simulator = file_suite.simulator
     for name in ("max_retries", "rate_limit_wait_seconds", "headers"):
         if simulator is not None and name in simulator.model_fields_set:
@@ -557,6 +572,8 @@ def _file(suite: Suite) -> dict[str, Any]:
     file: dict[str, Any] = {"data": suite.dataset_location}
     if (target := _target_file(suite.target, settings)) is not None:
         file["target"] = target
+    if suite.matrix:
+        file["matrix"] = dict(suite.matrix)
     repeats = suite.repeats
     checks = [
         _check_file(position, scorer, repeats.checks.get(scorer.name)) for position, scorer in enumerate(suite.scorers)
@@ -584,6 +601,8 @@ def _file(suite: Suite) -> dict[str, Any]:
         file["mlflow"] = mlflow
     if settings.limits is not None:
         file["limits"] = settings.limits.model_dump(exclude_none=True)
+    if settings.cache is not None:
+        file["cache"] = {name: value for name, value in settings.cache.model_dump().items() if value is not None}
     return file
 
 
@@ -685,7 +704,7 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
         if scorer.panel:
             options["panel"] = [member.model for member in scorer.panel]
     elif scorer.kind in ("check", "code"):
-        types = runner.CHECKS if scorer.kind == "check" else runner.CODE_CHECKS
+        types = runner.CHECKS if scorer.kind == "check" else runner.CODE_CHECKS + runner.INSTALLED_CHECKS
         if scorer.type not in types:
             raise ConfigError(f"{where}: a suite file's {scorer.kind} scorers are {', '.join(types)}")
         if scorer.criteria:
@@ -696,7 +715,7 @@ def _check_file(position: int, scorer: ScorerVersion, combine: str | None) -> di
     else:
         raise ConfigError(f"{where}: a {scorer.kind} scorer cannot be written in a suite file")
     written: dict[str, Any] = {"type": scorer.type}
-    if scorer.name != _label(scorer.type):
+    if scorer.name != _label(scorer.type) or scorer.type in runner.INSTALLED_CHECKS:  # an installed check needs one
         written["name"] = scorer.name
     if combine is not None:
         written["combine"] = combine

@@ -236,17 +236,22 @@ def test_a_resumed_run_reuses_a_conversation_until_its_turns_change(tmp_path):
 
 # ---------- targets that keep the conversation ----------
 
+# A function target runs in a process of its own, so it writes what it was given where the test
+# can read it: a folder beside it that holds none of the run's files.
 SESSION_AGENT = """
+import json
 import threading
+from pathlib import Path
 
 NAMES = {}
-SEEN = []
+SEEN = Path(__file__).resolve().parent / "agent-log" / "seen.jsonl"
 LOCK = threading.Lock()
 
 
 def chat(message, session_id):
     with LOCK:
-        SEEN.append((session_id, message))
+        with SEEN.open("a", encoding="utf-8") as log:
+            log.write(json.dumps([session_id, message]) + "\\n")
         if message.startswith("I am "):
             NAMES[session_id] = message.removeprefix("I am ")
             return "Hello."
@@ -256,6 +261,7 @@ def chat(message, session_id):
 
 def test_a_function_target_that_takes_a_session_id_keeps_the_conversation_itself(tmp_path):
     (tmp_path / "agent.py").write_text(SESSION_AGENT, encoding="utf-8")
+    (tmp_path / "agent-log").mkdir()
     cases = [
         {"id": name, "turns": [{"input": f"I am {name}", "checks": []}, {"input": "Who am I?"}, {"input": "Again?"}]}
         for name in ("Ada", "Grace")
@@ -267,9 +273,8 @@ def test_a_function_target_that_takes_a_session_id_keeps_the_conversation_itself
     assert found["Ada"]["turns"][2]["output"] == "You are Ada."
     assert found["Grace"]["turns"][1]["output"] == "You are Grace."
     # One session id per conversation, the same in each of its turns, and never another's.
-    import sys
-
-    seen = sys.modules["martian_evals_target"].SEEN
+    lines = (tmp_path / "agent-log" / "seen.jsonl").read_text(encoding="utf-8").splitlines()
+    seen = [tuple(json.loads(line)) for line in lines]
     assert {session for session, _ in seen} == {found["Ada"]["session_id"], found["Grace"]["session_id"]}
     assert [message for session, message in seen if session == found["Ada"]["session_id"]] == [
         "I am Ada",
@@ -684,5 +689,6 @@ def test_the_worker_skips_a_conversation_case_with_its_reason():
 
     run = Run(id="r", project_id="default", source="console", state="running")
     case = Case(id="c", turns=[Turn(inputs={"message": "hi"})], expectations={"expected_response": "hi"})
-    result, score, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5))  # type: ignore[arg-type]
-    assert (result.status, result.error, score, model) == ("skipped", execute.CONVERSATION, None, None)
+    grading = execute._Grading()
+    result, scores, model = asyncio.run(execute._run_case(None, SINGLE_USER, run, 0, case, never, 5, grading))  # type: ignore[arg-type]
+    assert (result.status, result.error, scores, model) == ("skipped", execute.CONVERSATION, [], None)
