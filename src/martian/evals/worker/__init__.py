@@ -323,6 +323,7 @@ class RunsSchedules(Protocol):
     def schedules(self) -> ScheduleServices | None: ...
 
 
+from martian.evals._pinned_address import AddressPolicy, public_addresses_only  # noqa: E402
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
 from martian.evals.worker.hooks import CaseContext, CaseHooks, CaseState  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
@@ -334,6 +335,7 @@ from martian.evals.worker.recheck import execute_recheck  # noqa: E402
 from martian.evals.worker.schedule import ScheduleServices  # noqa: E402
 
 __all__ = [
+    "AddressPolicy",
     "AgentExecutor",
     "AgentsConnection",
     "CaseContext",
@@ -369,6 +371,7 @@ __all__ = [
     "execute_scoring",
     "fail_unfinished",
     "load_work",
+    "public_addresses_only",
     "sampled",
     "sdk_judge",
     "take_over",

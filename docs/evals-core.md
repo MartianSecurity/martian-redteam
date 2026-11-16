@@ -1344,7 +1344,7 @@ The worker grades judge scorers with one of two judges from `martian.evals.worke
 `WorkerServices.judge` (or `InProcessWorker(judge=...)`); the routes are the same either way.
 
 **`sdk_judge(model=None, inference_params=None, max_retries=5, rate_limit_wait_seconds=300,
-headers=None)`** runs the SDK's own judge code, the [rubric judge](evals.md#direct-passfail-rubrics-and-policies)
+headers=None, address_policy=None)`** runs the SDK's own judge code, the [rubric judge](evals.md#direct-passfail-rubrics-and-policies)
 local suite runs use: the same prompt, reply validation, citations, retries and failure
 messages. It grades every pass/fail scorer of a request as one rubric of one
 `response-rubrics-v1` judgment, so a request is one model call:
@@ -1369,6 +1369,29 @@ environment: `OPENAI_API_KEY` for `openai:/` models. `inference_params`, `max_re
 `rate_limit_wait_seconds` and `headers` are the SDK judges' arguments of the same names, and a
 wrong one fails `sdk_judge` itself. A score records the model version the provider reported (the
 `model` field of its reply) and `martian.judge.version` `response-rubrics-v1`.
+
+**`address_policy(host, address) -> bool`** is for an edition that calls endpoints other people
+name. Without it the judge calls the endpoint as a local run does, whatever address its name has.
+With it, the judge resolves the endpoint's name when each connection opens, asks the policy about
+every address the name answers, refuses the name if the policy refuses any of them, and connects to
+one of the addresses it asked about, by number (`martian.evals._pinned_address`). Nothing resolves
+the name between the check and the connection, so a name that answers a public address for the
+check and an internal one for the call (DNS rebinding) is never connected to at the internal one.
+The request keeps the name's `Host` header, TLS server name and certificate check; a certificate
+authority named by `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE` is still used. A refused name fails the
+request's scores with `Judge draft failed [judge_provider_address_refused]. The endpoint's name
+resolves to an address this installation does not allow a judge to call. Check the judge's
+endpoint.`, after no connection and no retry. The judge never falls back to an unpinned
+connection: it follows no redirect, uses no proxy from the environment, and refuses a model whose
+provider is not an OpenAI-compatible endpoint (`judge_provider_config`), since MLflow calls those
+through LiteLLM, which opens its own connections. `public_addresses_only` (also from
+`martian.evals.worker`) is the usual policy: it allows an address that is global and public, and
+refuses loopback, private, link-local, shared (`100.64.0.0/10`), multicast and reserved ones,
+judging an IPv4 address written as IPv6 (`::ffff:10.0.0.1`) by the IPv4 address. An edition with
+internal hosts it does call writes its own, as the Martian server's allows the hosts its operator
+lists. A judged call makes no other outbound request: it prices a call only from a catalogue the
+operator names, never from MLflow's download from github.com
+([the model catalogue](security-and-data.md#judges-and-the-model-catalogue)).
 
 **`agents_judge(base_url, connection, timeout_seconds=75)`** asks martian-agents instead, as the
 Martian server does today: `POST {base_url}/v1/martian/targets/{target_id}/judge` with the
@@ -1424,7 +1447,16 @@ loopback OpenAI-compatible endpoint (the rubrics, the context, one call per case
 version, a numeric judge's error, a wrong key, an unreachable endpoint, no model at all), and with
 the Agents judge against a loopback judge route (the request body, the checks on the reply, each
 judge's allowed model recorded on its scores, a model Agents refuses, an endpoint, Agents'
-failures).
+failures). `tests/evals/test_judge_address_pin.py` pins the address with a name whose first lookup
+answers a public address and later ones an internal one, each on a loopback server of its own that
+counts connections: the internal one is never connected to, the policy is asked about every address
+of an answer and a name with one refused address is refused whole, and the request keeps the name's
+`Host` header and, over TLS, its server name and certificate check, and is not retried; an
+environment proxy and a redirect are not followed, a provider that cannot be pinned is refused, and
+`public_addresses_only` is checked on public, private, reserved and IPv4-mapped addresses.
+`tests/evals/test_no_outbound.py` grades a request with the SDK judge, with and without an address
+policy, and refuses every connection and name lookup but the endpoint's; `test_worker_judges.py`
+checks that a call is priced only from a catalogue the operator names.
 
 ### Custom scorers in the worker
 
