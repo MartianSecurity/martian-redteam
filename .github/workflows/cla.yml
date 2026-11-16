@@ -40,7 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          path-to-document: https://github.com/MorningHQ/martian-redteam/blob/main/cla/individual.md
+          path-to-document: https://github.com/MartianSecurity/martian-redteam/blob/main/cla/individual.md
           path-to-signatures: signatures/cla.json
           branch: cla-signatures
           # Exact names only: the action's "*" pattern is unanchored and would match any name
@@ -49,7 +49,7 @@ jobs:
           custom-notsigned-prcomment: >-
             <br/>Thank you for your pull request. Before we can accept it, $you need to sign the
             MartianSecurity
-            [Individual Contributor License Agreement](https://github.com/MorningHQ/martian-redteam/blob/main/cla/individual.md).
+            [Individual Contributor License Agreement](https://github.com/MartianSecurity/martian-redteam/blob/main/cla/individual.md).
             If your employer has rights to your work, it may need to sign the
-            [corporate agreement](https://github.com/MorningHQ/martian-redteam/blob/main/cla/corporate.md)
+            [corporate agreement](https://github.com/MartianSecurity/martian-redteam/blob/main/cla/corporate.md)
             as well. To sign, post a comment on this pull request with exactly the text below.<br/>

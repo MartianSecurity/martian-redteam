@@ -1,5 +1,5 @@
 """Creating and archiving projects: a port of ``POST /projects`` and ``POST /projects/{id}/archive``
-in the server's ``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store.
+in the server's ``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store.
 
 A project's id is derived from the ``request_id`` that created it, so the same request again
 returns the same project. An organisation has at most 25 projects besides the default one, as on

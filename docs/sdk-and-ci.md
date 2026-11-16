@@ -2,7 +2,7 @@
 
 `martian-sdk` is the canonical Python 3.12+ distribution. It contains
 `martian.evals`, `martian.redteam`, the `martian` CLI, and the legacy import
-names. The source repository remains `MorningHQ/martian-redteam`. The package
+names. The source repository remains `MartianSecurity/martian-redteam`. The package
 is published on [PyPI](https://pypi.org/project/martian-sdk/). Install an exact
 released version with its `evals` extra for the persisted CI runner:
 
@@ -15,9 +15,11 @@ Replace `<version>` with a release listed on PyPI.
 
 `evals` includes MLflow-skinny **3.18.0** and pytest. The SDK never connects to
 the hosted MLflow server, so this pin is independent of the server's version,
-which MorningHQ/martian-evals sets. The base installation supports redteam
+which MartianSecurity/martian-evals sets. The base installation supports redteam
 callbacks and local reports. The SDK reaches MLflow internals only through
-`src/martian/evals/_mlflow.py`, which lists each one. Before moving the pin, run
+`src/martian/evals/_mlflow.py`, which lists each one. The exception is the process
+a function target runs in, which never imports the evals package and imports the
+two its tracing needs itself; `_mlflow.py` lists those too. Before moving the pin, run
 the [MLflow compatibility suite](development.md#mlflow-upgrades) on the
 candidate release.
 The separate `mcp` extra adds the existing customer MCP integration.
@@ -97,7 +99,8 @@ Without explicit config, only these canonical process variables are read:
 Create one API key under the console's **API Keys** settings (admin/owner),
 select only the needed capabilities and applicable restrictions, and save the
 once-shown token in your secret manager. Evals dataset reads need `evals:read`;
-redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities.
+redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities;
+`martian evals push` needs `evals:write`.
 The key neither grants model entitlement nor administers the console. An
 agent-bound key supplies its immutable agent binding automatically; explicit
 `Client(agent_id=...)` attribution must match that grant. This labels/access-binds
@@ -127,6 +130,10 @@ martian ci --redteam-config redteam.yaml --output results
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
 # A suite file, run locally with only a model key (see the eval guide):
 martian evals run evals.yaml
+# The same, compared case by case with an earlier run's output folder and gated on the comparison:
+martian evals run evals.yaml --output results/pr --baseline results/main
+# A suite file's prompts as versions in the local Evals UI, which each later run names (see the eval guide):
+martian evals prompts push evals.yaml -m "Shorter greeting"
 # The Evals UI on this machine, one user and no login (see the evals core guide):
 martian ui
 # Inspect AI logs as runs in that UI (see the evals core guide):
@@ -139,6 +146,8 @@ martian evals import mlflow ./mlflow.db
 # All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):
 martian evals export ./evals-export
 martian evals import martian ./evals-export --data-dir ./new-data
+# That UI's finished runs pushed to a Martian server, signed in as below (see the eval guide):
+martian evals push
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml
@@ -154,6 +163,17 @@ redteam records. The CLI no longer combines two subprocess exit codes.
 `martian ci --redteam-config` also persists it through Backend. `martian evals
 run` forwards pytest options and supports eval-only xdist. The combined runner
 is serial. Do not also include the same redteam assessment as a pytest test.
+
+A suite file's run (`martian evals run evals.yaml`) is local and gated on its
+own exit code. With `--baseline DIR` it compares its cases with
+the earlier run in `DIR` by their `verdicts.json` and gates on the comparison:
+it fails on a change worse than noise, on any case that newly fails a
+security check, or on a failed case with no result in the baseline, not on
+cases that failed in both runs or on a few that changed within noise on other
+checks ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+The [evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps
+`main`'s `verdicts.json` in the Actions cache and passes it on each pull
+request. The pytest gate and `martian ci` have no baseline.
 
 Success requires every required test/probe to complete and meet its policy,
 and a complete, consistent Backend session acknowledgment.

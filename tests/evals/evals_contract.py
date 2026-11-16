@@ -1,7 +1,7 @@
 """The server's frozen evals API contract, for testing the core against it.
 
-``contracts/evals-api-v3.json`` is an unchanged copy of ``contracts/evals-api.json`` in
-MorningHQ/MartianBackend at version 3 (``info.version``), generated there by
+``contracts/evals-api-v4.json`` is an unchanged copy of ``contracts/evals-api.json`` in
+MartianSecurity/MartianBackend at version 4 (``info.version``), generated there by
 ``scripts/evals-contract.py`` from the server's routes. When the server raises the version, copy
 the file again under the new version's name and update ``VERSION``.
 """
@@ -15,8 +15,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-VERSION = "3"
-CONTRACT: dict[str, Any] = json.loads((Path(__file__).parent / "contracts" / "evals-api-v3.json").read_text("utf-8"))
+VERSION = "4"
+CONTRACT: dict[str, Any] = json.loads((Path(__file__).parent / "contracts" / "evals-api-v4.json").read_text("utf-8"))
 
 FORMATS = FormatChecker(["uuid"])
 

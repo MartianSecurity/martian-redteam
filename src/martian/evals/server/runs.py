@@ -1,6 +1,6 @@
 """Read routes for projects, runs, their results and comparisons: a port of the server's
 ``app/api/evals.py``, ``app/api/evals_workbench.py`` and ``GET /projects`` of
-``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store and the record store.
+``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store and the record store.
 
 Runs, case results, scores, scoring jobs and reviews come from the record store; projects, traces,
 run telemetry and review queues from the store. A run is found by its id in the default project,
@@ -25,14 +25,23 @@ from fastapi import APIRouter, HTTPException, Query
 
 from martian.evals.model import CaseResult, Project, ReviewQueue, Run, Score, ScoringJob, Trace
 from martian.evals.records import RecordStore
+from martian.evals.server.blind import (
+    blind_queue_ids,
+    hidden_items,
+    hidden_of_run,
+    queue_with,
+    visible_reviews,
+    visible_scores,
+)
 from martian.evals.server.capabilities import highest_role
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep
+from martian.evals.server.dependencies import AgentNames, AgentNamesDep, PrincipalDep, RecordsDep, StoreDep
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
     RUN_STATUS,
     Assessment,
     ReviewRow,
+    agent_of,
     attempts_out,
     conversation_out,
     item_out,
@@ -40,7 +49,7 @@ from martian.evals.server.projection import (
     mlflow_assessment,
     project_key,
     public_job,
-    queue_out,
+    reader_provenance,
     reliability_out,
     result_id,
     run_detail,
@@ -64,6 +73,16 @@ PROVENANCE_NOTE = (
 
 
 # --- lookups --------------------------------------------------------------------------------
+
+
+async def agent_names(names: AgentNames | None, principal: Principal, runs: Sequence[Run]) -> dict[str, str]:
+    """The display names of the runs' agents, by agent id, as far as the edition can name them."""
+    ids = sorted({agent for run in runs if (agent := agent_of(run))})
+    return await names(principal, ids) if names is not None and ids else {}
+
+
+def name_of(found: dict[str, str], run: Run) -> str | None:
+    return found.get(agent_of(run) or "")
 
 
 async def project_keys(store: EvalStore, principal: Principal) -> list[str]:
@@ -242,6 +261,7 @@ async def list_runs(
     principal: PrincipalDep,
     store: StoreDep,
     records: RecordsDep,
+    names: AgentNamesDep,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     project_id: uuid.UUID | None = None,
@@ -261,14 +281,18 @@ async def list_runs(
         for run in await project_runs(records, principal, key)
         if needle in run.code.casefold() or needle in run.dataset_name.casefold()
     ]
-    runs = _newest(runs, lambda r: (r.created_at or EPOCH, r.id))
-    return [run_out(r) for r in runs[(page - 1) * limit : page * limit]]
+    runs = _newest(runs, lambda r: (r.created_at or EPOCH, r.id))[(page - 1) * limit : page * limit]
+    found = await agent_names(names, principal, runs)
+    return [run_out(r, name_of(found, r)) for r in runs]
 
 
 @router.get("/{run_id:uuid}", response_model=EvalRunDetailOut)
-async def get_run(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> EvalRunDetailOut:
+async def get_run(
+    run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, names: AgentNamesDep
+) -> EvalRunDetailOut:
     run = await find_run(store, records, principal, run_id)
-    return run_detail(run, await run_results(records, principal, run))
+    found = await agent_names(names, principal, [run])
+    return run_detail(run, await run_results(records, principal, run), name_of(found, run))
 
 
 @router.get("/{run_id:uuid}/attempts", response_model=None)
@@ -276,14 +300,14 @@ async def attempts(
     run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep, flaky: bool = False
 ) -> dict[str, Any]:
     # The core's own route, not the contract's: every attempt of each case of a run whose suite
-    # repeats its cases, with the run's repeats (MorningHQ/martian-notes#180) and its reliability
-    # and flaky cases (MorningHQ/martian-notes#183). `flaky=true` keeps only the flaky cases; the
+    # repeats its cases, with the run's repeats (MartianSecurity/martian-notes#180) and its reliability
+    # and flaky cases (MartianSecurity/martian-notes#183). `flaky=true` keeps only the flaky cases; the
     # reliability is the whole run's. A run without repeats answers `repeats: null`,
     # `reliability: null` and no attempts. Reliability is here, not on the run routes, because
     # their responses are typed in the frozen contract.
     run = await find_run(store, records, principal, run_id)
     results = await run_results(records, principal, run)
-    repeats = run.provenance.get("repeats")
+    repeats = reader_provenance(run.provenance).get("repeats")
     items = [attempts_out(result) for result in results]
     return {
         "run_id": run.id,
@@ -297,13 +321,16 @@ async def attempts(
 async def turns(run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep) -> dict[str, Any]:
     # The core's own route, not the contract's: each conversation case of the run, with its
     # verdict on each check, the session its turns' traces share and every turn it sent with that
-    # turn's verdicts (MorningHQ/martian-notes#191). A run without conversation cases answers no
+    # turn's verdicts (MartianSecurity/martian-notes#191). A run without conversation cases answers no
     # items. The run routes' responses are typed in the frozen contract, whose `EvalItemOut` has no
     # place for turns.
     run = await find_run(store, records, principal, run_id)
     results = [result for result in await run_results(records, principal, run) if result.turns]
     scores: dict[str | None, list[Score]] = {}
-    for score in await records.list_scores(principal, run.project_id, run.id) if results else []:
+    hidden = await hidden_of_run(records, principal, run.project_id, run.id) if results else set()
+    for score in (
+        visible_scores(await records.list_scores(principal, run.project_id, run.id), hidden) if results else []
+    ):
         scores.setdefault(score.case_id, []).append(score)
     return {"run_id": run.id, "items": [conversation_out(result, scores.get(result.case_id, [])) for result in results]}
 
@@ -338,7 +365,14 @@ async def workbench(
         selected = job_rows[0]
     config = job_config(selected) if selected else None
 
-    scores = [Assessment.of(s) for s in await records.list_scores(principal, run.project_id, run.id)]
+    # In a blind queue, the reviews and human scores of an item the principal has not answered are
+    # other people's answers they may not read yet (martian.evals.server.blind).
+    blind = await blind_queue_ids(records, principal, run.project_id, run.id)
+    chains = await records.list_reviews(principal, run.project_id, run.id, current_only=False)
+    hidden = hidden_items(chains, blind, principal.user_id)
+    scores = [
+        Assessment.of(s) for s in visible_scores(await records.list_scores(principal, run.project_id, run.id), hidden)
+    ]
     if item_id is not None:
         shown = [s for s in scores if s.item_id == item_id]
     else:
@@ -349,7 +383,7 @@ async def workbench(
     selected_scores = [s for s in scores if selected and s.job_id == selected.id]
 
     reviews = _newest(
-        [ReviewRow.of(r) for r in await records.list_reviews(principal, run.project_id, run.id, current_only=False)],
+        [ReviewRow.of(r) for r in visible_reviews(chains, hidden, principal.user_id)],
         lambda r: (r.created_at or EPOCH, r.id),
     )
     history = [r for r in reviews if item_id is None or r.item_id == item_id]
@@ -387,7 +421,7 @@ async def workbench(
                 "role": highest_role(principal.roles),
             }
         ],
-        "queues": [queue_out(q) for q in queues],
+        "queues": [queue_with(q, blind) for q in queues],
         "selected_job": public_job(selected) if selected else None,
         "pagination": {"jobs": jobs_pagination, "assessments": scores_pagination, "reviews": reviews_pagination},
         "truncated": False,
@@ -404,8 +438,9 @@ async def workbench(
 async def provenance(
     run_id: uuid.UUID, principal: PrincipalDep, store: StoreDep, records: RecordsDep
 ) -> dict[str, Any]:
-    # The run as it was admitted, and its run in the store.
+    # The run as it was admitted, as far as its readers see it, and its run in the store.
     run = await find_run(store, records, principal, run_id)
+    admission = reader_provenance(run.provenance)
     try:
         native = await store.get_run(principal, run.project_id, run.id)
     except StoreError as error:
@@ -413,11 +448,11 @@ async def provenance(
             raise
         native = None
     if native is None:
-        return {"admission": run.provenance, "native": None, "note": NOT_PERSISTED}
+        return {"admission": admission, "native": None, "note": NOT_PERSISTED}
     if native.id != run.id or native.dataset_digest != run.dataset_digest:
         raise HTTPException(409, "Native run provenance differs from its admission")
     return {
-        "admission": run.provenance,
+        "admission": admission,
         "native": {
             "id": native.store.run_id or native.id,
             "status": RUN_STATUS[native.state],

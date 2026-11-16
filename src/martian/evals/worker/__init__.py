@@ -1,10 +1,12 @@
 """The worker interface: what the evals core hands its long-running work to.
 
-A write route that starts work records it first, as a queued ``Run`` or ``ScoringJob`` in the
-record store, and then calls :meth:`Worker.submit` with a :class:`Work` naming it. The worker does
-the work later, outside the request: it calls the target once per case, runs the scorers and
-judges, and writes case results, traces and scores through the store and the record store. The API
-process never calls a target or a model while answering a request.
+A write route that starts work records it first, as a queued ``Run``, ``ScoringJob`` or
+``CalibrationRecheck`` in the record store, and then calls :meth:`Worker.submit` with a
+:class:`Work` naming it. The worker does the work later, outside the request: it calls the target
+once per case, runs the scorers and judges, grades a calibration's labelled items again
+(:mod:`martian.evals.worker.recheck`), and writes case results, traces, scores and calibrations
+through the store and the record store. The API process never calls a target or a model while
+answering a request.
 
 The interface is deliberately small, so the editions and the issues that follow can each supply
 their own worker without changing the routes:
@@ -19,10 +21,15 @@ their own worker without changing the routes:
 - :class:`QueueWorker` implements ``submit`` by putting the work in a durable queue in the record
   store's database, and a worker, beside the app or in a process of its own, takes it from there
   and runs it with either of the two above, its :class:`Runner`. Restarting the API process then
-  loses no queued or running work (:mod:`martian.evals.worker.queue`).
+  loses no queued or running work (:mod:`martian.evals.worker.queue`). Given ``schedules``, it
+  also takes each schedule's turn at its slots and admits the schedule's runs itself
+  (:mod:`martian.evals.worker.schedule`).
 - The judge given to the worker is :func:`sdk_judge`, the SDK's own judge code, or
   :func:`agents_judge`, which asks martian-agents (:mod:`martian.evals.worker.judges`); the
   routes do not change.
+- A worker given alert settings (:class:`martian.evals.alerts.AlertSettings`) delivers the alerts
+  of thresholds on its monitors' scores after each pass, and says which channels it sends
+  (:class:`SendsAlerts`). Without them it sends no alert.
 
 A worker knows each target a run can name by its id: a function in its process, an HTTP target it
 calls itself, or a registered agent it calls through martian-agents (:class:`AgentExecutor`). An
@@ -36,6 +43,11 @@ so a worker in another process sees it too. A worker that can tell when nothing 
 any more also implements :class:`InterruptedRuns`, so that cancelling such a run finishes it at once
 instead of waiting for a next case that never comes. :func:`execute_run` and
 :func:`execute_scoring` are the work itself, for any worker to call.
+
+An edition installs, beside its targets, hooks that run around each case of a run and checks it
+grades with by name (:class:`CaseHooks`, :mod:`martian.evals.worker.hooks`): each case's setup
+fills in a :class:`CaseState` that reaches the target call and the checks, and its teardown runs
+after the case is graded, also when it failed or timed out. The open edition installs none.
 
 Every target call has the worker's time limit (``target_timeout_seconds``), whatever the target.
 Each piece of work also runs under limits (:class:`~martian.evals.model.RunLimits`): the run's own,
@@ -58,25 +70,54 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Work:
-    """One piece of work: a queued run (``kind="run"``) or a queued scoring job of a finished run
-    (``kind="scoring"``, with ``job_id``). The record store holds everything else about it."""
+    """One piece of work: a queued run (``kind="run"``), a queued scoring job of a finished run
+    (``kind="scoring"``, with ``job_id``), a queued re-check of a judge version's calibration
+    (``kind="recheck"``, with the re-check's id as ``job_id`` and no ``run_id``), one pass of a
+    monitor over its project's new traces (``kind="monitor"``, with ``monitor_id`` and no run), or
+    one turn of a schedule, which admits its run when a slot is due (``kind="schedule"``, with
+    ``schedule_id`` and no run). The record store holds everything else about it."""
 
-    kind: Literal["run", "scoring"]
+    kind: Literal["run", "scoring", "recheck", "monitor", "schedule"]
     principal: Principal
     project_id: str
-    run_id: str
+    run_id: str = ""
     job_id: str | None = None
+    monitor_id: str | None = None
+    schedule_id: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.kind == "scoring") != (self.job_id is not None):
-            raise ValueError("scoring work names its job, and only scoring work does")
+        if (self.kind in ("scoring", "recheck")) != (self.job_id is not None):
+            raise ValueError("scoring work names its job, as re-check work does, and other work names none")
+        if (self.kind == "monitor") != (self.monitor_id is not None):
+            raise ValueError("monitor work names its monitor, and only monitor work does")
+        if (self.kind == "schedule") != (self.schedule_id is not None):
+            raise ValueError("schedule work names its schedule, and only schedule work does")
+        if (self.kind in ("recheck", "monitor", "schedule")) == bool(self.run_id):
+            raise ValueError(
+                "re-check work names no run, nor does monitor or schedule work; run and scoring work name theirs"
+            )
+
+
+@dataclass(frozen=True)
+class TargetReply:
+    """What a target call returns when it also reports the model that answered: the ``output``,
+    and ``model``, the model's name as the target reported it, such as an OpenAI-compatible
+    reply's ``model`` (``gpt-4o-2024-08-06``), or None. The worker records the model on the
+    case's trace and counts it in the run's ``provenance["model"]``
+    (:func:`~martian.evals.worker.targets.reported_model`). An HTTP target returns one when its
+    ``model_path`` or ``model_header`` is set; a function or an :class:`AgentExecutor` may return
+    one instead of its bare output."""
+
+    output: Any
+    model: str | None = None
 
 
 TargetCall = Callable[[Case], Awaitable[Any]]
-"""Calls the thing under test with one case and returns its output. An exception or a timeout is
-the case's error; the worker never retries. A function the worker is given as a target runs on an
-event loop of a thread of its own, so a function that blocks, or never returns, ends its case as
-``item timed out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
+"""Calls the thing under test with one case and returns its output, or a :class:`TargetReply`
+that also names the model that answered. An exception or a timeout is the case's error; the
+worker never retries. A function the worker is given as a target runs on an event loop of a
+thread of its own, so a function that blocks, or never returns, ends its case as ``item timed
+out`` without holding up the worker (:mod:`martian.evals.worker.targets`)."""
 
 
 class Credentials(Protocol):
@@ -87,7 +128,7 @@ class Credentials(Protocol):
     never travels with the request that started the run and is never written to a record; the
     run keeps the target as written, with ``${name}`` unexpanded. The local edition answers with
     the key it keeps for the target (``LocalTargets.key``); a per-organisation key store is
-    MorningHQ/martian-notes#135. A worker given none has no credentials, so a target that needs
+    MartianSecurity/martian-notes#135. A worker given none has no credentials, so a target that needs
     one fails each case with the setting that names it."""
 
     def __call__(self, principal: Principal, target_id: str, name: str, /) -> str | None: ...
@@ -100,8 +141,8 @@ class AgentExecutor(Protocol):
     On the Martian server a registered agent's credential stays with its approved connection:
     admitting a run pins the connection and its approval, and each case's call carries a
     short-lived target lease that martian-agents exchanges for the credential, so neither the
-    worker nor a record ever holds it (``app/evals_targets.py`` in MorningHQ/MartianBackend). The
-    server implements this interface when it mounts the core (MorningHQ/martian-notes#102); a
+    worker nor a record ever holds it (``app/evals_targets.py`` in MartianSecurity/MartianBackend). The
+    server implements this interface when it mounts the core (MartianSecurity/martian-notes#102); a
     worker without one calls no registered agent."""
 
     async def check(self, principal: Principal, agent_id: str) -> dict[str, Any]:
@@ -117,7 +158,8 @@ class AgentExecutor(Protocol):
 
     async def call(self, principal: Principal, run: Run, case: Case, *, timeout_seconds: float) -> Any:
         """Call the run's agent once with one case, within ``timeout_seconds``, and return its
-        output. An exception is the case's error; the worker never retries."""
+        output, or a :class:`TargetReply` with the model the agent reported answering with. An
+        exception is the case's error; the worker never retries."""
         ...
 
 
@@ -241,15 +283,64 @@ class InterruptedRuns(Protocol):
         ...
 
 
+@runtime_checkable
+class RunsMonitors(Protocol):
+    """What a worker adds when it runs monitors: it takes a monitor's work (``kind="monitor"``)
+    again every ``monitor_seconds`` for as long as the monitor exists, as a :class:`QueueWorker`
+    does with the monitor's row in its queue. The routes that create and resume monitors need it;
+    a worker without it runs one pass per ``submit``."""
+
+    @property
+    def monitor_seconds(self) -> float:
+        """How long after a monitor's pass ends its next pass is due."""
+        ...
+
+
+@runtime_checkable
+class SendsAlerts(Protocol):
+    """What a worker adds when it delivers thresholds' alerts (:mod:`martian.evals.alerts`): the
+    channels its installation configured, ``webhook`` and ``email``, or none. The threshold routes
+    refuse a channel the worker does not send; a worker without it sends none."""
+
+    @property
+    def alert_channels(self) -> frozenset[str]: ...
+
+
+def alert_channels(worker: object) -> frozenset[str]:
+    """The channels ``worker`` sends alerts on: none unless it is :class:`SendsAlerts`."""
+    return worker.alert_channels if isinstance(worker, SendsAlerts) else frozenset()
+
+
+@runtime_checkable
+class RunsSchedules(Protocol):
+    """What a worker adds when it runs schedules: it takes a schedule's work (``kind="schedule"``)
+    again at each of its slots for as long as the schedule exists, and admits the schedule's run
+    there, as a :class:`QueueWorker` given ``schedules`` does
+    (:mod:`martian.evals.worker.schedule`). ``schedules`` is what it admits runs with, or None when
+    it runs no schedules. The routes that create and resume schedules need one."""
+
+    @property
+    def schedules(self) -> ScheduleServices | None: ...
+
+
+from martian.evals._pinned_address import AddressPolicy, public_addresses_only  # noqa: E402
 from martian.evals.worker.execute import execute_run, execute_scoring, fail_unfinished, take_over  # noqa: E402
+from martian.evals.worker.hooks import CaseContext, CaseHooks, CaseState  # noqa: E402
 from martian.evals.worker.inprocess import InProcessWorker  # noqa: E402
 from martian.evals.worker.judges import AgentsConnection, agents_judge, sdk_judge  # noqa: E402
+from martian.evals.worker.monitor import execute_monitor, sampled  # noqa: E402
 from martian.evals.worker.process import ProcessWorker, WorkerServices, dump_work, load_work  # noqa: E402
 from martian.evals.worker.queue import QueueWorker  # noqa: E402
+from martian.evals.worker.recheck import execute_recheck  # noqa: E402
+from martian.evals.worker.schedule import ScheduleServices  # noqa: E402
 
 __all__ = [
+    "AddressPolicy",
     "AgentExecutor",
     "AgentsConnection",
+    "CaseContext",
+    "CaseHooks",
+    "CaseState",
     "Credentials",
     "InProcessWorker",
     "InterruptedRuns",
@@ -261,17 +352,27 @@ __all__ = [
     "ProcessWorker",
     "QueueWorker",
     "Runner",
+    "RunsMonitors",
+    "RunsSchedules",
+    "ScheduleServices",
+    "SendsAlerts",
     "TargetCall",
+    "TargetReply",
     "Verdict",
     "Work",
     "Worker",
     "WorkerServices",
     "agents_judge",
+    "alert_channels",
     "dump_work",
+    "execute_monitor",
+    "execute_recheck",
     "execute_run",
     "execute_scoring",
     "fail_unfinished",
     "load_work",
+    "public_addresses_only",
+    "sampled",
     "sdk_judge",
     "take_over",
 ]

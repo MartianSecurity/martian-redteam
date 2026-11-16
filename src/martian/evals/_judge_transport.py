@@ -9,11 +9,11 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import requests
 from mlflow.entities import AssessmentSource, AssessmentSourceType, Feedback
-from mlflow.environment_variables import MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS
+from mlflow.environment_variables import MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS, MLFLOW_MODEL_CATALOG_URI
 from mlflow.types.llm import ChatMessage
 from pydantic import BaseModel, ValidationError
 
@@ -37,6 +37,11 @@ from martian.evals._mlflow import (
     parse_model_uri,
     provider_instance,
 )
+from martian.evals._pinned_address import AddressPolicy, AddressRefused, pinned_session
+from martian.evals.cache import HIT_KEY, key_address, key_headers
+
+if TYPE_CHECKING:
+    from martian.evals.cache import ModelCallCache
 
 # A provider reply with one of these statuses carries no judgment, so sending the same request
 # again cannot change a verdict that was already given.
@@ -112,9 +117,29 @@ def _post_chat(endpoint: str, headers: dict[str, str], payload: dict[str, Any]) 
     ``requests`` error. MLflow's helper wraps those in an exception without a status, which the
     retry loop could not tell apart from a failure that must not be retried."""
     timeout: float = MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS.get()  # type: ignore[no-untyped-call]
-    response = requests.post(
-        url=endpoint, headers={"Content-Type": "application/json", **headers}, json=payload, timeout=timeout
+    return _chat_reply(
+        requests.post(
+            url=endpoint, headers={"Content-Type": "application/json", **headers}, json=payload, timeout=timeout
+        )
     )
+
+
+def _post_chat_pinned(
+    endpoint: str, headers: dict[str, str], payload: dict[str, Any], *, address_policy: AddressPolicy
+) -> dict[str, Any]:
+    """:func:`_post_chat` over a connection that goes only to an address ``address_policy`` allows,
+    the one the endpoint's name resolved to when the connection opened (:mod:`martian.evals._pinned_address`):
+    no proxy, no redirect, and a refused address is :class:`AddressRefused`, never a call to the name."""
+    timeout: float = MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS.get()  # type: ignore[no-untyped-call]
+    with pinned_session(address_policy) as session:
+        response = session.post(
+            url=endpoint, headers={"Content-Type": "application/json", **headers}, json=payload, timeout=timeout
+        )
+    return _chat_reply(response)
+
+
+def _chat_reply(response: requests.Response) -> dict[str, Any]:
+    """The chat completion a provider's reply holds, or the error its status stands for."""
     if response.status_code == 400:
         message = error_text(response)
         raise ChatCompletionError(
@@ -139,9 +164,11 @@ def _gateway_completion(
     params: dict[str, Any] | None,
     extra_headers: Mapping[str, str],
     base_url: str | None = None,
+    address_policy: AddressPolicy | None = None,
 ) -> tuple[Any, bool]:
     """The completion, and whether it was requested with structured output. ``base_url`` is an
-    OpenAI-compatible endpoint's base address, used instead of the one in the environment."""
+    OpenAI-compatible endpoint's base address, used instead of the one in the environment. With an
+    ``address_policy`` the request is made on a pinned connection (:func:`_post_chat_pinned`)."""
     # The pinned helper is annotated with BaseProvider, whose HTTP implementations
     # add the wire adapter and headers used by MLflow's own Gateway judge.
     provider: Any = provider_instance(provider_name, model)
@@ -156,9 +183,10 @@ def _gateway_completion(
 
     def send(*, structured: bool) -> dict[str, Any]:
         payload = build_chat_request(prompt, None, schema, structured, params)
-        return _post_chat(
-            endpoint=endpoint, headers=headers, payload=provider.adapter_class.chat_to_model(payload, provider.config)
-        )
+        wire = provider.adapter_class.chat_to_model(payload, provider.config)
+        if address_policy is None:
+            return _post_chat(endpoint=endpoint, headers=headers, payload=wire)
+        return _post_chat_pinned(endpoint, headers, wire, address_policy=address_policy)
 
     structured = True
     try:
@@ -233,6 +261,12 @@ def _provider_failure(
     def failed(code: str, hint: str) -> ValueError:
         return ValueError(f"{caller} failed [{code}]. {hint}")
 
+    if isinstance(error, AddressRefused):
+        return failed(
+            "judge_provider_address_refused",
+            "The endpoint's name resolves to an address this installation does not allow a judge to call. "
+            f"Check {address}.",
+        )
     if isinstance(error, NotAChatCompletion):
         return failed("judge_provider_address", f"The address did not answer as a chat endpoint. Check {address}.")
     if isinstance(
@@ -282,6 +316,22 @@ def _provider_failure(
     )
 
 
+def _price(model_uri: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """What a call cost, from the model catalogue MLflow reads, or None.
+
+    MLflow's catalogue is a download from github.com, which it makes at the first priced call of a
+    process, tries four times with a five-second timeout each, and makes again for every provider:
+    a judged call that reaches only its endpoint cannot make it, and an installation with no route
+    out would wait on it. So a call is priced only from a catalogue the operator named with
+    ``MLFLOW_MODEL_CATALOG_URI`` (a mirror, or a ``file://`` folder), and is left unpriced without
+    one. Nothing reads the price; the tokens, the model version and the verdict do not depend on it.
+    The variable is read here, and the same setting prices the model calls a traced target makes.
+    """
+    if not MLFLOW_MODEL_CATALOG_URI.get_raw():  # type: ignore[no-untyped-call]
+        return None
+    return lookup_model_cost(model_uri, prompt_tokens, completion_tokens)
+
+
 def invoke_response_judge(
     *,
     model_uri: str,
@@ -294,51 +344,145 @@ def invoke_response_judge(
     rate_limit_wait_seconds: float = 0.0,
     headers: Mapping[str, str] | None = None,
     endpoint: str | None = None,
+    cache: ModelCallCache | None = None,
+    judge_version: str = "",
+    address_policy: AddressPolicy | None = None,
 ) -> Feedback:
-    """One judge stage's request and its validated judgment. ``endpoint`` is the base address of
-    the OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``."""
-    judgment, metadata = invoke_structured(
+    """One judge stage's request and its validated judgment (:func:`invoke_structured`).
+    ``endpoint`` is the base address of the OpenAI-compatible endpoint that serves an ``openai:/``
+    model, used instead of ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``. With an
+    ``address_policy`` the call connects only to an address the policy allows, pinned
+    (:mod:`martian.evals._pinned_address`), or is refused.
+
+    With ``cache`` (:class:`martian.evals.cache.ModelCallCache`), a validated judgment is stored
+    under the full request (:func:`_cache_request`, with ``judge_version``, the version of the
+    judge that built the prompt) and replayed for the same request in a later run. The model, the
+    endpoint and the key are checked first, as without the cache. A failure is raised as without
+    the cache and never stored. A replayed judgment's metadata says so (``martian.cache: hit``),
+    with no provider retries, token counts or cost, since no call was made."""
+    caller = f"Judge {stage}"
+
+    def fresh() -> Feedback:
+        judgment, metadata = invoke_structured(
+            model_uri=model_uri,
+            prompt=prompt,
+            response_format=response_format,
+            inference_params=inference_params,
+            caller=caller,
+            setting="judge",
+            max_retries=max_retries,
+            rate_limit_wait_seconds=rate_limit_wait_seconds,
+            headers=headers,
+            endpoint=endpoint,
+            address_policy=address_policy,
+        )
+        return Feedback(
+            name=assessment_name,
+            value=judgment.model_dump()["result"],
+            source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
+            metadata=metadata,
+        )
+
+    if cache is None:
+        return fresh()
+    provider, _, _ = _route(
+        model_uri, prompt, caller=caller, setting="judge", endpoint=endpoint, address_policy=address_policy
+    )
+    request = _cache_request(
         model_uri=model_uri,
+        provider=provider,
+        endpoint=endpoint,
         prompt=prompt,
         response_format=response_format,
         inference_params=inference_params,
-        caller=f"Judge {stage}",
-        setting="judge",
-        max_retries=max_retries,
-        rate_limit_wait_seconds=rate_limit_wait_seconds,
-        headers=headers,
-        endpoint=endpoint,
-    )
-    return Feedback(
-        name=assessment_name,
-        value=judgment.model_dump()["result"],
-        source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
-        metadata=metadata,
+        headers=dict(headers or {}),
+        stage=stage,
+        judge_version=judge_version,
     )
 
+    def replay(stored: Any) -> Feedback:
+        metadata = {**stored["metadata"], PROVIDER_RETRIES_KEY: 0, HIT_KEY: "hit"}
+        return Feedback(
+            name=assessment_name,
+            value=stored["value"],
+            source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=model_uri),
+            metadata=metadata,
+        )
 
-def invoke_structured[Reply: BaseModel](
+    return cache.call("judge", request, fresh, store=_stored_judgment, replay=replay)
+
+
+# Feedback metadata a replayed judgment leaves out: they describe the call that produced it.
+_PER_CALL_METADATA = frozenset(
+    {
+        PROVIDER_RETRIES_KEY,
+        AssessmentMetadataKey.JUDGE_INPUT_TOKENS,
+        AssessmentMetadataKey.JUDGE_OUTPUT_TOKENS,
+        AssessmentMetadataKey.JUDGE_COST,
+    }
+)
+
+
+def _stored_judgment(feedback: Feedback) -> dict[str, Any]:
+    """What the cache keeps of a judgment: its value and the metadata that describes the reply."""
+    metadata = {key: value for key, value in (feedback.metadata or {}).items() if key not in _PER_CALL_METADATA}
+    return {"value": feedback.value, "metadata": metadata}
+
+
+def _judge_address(provider: str, endpoint: str | None) -> str | None:
+    """The address that serves the judge, as a cache key holds it: ``endpoint``, else for the
+    openai provider the base address in the environment as MLflow reads it, else None (the
+    provider's own address, which its name and the model URI fix)."""
+    if endpoint is not None:
+        return key_address(endpoint)
+    if provider == "openai":
+        base = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+        return key_address(base) if base else None
+    return None
+
+
+def _cache_request(
     *,
     model_uri: str,
+    provider: str,
+    endpoint: str | None,
     prompt: list[ChatMessage],
-    response_format: type[Reply],
+    response_format: type[BaseModel],
     inference_params: dict[str, Any] | None,
+    headers: Mapping[str, str],
+    stage: str,
+    judge_version: str,
+) -> dict[str, Any]:
+    """Everything that decides a judge stage's reply, as its cache key: the model, the address
+    serving it, the messages (the judge's prompt with its criteria, the request and the reply
+    under test), the reply schema, the inference parameters, the headers that are not
+    credentials, the stage and the judge's version. No key and no credential header."""
+    return {
+        "model": model_uri,
+        "address": _judge_address(provider, endpoint),
+        "messages": [{"role": message.role, "content": message.content} for message in prompt],
+        "schema": response_format.model_json_schema(),
+        "inference_params": dict(inference_params or {}),
+        "headers": key_headers(headers),
+        "stage": stage,
+        "judge": judge_version,
+    }
+
+
+def _route(
+    model_uri: str,
+    prompt: list[ChatMessage],
+    *,
     caller: str,
     setting: str,
-    max_retries: int = 0,
-    rate_limit_wait_seconds: float = 0.0,
-    headers: Mapping[str, str] | None = None,
-    endpoint: str | None = None,
-) -> tuple[Reply, dict[str, Any]]:
-    """One structured-output request on the judges' provider path, and its validated reply with
-    the call's metadata (retries, the reply's format, the model the provider says answered, tokens
-    and cost). The judges and the simulated user (:mod:`martian.evals.simulation`) share it, so
-    they share the routing, the key, the retry rules and the failure messages: ``caller`` names who
-    asked (``Judge draft``, ``Simulated user``) and ``setting`` the suite file block whose settings a
-    failure names (``judge``, ``simulator``). ``endpoint`` is the base address of the
-    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``."""
+    endpoint: str | None,
+    address_policy: AddressPolicy | None = None,
+) -> tuple[str, str, Any]:
+    """The provider, the model and MLflow's adapter for ``model_uri``, once the model URI, the
+    endpoint and, for the openai provider, the key are checked. A problem is the caller's own
+    ``ValueError`` naming the ``<setting>`` to check. With an ``address_policy`` only a provider
+    whose requests this module sends itself, over a pinned connection, is accepted: the others call
+    through LiteLLM, which opens its own."""
     # Reuse routing, credentials and wire transforms from the pinned MLflow.
     # Calling the judge adapter itself would dispatch tools and drop envelope fields.
     try:
@@ -353,6 +497,11 @@ def invoke_structured[Reply: BaseModel](
             f"{caller} failed [judge_provider_config]. "
             f"Check {setting}.model: its provider must return a direct chat completion."
         )
+    if address_policy is not None and not isinstance(adapter, GatewayAdapter):
+        raise ValueError(
+            f"{caller} failed [judge_provider_config]. "
+            f"This installation lets a judge call only an OpenAI-compatible endpoint: check {setting}.model."
+        )
     if endpoint is not None and (provider != "openai" or not isinstance(adapter, GatewayAdapter)):
         raise ValueError(
             f"{caller} failed [judge_provider_config]. "
@@ -361,6 +510,37 @@ def invoke_structured[Reply: BaseModel](
     # MLflow's openai provider refuses to start without a key, so say which one before it does.
     if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
         raise ValueError(f"{caller} failed [judge_provider_key]. Set OPENAI_API_KEY.")
+    return provider, model, adapter
+
+
+def invoke_structured[Reply: BaseModel](
+    *,
+    model_uri: str,
+    prompt: list[ChatMessage],
+    response_format: type[Reply],
+    inference_params: dict[str, Any] | None,
+    caller: str,
+    setting: str,
+    max_retries: int = 0,
+    rate_limit_wait_seconds: float = 0.0,
+    headers: Mapping[str, str] | None = None,
+    endpoint: str | None = None,
+    address_policy: AddressPolicy | None = None,
+) -> tuple[Reply, dict[str, Any]]:
+    """One structured-output request on the judges' provider path, and its validated reply with
+    the call's metadata (retries, the reply's format, the model the provider says answered, tokens
+    and cost). The judges and the simulated user (:mod:`martian.evals.simulation`) share it, so
+    they share the routing, the key, the retry rules and the failure messages: ``caller`` names who
+    asked (``Judge draft``, ``Simulated user``) and ``setting`` the suite file block whose settings a
+    failure names (``judge``, ``simulator``). ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``; the key is still ``OPENAI_API_KEY``. With an ``address_policy`` the request
+    connects only to an address the policy allows (:mod:`martian.evals._pinned_address`), and a
+    provider that cannot be pinned is refused. Only the judges' calls go through the cache of
+    model calls (:func:`invoke_response_judge`); a simulated user's never do."""
+    provider, model, adapter = _route(
+        model_uri, prompt, caller=caller, setting=setting, endpoint=endpoint, address_policy=address_policy
+    )
     extra_headers = dict(headers or {})
 
     retries = 0  # every retry, recorded in the feedback metadata
@@ -370,7 +550,7 @@ def invoke_structured[Reply: BaseModel](
         try:
             if isinstance(adapter, GatewayAdapter):
                 completion, structured = _gateway_completion(
-                    provider, model, prompt, response_format, inference_params, extra_headers, endpoint
+                    provider, model, prompt, response_format, inference_params, extra_headers, endpoint, address_policy
                 )
             else:
                 completion, structured = _litellm_completion(
@@ -459,7 +639,7 @@ def invoke_structured[Reply: BaseModel](
         if (
             prompt_tokens is not None
             and completion_tokens is not None
-            and (cost := lookup_model_cost(model_uri, prompt_tokens, completion_tokens)) is not None
+            and (cost := _price(model_uri, prompt_tokens, completion_tokens)) is not None
         ):
             metadata[AssessmentMetadataKey.JUDGE_COST] = cost
     return reply, metadata

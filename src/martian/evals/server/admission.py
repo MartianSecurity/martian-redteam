@@ -1,5 +1,5 @@
 """How much of an organisation's work may be in progress at once: the edition's limits on runs and
-scoring jobs, checked where work is admitted (MorningHQ/martian-notes#145).
+scoring jobs, checked where work is admitted (MartianSecurity/martian-notes#145).
 
 The limits are entitlement limits (:mod:`martian.evals.server.entitlements`):
 

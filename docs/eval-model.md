@@ -23,10 +23,12 @@ rejects unknown fields.
 - Case identifiers come from the data (`id` in a JSONL or CSV row, or its position) and are what
   results, scores and reviews refer to.
 - Digests are SHA-256 over canonical JSON (keys sorted, no whitespace, UTF-8), computed by
-  `martian.evals.model.digest`. A dataset's digest identifies its content whatever it is called.
-  A suite's digest (`suite_digest`) covers every field but `id`, `version`, `digest` and who saved
-  the version when (`created_by`, `created_at`), run settings included, so a store that keeps one
-  version per digest keeps every change.
+  `martian.evals.model.digest`. A prompt version's digest is SHA-256 of its text alone, as UTF-8
+  (`prompt_digest`), so it can be computed from the text with any SHA-256 tool. A dataset's
+  digest identifies its content whatever it is called. A suite's digest (`suite_digest`) covers
+  every field but `id`, `version`, `digest` and who saved the version when (`created_by`,
+  `created_at`), run settings included, so a store that keeps one version per digest keeps every
+  change.
 - A case result's `fingerprint` is the digest of everything that produced it (see
   [resume](evals.md#run-a-suite-file-locally)), so a resumed run reuses it only while that is unchanged.
 
@@ -38,18 +40,19 @@ rejects unknown fields.
 | `Case` | One test case: `inputs`, `expectations`, optional stored `outputs`, `tags`, `metadata`. A [conversation](evals.md#conversations) case has `turns` in place of `inputs` (`Turn`: `inputs`, `expectations`, and `checks`, the turn-scoped scorers that grade it by name, every one when left out), at most 100, and no stored `outputs`; its `expectations` are the conversation's. `turns` is left out when empty, so a case of one input keeps its digest. A [simulated](evals.md#simulated-users) conversation case has a `simulated_user` in place of both (`SimulatedUser`: `goal`, `persona`, `max_turns` from 1 to 100, `stop_when`), and its `expectations` are the conversation's and each turn's; `simulated_user` is left out when there is none | Evaluation dataset record |
 | `DatasetVersion` | An immutable set of cases: `name`, optional `version`, `digest`, `case_count`, `source` (`file`, `draft`, `global`, `upload`, `traces`) and `location` | Evaluation dataset |
 | `DatasetDraft` | An editable working copy of a dataset: `name`, `revision` (raised by every edit), `state` (`editing` or `published`), `case_count`, and the `published_digest` of the version publishing created | none (Martian table) |
-| `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
-| `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`; `check`, a built-in check; `code`, a team's own Python function, type `python`; `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `parameters`, `criteria`, and `scope`: what it grades in a conversation case, each turn's reply (`turn`) or the conversation once (`conversation`), left out when `turn`, so a scorer without it keeps its digest. Never a key | Registered scorer |
+| `Target` | The thing under test: `function` (file and function), `http` (URL, headers, body template, response path, and where its response reports the model that answered: `model_path` in its JSON or `model_header`, one of them, each left out when unset so a target without them keeps its digest), `agent` (a registered agent on the server) or `stored` (outputs come with the cases). The URL and header values are kept as written, with `${NAME}` unexpanded; the values a run reads from the environment are never part of it | none |
+| `ScorerVersion` | One way of scoring, pinned to the version that scored: `name`, `kind` (`llm_judge`; `check`, a built-in check; `code`, a team's own Python function, type `python`, or a check a worker installs, type `installed`, with its options in `parameters.options`, `required: true` among them when the check decides its case's status; `human`), `type`, `version`, judge `model` (an MLflow model URI) and `endpoint` (the base address of the OpenAI-compatible endpoint serving it; left out when unset, so a scorer without one keeps its digest), `panel`, `parameters`, `criteria`, and `scope`: what it grades in a conversation case, each turn's reply (`turn`) or the conversation once (`conversation`), left out when `turn`, so a scorer without it keeps its digest. Never a key. A judge's `panel` is the judge models that each grade it, 2 to 9 different `PanelMember`s (`model`, `endpoint`); the strict majority of those that give a verdict decides ([a panel of judges](evals.md#a-panel-of-judges)). A judge with a panel names no `model` or `endpoint` of its own, and an empty panel is left out, so a scorer without one keeps its digest | Registered scorer |
 | `Policy` | When a scorer's results pass: `direction`, `threshold`, `minimum_coverage` | none |
-| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds` (each target call, whatever the target), `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder, the MLflow location, the run's `limits`, and the simulator's `simulator_max_retries`, `simulator_rate_limit_wait_seconds` and `simulator_headers`. Unset means the runner's default. Unset `limits` and simulator settings are left out when the settings are written, so a suite without them keeps its digest | none |
-| `RunLimits` | When a run stops before its last case: `max_seconds` of wall time, or `max_judge_tokens`, the tokens its judges may use, input and output together, as the provider reported them. `None` is no limit, and each start or resume of a run has its limits afresh. `stop(limit, used)` is what a run that reached one records: the limit, its value, what was used and a message | none |
-| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Its `simulator` (`Simulator`: `model`, an MLflow model URI, and `parameters`, its inference parameters; never a key) plays its cases' simulated users, left out when there is none. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
-| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`, `stopped`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it. A run that reached one of its limits is `stopped`: it keeps its finished cases, the others have no result, and it can be resumed. With repeats a case is finished only when all of its attempts ran. Its limits are in `provenance.limits` and the one it reached, `RunLimits.stop`, in `provenance.stopped` and, as a message, in `error` | Run |
-| `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint`. A case its suite runs more than once has every attempt in `attempts` (`Attempt`: `number`, `status`, `checks` with one `CheckVerdict` per check, `output`, `error`, `latency_ms`, `trace_id`); its own `status` and scores are the attempts combined ([repeated attempts](evals.md#repeated-attempts)). A conversation case has its conversation's `session_id` and every turn it sent in `turns` (`TurnResult`: `number`, `status`, `inputs`, `expectations`, `checks`, `output`, `error`, `latency_ms`, `trace_id`); its `output` is the conversation as `role` and `content` messages and its scores are the conversation's verdicts. With repeats each attempt has its own `session_id` and `turns`, and the case's are its representative attempt's. `simulated` marks a case whose user turns a simulator wrote. `attempts`, `session_id`, `turns` and `simulated` are left out when empty or false | Trace; each attempt's and each turn's own trace too |
-| `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `source_id`, `trace_id`, `metadata`. A judge score made by the evals core's worker has the model and version that produced it as `source_id` (`model@version`) and in `metadata` (`martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint`), with the judge's own version in `martian.judge.version` | Assessment (feedback) |
+| `Prompt`, `PromptVersion` | A named prompt (`name`: 1 to 64 letters, digits and `. _ -`; `description`; who created it when) and its versions: `version`, counting up from 1, the `text` exactly as written (at most 100,000 characters), its `digest` (`prompt_digest`: SHA-256 of the text as UTF-8), the commit `message`, and who added it when (`created_by`, `created_at`). A version never changes. A prompt belongs to an organisation, not a project ([prompt versions](evals.md#prompt-versions)) | Prompt and prompt version of MLflow's prompt registry |
+| `RunSettings` | How a run is carried out, not what it grades: `concurrency`, `batch`, `target_timeout_seconds` (each target call, whatever the target), `judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written, with `${NAME}` unexpanded), the local `output` folder, the MLflow location, the run's `limits`, `cache` (`CacheSettings`: `folder` as written, `ttl_seconds`, `functions`), set when the suite turns the [cache of model calls](evals.md#a-cache-of-model-calls) on, and the simulator's `simulator_max_retries`, `simulator_rate_limit_wait_seconds` and `simulator_headers`. Unset means the runner's default. Unset `limits`, `cache` and simulator settings are left out when the settings are written, so a suite without them keeps its digest | none |
+| `RunLimits` | When a run stops before its last case: `max_seconds` of wall time, or `max_judge_tokens`, the tokens its model calls on the judges' provider path may use, input and output together, as the provider reported them: its LLM judges' and, in `martian evals run`, its simulated users'. `None` is no limit, and each start or resume of a run has its limits afresh. `stop(limit, used)` is what a run that reached one records: the limit, its value, what was used and a message, which counts the simulated users' tokens apart (`simulated`) and names the call that reported no usage (`unreported`) | none |
+| `Suite` | A dataset (`dataset_name`, `dataset_digest`, and `dataset_location`, where its cases are read from), a target, scorers with policies, the `input_key` judges grade against, its `settings`, and its `repeats` (`Repeats`: `attempts` of each case, the suite's `combine` rule and the rules `checks` name for themselves, by scorer name; left out when it is the default, one attempt, so a suite without repeats keeps its digest). Repeats change verdicts, so they are part of the definition, not a run setting. Its `simulator` (`Simulator`: `model`, an MLflow model URI, and `parameters`, its inference parameters; never a key) plays its cases' simulated users, left out when there is none. Its `matrix` holds the axes of values the suite runs every combination of, each a list of values or a mapping of names to values, as the suite file writes them ([a matrix](evals.md#a-matrix-of-prompts-and-models)); it is left out when empty, so a suite without one keeps its digest too. Versioned: a new version for every change, which records who saved it and when (`created_by`, `created_at`) | none |
+| `Run` | One execution over a dataset's cases: `source` (`local`, `console`, `ci`), `state` (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`, `stopped`), what it ran with, `counts`, `provenance` and timestamps, including `cancel_requested_at` when someone asked to stop it. A run of one combination of a suite's matrix has it in `provenance.matrix`, and the registered prompt versions its values matched in `provenance.prompts`. A run that reached one of its limits is `stopped`: it keeps its finished cases, the others have no result, and it can be resumed. With repeats a case is finished only when all of its attempts ran. Its limits are in `provenance.limits` and the one it reached, `RunLimits.stop`, in `provenance.stopped` and, as a message, in `error`. A run with the cache of model calls on has `provenance.cache`. The model its target reported, when the evals core's worker ran it, is in `provenance.model`: `name`, the latest case's, and `cases`, how many cases each model answered | Run |
+| `CaseResult` | What one case produced in one run: `status` (`pending`, `passed`, `failed`, `error`, `skipped`), `inputs`, `expectations`, `output`, `error`, `latency_ms`, `fingerprint`. A case its suite runs more than once has every attempt in `attempts` (`Attempt`: `number`, `status`, `checks` with one `CheckVerdict` per check, `output`, `error`, `latency_ms`, `trace_id`); its own `status` and scores are the attempts combined ([repeated attempts](evals.md#repeated-attempts)). A conversation case has its conversation's `session_id` and every turn it sent in `turns` (`TurnResult`: `number`, `status`, `inputs`, `expectations`, `checks`, `output`, `error`, `latency_ms`, `trace_id`); its `output` is the conversation as `role` and `content` messages and its scores are the conversation's verdicts. With repeats each attempt has its own `session_id` and `turns`, and the case's are its representative attempt's. `simulated` marks a case whose user turns a simulator wrote. `attempts`, `session_id`, `turns` and `simulated` are left out when empty or false. A `CheckVerdict` (`passed`, `rationale`, `error`) also has the `metadata` its check recorded, such as a panel's votes, left out when empty | Trace; each attempt's and each turn's own trace too |
+| `Score` | One scorer's verdict on a case result, or on a trace of live traffic (then `run_id` and `case_id` are empty): `value`, `passed` (none when there is no verdict), `rationale`, `error`, `source` (`code`, `llm_judge`, `human`), `source_id`, `trace_id`, `metadata`. A judge score made by the evals core's worker has the model and version that produced it as `source_id` (`model@version`) and in `metadata` (`martian.judge.model`, `martian.judge.model_version`, `martian.judge.endpoint`), with the judge's own version in `martian.judge.version`, and the judge version's calibration that applied in `martian.calibration_id` (an id, or `none`; [calibration](evals.md#calibration)). A panel's score has `panel:` and a digest of its members as `source_id`, and its decision and each member's model, verdict and reason in `metadata` (`martian.panel.*`, flat strings; [what is recorded](evals.md#a-panel-of-judges)). A case result has one score per scorer, scoring job and source, so a person's answer named like a check or a judge sits beside that scorer's score | Assessment (feedback) |
 | `ScoringJob` | Scoring a finished run again with more scorers. Its scores add to the run's and never replace them. A job that applies a saved suite names it (`suite_id`, `suite_version`) and carries its `policies`; `cancel_requested_at` as for a run. A policy judge's guidelines are in its scorer's `criteria`. It runs under its run's limits, and one that reached one is `stopped`, with the limit in `error` | none |
-| `Trace`, `Span` | A recorded call to the thing under test, from an eval run or from live traffic, and the steps inside it. A case result is a trace of a run. `session_id` and `user_id` are the application's conversation and user. Search results leave `spans` empty and may give a preview of a long `request` or `response`; the trace's `martian.request_preview_truncated` or `martian.response_preview_truncated` metadata is then `"true"`, and reading the trace gives them whole; each turn of a conversation case has its own trace, with its conversation's session id. A span keeps its attributes as recorded; a store fills a trace's unset model, tokens, session, user and span kinds, inputs and outputs from them through the [trace conventions](evals-core.md#trace-conventions) mapping and names its version in the `martian.trace_mapping` metadata | Trace and spans; session and user are the `mlflow.trace.session` and `mlflow.trace.user` metadata MLflow tracing records |
-| `TraceQuery`, `Page` | Which traces to return (run, session, user, ids, text, states, tags, time window, order) and one page of any result with `next_cursor` | none |
+| `Trace`, `Span` | A recorded call to the thing under test, from an eval run or from live traffic, and the steps inside it. A case result is a trace of a run. `session_id` and `user_id` are the application's conversation and user. Search results leave `spans` empty and may give a preview of a long `request` or `response`; the trace's `martian.request_preview_truncated` or `martian.response_preview_truncated` metadata is then `"true"`, and reading the trace gives them whole; each turn of a conversation case has its own trace, with its conversation's session id. A span keeps its attributes as recorded; a store fills a trace's unset model, tokens, session, user and span kinds, inputs and outputs from them through the [trace conventions](evals-core.md#trace-conventions) mapping and names its version in the `martian.trace_mapping` metadata | Trace and spans; session and user are the `mlflow.trace.session` and `mlflow.trace.user` metadata MLflow tracing records, and the in-process binding keeps the model in `mlflow.trace.model` |
+| `TraceQuery`, `Page` | Which traces to return (run, session, user, model, ids, text, states, tags, time window, minimum latency, verdicts, order by time or latency) and one page of any result with `next_cursor`; a store filters and orders before it pages, and a page may hold fewer items than its `limit`, or none, and still have a `next_cursor`. `text` matches, ignoring case, a trace's name and its request and response up to 1,000 characters, or the first 997 of a longer one ([why](evals-core.md#the-in-process-binding)) | none |
 | `Session`, `SessionSearch` | A conversation: the traces that share a session id, each one a turn, with `turns`, `errors`, `started_at`, `last_at`, `preview` and `tokens`. A session search is the sessions among the first `limit` traces (1,000) a query matches, with `has_more`, `traces_examined` and `ungrouped`. Built from traces by `sessions_from_traces`, never stored | none (grouped from traces) |
 | `QueueItem` | One trace in a review queue and whether its review is done | Review queue item |
 | `ReviewQueue`, `ReviewQuestion` | Case results of one run handed to people, with the questions they answer | Labeling session and review schema |
@@ -81,17 +84,19 @@ and its data give them again on the next load.
 | `target.file`, `target.function` | `Target` of kind `function` |
 | `target.url`, `headers`, `body`, `response_path` | `Target` of kind `http`, the URL and header values as written |
 | `target.timeout_seconds` | `RunSettings.target_timeout_seconds`, for a function or an HTTP target |
-| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`, `calls`, `arguments_match`, `order`, `source`, `min_calls`, `max_calls`, `min_turns`, `max_turns`). A [`python` check](evals.md#custom-python-checks) is `kind: code`, type `python`, with `file` (as written, relative to the suite file), `function`, `min_score`, `max_score` and `security` in `parameters`: the model names the code and never holds it, and neither loading nor writing imports the file. A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same, and a tool-call check's `calls` keep theirs: a tool's name, an object with `name` and `arguments`, and in `tool_trajectory` a list for the calls of one model turn. `suite_file.CHECK_OPTIONS` lists which options each type takes |
+| Each entry of `checks`, in order | A `ScorerVersion` named by the check's label. `rubric`, `guidelines` and `conditions` are `kind: llm_judge` with their criteria in `criteria`; `groundedness`, `context_relevance` and `context_sufficiency` are `kind: llm_judge` with no criteria; the [conversation judges](evals.md#conversation-judges) `task_completion`, `policy_adherence` and `knowledge_retention` are `kind: llm_judge` with `scope: conversation`, and a `policy_adherence` check's `guidelines` are its `criteria.guidelines`; a judge check's `panel` is `ScorerVersion.panel`, a `PanelMember` for each model URI, in order, with no `model`; the other types are `kind: check` with the options they give in `parameters`, under the file's names (`values`, `expectation`, `any_of`, `case_sensitive`, `min_similarity`, `pattern`, `required_keys`, `schema`, `min_length`, `max_length`, `max_ms`, `max_usd`, `max_tokens`, `value`, `path`, `abs_tolerance`, `rel_tolerance`, `parts`, `add`, `subtract`, `total`, `key`, `columns`, `rows`, `kinds`, `allow`, `calls`, `arguments_match`, `order`, `source`, `min_calls`, `max_calls`, `min_turns`, `max_turns`). A [`python` check](evals.md#custom-python-checks) is `kind: code`, type `python`, with `file` (as written, relative to the suite file), `function`, `min_score`, `max_score` and `security` in `parameters`: the model names the code and never holds it, and neither loading nor writing imports the file. An [`installed` check](evals.md#installed-checks) is `kind: code`, type `installed`, named by its `name`, with its `options`, as written, in `parameters.options` and nothing else; writing always writes its `name`. Its `required: true` option, which makes it decide its case's status in a run ([required installed checks](evals-core.md#required-installed-checks)), is one of those options and not a field, so the model and the frozen contracts carry it unchanged. A figure (`value`, `abs_tolerance`, `rel_tolerance`, a cell of `rows`) keeps the form it is written in, a number or text such as `"1,234.56"`, so a written file says the same, and a tool-call check's `calls` keep theirs: a tool's name, an object with `name` and `arguments`, and in `tool_trajectory` a list for the calls of one model turn. `suite_file.CHECK_OPTIONS` lists which options each type takes |
 | A check's `combine` | `Suite.repeats.checks`, under the check's label. A check that names none has no entry: its rule is decided when the suite runs (`all` for a security check, else the suite's) |
-| A check's `scope` | `ScorerVersion.scope`; a check that names none is `turn` |
+| A check's `scope` | `ScorerVersion.scope`; a check that names none is `turn`, and a conversation judge must name `conversation` |
 | `repeats`, `combine` | `Suite.repeats.attempts`, `Suite.repeats.combine` |
-| `judge.model`, `judge.inference_params` | `model` and `parameters` of every `llm_judge` scorer |
+| `matrix` | `Suite.matrix`, as written: each axis a list of values or a mapping of names to values. `martian.evals.matrix.combinations` expands it; the URL target's `{{matrix.NAME}}` stays in `Target.body` unfilled |
+| `judge.model`, `judge.inference_params` | `model` of every `llm_judge` scorer without a panel, and `parameters` of every `llm_judge` scorer, panels included |
 | `judge.max_retries`, `judge.rate_limit_wait_seconds`, `judge.headers` | `RunSettings.judge_max_retries`, `judge_rate_limit_wait_seconds`, `judge_headers` (values as written) |
 | `simulator.model`, `simulator.inference_params` | `Suite.simulator`: its `model` and `parameters` |
 | `simulator.max_retries`, `simulator.rate_limit_wait_seconds`, `simulator.headers` | `RunSettings.simulator_max_retries`, `simulator_rate_limit_wait_seconds`, `simulator_headers` (values as written) |
 | `concurrency`, `batch`, `output` | `RunSettings.concurrency`, `batch`, `output` |
 | `mlflow.tracking_uri`, `mlflow.experiment` | `RunSettings.mlflow_tracking_uri`, `mlflow_experiment` |
 | `limits.max_seconds`, `limits.max_judge_tokens` | `RunSettings.limits` (`RunLimits`) |
+| `cache`, `cache.folder`, `cache.ttl_seconds`, `cache.functions` | `RunSettings.cache`, a `CacheSettings` with the fields the block gives; an empty block is a `CacheSettings` with none, which turns the cache on with its defaults. `cache.functions` is refused for a target that is not a function |
 | `input_key` | `Suite.input_key` |
 
 `RunSettings` holds only what the file sets, so an unset setting stays the runner's default and
@@ -100,13 +105,18 @@ lists every field, and a test fails when the runner accepts a field that has no 
 
 Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
 
-- a check option that does not apply to its type, such as `pattern` on `is_json`, and a `judge`
-  with no LLM judge check;
+- a check option that does not apply to its type, such as `pattern` on `is_json` or `panel` on
+  any check that is no LLM judge, a `judge` with no LLM judge check, and a `judge.model` when
+  every LLM judge check names its own `panel`;
 - a field of a JSONL case or of one of its turns that the runner does not read, or both `input`
   and `inputs` (or `output` and `outputs`) in one case or turn;
 - a conversation the suite cannot run: one in a suite without a target, a turn that names a check
   the suite does not have or one of scope `conversation`, or a conversation no check grades; and
-  `scope: conversation` on an LLM judge, `latency` or `cost`;
+  `scope: conversation` on an LLM judge other than a conversation judge, `latency` or `cost`;
+- a conversation judge the data cannot feed: one without `scope: conversation`, one in a suite
+  whose data has a case of one input, a `task_completion` judge with a scripted conversation whose
+  case gives no `expectations.goal`, and a `policy_adherence` judge with a conversation that has
+  no guidelines, its case's or the check's;
 - a simulated user the suite cannot run: one in a suite without a target or a `simulator`, one
   beside `input`, `inputs` or `turns`, a `simulated_user` field other than its four, and a check
   named `goal_reached`, the label of its goal verdict;
@@ -122,14 +132,17 @@ Nothing is dropped silently. Loading raises `ConfigError` naming the field for:
   [tool calls](evals.md#tool-calls-and-trajectories)), or a `python` check without a `file` and a
   `function`, or with a `min_score` above its `max_score`. Whether the function can be called is
   checked when a run starts, since that needs the file imported
-  ([custom Python checks](evals.md#custom-python-checks)).
+  ([custom Python checks](evals.md#custom-python-checks)); or an `installed` check without a
+  `name`, or with `options` that are not a mapping.
 
 Writing raises `ConfigError` for a suite the file cannot hold: no target (a file without one
 grades stored outputs, which is a `stored` target), an `agent` target, `policies` (in a file, a
 case passes when every check passes it), `human` scorers, `code` scorers other than a python check
-with its `file` and `function`, a pinned scorer `version`,
-`llm_judge` scorers with different models or parameters (a file has one judge), run settings
-for a target, judge or simulator the suite does not have (a time limit for stored outputs, a judge
+with its `file` and `function` or an installed check with its `options`, a pinned scorer `version`,
+`llm_judge` scorers without a panel on different models, or any `llm_judge` scorers with different
+parameters (a file has one judge), a panel member with an `endpoint` (a file's judges are all
+reached at `OPENAI_API_BASE`), run settings for a target, judge or simulator the suite does not
+have (a time limit for stored outputs, a judge
 token limit with no `llm_judge` scorer), and a suite with no `dataset_location`.
 `cases_to_jsonl` writes the `martian.group` tag as the row's `group`, a conversation's turns as
 its `turns` and a simulated user as its `simulated_user`, and refuses cases with any other `tags` or with `metadata`. The written text is then loaded again
@@ -139,6 +152,31 @@ and must give the same definition, so a field the writer does not know is refuse
 any case runs, and records the run through the model: a `Run` of the loaded `Suite`, and a
 `CaseResult` and `Score`s for each `results.jsonl` record
 ([command-line runs](evals-core.md#command-line-runs)).
+
+A suite with a matrix is recorded as one `Run` per combination, each with the same suite id and
+digest and its combination in `provenance.matrix`: `id` (such as `model=gpt-4o-mini,prompt=terse`,
+each axis's `axis=name` in the axes' alphabetical order), `values` (each axis's value name),
+`axes` (each axis's `name` and its values' names, in the file's order) and `invocation` (an id
+the runs of one `martian evals run` share). A run per combination, rather than one run with a
+combination on each case result, keeps every combination a run as the model and the evals
+core's typed run responses already have it, with its own counts, resume, repeats and baseline;
+a `CaseResult` has no field for a combination, and the contract's item responses none either.
+
+A combination's text values that are the text of a registered `PromptVersion`, by its digest,
+are named in the run's `provenance.prompts`: one entry per such axis, in the matrix's order, with
+`axis`, `value` (the value's name), and the version's prompt `name`, `version` and `digest`
+([prompt versions](evals.md#prompt-versions)). The suite file itself names no prompt version.
+
+A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on, from the suite file's
+`cache` or from `--cache`, has it in `provenance.cache`: `on` (`true`), `folder` (the cache's
+absolute path), `ttl_seconds` and `functions` from the start, then, once the run ends (finished,
+`stopped` at a limit or `cancelled`), `target` and
+`judge`, each that run's `hits`, `calls` and `stored`, or null when the suite makes no such call
+that the cache holds. The run routes show only `on`, `target` and `judge`: the folder is a path on
+the machine that ran the suite and stays in the data folder's record
+([run provenance](evals-core.md#run-provenance)). A replayed reply is a reply an earlier run received, so the provenance is
+where a reader of the run learns that it was not called fresh; `CaseResult` and `Score` carry
+nothing new.
 
 ## Local results
 
@@ -151,11 +189,12 @@ map. `martian evals run` records every case this way:
 | `id` | `CaseResult.case_id` |
 | `passed` | `CaseResult.status` (`true` passed, `false` failed, `null` error) |
 | `checks.<label>.passed`, `.rationale`, `.error` | One `Score` per label: `passed` and `value`, `rationale`, `error` |
+| `checks.<label>.metadata`, only for a panel check | The `Score`'s `metadata`: the panel's decision and each member's vote (`martian.panel.*`) |
 | `inputs` | `CaseResult.inputs` |
 | `output` | `CaseResult.output` |
 | `error` | `CaseResult.error` |
 | `fingerprint` | `CaseResult.fingerprint` |
-| `attempts`, only when the suite repeats its cases | `CaseResult.attempts`: each entry's `number`, `passed` (as `Attempt.status`), `checks` (one `CheckVerdict` per label), `output` and `error`, and a conversation's `session_id` and `turns` (`martian.evals.model.ATTEMPT_RECORD_FIELDS`) |
+| `attempts`, only when the suite repeats its cases | `CaseResult.attempts`: each entry's `number`, `passed` (as `Attempt.status`), `checks` (one `CheckVerdict` per label, a panel check's with its `metadata`), `output` and `error`, and a conversation's `session_id` and `turns` (`martian.evals.model.ATTEMPT_RECORD_FIELDS`) |
 | `session_id`, only for a conversation case | `CaseResult.session_id` |
 | `turns`, only for a conversation case | `CaseResult.turns`: each entry's `number`, `inputs`, `passed` (as `TurnResult.status`), `checks` (one `CheckVerdict` per label that grades the turn), `output` and `error` (`martian.evals.model.TURN_RECORD_FIELDS`). A turn's `expectations` come from the case, as the case result's do |
 | `simulated`, only for a case with a simulated user | `CaseResult.simulated`. Its goal verdict, `checks.goal_reached`, is one `Score` like any check's |
@@ -167,10 +206,16 @@ counts and `target_errors` are counted from scores and case results; `pass_rate`
 `repeats` is the run's `provenance.repeats`, and `attempts` and `reliability` are counted from
 the case results' attempts; `false_refusals`, for a suite with a policy check, is counted from
 the cases' `no_refusal` verdicts, with repeats their attempts combined
-([false refusals](evals.md#false-refusals)); with conversation cases, `conversations` and each check's `scope` and `turns`
+([false refusals](evals.md#false-refusals)); `cache`, with the cache on, is the run's
+`provenance.cache`; with conversation cases, `conversations` and each check's `scope` and `turns`
 are counted from the case results' turns ([conversations](evals.md#conversations)); with simulated users, `simulator` is the run's `provenance.simulator` (`model`, `parameters`, `version`), the persona source (the suite's `dataset_location` and the run's `provenance.dataset` digest), and the counts and pass rate of the `simulated` case results ([simulated users](evals.md#simulated-users)); `invalidated`, `seconds_this_run` and `output` describe that one local invocation and
 are not stored. A `results.jsonl` record has no `group`: the group belongs to the case, not to
 its result.
+
+A matrix run's `matrix.json` is derived too: each entry of `combinations` is one combination's
+run, its `id` and `values` that run's `provenance.matrix`, its `summary` that run's
+`summary.json`, and its `gate` follows from its counts and its comparison; `axes` is every run's
+`provenance.matrix.axes` ([what a matrix run writes](evals.md#a-matrix-of-prompts-and-models)).
 
 ## Inspect AI logs
 
@@ -215,6 +260,7 @@ Scores keep Inspect's values exactly, their types too:
 | `value` a dict | One `Score` per key, named `<scorer>/<key>`, as Inspect computes a metric per key; the key is in `metadata["inspect.key"]`. A key's `None` is a score with no value |
 | `value` a list | One `Score` per entry, named `<scorer>/<index>`, with `metadata["inspect.index"]` |
 | `value` NaN, Inspect's unscored value | A `Score` with no value, `error` `unscored` with Inspect's `reason` (such as `unscored: grader_failed`) and `metadata["inspect.value"]` `NaN`. For a dict-valued scorer, one for each key the scorer gives in other samples |
+| Two scores of one name and source on a sample, such as a code scorer named `tool_use/calls` beside the entry `calls` of the code scorer `tool_use` | The log is refused before anything is written: a case holds one score of a name and source |
 | `C`, `I`, `P`, `N` and booleans | `Score.passed`: `C` and `true` pass; `I`, `P` (partial credit) and `N` (no answer) and `false` fail. Numbers and other text have no verdict, and the value is kept as it is |
 | `explanation` | `Score.rationale` |
 | `answer`, `reason`, `metadata` (such as a model grader's `grading` transcript), `history` | `metadata["inspect.answer"]`, `["inspect.reason"]`, `["inspect.metadata"]`, `["inspect.history"]`, with the scorer's name in `["inspect.scorer"]` |
@@ -250,7 +296,7 @@ gives it, and records each provider in it as one run
 | A result's `provider` (`id`, `label`) | One `Run` per provider, with `provenance["promptfoo"]["provider"]`, the code `promptfoo-<label or id>-<n>`, and each trace's `model` the provider's id. `Run.target` is `stored` |
 | `results.timestamp`, `stats.durationMs` | `Run.created_at` and `started_at`; `finished_at` the timestamp plus the duration |
 | `config.description` | `Run.dataset_name`, else the file's name. `Run.dataset_digest` is the digest of the cases' ids, inputs and expectations, so two providers over the same tests compare |
-| A result (`testIdx`, `promptIdx`, `repeatIndex`) | A `CaseResult`, in test, prompt and repeat order, with `case_id` `test <testIdx + 1>`, `, prompt <promptIdx + 1>` when the file has several prompts, and ` (repeat <repeatIndex + 1>)` for a later repeat |
+| A result (`testIdx`, `promptIdx`, `promptId`, `repeatIndex`) | A `CaseResult`, in test, prompt and repeat order, with `case_id` `test <testIdx + 1>`, `, prompt <m>` when the file has several prompts, and ` (repeat <repeatIndex + 1>)` for a later repeat. `promptIdx` is a column per provider and prompt (with two prompts, the second provider's are 2 and 3), so `<m>` numbers the prompts instead: a column's prompt is its `promptId`, and a provider's second column with the same `promptId` (two prompts with one label) is another prompt. Prompts are numbered in the order of their first column, so the same test on the same prompt has one `case_id` under every provider |
 | `prompt.raw` (the rendered prompt), `vars` | `CaseResult.inputs.prompt` and `inputs.vars`; the prompt is the trace's request |
 | `testCase.assert` | `CaseResult.expectations.assert`; a grading `provider` given as an object is kept as its id only, here and in each score's metadata |
 | `response.output` | `CaseResult.output` and the trace's response |
@@ -298,9 +344,9 @@ first wrote.
 | An evaluation dataset | A `DatasetVersion` in the default project, where the core keeps the organisation's datasets, under the dataset's name (a second dataset of the same name with other content is its next version) |
 | A dataset record | A `Case`: `id` the record's id (`dr-...`), `inputs`, `expectations`, `outputs` (an empty one is none), `tags` but MLflow's own, and `metadata["mlflow_source.source"]` the record's source. A record without inputs is not copied, and reported |
 | An active run with traces, `FINISHED`, `FAILED` or `KILLED` | A `Run` of source `local` with a `stored` target and state `completed`, `failed` or `cancelled`. `id` MLflow's run id as the UUID it is; `code` `mlflow-` and the run's name; `dataset_name` its first dataset input; times MLflow's. A run still `RUNNING` or `SCHEDULED`, and a run without traces (only parameters and metrics), are not copied, and reported |
-| The run's traces (linked to it, or recorded in it: `mlflow.sourceRun`) | One `CaseResult` each, holding the trace. Its `case_id` is the id of the record with the same inputs when the run evaluated an evaluation dataset of the store, else `case-` and 12 hex digits of the inputs' digest, so runs over the same inputs pair; `inputs` and `output` the root span's; `expectations` the trace's expectations; `latency_ms` and `finished_at` the trace's. A trace that is a case of two runs belongs to the earlier one; the later one's case has no trace |
-| The case's scores | The trace's judge and code feedback that MLflow records as made in that run (`mlflow.assessment.sourceRunId`), or that names no run. The case's status follows them as for Inspect logs: `error` when the trace failed, `failed` when a score fails, `error` when one has an error, `passed` when one passes, else `skipped` |
-| `Run.scorers` | A `ScorerVersion` per score name, `kind` the score's source, `type` `mlflow`, `model` the judge's |
+| The run's traces (linked to it, or recorded in it: `mlflow.sourceRun`) | One `CaseResult` each, holding the trace. Its `case_id` is the id of the record with the same inputs when the run evaluated an evaluation dataset of the store, else `case-` and 12 hex digits of the inputs' digest, so runs over the same inputs pair; `inputs` and `output` the root span's; `expectations` the trace's expectations, the first of each name; `latency_ms` and `finished_at` the trace's. A trace that is a case of two runs belongs to the earlier one; the later one's case has no trace |
+| The case's scores | The trace's judge and code feedback that MLflow records as made in that run (`mlflow.assessment.sourceRunId`), or that names no run, each linked to its own copied assessment by name, source and `metadata["mlflow_source.assessment_id"]`, so feedback of one name from a scorer, a judge and a person stays three assessments. A case holds one score of a name and source: of two feedbacks of one name and source, such as two judges' both named `correct`, it keeps the first, and of two expectations of one name, the first; the trace keeps the others, and the copy reports each with its assessment id. The case's status follows its scores as for Inspect logs: `error` when the trace failed, `failed` when a score fails, `error` when one has an error, `passed` when one passes, else `skipped` |
+| `Run.scorers` | A `ScorerVersion` per score name and source, `kind` the score's source, `type` `mlflow`, `model` the judge's |
 | `Run.dataset_digest` | The digest of the cases' ids, inputs and expectations, so two runs over the same dataset compare |
 | `Run.truncated` | Fewer cases than the evaluated dataset's records |
 | The run's experiment, id, name, status, user, `mlflow.runType`, metrics, parameters, its own tags and its dataset inputs | `Run.provenance["mlflow"]`, with the store's URL (without a password) and its schema revision |
@@ -326,7 +372,7 @@ and are not copied; the report counts the first five.
 | `eval_judge_operations` | Registering a `ScorerVersion` |
 
 The column-by-column map lives with the tables, in `app/evals_model_map.py` in
-MorningHQ/MartianBackend, and a test there fails when an evals table or column has no entry. A
+MartianSecurity/MartianBackend, and a test there fails when an evals table or column has no entry. A
 column that is not model content names why: tenancy, request receipts, job custody, delivery to
 MLflow, or the dormant Langfuse columns. Tables with no model content at all (API keys, saved
 views, store bindings, migrations, delivery progress and CI gate sessions) are listed there too.
@@ -339,5 +385,6 @@ results are imported into them ([above](#inspect-ai-logs), [above](#promptfoo-re
 promptfoo config is converted into suite files ([converted configs](evals-core.md#converted-configs)),
 and MLflow tracking stores copied into them ([above](#mlflow-tracking-stores)). An organisation's [data export](data-export.md) is these
 objects' JSON, one per line. The evals core serves them
-(MorningHQ/martian-notes#98), and the server imports them when it mounts that core
-(MorningHQ/martian-notes#102).
+(MartianSecurity/martian-notes#98). The Martian server imports them: its store binding reads its
+MLflow projects and traces as these objects for the core routes it mounts
+([the Martian server](evals-core.md#the-martian-server)).

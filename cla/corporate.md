@@ -105,7 +105,7 @@ if there is no concurrent software grant.
 ## How to sign
 
 A person authorized to sign for the Corporation opens a pull request to
-[MorningHQ/martian-redteam](https://github.com/MorningHQ/martian-redteam), from their own GitHub
+[MartianSecurity/martian-redteam](https://github.com/MartianSecurity/martian-redteam), from their own GitHub
 account, that adds the Corporation to [corporations.md](corporations.md) with this entry filled
 in:
 

@@ -1,4 +1,4 @@
-"""The worker's limits (MorningHQ/martian-notes#144): every target call has a time limit, a function
+"""The worker's limits (MartianSecurity/martian-notes#144): every target call has a time limit, a function
 that blocks or never returns included, and a run or scoring job stops at its time or judge token
 limit, keeps what it finished, and resumes after it. A fake agent and a deterministic judge stand
 in for the target and the model; nothing calls a model or a network target."""
@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import dataclasses
 import re
+import threading
 import time
 from typing import Any
 
@@ -42,27 +43,36 @@ def stored_run(served: Served, run_id: str):
 
 
 def test_a_function_that_blocks_or_never_returns_is_a_timed_out_case_and_the_run_finishes(records):
+    # The hung cases stay hung until the test ends, and note when they return.
+    release, returned = threading.Event(), []
+
     async def hung(case):
         if case.id == "faq-1":
-            time.sleep(6)  # blocks whichever event loop runs it
+            release.wait(120)  # blocks whichever event loop runs it
         if case.id == "faq-2":  # ignores being cancelled, for long after its deadline
-            for _ in range(16):
+            for _ in range(2400):
+                if release.is_set():
+                    break
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.05)
+        if case.id in ("faq-1", "faq-2"):
+            returned.append(case.id)
         return await agent(case)
 
     client, served = serve(MemoryStore(), records, targets={AGENT: hung}, target_timeout_seconds=0.3)
     with client:
-        started = time.monotonic()
-        run = served.launch()
-        served.drain()
-        elapsed = time.monotonic() - started
-        run = served.call("GET", f"/v1/evals/{run['id']}", 200)
+        try:
+            run = served.launch()
+            served.drain()
+            # The run ended while both cases were still hung: it waited for neither.
+            assert returned == []
+            run = served.call("GET", f"/v1/evals/{run['id']}", 200)
+        finally:
+            release.set()
     # Each hung case ends at its deadline as an error, and the run goes on to its end.
     assert (run["state"], run["errored"], run["skipped"]) == ("completed", 2, 1)
     assert items(run)["faq-1"] == ("error", "item timed out")
     assert items(run)["faq-2"] == ("error", "item timed out")
-    assert elapsed < 5, elapsed
 
 
 def test_a_run_stops_at_its_time_limit_and_resumes_after_its_finished_cases(records, monkeypatch):

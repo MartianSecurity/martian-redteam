@@ -16,6 +16,8 @@ from martian.evals.model import (
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     ReviewQuestion,
     ReviewQueue,
@@ -28,9 +30,22 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    prompt_digest,
+    query_keeps,
+    query_order,
     sessions_from_traces,
 )
-from martian.evals.store import StoreError, StoreStatus, check_session_search
+from martian.evals.store import (
+    TRACE_DELETE_LIMIT,
+    StoreError,
+    StoreStatus,
+    check_imported_prompt,
+    check_prompt,
+    check_session_search,
+    check_trace_deletion,
+    cursor_offset,
+    text_matches,
+)
 from martian.evals.trace_conventions import map_trace
 
 if TYPE_CHECKING:
@@ -53,7 +68,7 @@ def _new_id(prefix: str) -> str:
 
 
 def _page[T](items: list[T], cursor: str | None, limit: int) -> Page[T]:
-    start = int(cursor) if cursor and cursor.isdigit() else 0
+    start = cursor_offset(cursor)
     chunk = items[start : start + limit]
     return Page[T](items=chunk, next_cursor=str(start + limit) if start + limit < len(items) else None)
 
@@ -70,6 +85,7 @@ class MemoryStore:
         self._traces: dict[tuple[str, str, str], Trace] = {}
         self._scores: dict[tuple[str, str, str], list[Score]] = {}
         self._scorers: dict[tuple[str, str, str], list[ScorerVersion]] = {}
+        self._prompts: dict[tuple[str, str], tuple[Prompt, list[PromptVersion]]] = {}
         self._questions: dict[tuple[str, str, str], ReviewQuestion] = {}
         self._queues: dict[tuple[str, str, str], ReviewQueue] = {}
         self._items: dict[tuple[str, str, str], dict[str, QueueItem]] = {}
@@ -251,26 +267,23 @@ class MemoryStore:
                 continue
             if query.user_id is not None and trace.user_id != query.user_id:
                 continue
+            if query.model is not None and trace.model != query.model:
+                continue
             if query.trace_ids and trace.id not in query.trace_ids:
                 continue
             if query.states and trace.state not in query.states:
                 continue
             if any(trace.tags.get(key) != value for key, value in query.tags.items()):
                 continue
-            if query.text and query.text.lower() not in f"{trace.name}\n{trace.request}\n{trace.response}".lower():
+            if query.text and not text_matches(query.text, trace.name, trace.request, trace.response):
                 continue
             when = trace.request_time
             if query.since is not None and (when is None or when < query.since):
                 continue
             if query.until is not None and (when is None or when >= query.until):
                 continue
-            found.append(trace)
-        epoch = datetime.min.replace(tzinfo=UTC)
-        found.sort(key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
-        return [
-            t.model_copy(update={"spans": [], "scores": self._scores.get((space, query.project_id, t.id), [])})
-            for t in found
-        ]
+            found.append(trace.model_copy(update={"spans": [], "scores": self._scores.get((space, p, trace.id), [])}))
+        return query_order([t for t in found if query_keeps(t, query)], query)
 
     async def search_traces(self, principal: Principal, query: TraceQuery) -> Page[Trace]:
         return _page(self._matching(principal, query), query.cursor, query.limit)
@@ -301,6 +314,36 @@ class MemoryStore:
         traces = [self._trace(principal, project_id, trace_id) for trace_id in trace_ids]
         for trace in traces:
             self._traces[(_space(principal), project_id, trace.id)] = trace.model_copy(update={"run_id": run_id})
+
+    def _delete(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        """Remove the traces the project holds, with their scores and their review queue items."""
+        space = _space(principal)
+        deleted = [t for t in dict.fromkeys(trace_ids) if self._traces.pop((space, project_id, t), None) is not None]
+        for trace_id in deleted:
+            self._scores.pop((space, project_id, trace_id), None)
+        for (s, p, _), items in self._items.items():
+            if s == space and p == project_id:
+                for trace_id in deleted:
+                    items.pop(trace_id, None)
+        return deleted
+
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        check_trace_deletion(trace_ids=trace_ids)
+        self._project(principal, project_id)
+        return self._delete(principal, project_id, trace_ids)
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        check_trace_deletion(limit=limit)
+        self._project(principal, project_id)
+        space = _space(principal)
+        older = sorted(
+            (trace.request_time, trace.id)
+            for (s, p, _), trace in self._traces.items()
+            if s == space and p == project_id and trace.request_time is not None and trace.request_time < before
+        )
+        return self._delete(principal, project_id, [trace_id for _, trace_id in older[:limit]])
 
     # --- scores ------------------------------------------------------------------------------
 
@@ -338,6 +381,70 @@ class MemoryStore:
     async def scorer_versions(self, principal: Principal, project_id: str, name: str) -> list[ScorerVersion]:
         self._project(principal, project_id)
         return list(self._scorers.get((_space(principal), project_id, name), []))
+
+    # --- prompts -----------------------------------------------------------------------------
+
+    async def create_prompt(self, principal: Principal, name: str, *, description: str = "") -> Prompt:
+        check_prompt(name, description=description)
+        prompt = Prompt(name=name, description=description, created_at=_now(), created_by=principal.user_id)
+        key = (_space(principal), name)
+        if (existing := self._prompts.get(key)) is not None:
+            if existing[0].description != description:
+                raise StoreError("conflict", "a prompt with this name already exists")
+            return existing[0]
+        self._prompts[key] = (prompt, [])
+        return prompt
+
+    async def get_prompt(self, principal: Principal, name: str) -> Prompt | None:
+        found = self._prompts.get((_space(principal), name))
+        return None if found is None else found[0]
+
+    async def list_prompts(self, principal: Principal) -> list[Prompt]:
+        space = _space(principal)
+        return sorted((p for (s, _), (p, _) in self._prompts.items() if s == space), key=lambda p: p.name)
+
+    async def add_prompt_version(
+        self, principal: Principal, name: str, text: str, *, message: str = ""
+    ) -> PromptVersion:
+        check_prompt(name, text, message=message)
+        versions = self._prompt_versions(principal, name)
+        version = PromptVersion(
+            name=name,
+            version=len(versions) + 1,
+            text=text,
+            digest=prompt_digest(text),
+            message=message,
+            created_at=_now(),
+            created_by=principal.user_id,
+        )
+        versions.append(version)
+        return version
+
+    async def prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        return list(self._prompt_versions(principal, name))
+
+    async def find_prompt_versions(self, principal: Principal, digest: str) -> list[PromptVersion]:
+        space = _space(principal)
+        found = [v for (s, _), (_, versions) in self._prompts.items() if s == space for v in versions]
+        return sorted((v for v in found if v.digest == digest), key=lambda v: (v.created_at or _now(), v.name))
+
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        check_imported_prompt(prompt, versions)
+        key = (_space(principal), prompt.name)
+        if key in self._prompts:
+            raise StoreError("conflict", "a prompt with this name already exists")
+        now = _now()
+        kept = [v.model_copy(update={"created_at": v.created_at or now}) for v in versions]
+        self._prompts[key] = (prompt.model_copy(update={"created_at": prompt.created_at or now}), kept)
+        return list(kept)
+
+    def _prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        found = self._prompts.get((_space(principal), name))
+        if found is None:
+            raise StoreError("not_found", "prompt not found")
+        return found[1]
 
     # --- review questions and queues --------------------------------------------------------
 

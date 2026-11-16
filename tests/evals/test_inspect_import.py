@@ -342,6 +342,54 @@ def test_chat_inputs_choices_and_the_single_scorer_placeholder(tmp_path):
     assert {name: a["value"] for name, a in scores_of(client, run.id)["capital"].items()} == {"includes": "C"}
 
 
+def test_same_named_scores_of_different_sources_link_to_their_own_assessments(tmp_path):
+    # tool_use's dict entry `calls` is the code score tool_use/calls; a scorer of that very name
+    # that grades with a model gives a judge's score of the same name on the same sample.
+    def change(log):
+        sample = next(s for s in log["samples"] if s["id"] == "sum")
+        sample["scores"]["tool_use/calls"] = {"value": 3, "explanation": "three calls"}
+        begin = next(e for e in sample["events"] if e.get("event") == "span_begin" and e.get("type") == "scorer")
+        model = next(e for e in sample["events"] if e.get("event") == "model")
+        sample["events"] += [
+            {**begin, "id": "judge-span", "name": "tool_use/calls"},
+            {**model, "span_id": "judge-span", "uuid": "judge-call"},
+        ]
+
+    run = import_inspect_log(write_log(tmp_path, change), tmp_path / "evals-home")
+    client = local_ui(tmp_path / "evals-home")
+    case = items_of(client, run.id)["sum"]["id"]
+    scores = [
+        a
+        for a in client.get(f"/v1/evals/{run.id}/workbench").json()["assessments"]
+        if (a["item_id"], a["name"]) == (case, "tool_use/calls")
+    ]
+    assert sorted((a["source"], a["value"]) for a in scores) == [("CODE", 1), ("LLM_JUDGE", 3)]
+    trace = client.get(f"/v1/evals/{run.id}/items/{case}/trace").json()
+    stored = {
+        a["assessment_id"]: (a["source"]["source_type"], a["feedback"]["value"])
+        for a in trace["annotations"]
+        if a["assessment_name"] == "tool_use/calls"
+    }
+    assert {stored[a["native_id"]] for a in scores} == {("CODE", 1), ("LLM_JUDGE", 3)}
+
+
+def test_two_scores_of_one_name_and_source_on_a_sample_refuse_the_log_before_anything_is_written(tmp_path):
+    # tool_use's dict entry `calls` is the code score tool_use/calls; a scorer of that very name
+    # that grades without a model is a second code score of the same name on the same sample.
+    def change(log):
+        sample = next(s for s in log["samples"] if s["id"] == "sum")
+        sample["scores"]["tool_use/calls"] = {"value": 3, "explanation": "three calls"}
+
+    path = write_log(tmp_path, change)
+    with pytest.raises(
+        InspectLogError,
+        match=r"sample sum has two code scores named tool_use/calls: the entry calls of the scorer tool_use and "
+        r"the scorer tool_use/calls; a case holds one score of a name and source",
+    ):
+        import_inspect_log(path, tmp_path / "evals-home")
+    assert not (tmp_path / "evals-home").exists()
+
+
 def eval_archive(folder: Path, entries: dict[str, object], name="log.eval") -> Path:
     """An .eval log as older Inspect versions wrote it, with Deflate entries."""
     path = folder / name

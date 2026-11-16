@@ -94,7 +94,7 @@ title, and interest in and to Your Contributions.
 ## How to sign
 
 Sign this Agreement on a pull request to
-[MorningHQ/martian-redteam](https://github.com/MorningHQ/martian-redteam), from the GitHub
+[MartianSecurity/martian-redteam](https://github.com/MartianSecurity/martian-redteam), from the GitHub
 account the pull request's commits belong to, by posting this comment with nothing else in it:
 
 ```text

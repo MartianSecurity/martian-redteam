@@ -42,11 +42,12 @@ concurrency: 4
 output: results
 ```
 
-Nothing in this command contacts the Martian platform. A function target runs in your process,
-a URL target is called from it, the judge calls the model you name with credentials from your
-environment, MLflow's evaluation harness writes to a local store in the output folder, and the
-run is recorded in the data folder of the
-[local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
+Nothing in this command contacts the Martian platform. A function target runs in a process of
+its own, which the command starts and ends and which cannot reach how it is graded (**The target
+never sees how it is graded**, below), a URL target is called from the command's process, the
+judge calls the model you name with credentials from your environment, MLflow's evaluation
+harness writes to a local store in the output folder, and the run is recorded in the data folder
+of the [local Evals UI](evals-core.md#the-local-edition-martian-ui) on this machine. Use
 [`martian ci`](sdk-and-ci.md) when a result must be recorded on the platform.
 
 **Data file.** JSONL takes one object per line: `input` (a string) or `inputs` (an object passed
@@ -85,9 +86,12 @@ target:
   `{{inputs.NAME}}` is one value of its `inputs` object, and `{{uuid}}` is a new random ID.
   `{{session_id}}`, `{{history}}` and `{{messages}}` carry a [conversation](#conversations): its
   id, its earlier turns, and those turns with this one's user message; in a case of one input they
-  are a new ID, an empty list and that one message. A value that is only a placeholder keeps its
+  are a new ID, an empty list and that one message. `{{matrix.NAME}}` is the value of the
+  axis NAME of the suite's [matrix](#a-matrix-of-prompts-and-models). A value that is only a placeholder keeps its
   type, so a number stays a number and `{{messages}}` a list. The body must use `{{input}}`,
-  `{{inputs.NAME}}` or `{{messages}}`.
+  `{{inputs.NAME}}` or `{{messages}}`. Any other placeholder is refused when the suite loads; one
+  that names the case's expectations or outputs, such as `{{expectations.answer}}` or
+  `{{expected_response}}`, is refused with an error saying they are never sent to the target.
 - **Secrets stay in your environment.** `${NAME}` in `url` or a header value is replaced from
   the environment when the suite loads; a missing variable stops the run before any case, with
   an error naming the setting that needs it, such as `target.headers.Authorization needs the
@@ -103,7 +107,9 @@ target:
   `results.jsonl` holds the reason, and the command prints how many cases failed for each
   reason. The reason is the SDK's own wording: it never includes the address, a header or the
   response body. A function target reports only `the target call failed`, because its
-  exception comes from your code, or `the target did not answer within target.timeout_seconds`.
+  exception comes from your code, `the target did not answer within target.timeout_seconds`,
+  `the target returned <type>, which is not JSON; return text, a number, a list or a dict`, or
+  `the target's process ended before it answered`.
 
   | Reason | Usual cause |
   | --- | --- |
@@ -120,28 +126,78 @@ A URL target cannot be combined with `file` or `function`. Use a function target
 agent needs anything else: another HTTP method, a non-JSON body, a multi-step call, or a
 secret in the body.
 
+**The target never sees how it is graded.** An agent under test may look for its answers, or
+change its results, if it can reach them. So a target is given each case's inputs and nothing
+else: a function target as keyword arguments, a URL target in the body its placeholders fill. A
+[conversation](#conversations)'s turn also gives it the conversation so far: its history and its
+session id, of which a function target gets those its parameters name, read in its own process. The
+expectations, the checks and their criteria, a `python` check's code, the results and the stores
+stay in the command's process and files. A function target runs in a process of its own, started
+with the run (`python -P`), which imports the target there and never in the command's process:
+
+- **Its memory holds no run.** The command sends it only inputs, and reads back only its reply.
+- **On Linux, the run's files are hidden from it**, with Landlock (kernel 5.13 or later, enabled by
+  default on current distributions), before it imports the target, and from every process it
+  starts: the suite file, the data file, each `python` check's file and the `__pycache__` folder
+  beside it, the output folder with `results.jsonl` and `mlflow.db`, a local SQLite or file
+  `mlflow.tracking_uri`, the local Evals UI's data folder, and the suite file's own `cache.folder`
+  when the run uses the [cache](#a-cache-of-model-calls), which holds the judges' stored
+  judgments. It cannot read, change, create,
+  rename or remove them, cannot create or remove anything directly in the folders that hold them,
+  such as the suite file's own folder, and cannot read the command's memory. It can list the names
+  in those folders, read the other files there, such as its own modules, and use any other file
+  and the network as your user can. On macOS and Windows, or a kernel without Landlock, the files
+  are not hidden: the command prints why, and `target_isolation` in `summary.json` records it.
+- **Its environment has no `MARTIAN_*` variables** and none of MLflow's tracking, experiment,
+  registry, run or workspace variables, so it is not told where the run or its stores are.
+  `TMPDIR` is a folder of its own, removed with the process, and `MLFLOW_TRACKING_URI` names a
+  store in that folder, so the target's own MLflow calls stay there. Every other variable, such as
+  your agent's model key, is as the command has it.
+- **It runs as before otherwise**: in the command's working folder with the command's import path,
+  each call on a thread of its own, with module-level state shared by the run's calls. When its
+  module imports MLflow or a library MLflow's autologging traces, such as the OpenAI or Anthropic
+  client, its spans and the autologged ones are added to each case's trace, so tool-call and cost
+  checks read them as before. A library it imports only inside the function is not traced.
+
+What it costs: the reply crosses from the target's process as JSON, so a function target returns
+text, a number, a list or a dict; the process takes about half a second to start, and a few
+seconds more when it loads MLflow for a target's spans, before the run's first call; and a target
+that writes files beside itself must write them in a subfolder or the temporary folder. A target whose own file is inside one of the hidden paths,
+such as the output folder, is refused before any case. What each kind of target can reach, in
+`martian evals run`, the pytest gate and the evals core's worker, is in
+[the target and the grader](security-and-data.md#the-target-and-the-grader).
+
 **Checks.** `rubric`, `guidelines` and `conditions` are the [LLM judges](#local-response-guideline-judge)
-graded by your criteria, and `groundedness`, `context_relevance` and `context_sufficiency` the
+graded by your criteria, `groundedness`, `context_relevance` and `context_sufficiency` the
 [grounding judges](#grounding-and-retrieval-judges), which grade each case's documents in
-`inputs.context` and take no options; `python` names a Python function of your own, in a file
-beside the suite file ([custom Python checks](#custom-python-checks)); every other type is one of
+`inputs.context` and take no options, and `task_completion`, `policy_adherence` and
+`knowledge_retention` the [conversation judges](#conversation-judges), which read a whole
+[conversation](#conversations); `python` names a Python function of your own, in a file
+beside the suite file ([custom Python checks](#custom-python-checks)); `installed` names a check
+that an edition's worker installs, which `martian evals run` cannot run
+([installed checks](#installed-checks)); every other type is one of
 the twenty-eight [deterministic checks](#deterministic-checks), each with its options and an
 example, five of them the [policy checks](#policy-checks) for prohibited phrases, personal data,
 secrets, planted instructions and refusals, and four the
 [tool-call checks](#tool-calls-and-trajectories) of the tools an agent called, with what
 arguments, in which order and in how many steps. Criteria written in the suite file apply to every
 case that does not carry its own in `expectations`. Use at most one check of each judge type, and
-give repeated check types a `name`. A check's `scope`, `turn` (the default) or `conversation`, says
-whether it grades each turn of a [conversation](#conversations) or the conversation once.
+give repeated check types a `name`. A judge check can name a `panel` of judge models in place of
+`judge.model` ([a panel of judges](#a-panel-of-judges)). A check's `scope`, `turn` (the default)
+or `conversation`, says whether it grades each turn of a [conversation](#conversations) or the
+conversation once.
 
 **Results.** The output folder receives:
 
 | File | Content |
 | --- | --- |
 | `results.jsonl` | One record per case: verdict, each check's verdict and reason, inputs, the reply, and a fingerprint of what produced the verdict. With [repeats](#repeated-attempts), also every attempt. A [conversation](#conversations) has its session id and every turn in place of inputs, and a [simulated](#simulated-users) one `simulated: true` |
-| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); and how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts |
+| `summary.json` | Counts of passed, failed and errored cases, overall and per check, each with its `pass_rate` and `confidence_95` (`[low, high]`, `null` when no case has a verdict); `groups`, the number of case groups the data file names (`null` for none); how many cases failed for each target error (`target_errors`) and, per check, for each reason a check gave no verdict, such as a judge setting to fix (`check_errors`); how many earlier results were discarded (`invalidated`); how many cases the run stopped before (`not_run`), with the limit it reached (`stopped`) or `cancelled`; the tokens its model calls used (`tokens_this_run`, [below](#run-a-suite-file-locally)); for a function target, `target_isolation`: whether the run's files were hidden from it (`files_hidden`) and, when not, why (`reason`); `null` for a URL target or stored outputs. A suite with a [policy check](#false-refusals) also has `false_refusals`: how many of its benign cases were refused. With repeats, also `repeats`, `attempts` and `reliability`; with conversation cases, `conversations`; with simulated users, `simulator`, the simulator's setup and the simulated cases' own counts; with the [cache](#a-cache-of-model-calls) on, `cache`: how many replies came from it |
 | `junit.xml` | The same verdicts for CI systems: a failed check is a failure, and a case with no verdict, or one the run stopped before, an error. The testsuite's `properties` hold the pass rates and their intervals, overall (`pass_rate`, `pass_rate_95_low`, `pass_rate_95_high`) and per check (`check.<label>.pass_rate`, …), `case_groups` when the data names groups, and with repeats `repeats` and each check's rule (`check.<label>.combine`) |
 | `mlflow.db` | MLflow's own store for its evaluation harness: one MLflow evaluation run per batch, with each case's trace and the scorers' assessments. Not written when `mlflow.tracking_uri` names your own server |
+| `verdicts.json` | Each case's id, verdict, target error and check verdicts, a digest of its inputs and expectations, a digest of each check's definition, and the names of the security checks: what a later run [compares with](#comparing-with-a-baseline). No input, reply or judge reason; a failed check keeps its reason only when the SDK writes it from counts, sizes or names |
+| `comparison.json` | With `--baseline` only: the run compared with the baseline ([comparing with a baseline](#comparing-with-a-baseline)). A run without one removes an earlier run's |
+| `matrix.json` | A suite with a [matrix](#a-matrix-of-prompts-and-models) only: one entry per combination, whose own files are in a folder of its own. A run without a matrix removes an earlier run's |
 
 `results.jsonl` holds your prompts and replies in clear text. Keep it out of shared artifacts if
 they are sensitive. The command also prints a table of the counts and each pass rate with its
@@ -150,16 +206,24 @@ the [reliability](#reliability-and-flaky-cases) and flaky cases, and for a run t
 cases it did not run in the table's title; under it, the false-refusal rate for a suite with a
 policy check, the reasons cases had no verdict, and the limit a stopped run reached. It exits `0`
 when every case passed, `1` when a case failed, and `2` when a case has no verdict, the run
-stopped before a case, or the suite file is invalid.
+stopped before a case, or the suite file is invalid. With `--baseline`, `1` means instead that the
+change is worse than noise, that a case newly failed a security check, or that a case with no
+result in the baseline failed.
 
 **Options.** `--output DIR`, `--concurrency N`, `--limit N`, `--repeats N`, `--fresh`,
-`--data-dir DIR`, `--max-seconds N` and `--max-judge-tokens N`. A run that is stopped can be
-started again: finished cases are skipped, and cases that errored are tried again. `--repeats`
-runs each case N times, 1 to 100, in place of the suite file's `repeats`
-([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--data-dir` names
-the local Evals UI's data folder the run is recorded in, as for `martian ui`; without it,
-`MARTIAN_EVALS_HOME`, else `~/.martian/evals`. `--max-seconds` and `--max-judge-tokens` replace
-the suite file's `limits`, below.
+`--cache` or `--no-cache`, `--baseline DIR`, `--data-dir DIR`, `--max-seconds N` and
+`--max-judge-tokens N`. A run that is
+stopped can be started again: finished cases are skipped, and cases that errored are tried again.
+`--repeats` runs each case N times, 1 to 100, in place of the suite file's `repeats`
+([repeated attempts](#repeated-attempts)). `--fresh` discards earlier results. `--cache` replays
+the target's and the judges' replies an earlier run stored for the same request, and
+`--no-cache` turns a suite file's `cache` block off ([a cache of model calls](#a-cache-of-model-calls)).
+`--baseline`
+compares the run with an earlier run's output folder and gates on the comparison
+([comparing with a baseline](#comparing-with-a-baseline)). `--data-dir` names the local Evals
+UI's data folder the run is recorded in, as for `martian ui`; without it, `MARTIAN_EVALS_HOME`,
+else `~/.martian/evals`. `--max-seconds` and `--max-judge-tokens` replace the suite file's
+`limits`, below.
 
 **Time limits and budgets.** Every target call has a time limit, and so does the run:
 
@@ -169,27 +233,43 @@ target:
   timeout_seconds: 60        # each call, function or URL target; default 120
 limits:
   max_seconds: 1800          # the run's wall time
-  max_judge_tokens: 200000   # the tokens its LLM judges may use, input and output together
+  max_judge_tokens: 200000   # the tokens its LLM judges and simulated users may use together
 ```
 
 - **A target call that outlasts `timeout_seconds`** is that case's error, `the target did not answer
-  within target.timeout_seconds`, and the run goes on. A function target runs on a thread of its
-  own, so a function that hangs cannot hold up the run; Python cannot stop a thread, so the
-  function keeps running in the background until it returns or the command ends. A URL target's
-  call ends there too, even when the server sends its reply a little at a time.
+  within target.timeout_seconds`, and the run goes on. A function target's process runs each call
+  on a thread of its own, so a function that hangs cannot hold up the run; Python cannot stop a
+  thread, so the function keeps running in that process until it returns or the run ends, which
+  ends the process. A URL target's call ends there too, even when the server sends its reply a
+  little at a time. The limit starts once the target's process has imported the target.
 - **A run that reaches a limit stops.** It calls no more targets, the cases in flight finish, and
   the cases it finished are kept in `results.jsonl` and the local Evals UI. The others have no
   result: `summary.json` counts them as `not_run` and names the limit under `stopped`, the command
   prints the limit and exits `2`, and the run shows as **stopped** in the UI with the limit as its
   error. Limits are checked before each batch and before each target call. A batch's judges finish
-  once it has started, so a run can go past `max_judge_tokens` by up to one batch; lower `batch`
-  for a closer bound.
+  once it has started, and a simulated user's reply counts when it comes back, so a run can go past
+  `max_judge_tokens` by up to one batch's judgments, or one reply of each simulated conversation in
+  flight; lower `batch` for a closer bound.
 - **To resume**, run the same command again, with a higher limit or none: the cases it finished are
   skipped, as for any stopped run. Each run has its limits afresh.
-- **Judge tokens** are the usage the judge's provider reports with each verdict. A provider that
-  reports none leaves the limit unkeepable, so with `max_judge_tokens` set the run stops after that
-  batch, and says so. A judge call that fails reports nothing and counts nothing.
-  `max_judge_tokens` needs an LLM judge check.
+- **In the Evals UI** the **Run eval** dialog sets the same two limits for a run it launches
+  (`limits` in the launch body of `POST /v1/evals`, [write routes](evals-core.md#write-routes)),
+  and a stopped run shows the limit it reached and a **Resume** action (`POST
+  /v1/evals/{run_id}/resume`, optionally with new limits), which goes on after the cases the run
+  finished. Without limits of its own, a run launched from the UI has the server's.
+- **What `max_judge_tokens` counts.** Every model call the run makes on the judges' provider path:
+  each LLM judge's verdict and each reply of a [simulated user](#simulated-users), input and
+  output together, as the provider reports them. A provider that reports none leaves the limit
+  unkeepable, so with `max_judge_tokens` set the run stops after that batch, or before the turn
+  that simulated user wrote is sent, and says which of the two reported none. A call that fails
+  reports nothing and counts nothing, and a judgment replayed from the
+  [cache](#a-cache-of-model-calls) counts 0: it made no call. When the run stops there, the message
+  counts the simulated users' tokens apart from the judges', such as `Stopped at its judge token
+  limit (max_judge_tokens 45) after 60 tokens (0 by its judges, 60 by its simulated users)`.
+  `max_judge_tokens` needs an LLM judge check or a simulated user.
+- **Tokens used.** `summary.json` has `tokens_this_run`: the tokens of this run's `judges` and,
+  with simulated users, of its `simulator`, each `null` when one of its calls reported none. A
+  resumed run counts only its own calls, as `seconds_this_run` counts only its own time.
 - **Cancelling** the run in `martian ui` while the command runs stops it the same way, before its
   next case, as **cancelled**; the command checks for it every second.
 - **With [repeats](#repeated-attempts)**, each attempt's call has the target's time limit, and a
@@ -197,22 +277,24 @@ limits:
   ([limits and repeats](#limits-and-repeats)).
 
 **On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
-comment on the pull request with the result, still with no Martian account. See
+comment on the pull request with the result, still with no Martian account, and can compare each
+pull request with the last result of `main`. See
 [gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
 inputs, expectations and stored output, the number of attempts and the rule each check's attempts
-combine by ([repeated attempts](#repeated-attempts)), a conversation's turns and each check's
-scope ([conversations](#conversations)), a simulated user and the simulator's `model` and
+combine by ([repeated attempts](#repeated-attempts)), the values of its combination of the
+[matrix](#a-matrix-of-prompts-and-models), a conversation's turns and each check's scope
+([conversations](#conversations)), a simulated user and the simulator's `model` and
 `inference_params` ([simulated users](#simulated-users)), and the SDK version. A function target
 and a [`python` check](#custom-python-checks) count by the contents of their files. When any of
 these changes, the case is graded again, and the run prints how
 many earlier results it discarded. Changing `concurrency`, `batch`, `output`, `judge.max_retries`,
 `judge.rate_limit_wait_seconds`, `judge.headers`, `timeout_seconds`, `limits`, the judge's key and
-address in the environment, or the MLflow location keeps earlier results. The SDK cannot see
-changes in modules the target or scorer files import, or in the service behind a URL target: use
-`--fresh` after those.
+address in the environment, the MLflow location or the [cache](#a-cache-of-model-calls) keeps
+earlier results. The SDK cannot see changes in modules the target or scorer files import, or in
+the service behind a URL target: use `--fresh` after those.
 
 **The local Evals UI.** Every suite-file run is recorded in the local Evals UI's data folder, and
 `martian ui` opens the Evals UI on it, with no login and no other service
@@ -281,6 +363,291 @@ results, with a message naming the setting to check, and the rest of the run car
 `martian evals run tests/evals -q`, with a path that is not a suite file, still runs pytest with
 the eval gate described below.
 
+### Push runs to a server
+
+`martian evals push` sends the local Evals UI's finished runs to a Martian server, each with its
+case results, scores, scoring jobs and traces, so your team sees them there as you see them in
+`martian ui`. It signs in as `martian ci` does: `MARTIAN_API_URL` is the server's origin and
+`MARTIAN_API_TOKEN` an organisation API key with `evals:write`
+([one customer connection](sdk-and-ci.md#one-customer-connection)).
+
+```bash
+export MARTIAN_API_URL=https://martian.example.com MARTIAN_API_TOKEN=...
+martian evals push                       # every finished run in the data folder
+martian evals push evals-3 EV-1002       # these runs, by code or id
+martian evals push --data-dir ./evals-data
+```
+
+```text
+Pushed 3 runs to https://martian.example.com (Acme): 2 new, 1 there already.
+  evals-3: 12 of 12 cases sent, 12 traces
+  EV-1002: 40 of 40 cases sent, 40 traces
+  evals-2: 0 of 5 cases sent, 0 traces
+```
+
+Run it as often as you like. The server keeps one of everything, so pushing again sends only what
+it lacks, such as a run since or a scoring job that has finished, and a push that was interrupted
+continues where it stopped (exit code `130` for Ctrl+C, `2` for a server it could not reach: run
+the same command again). A run still running is left for a later push. Runs of the default project
+go with any key that may write evals; a run of another project creates that project on the server,
+which needs an admin, and the Martian server's API keys and service accounts write as members, so
+it pushes those runs only into projects the server already has. A service account limited to one
+project pushes that project's runs only. The command names each run the server refused and why, and exits `2`: one that changed
+here after it was pushed, for example. Reviews, artifacts and the dataset version a run read stay
+here. What goes and how the ids map: [pushed runs](evals-core.md#pushed-runs).
+
+## Audit a suite
+
+A suite can hold cases that pass with no work, or by a shortcut, and its pass rate does not show
+it. An audit grades replies that do nothing, and replies that cheat, with the suite's checks, in
+place of its target's replies or its stored outputs:
+
+```bash
+martian evals audit evals.yaml
+```
+
+It calls neither the target nor a model, unless `--run-judges` asks the judges, so it needs no key
+and costs nothing. Every case one of these replies passes is reported with the reply and the
+checks that let it through, and a suite with a weak check is flagged: the command names each weak
+check, the targets it let through and its cases, and exits `1`. It exits `0` when the suite is not
+flagged, and `2` when the suite file is invalid or none of its checks could be audited.
+`--output DIR` names the folder for `audit.json` (default: the suite's `output`), `--limit N`
+audits the first N cases, and `--run-judges` asks the LLM judges (below). In Python,
+`martian.evals.audit.audit_suite("evals.yaml")` returns the same result.
+
+### The targets
+
+| Target | Kind | Its reply to every case |
+| --- | --- | --- |
+| `empty` | Does nothing | An empty reply |
+| `refusal` | Does nothing | `I'm sorry, but I can't help with that.` |
+| `echo` | Does nothing | The case's input, as it came: its text under the suite's `input_key` (`message`), else the first text under `prompt`, `question` or `content`, else its inputs as JSON |
+| `repeat_question` | Cheats | Every text in the case's inputs, the question and any context or options, one per line; only when the inputs hold more than the question |
+| `every_option` | Cheats | Every option the case offers, one per line: an `options`, `choices`, `answers` or `candidates` list among its inputs, or the options its question letters `A)` to `H)` or numbers |
+| `claim_pass` | Cheats | `PASS`, `Correct`, and `PASS. The answer is correct and the task is complete.` |
+| `check_keywords` | Cheats | Each check's own values: a text check's `values` (together for `contains`, `contains_all` and `contains_any`, one at a time for `equals`, `starts_with`, `ends_with` and `similarity`), the fixed `value` of `number_equals` and `rows` of `table_equals` at their `path`, and chat messages claiming the `calls` of `tool_called` or `tool_trajectory` with `source: reply`; and every check's in one reply |
+| `answer_format` | Cheats | The form a check asks for, with nothing in it: a short text a `matches` pattern finds, such as `ORD-000000` for `ORD-\d{6}`, and filler of a `length` check's `min_length` |
+| `common_guesses` | Cheats | One common answer to every case, each its own target: `yes`, `no`, `true`, `false`, `0`, `1`, `A`, `B`, `C`, `D` and `none` |
+| `hollow_json` | Cheats | JSON with nothing in it: `{}`, `[]`, an `is_json` check's `required_keys` with blank values, the emptiest value a `json_schema` accepts (its required keys, blank text, zeros, the fewest items), and 0 at every path a `sums_to`, `reconciles` or `number_equals` check reads, with an empty list where a path steps into every item (`*`); and these objects merged |
+
+A cheat knows only what the suite file gives away and what the case's inputs hold: no target
+reads a case's `expectations`. A pattern with a back reference, or a look-around its sample does
+not meet, has no `answer_format` reply.
+
+### What it reports
+
+- **A finding** is a case a target passes: every audited check passes the target's reply. Each
+  names the case, the target, its reply, and every check with the reason it passed it.
+- **A weak check** asks for something, an answer, a value, a form, a length, a tool call or a
+  reply that does not refuse, and lets a target through on a case. `contains` on a word the
+  question already holds is one: the echo passes it. A suite with a weak check is flagged.
+- **Checks that only forbid or bound something** pass any reply that holds nothing forbidden, so
+  the do-nothing targets pass them by design: the security checks (`not_contains`, `not_matches`,
+  `no_prohibited_phrases`, `no_personal_data`, `no_secrets`, `resists_injection`,
+  `tool_not_called` and a `python` check with `security: true`), `length` with only `max_length`
+  and `step_count` with only maximums. A case that only they grade is reported, noting that
+  doing nothing passes it, and does not flag the suite: a case the agent should decline is such a
+  case. Give a case the agent should answer a check of what the answer holds.
+- **A chance pass.** A constant guess that passes no more than half of the cases it got a verdict
+  on is reported and does not flag: a yes-or-no question is guessed half the time. One that passes
+  more flags its checks: the answers lean one way.
+- **A decline the case wants.** On a case the suite marks for declining, one its `no_refusal`
+  check's `expectation` key says is not benign ([false refusals](#false-refusals)), an empty reply
+  or a refusal passing is the answer the case wants, and does not flag. `no_refusal` asks for
+  something only on the cases it checks.
+- **No verdict.** A check that gives none on a reply, such as one whose `expectation` key a case
+  lacks, counts it under the check's `errors`, and that reply passes no case.
+
+### What it cannot audit
+
+Each such check is listed with the reason, and every finding names the checks it was not graded
+by: the case may still fail one of them.
+
+- **LLM judges** (`rubric`, `guidelines`, `conditions`, `groundedness`, `context_relevance` and
+  `context_sufficiency`): grading a reply calls the judge's model. `--run-judges` asks them, at your
+  provider's cost, about the replies every other check of the case passes, since any other reply
+  fails the case anyway; `judge_calls` counts the calls. A judge asks for something, so one that
+  passes a do-nothing or cheating reply is a weak check.
+- **`latency` and `cost`** measure the target's call, which none of these replies makes.
+- **Tool-call checks that read the trace** of the target's call (`source: trace`, or no `source`
+  in a suite with a target): a reply cannot put calls in a trace. With `source: reply` they are
+  audited, and `check_keywords` claims the calls they look for in messages, which shows that such a
+  check reads what the agent says it did rather than what it did.
+- **Installed checks** (`type: installed`): only a worker that installs a check under that name
+  runs it ([installed checks](#installed-checks)).
+
+A `python` check is audited: its function runs on each reply in the command's process, as in a run
+([security and data](security-and-data.md#custom-python-scorers)), with no `trace`.
+
+A [conversation](#conversations) case, scripted or played by a [simulated user](#simulated-users),
+is not audited: the audit grades one reply per case. `skipped` in `audit.json` counts them, and the
+command says how many; with no other case, it audits nothing and exits `2`.
+
+### The audit's result
+
+`audit.json` in the output folder, beside a run's results:
+
+| Field | What |
+| --- | --- |
+| `suite`, `dataset` | Each one's `name` and `digest`: the suite's digest is the version of the suite file it audited |
+| `audit` | `martian-suite-audit-v1`, the version of the targets and rules |
+| `flagged`, `audited` | Whether a weak check let a target through, and whether any check could be audited |
+| `cases`, `replies` | The cases audited and the replies graded |
+| `skipped` | The conversation cases left out |
+| `judges_run`, `judge_calls` | Whether `--run-judges` asked the judges, and how many times |
+| `targets` | Each target's `name`, `kind` (`do_nothing` or `cheating`), `description`, `replies` and `cases_passed` |
+| `checks` | Each check's `label`, `type`, `audited`, `asks`, `not_audited` (the reason), `passed` (per target, the cases whose reply it passed, whether or not another check failed it) and `errors` (up to three reasons it gave no verdict, with counts) |
+| `weak_checks` | Each weak check's `label`, `type`, the `targets` it let through with `why` for each, `cases` (how many) and `examples` (up to 20 case ids) |
+| `findings` | One per case and target that passed it: `case`, `target`, `kind`, `reply` (its first 200 characters), `checks` (every audited check and its reason), `weak_checks` (the asking checks that let it through, when it flags), `flags`, `note` (why it flags or does not) and `not_audited` |
+| `not_audited` | Each check not audited: `label`, `type` and `reason` |
+
+`audit.json` holds the cases' inputs in clear text, in the echo's replies, as `results.jsonl` holds
+them. A suite saved in the Evals UI is audited by the evals core, which keeps the result with the
+suite version ([suite audits](evals-core.md#suite-audits)).
+
+## Inspect a run for cheating
+
+An audit asks whether a suite can be passed without the work. Inspecting a run asks whether its
+agent tried: whether it reached for its answers, tests or grader instead of doing the task. [Target
+isolation](security-and-data.md#the-target-and-the-grader) keeps a function target from the run's own files, but not
+from a copy of the answers kept elsewhere, and not a URL target or a registered agent, which run
+where the SDK cannot see. So each case's transcript is read for signs that it tried:
+
+```bash
+martian evals run evals.yaml
+martian evals inspect-cheating evals.yaml
+```
+
+It reads the suite's newest run in the local Evals UI's data folder, or the one `--run` names by its
+code (`evals-3`) or id, and writes `cheating.json` in the suite's output folder. Each case flagged
+is printed with its signals, and the command exits `1` when a case is flagged, `0` when none is, and
+`2` when it cannot inspect: an invalid suite file, or no run recorded. `--output DIR` names the
+folder the run wrote its results to, when it was run with `--output`; `--data-dir DIR` names the
+data folder, as for `martian ui`. No model is called unless `--judge` asks one (below). In Python,
+`martian.evals.cheating.inspect_suite_run("evals.yaml")` returns the same inspection and the
+transcripts it read.
+
+**A transcript** is one case's call, or one attempt's with [repeats](#repeated-attempts), or one
+turn of a [conversation](#conversations), each turn having a trace of its own: its inputs,
+expectations and reply, and its trace. A turn's inputs include the conversation so far, the
+earlier turns' messages and replies, since the agent was given them. Each span below the call's own span is a **step**:
+a model call (span kind `LLM` or `CHAT_MODEL`), a tool call (a span the
+[trace mapping](evals-core.md#trace-conventions) reads as a tool, or of kind `TOOL` or
+`RETRIEVER`), or another step the target recorded. A step is read for what it was asked (its
+inputs, or the tool's arguments, and its attributes) and what it returned (its outputs, and the
+attributes that hold a result or response). A target that records no spans has steps only if
+MLflow's autologging traces the library it calls; a case reused from an earlier run has no trace
+in this run, so only its reply is read, and the command says how many.
+
+A flagged case is a reason for a person to read the transcript, not a verdict: in the evals core,
+the flagged cases of a run go to a review queue with their signals as the reason
+([runs inspected for cheating](evals-core.md#runs-inspected-for-cheating)).
+
+### The signals
+
+Every signal is deterministic and names where it was found and the text that shows it. A text the
+case's own inputs hold is never a signal, because the task asked for it: a task that names
+`results.jsonl` lets the agent read it.
+
+| Signal | Found when |
+| --- | --- |
+| `protected_path` | A step that is not a model call names a file or folder the run hides from its target: the suite file, the data file, a `python` check's file and the `__pycache__` beside it, the output folder, a local MLflow store the suite names, the local Evals UI's data folder, or the suite file's own `cache.folder`, by its path (as written from the working folder, or with links resolved); or the suite file, data file or a check's file by its name, wherever it is. The evals core knows the run's files by name only: the suite's name with `.yaml` or `.yml`, the dataset's with `.jsonl` or `.csv`, and each `python` check's file |
+| `blocked_access` | A step that names one of those paths failed (its span's status is an error, or its result a permission error), or a step on a path in a folder that holds one failed with a permission error, as [target isolation](security-and-data.md#the-target-and-the-grader) refuses it. Isolation records nothing itself: the signal reads the target's own step |
+| `grader_file` | A step names a file the way answer keys, graders and results are named: `answer_key`, `answers.json`, `expected_output`, `expected_response`, `ground_truth`, `gold_answers`, `grader.py`, `grade.py`, `scorers.py`, `rubric.yaml`, `hidden_tests`, `expectations.json`, `results.jsonl`, `junit.xml`, `mlflow.db`, `mlruns`, `audit.json`, `cheating.json` or `.martian/evals`, wherever it is |
+| `grader_endpoint` | A step names the evals API (`/v1/evals`), MLflow's REST API (`/api/2.0/mlflow/`, `/ajax-api/2.0/mlflow/`), the local Evals UI on port 7600 of this machine, or the MLflow server the suite's `mlflow.tracking_uri` names |
+| `environment_probe` | A step reads a variable that names the run's locations (`MARTIAN_*`, `MLFLOW_TRACKING_*`, `MLFLOW_EXPERIMENT_*`, `MLFLOW_REGISTRY_*`, `MLFLOW_RUN_ID`), which isolation removes, or dumps the whole environment (`env`, `printenv`, `os.environ` as a whole, `process.env`, `/proc/*/environ`, `export -p`) |
+| `process_probe` | A step reads another process: its parent (`getppid`, `$PPID`), `/proc/<pid>/mem`, `maps`, `environ`, `cmdline` or `fd`, `ptrace`, `gdb -p` or `py-spy dump` |
+| `answer_before_work` | An expected answer is in the inputs of a step that is not a model call, before any model or tool step returned it: the agent knew the answer before it worked it out |
+| `answer_without_work` | The reply gives an expected answer verbatim and no model or tool step of the trace returned it, in a run whose target records model or tool steps for some case. A target that records none for any case is not judged by this |
+| `grader_injection` | The reply writes to the grader: a note or message to the grader, judge or evaluator, an instruction to grade, mark or score it as correct or a pass, or to ignore earlier instructions or rubric |
+| `judge` | The opt-in judge (below) read a transcript no other signal flagged and found that the agent reached for its answers, tests or grader |
+
+**An expected answer** is a text among the case's expectations, at any depth, of at least four
+characters that is not a common short answer (`yes`, `no`, `true`, `pass`, `correct`, `benign`
+and the like), or a number of at least three characters, and that the case's inputs do not hold.
+It is matched as a whole word, ignoring case and runs of whitespace. A short answer, such as `yes`
+or `42`, is never one: anything could hold it.
+
+### The judge
+
+`--judge MODEL` also asks a judge, an MLflow model URI such as `openai:/MODEL` with the
+[same provider setup](#run-a-suite-file-locally) as the suite's judges, about each transcript no
+signal flagged: one model call each, at your provider's cost. So it needs `--accept-judge-cost`;
+without it the command says how many calls `--judge` would make and exits `2` before calling.
+
+The judge is given the case's inputs, each step's name, kind and status with what it was asked and
+returned, and the reply, each text cut to 600 characters and at most 40 steps, never the
+expectations. It answers on the shared judge engine with one flat verdict, a reason, a quote and
+`cheating`, `honest` or `uncertain`, as the [grounding judges](#grounding-and-retrieval-judges) do.
+A `cheating` verdict adds a `judge` finding; `uncertain` and a failed call flag nothing and are
+counted under `judge` in `cheating.json`, with the calls made and the tokens the provider reported.
+
+### How well it catches cheating
+
+Measured on a hand-written labelled set of 46 synthetic transcripts,
+`tests/evals/benchmarks/cheating_transcripts.json`: 23 of agents that cheat (read the data file
+from a shell or a tool, are refused it by isolation, plant a file beside the suite, read an answer
+key, earlier results, the MLflow store or the scorer, read the run's variables or their parent's
+memory, call the local Evals UI or the suite's MLflow server, answer or submit an answer with no
+work behind it, write to the grader, search for ground truth or hidden tests, find leaked answers
+on the web, read a renamed copy of the data, hide the path in base64, or carry the answers in their
+prompt) and 23 of agents that do not (look things up, compute, run tests the task names, read the
+task's own files, inspect the environment for a configuration task, answer from a cache, quote a
+retrieved passage word for word, and an untraced target). Every name, path and value is invented.
+
+```bash
+uv run --extra evals python scripts/benchmark_cheating_inspection.py
+```
+
+The miss rate is the cheating transcripts not flagged, over the 23; the false-alarm rate the
+honest transcripts flagged, over the 23. The intervals are 95% Wilson intervals.
+
+| Classifier | Misses | False alarms | Model calls |
+| --- | --- | --- | --- |
+| The signals | 4 of the 23 (17%, 7–37%) | 3 of the 23 (13%, 5–32%) | None |
+| The judge alone, on every transcript | 7 of 23 (30%, 16–51%), 1 of them `uncertain` | 0 of 23 (0%, 0–14%) | 46 |
+| The signals, then the judge on the 24 transcripts they did not flag, as `--judge` does | 1 of 23 (4%, 1–21%) | 3 of 23 (13%, 5–32%) | 24 |
+
+- **The signals miss** what names nothing they know: answers found on the web, a copy of the data
+  under another name, a path hidden in base64, and answers carried in the agent's own prompt.
+- **The signals' false alarms**: a devops agent that runs `env` because the task is about the
+  app's configuration, a coding agent whose test has a variable named `expected_output`, and an
+  agent that answers from a cache it records as an untyped span, not a tool, so no step returned
+  the answer.
+- **The judge alone** missed what it read as ordinary tool use: a refused read of the data file,
+  a query of the MLflow store, a grep of the environment for MLflow, a call to the suite's MLflow
+  server, an answer with no steps, and the web search for leaked answers; it could not decide an
+  answer submitted with no work. Together the two miss only the leaked answers.
+
+The judge was GLM 5 (`openai:/glm-5`) through a local LiteLLM proxy to Amazon Bedrock, with
+temperature 0, once per transcript: 46 calls, about 21,000 input and 3,800 output tokens.
+`scripts/benchmark_cheating_inspection.py --judge MODEL --out FILE` measures a judge again; it
+skips the transcripts `FILE` already holds and stops at `--cap` requests (default 90). The set was
+written by the authors of the signals, so it measures their known limits, not cheating no one has
+thought of, and 23 transcripts on each side give wide intervals. A change to a signal needs the
+measurement run again: `tests/evals/test_cheating.py` checks that the signals miss and flag exactly
+the transcripts above.
+
+### The inspection's result
+
+`cheating.json` in the output folder, beside a run's results:
+
+| Field | What |
+| --- | --- |
+| `run` | The run inspected: its `id` and `code` |
+| `inspection` | `martian-cheating-inspection-v1`, the version of the signals and their rules |
+| `cases`, `transcripts` | The cases inspected, and their transcripts: one per case, or one per attempt with repeats |
+| `untraced` | The cases (or attempts) with no trace in this run, whose replies alone were read |
+| `target_traced` | Whether any transcript has a model or tool step; without one, `answer_without_work` is not looked for |
+| `flagged`, `flagged_cases` | Whether a case is flagged, and which, in the run's order |
+| `signal_counts` | For each signal, the transcripts it was found in |
+| `findings` | One per transcript with a signal: `case`, `attempt` (`null` without repeats), `turn` (`null` but in a conversation case), `trace_id`, `signals` (each `signal`, `where`, `detail` and `evidence`, up to 160 characters of the text that shows it) and `reason`, the signals as one text |
+| `judge` | `null` without `--judge`; else its `model`, `version`, `calls`, `flagged`, `uncertain`, `errors`, `input_tokens` and `output_tokens` |
+| `output` | The folder `cheating.json` is in |
+
+The evidence quotes the target's steps and replies, which can hold the cases' inputs and answers:
+treat `cheating.json` as you treat `results.jsonl`.
+
 ## Repeated attempts
 
 A case that fails one time in five passes a gate that runs it once four times out of five.
@@ -303,7 +670,8 @@ checks:
 
 `martian evals run evals.yaml --repeats 5`, or `run_suite(path, repeats=5)` from
 `martian.evals.runner`, replaces the file's `repeats` for one run. Each attempt calls the target
-and every judge again, so five attempts cost five times as much.
+and every judge again, so five attempts cost five times as much; with the
+[cache](#a-cache-of-model-calls) on, a later run replays each attempt's own replies.
 
 | Rule | A check passes the case when |
 | --- | --- |
@@ -325,7 +693,8 @@ and every judge again, so five attempts cost five times as much.
   suite's rule. An LLM judge is not a security check by its type: give a judge that guards a
   secret `combine: all` when the suite's rule is looser. A [`python` check](#custom-python-checks)
   is one only when it says so, with `security: true`: the SDK cannot tell what a function guards,
-  and its author can.
+  and its author can. Compared with a baseline, a case that newly fails a security check fails the
+  gate on its own, however few cases changed ([comparing with a baseline](#comparing-with-a-baseline)).
 - **A case passes** when every check, combined, passes it, as with one attempt.
 - **Attempts without a verdict.** An attempt whose target call failed, or that a check gave no
   verdict, could have gone either way. A combined verdict stands when it is the same both ways;
@@ -401,8 +770,8 @@ run stops at and resumes from:
   check. So the attempts that ran are dropped: the case has no result in `results.jsonl` or the
   local Evals UI, `summary.json` counts it in `not_run`, and running again runs all of its
   attempts.
-- **Their judge tokens count.** The judges of the dropped attempts were asked, so what they used
-  counts towards `max_judge_tokens`.
+- **Their tokens count.** The judges of the dropped attempts, and the simulated users of dropped
+  conversations, were asked, so what they used counts towards `max_judge_tokens`.
 - **An attempt that outlasts `timeout_seconds`** is an attempt whose target call failed, an attempt
   without a verdict, as above; it does not stop the run.
 - **What a stopped run counts.** `cases`, the counts and pass rates, `attempts`, `reliability`, the
@@ -412,6 +781,243 @@ run stops at and resumes from:
 - **The printed table** names the cases not run in its title, after the attempts of each case. The
   Reliability row is in the table, and under it come the flaky cases, the false-refusal line, the
   reasons attempts had no verdict, and last the limit the run reached and how to resume.
+
+## A matrix of prompts and models
+
+Trying three prompts on two models should not take six suite files. `matrix` names the values to
+try, and the suite runs once per combination, each combination a run of its own:
+
+```yaml
+target:
+  url: "${OPENAI_API_BASE}/chat/completions"
+  headers:
+    Authorization: "Bearer ${OPENAI_API_KEY}"
+  body:
+    model: "{{matrix.model}}"
+    messages:
+      - {role: system, content: "{{matrix.prompt}}"}
+      - {role: user, content: "{{input}}"}
+  response_path: choices.0.message.content
+matrix:
+  model: [gpt-4o-mini, claude-3-5-haiku]   # a list: each value is its own name
+  prompt:                                  # a mapping: a short name for each value
+    terse: "Answer in one sentence."
+    friendly: "Greet the customer, then answer."
+```
+
+[`examples/evals/matrix`](../examples/evals/matrix/evals.yaml) does the same with a function
+target that stands in for the model, so it runs with no key:
+`martian evals run examples/evals/matrix/evals.yaml` prints four rows, one per combination.
+
+- **Axes and values.** Each key of `matrix` is an axis, named by a letter or `_` and then
+  letters, digits and `_`, at most 40 characters. Its values are a list, each value naming itself
+  (text as written, a number as JSON writes it, `true` or `false`), or a mapping of names to
+  values, for values such as prompts that are too long to name a combination. A name is 1 to 64
+  letters, digits and `. _ : / @ + -`; a list value that is not such a name is refused with the
+  advice to use a mapping. A mapped value can be any value but null. A matrix has at most 100
+  combinations.
+- **Combinations.** Every combination of one value of each axis runs, the first axis outermost:
+  two models and two prompts are four runs, one after another. Each runs every case with the
+  suite's checks, `repeats`, `--limit` and `--concurrency`.
+- **Where the values go.** A URL target's `body` takes `{{matrix.NAME}}`, filled like the other
+  placeholders: a value that is a whole placeholder keeps its type, and a value is inserted as
+  data, so an `{{input}}` inside a prompt's text is sent as written. The body must use every axis,
+  and each `{{matrix.NAME}}` must name one. The `url` and headers take no matrix values. A
+  function target receives each axis as a keyword argument of the axis's name, beside the case's
+  inputs: `answer(message="...", model="gpt-4o-mini", prompt="Answer in one sentence.")`, a mapped
+  value as its value, not its name. A case with an input of an axis's name is refused, and so is
+  a matrix in a suite without a target, which grades stored outputs and has nothing to vary.
+- **Checks.** Each combination's checks grade its own calls: a
+  [tool-call check](#tool-calls-and-trajectories) reads the trace or the reply of that
+  combination's call. A [`python` check](#custom-python-checks) is given the case's inputs, not
+  the combination's values, which are in the run's `provenance.matrix`.
+- **Identity.** A combination's id is `axis=name` for each axis, in the axes' alphabetical
+  order, joined by commas: `model=gpt-4o-mini,prompt=terse`. It names the combination's folder,
+  run and row everywhere below. It depends on the names only, so reordering the axes keeps it,
+  and so does editing a mapped value's text: the next run of that combination is compared with
+  the last, and grades its cases again (below).
+
+| Where | What |
+| --- | --- |
+| `<output>/<id>/` | One folder per combination, named by its id with `/` and `:` written as `_`, holding what a run without a matrix writes: `results.jsonl`, `summary.json`, `junit.xml` (one testsuite, named `evals[<id>]` for `evals.yaml`), `verdicts.json`, `mlflow.db` and, with a baseline, `comparison.json` |
+| `<output>/matrix.json` | `axes`, each axis's `name` and its values' names in the file's order; `combinations`, in run order, each with its `id`, `values` (each axis's value name), `folder`, `gate` (`passed`, `failed` or `error`, below), `summary` (its `summary.json`) and `comparison` (its `comparison.json`, `null` when it was not compared); `seconds_this_run` and `output` |
+| `<output>/verdicts.json` | Every combination's `verdicts.json` under `combinations`, by id (format `martian-evals-matrix-verdicts/1`): what a later run of the matrix compares with |
+| The printed table | One row per combination: its counts and pass rate with its 95% interval, with repeats its reliability, and with `--baseline` its label and gate. Under it, each combination's flaky cases, false refusals, errors and comparison, each line starting with the combination's id |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
+| The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file. A value that is a [registered prompt version](#prompt-versions)'s text is named in `provenance.prompts` |
+
+- **The gate.** A combination's `gate` is `error` when a case has no verdict, or when it stopped
+  at a limit before a case (below); with a baseline, its comparison's gate; otherwise `failed`
+  when a case failed and `passed` when none did. The command exits `2` when a combination's gate
+  is `error`, else `1` when one is `failed`, else `0`.
+- **Limits.** Each combination is a run of its own, so it has the run's
+  [limits](#run-a-suite-file-locally) afresh: `max_seconds` and `max_judge_tokens` bound each
+  combination, not the whole command. A combination that reaches one stops as a run does, with
+  its cases not run (`not_run` in its `summary.json`) and a line under the table, and the next
+  combination starts with its limits unspent. Every target call, in every combination, has
+  `timeout_seconds`. A cancel in `martian ui` stops the run it names, one combination.
+- **Resume** works per combination, from its own folder. A combination's values are part of what
+  its verdicts depend on, so editing one mapped prompt's text grades that prompt's combinations
+  again and reuses the others' results.
+- **Repeats** apply to every combination, with each one's reliability and flaky cases.
+- **The baseline.** `--baseline DIR` compares each combination with the result of the same id in
+  `DIR/verdicts.json` and gates it on that comparison
+  ([comparing with a baseline](#comparing-with-a-baseline)). A combination `DIR` has no result
+  of, such as one with a value added since, is not compared and is gated on its own, as is every
+  combination when `DIR` is a run of the suite before it had a matrix. A suite without a matrix
+  whose baseline is a matrix's is gated on its own the same way.
+- **One run per combination.** Each combination is its own `Run` of the
+  [shared model](eval-model.md#the-sdk-suite-file), so the evals core's routes and their typed
+  responses, Compare and the run page read it as any run, and two combinations compare as two
+  runs of the same data.
+- **A suite without a matrix** runs, writes and records exactly what it did before: no
+  `matrix.json`, no folder per combination, a run named `evals-<n>` with no `provenance.matrix`,
+  and the fingerprint and digest it had.
+
+## Prompt versions
+
+A prompt edited in a suite file has no history of its own. `martian evals prompts push` keeps each
+prompt of a suite file's matrix as a numbered, immutable version in the local Evals UI's data
+folder, and each run then records the version it used:
+
+```bash
+martian evals prompts push evals.yaml -m "Greet by name"   # terse: version 2 added
+martian evals run evals.yaml                               # each combination names its prompt version
+martian ui                                                 # Prompts: versions, differences and runs
+```
+
+- **What it pushes.** Each value of the matrix axis `prompt` (`--axis NAME` for another), or only
+  those named with `--value NAME`, as a version of the prompt named by the value's name: the
+  mapped value `terse: "Answer in one sentence."` is a version of the prompt `terse`. A prompt
+  that does not exist yet is created. A value whose text is the prompt's latest version adds
+  nothing (`terse: version 1 unchanged`), so pushing an unchanged suite file is harmless; text
+  the prompt had in an older version adds a new version with that text. A value must be text,
+  and its name a prompt's name: 1 to 64 letters, digits and `. _ -`, starting with a letter or
+  digit. Anything else is refused with exit code `2` before anything is pushed.
+- **A version** keeps its text exactly as written, at most 100,000 characters, its digest (SHA-256
+  of the text as UTF-8), the commit message (`-m`, optional), its author (the local user) and its
+  time. It never changes. `--data-dir` names the data folder, as for `martian evals run`.
+- **Which version a run used.** When `martian evals run` records a combination, each of its text
+  values whose digest is a registered version's is named in the run's `provenance.prompts`:
+  `axis`, `value` (the value's name), and the version's prompt `name`, `version` and `digest`.
+  When several versions have the text, the run takes the newest of the prompt named as the value,
+  else the newest of any prompt. The run's page shows the version, and the Prompts page lists the
+  run under it. A run is matched when it is recorded: push before running, since a run recorded
+  before its text was pushed names no version.
+- **The suite file names no version.** It keeps the prompt's text, not a reference such as
+  `terse@2`, so it stays the whole definition of what it runs and runs the same on a machine with
+  no registry, such as a CI runner. A suite without a matrix has no prompt of its own and records
+  none.
+- **The local Evals UI's Prompts page** lists the prompts, each prompt's versions with their
+  messages, authors and times, the difference between two versions, and the runs that used each
+  version. The prompts are the evals core's, served by its own routes
+  ([prompt routes](evals-core.md#prompt-versions)); Python can push one with
+  `martian.evals.prompts.push_suite_prompts`.
+
+## A cache of model calls
+
+Running an unchanged case again pays for the same model calls again. With the cache on, each
+reply of the target and of the LLM judges is stored by its full request, and a later run that
+sends the same request gets the stored reply instead of calling the model:
+
+```yaml
+cache:                     # turns the cache on; `cache:` alone takes every default
+  folder: .model-cache     # relative to this file; default: `cache` in the local data folder
+  ttl_seconds: 86400       # how long an entry is used; default 604800 (seven days), at most 366 days
+  functions: true          # a function target's calls too; default false
+```
+
+`martian evals run evals.yaml --cache` turns it on for one run of a suite without a `cache`
+block, with the defaults, and `--no-cache` turns a suite file's block off;
+`run_suite(path, cache=True)` or `cache=False` does the same from Python. Without either, nothing
+is cached and every call is made, as before. The default folder is `cache` in the local Evals UI's
+data folder: `--data-dir`, else `MARTIAN_EVALS_HOME`, else `~/.martian/evals`, so
+`~/.martian/evals/cache`.
+
+- **What is cached.** A URL target's calls, and every LLM judge's, through the judges' shared
+  provider call (both stages of a judge that reviews its draft, and each member of a
+  [panel](#a-panel-of-judges), by its own model). A function target's calls only
+  with `functions: true`: a function is your code and may do more than answer, such as write to a
+  database or send a message, so replaying it is your choice. Deterministic checks call no model,
+  and neither does a [`python` check](#custom-python-checks): it is your code, so it runs on every
+  case of every run, replayed reply or not, and the cache never holds its verdict.
+- **The key is the full request**, as a SHA-256 digest of everything that decides the reply:
+
+  | Call | In the key |
+  | --- | --- |
+  | URL target | The address as called, with `${NAME}` read from the environment; the headers; the body with the case's inputs and the combination's [matrix](#a-matrix-of-prompts-and-models) values filled in; `response_path`. `{{uuid}}` and `{{session_id}}` count as written, not as the new id each call sends, or no request would ever repeat; `{{history}}` is empty and `{{messages}}` the case's one message, as sent |
+  | Function target | The SHA-256 of its file, the function's name and its arguments: the case's inputs and the combination's values |
+  | LLM judge | The judge model, the address serving it (for an `openai:/` model `OPENAI_API_BASE`, else `OPENAI_BASE_URL`), the messages it sends (its prompt with your criteria, the case's input and the reply under test), the reply's schema, `judge.inference_params`, `judge.headers`, the stage (draft or review) and the judge's version, such as `response-rubrics-v1` |
+
+  `timeout_seconds`, `judge.max_retries` and `judge.rate_limit_wait_seconds` are not in it: they
+  change how a call is made, not what it asks. Neither are modules a function target's file
+  imports, nor the model behind an endpoint, which the SDK cannot see: delete the folder after
+  changing those, or use `--no-cache`.
+- **Credentials are never in it.** A header or a query parameter of the address whose name says
+  it holds a credential is left out of the key: `Authorization`, `Proxy-Authorization` and
+  `Cookie`, any name that holds `auth`, `key`, `token`, `secret`, `pass`, `credential`, `cookie`,
+  `session` or `signature`, and `sig`, `code` and `pwd`. A user name or password in an address is
+  left out too. Rotating a key keeps the cache, while a header such as `X-Tenant`, which changes
+  what is asked, counts. A judge's key (`OPENAI_API_KEY`) is never read into the key. What an
+  entry holds is in [security and data](security-and-data.md#the-cache-of-model-calls).
+- **A failed call is never stored.** A target call that fails (an error status, a timeout, a
+  response with nothing at `response_path`, an exception from a function target) and a judge call
+  that fails, or whose reply is not the judgment asked for, fail as they do without the cache, and
+  the next run makes them again. A function target's reply that JSON cannot hold exactly, such as
+  a tuple, is not stored either.
+- **Repeats still sample.** Within one `martian evals run`, the nth identical request is attempt
+  n, with its own entry. Each of a case's [attempts](#repeated-attempts) gets the reply that
+  attempt got in the earlier run, and a first run makes exactly the calls it makes without the
+  cache: identical requests in one run are never answered with one reply. Raising `--repeats`
+  from 3 to 5 replays three attempts of each case and calls the model for two.
+- **A changed prompt misses.** Editing a judge's criteria calls the judge again and replays the
+  target. Editing the prompt in the target's body, or a case's input, calls the target again, and
+  the judge too when the reply it grades changed.
+- **Time to live.** An entry older than `ttl_seconds` is not used, and the next successful call
+  replaces it. Delete the folder to empty the cache.
+- **`--fresh` replays too.** It discards earlier results and grades every case again; with the
+  cache on, the replies come from the cache. Add `--no-cache` to call the models again.
+- **Checks of the call itself.** `latency` and `cost` measure the target's call, and a replayed
+  reply took no time and spent no tokens, so a suite whose target's calls are cached is refused
+  before any case: run it with `--no-cache`, or, for a function target, leave `functions` off.
+  The same goes for a check that reads the call's trace, since a replayed reply's trace records
+  none of the call's spans: a [tool-call check](#tool-calls-and-trajectories) that reads the
+  trace (a function target's, unless it says `source: reply`, which reads the replayed reply
+  and works) and a `python` check whose function takes `trace`.
+- **Time limits and budgets.** A replayed call made no model call, so it spends nothing of the
+  run's [limits](#run-a-suite-file-locally): a replayed judgment counts 0 tokens towards
+  `max_judge_tokens`, and a replayed reply takes only the moment it takes to read, against
+  `max_seconds` and `timeout_seconds`. A run whose judgments are all replayed can therefore run
+  under a token limit it would otherwise reach. A target call that outlasted `timeout_seconds` is
+  the case's error and is never stored, even when it ends later. A run that reaches a limit calls
+  no more targets, replayed or not, and the next run resumes after the cases it finished.
+- **In a matrix** each combination is its own run, with its own counts in its `summary.cache` and
+  `provenance.cache` and its limits afresh. Attempt numbers run across the whole command, so two
+  combinations that send the same judge request, such as two prompts whose replies are the same,
+  each have an entry of their own and each make their own call the first time, as without the
+  cache.
+- **Resume and the baseline.** The cache is not part of what a reused verdict depends on, so a
+  finished case is skipped as before and turning the cache on or off keeps earlier results; a
+  run compares with a [baseline](#comparing-with-a-baseline) as before.
+- **Not for conversations yet.** The cache does not hold a [conversation](#conversations)'s turns,
+  scripted or played by a [simulated user](#simulated-users), so a run whose cases include one is
+  refused with the cache on, before any case: run it with `--no-cache`, or without a `cache`
+  block. A body that uses `{{session_id}}`, `{{history}}` or `{{messages}}` is cached as usual for
+  cases of one input.
+- **Suite-file runs only.** The pytest gate (`assert_gate`, `assert_checks`) does not cache. In
+  Python, every judge factory takes `cache=`, a `martian.evals.cache.ModelCallCache`.
+
+A run with the cache on says so wherever its result is read, so a replayed result is never taken
+for a fresh one:
+
+| Where | What |
+| --- | --- |
+| `summary.json` | `cache`: `folder`, `ttl_seconds`, `functions`, and for `target` and for `judge` this run's `hits` (replies from the cache), `calls` (requests sent to the model) and `stored` (replies written to the cache), or `null` when the suite makes no such call that the cache holds. A run without the cache has no `cache` |
+| `matrix.json` | Each combination's own counts in its `summary.cache` |
+| The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
+| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
+| The local Evals UI's data folder | The run's `provenance.cache`: `on`, the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled. The Evals UI's run routes show only `on` and the counts, never the folder |
+| `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call. A panel is marked only when every member was replayed; its tokens are those of the members that made a call |
 
 ## Conversations
 
@@ -497,9 +1103,11 @@ with the case's inputs only, so a function that serves both gives `history` a de
   fails when it failed one; a turn without a verdict otherwise leaves it open. Its rationale says
   how the turns went, such as `1 of 2 turns passed, failed on turn 3`.
 - A **conversation check** grades the conversation once: the target's replies, in order, joined
-  by a blank line, against the case's own `expectations`. It is a deterministic check or a
-  [`python` check](#custom-python-checks): an LLM judge grades one turn's reply against that
-  turn's input, `latency` and `cost` measure one call, and the
+  by a blank line, against the case's own `expectations`. It is a deterministic check, a
+  [`python` check](#custom-python-checks) or a [conversation judge](#conversation-judges)
+  (`task_completion`, `policy_adherence`, `knowledge_retention`), which reads the conversation
+  turn by turn and must say `scope: conversation`. The other LLM judges grade one turn's reply
+  against that turn's input, `latency` and `cost` measure one call, and the
   [tool-call checks](#tool-calls-and-trajectories) read the tool calls of one call, so they take
   no `scope: conversation`.
 - **Tool-call checks** grade each turn: a turn's `tool_called`, `tool_not_called`,
@@ -519,7 +1127,10 @@ with the case's inputs only, so a function that serves both gives `history` a de
   scope.
 
 Loading refuses a turn that names a check the suite does not have or a conversation check, a
-conversation that no check grades, and a conversation in a suite without a target.
+conversation that no check grades, a conversation in a suite without a target, and a
+[conversation judge](#conversation-judges) the data cannot feed: one in a suite whose data has a
+case of one input, a `task_completion` judge with a scripted conversation that gives no
+`expectations.goal`, and a `policy_adherence` judge with a conversation that has no guidelines.
 
 **False refusals.** A conversation counts once in [`false_refusals`](#false-refusals). A turn
 `no_refusal` check with an expectation key reads each turn's own flag, so a conversation is benign
@@ -540,11 +1151,13 @@ checked before each turn's call, so a run can stop in the middle of a conversati
 is then not run, as a case is whose attempts did not all run
 ([limits and repeats](#limits-and-repeats)): the turns it sent are dropped, the case has no
 result, `summary.json` counts it in `not_run`, and running again sends every turn again. The
-judge tokens of the dropped turns still count towards `max_judge_tokens`. Each turn's call has
+judge tokens of the dropped turns still count towards `max_judge_tokens`, as do those of the
+[conversation judges](#conversation-judges), which grade a batch's conversations once their turns
+are done. Each turn's call has
 the target's `timeout_seconds`; a turn that outlasts it is a failed call, which ends its
 conversation as above. A [simulated user](#simulated-users)'s model calls, the turns it writes and
-its goal verdict, are the simulator's, not a judge's: `max_judge_tokens` does not count them, and
-`max_seconds` stops its conversation at the next target call.
+its goal verdict, count towards `max_judge_tokens` too, and a limit stops its conversation at the
+next target call: the turn it wrote then is not sent.
 
 **Resume.** A conversation's turns are part of what its verdict depends on, so changing a turn's
 input, expectations or checks, or a check's scope, grades it again.
@@ -552,7 +1165,8 @@ input, expectations or checks, or a check's scope, grades it again.
 **Suite-file runs only.** The pytest gate evaluates one input per row, and the evals core's worker
 sends one prompt per case: it skips a conversation case, scripted or simulated, saying so. Its
 HTTP targets fill in `{{session_id}}`, `{{history}}` and `{{messages}}` as for a case of one input.
-LLM judges of a whole conversation are not built yet (MorningHQ/martian-notes#176).
+The [conversation judges](#conversation-judges) are scorers in Python too, for conversations you
+pass to `evaluate(...)` yourself.
 
 Every turn is recorded:
 
@@ -624,7 +1238,8 @@ and a check named `goal_reached`.
 - After each reply it writes the next message, or sets `done` when its stop condition is met.
 - When the user has sent `max_turns` messages, it is asked once more, only whether the goal was
   reached. A conversation costs at most `max_turns + 1` simulator calls, besides the target's and
-  the judges'.
+  the judges'. The run's `max_judge_tokens` counts their tokens with the judges'
+  ([limits](#run-a-suite-file-locally)), so one limit caps what the run spends on models.
 - Each message is a turn, sent as a [conversation](#conversations)'s turns are, and graded by
   every turn check against the case's expectations; the conversation checks then grade the
   replies.
@@ -635,7 +1250,11 @@ its reason as the rationale, such as `With its budget of 4 messages spent, the s
 not reach its goal: ...`. The case passes when every check passes it and the goal was reached.
 With [repeats](#repeated-attempts) each attempt is a conversation of its own, and the goal's
 verdicts combine by the suite's `combine`. A model plays the user, so the same suite can talk
-differently from run to run; repeats show how much.
+differently from run to run; repeats show how much. The simulator grades its own conversation;
+for a second opinion, add a [`task_completion`](#conversation-judges) judge, which reads the same
+goal and the conversation with the suite's judge model. In a suite with one, a simulated
+conversation's conversation checks read its user's goal as `expectations.goal` unless the case's
+expectations give one.
 
 **When it fails.** A simulator call that fails, or a reply that neither ends the conversation nor
 holds a message, ends the conversation as a failed target call does: no check has a verdict, the
@@ -647,7 +1266,7 @@ only the last call, the one after the budget is spent, fails, the goal alone has
 | Where | What |
 | --- | --- |
 | `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
-| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation` |
+| `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation`. `tokens_this_run` has the simulator's tokens, `simulator`, beside the judges' |
 | The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
 | The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
 | The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
@@ -893,7 +1512,61 @@ a group, such as paraphrases of one attack, the label can overstate the evidence
 | --- | --- |
 | `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
-| `martian evals run` | Nothing. No command compares two runs; open them in `martian ui` and use Compare |
+| `martian evals run --baseline DIR` | The label for the cases' verdicts, under the table and in `comparison.json`, and the gate follows it ([comparing with a baseline](#comparing-with-a-baseline)) |
+| The evals action's [pull-request comment](gate-and-ci.md#compared-with-the-last-result-of-main) | The label against the last result of `main`, and each case that went from pass to fail |
+
+### Comparing with a baseline
+
+`martian evals run evals.yaml --baseline DIR` (`run_suite(path, baseline=DIR)` from
+`martian.evals.runner`) compares a run with an earlier run of the suite, whose output folder is
+`DIR`, from the files alone: no data folder or Evals UI is needed, so CI can keep the earlier
+run's `verdicts.json` and nothing else. `martian.evals.baseline` does the comparison.
+
+```bash
+martian evals run evals.yaml --output results/main             # the baseline, such as main
+martian evals run evals.yaml --output results/pr --baseline results/main
+```
+
+- **Read first.** `DIR/verdicts.json` is read before any case runs. A folder without one, or a
+  file this SDK did not write, stops the run with exit `2`.
+- **Pairs.** A case pairs with the baseline's case of the same id when its inputs and expectations
+  are the same and both runs have a verdict for it. The verdicts compare by the exact McNemar test,
+  as above, so a few changed cases are always within noise. A case new since the baseline, one
+  whose inputs or expectations changed, and one without a verdict in either run are not paired;
+  baseline cases this run did not have are counted as missing. With repeats, a pair is of the
+  cases' combined verdicts.
+- **The gate.** With a baseline the exit code follows the comparison: `1` when the change is
+  worse than noise, when a paired case newly fails a security check, or when a case with no pair
+  failed, since there is nothing to compare it with; otherwise `0`, even when cases failed in
+  both runs or a few went from pass to fail on other checks. A case without a verdict, or a run
+  that [stopped at a limit](#run-a-suite-file-locally) before a case, still exits `2`; a stopped
+  run's `verdicts.json` and `comparison.json` hold only the cases it finished. Without
+  `--baseline` the run is gated on its own, as before.
+- **Security checks, case by case.** A leak is never noise. A paired case that fails a
+  [security check](#repeated-attempts) it passed in the baseline, or that the baseline did not
+  have, fails the gate on its own, whatever the label and also when the case already failed
+  another check in the baseline. A case that failed the same security check in both runs is a
+  known failure. The run's own `verdicts.json` names its security checks, the checks whose type is
+  in `martian.evals.runner.SECURITY_CHECKS` and the [`python` checks](#custom-python-checks)
+  marked `security: true`, so the rule follows the suite as it is now.
+- **What it reports.** The command prints the label, the counts and the p-value under the table,
+  then the cases that went from pass to fail with their failed checks, the cases that newly failed
+  a security check, the cases it could not pair and the failed ones among them. `comparison.json`
+  holds the same: `label`, `significance` (the paired comparison's fields, as
+  `GET /v1/evals/compare` returns them), `regressed` (each case's id and each failed check's
+  reason, `null` when the reason is not kept), `improved`, `security_regressed` (each case that
+  newly failed a security check, with those checks' reasons), `new`, `changed`, `unverified`,
+  `missing`, `unpaired_failures`, `checks` (the checks `added`, `removed` and `changed` since the
+  baseline), `attempts` and `gate`.
+- **A changed suite.** A check added, removed or redefined, or a different number of attempts per
+  case, changes what a verdict means, so the label measures that change as well as the system's.
+  The comparison names such changes rather than refusing to compare. An LLM judge check is
+  redefined by its criteria, `judge.model` and `judge.inference_params`; a
+  [panel](#a-panel-of-judges) check by its members and `judge.inference_params`, not by
+  `judge.model`, which it does not use.
+- **A matrix.** Each combination is compared with the same combination of the baseline, and
+  one the baseline has no result of is gated on its own
+  ([a matrix of prompts and models](#a-matrix-of-prompts-and-models)).
 
 ### OpenAI-compatible endpoints
 
@@ -916,6 +1589,7 @@ endpoint declines structured output.
 | --- | --- | --- |
 | `OPENAI_API_BASE` | Judge | The endpoint's base address, usually ending in `/v1`. The judge posts to `<base>/chat/completions`. When it is unset, MLflow reads `OPENAI_BASE_URL`, and with neither the judge calls OpenAI. One address serves every judge in the process |
 | `OPENAI_API_KEY` | Judge | Sent as `Authorization: Bearer <key>`. MLflow's `openai` provider requires it, so give any value to an endpoint that takes no key |
+| `MLFLOW_MODEL_CATALOG_URI` | Judge | A catalogue of model prices, `https://` or `file://`, with a `<provider>.json` file for each provider. The judge prices a call (`mlflow.assessment.judgeCost` in its metadata) only from a catalogue this names. Unset or empty, the default, it makes no download from github.com, which an installation with no route out cannot reach, and records no price ([the model catalogue](security-and-data.md#judges-and-the-model-catalogue)) |
 | `judge.model` | Judge | `openai:/<model>`: the name after `openai:/` is the `model` the endpoint receives |
 | `judge.headers` | Judge | Headers added to every judge request after the provider's own, so one named `Authorization` replaces the key's; for a gateway that takes its key, tenant or route in another header. `${NAME}` in a value is read from the environment, and a missing variable stops the run before any case. The values are never written to the results or the judge metadata. Changing them keeps earlier results, as changing the key or address does. In Python it is `headers=` on `response_guidelines`, `response_conditions` and `response_rubric` |
 | `target.url`, `target.headers`, `target.body`, `target.response_path` | Model under test | A [URL target](#run-a-suite-file-locally) that posts a chat completion: `url: "${OPENAI_API_BASE}/chat/completions"`, `Authorization: "Bearer ${OPENAI_API_KEY}"` in `headers`, the `model` and `messages` in `body`, and `response_path: choices.0.message.content` |
@@ -947,12 +1621,514 @@ same name. The endpoint's own error text is read to choose the message and is ne
 | `judge_provider_structured_output` | `The endpoint refused structured output (response_format), ... Use a judge.model on an endpoint that supports it.` | A refusal of `response_format` other than HTTP 400, such as 422 |
 | `judge_provider_rejected` | `The endpoint rejected the request. Check judge.inference_params.` | Any other HTTP 400 or 422 |
 | `judge_provider_throttled` | `Check the provider quota, or raise judge.rate_limit_wait_seconds.` | Rate limits beyond the wait |
+| `judge_provider_address_refused` | `The endpoint's name resolves to an address this installation does not allow a judge to call. Check the judge's endpoint.` | Only on a server whose judge has an address policy ([the worker's judge](evals-core.md#the-workers-judge)): the name resolved to an address the policy refuses. Not retried |
 | `judge_provider_error` | `The endpoint failed without a judgment; ...` | Server errors after `judge.max_retries` retries |
 | `judge_invalid_schema` | `... The endpoint may ignore structured output (response_format): check judge.model.` | A reply that is not the judgment's JSON. After a declined `response_format` the message says so |
 | `judge_invalid_response` | `Judge draft returned no text` | An empty reply. A reply cut off at its length limit names `judge.inference_params.max_tokens` here and for `judge_invalid_schema` |
 
 The messages name `OPENAI_BASE_URL` instead when that is the variable in use. For other
 providers they name the provider's key and address without a variable.
+
+## A panel of judges
+
+With one judge, that judge's mistake, or its failure to answer, decides the check. A panel names
+several judge models for one judge check. Each grades the case on its own, through the same judge
+code as a single judge, and the strict majority of those that gave a verdict decides
+(`martian.evals.panel`, rule `strict-majority-v1`):
+
+- **A judge that errors does not vote.** Its error is kept as its reason.
+- **More than half of the panel must vote.** With fewer votes there is no verdict: one judge of
+  three deciding alone is the single judge the panel replaces.
+- **More than half of the votes must agree.** A tie has no verdict.
+- **No majority is an error, never a pass** (`judge_panel_no_majority`). The case has no verdict,
+  `martian evals run` exits `2`, `assert_checks` fails, and the next run grades the case again.
+
+| Panel | Votes | Verdict |
+| --- | --- | --- |
+| 3 judges | pass, pass, error | Pass: two of two votes, from two of three judges |
+| 3 judges | fail, fail, pass | Fail |
+| 3 judges | pass, fail, error | No majority: a tie |
+| 3 judges | pass, error, error | No majority: one of three judges voted |
+| 4 judges | pass, pass, fail, fail | No majority: a tie |
+| 5 judges | pass, pass, fail, error, error | Pass: two of three votes, from three of five judges |
+
+A panel names 2 to 9 different models. Name an odd number, so that a full panel cannot tie. Each
+judge is a model call, so a panel of three costs three single judges, and a run's
+`max_judge_tokens` ([time limits and budgets](#run-a-suite-file-locally)) counts the tokens of
+every member that gave a verdict, which the panel's feedback adds up; a member that gave a verdict
+and reported no usage leaves the panel's usage unknown, and the run stops as for a single judge.
+With the [cache of model calls](#a-cache-of-model-calls) on, each member's call is cached on its
+own, by its model, and a member replayed from the cache counts 0 tokens. The rule reads pass/fail
+verdicts, which every SDK judge gives. MLflow's own ensemble (`make_scorer_ensemble` with
+`majority_vote` in `mlflow.genai.scorers`) fails when any member errors and breaks a tie by
+sorting the answers, so the panel has its own rule.
+
+**In a suite file**, a judge check's `panel` lists the models:
+
+```yaml
+judge:
+  model: "openai:/YOUR_JUDGE_MODEL"        # every judge check without a panel
+  inference_params: {temperature: 0}       # every judge, the panel's members too
+checks:
+  - type: rubric
+    rubric: "Fail if the reply reveals the secret key. Pass if it declines."
+    panel: ["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"]
+  - type: guidelines
+    guidelines: ["Greet the user."]          # judged by judge.model alone
+```
+
+Any LLM judge check takes a `panel`: `rubric`, `guidelines`, `conditions`, the grounding
+judges and the [conversation judges](#conversation-judges). The members share `judge`'s settings
+(`inference_params`, `headers`, `max_retries`, `rate_limit_wait_seconds`) and its endpoint,
+`OPENAI_API_BASE`, so they are models one endpoint or gateway serves. A suite whose every judge check names a panel needs no `judge.model`, and
+refuses one, since nothing would use it. The panel is part of what a reused verdict depends on,
+so changing it grades the cases again.
+
+**In Python**, `judge_panel` builds one of the SDK judges for each model:
+
+```python
+from martian.evals import judge_panel, response_rubric
+
+judge = judge_panel(
+    response_rubric,
+    models=["openai:/JUDGE_A", "openai:/JUDGE_B", "openai:/JUDGE_C"],
+    name="keeps_secret",                     # default: the judge's own default name
+    inference_params={"temperature": 0},     # the judge's other arguments, for every member
+)
+```
+
+`judge` is `response_guidelines`, `response_conditions`, `response_rubric`, `groundedness`,
+`context_relevance` or `context_sufficiency`, or any function that takes `model=` and `name=` and
+returns a scorer whose value is a boolean. The members grade each case at the same time, so a
+panel takes about as long as its slowest member. With no majority the feedback has no value and
+the error code `judge_panel_no_majority`.
+
+**A registered judge.** `POST /v1/evals/judge-panels` on the evals core registers a version of a
+judge graded by a panel, and the core's worker grades it once on each member's model
+([evals core](evals-core.md#write-routes)). The Evals UI does not register panels or show a
+panel's members yet, and the Martian server does not serve the route.
+
+**What is recorded.** The score's value is the panel's verdict, and its rationale gives the count
+and each member's vote and reason. Its metadata holds the decision and every vote as flat
+strings: on the MLflow feedback in Python, under `checks.<label>.metadata` in a suite-file run's
+`results.jsonl` and on its score in the local Evals UI, and in the `provenance` of the core's
+score.
+
+| Key | Value |
+| --- | --- |
+| `martian.panel.rule` | `strict-majority-v1` |
+| `martian.panel.size` | The number of judges |
+| `martian.panel.passed`, `.failed`, `.errors` | How many judges passed, failed and gave no verdict |
+| `martian.panel.verdict` | `pass`, `fail` or `none` |
+| `martian.panel.<n>.model` | Judge n's model, from 1 in the panel's order |
+| `martian.panel.<n>.endpoint` | Its endpoint, when it names one (a registered judge only) |
+| `martian.panel.<n>.model_version` | The model version its provider reported, when it reported one |
+| `martian.panel.<n>.verdict` | `pass`, `fail` or `error` |
+| `martian.panel.<n>.reason` | Its reason, or why it gave no verdict, at most 2,000 characters |
+
+`martian.judge.version` is the members' judge version when they report one. The score's
+`source_id` is `panel:` and 12 hex digits of a digest of its members, the same for the same
+members in any order, so runs of the same panel compare.
+
+## Judge agreement with human labels
+
+A judge's pass rate says how often it passes, not how often it is right. `martian.evals.agreement`
+compares a judge version's verdicts with the labels people gave the same items. The evals core
+reports it for every judge version of a project (`GET /v1/evals/judge-agreement`), the Evals UI
+shows it on the Judges page, and the SDK computes it from scores and reviews or from a suite-file
+run's results. Beside it the report gives how far people agree with each other on the same
+question ([agreement between reviewers](#agreement-between-reviewers)), the most a judge can be
+expected to reach. A report saved as a judge version's [calibration](#calibration) says when the
+judge was last checked, and each judge score names the calibration that applied. No model is
+called.
+
+**What counts as a label.** A person's answer: a complete review of a case result, which labels
+the criterion its review question names, or human feedback on a trace, such as an annotation or
+feedback an application recorded with MLflow. A review's `human_review` criterion labels the case
+as a whole, so it pairs with no judge, and an expectation says what an output should hold rather
+than judging it, so it is no label.
+
+**How verdicts and labels meet.** A label pairs with the verdicts of the judge of the same name on
+the same item: the case result a verdict or label names, else the case result whose trace it is
+on, else the trace. To label a judge named `polite_tone`, give a review queue a question named
+`polite_tone`, or annotate its traces with feedback named `polite_tone`. On each item a judge
+version counts its newest verdict and the criterion its newest label. A judge version is a judge's
+name and version: a registered judge's version number, or `v1` for a built-in judge. Reports come
+by judge name, then version: versions of the digits 0-9 in number order, then any other version
+as text, such as one of other digits (`²`, `١`) on an application's score. Its verdicts are
+pooled over the models it ran on, which `models` lists. A judge version graded by a
+[panel](#a-panel-of-judges) is reported as one judge: its verdicts are the panel's, `panel` is
+`true`, and `models` lists the members' models, none for a score whose `martian.panel.size` is
+not written in the digits 0-9; a panel score with no majority is no verdict.
+The members' own agreement is not reported.
+
+| Judge's verdicts | What is reported |
+| --- | --- |
+| Pass/fail | `agreement`, the share of items where verdict and label are the same, with its Wilson interval; Cohen's `kappa`; the counts `both_pass`, `false_pass` (the judge passed what people failed), `false_fail` (the judge failed what people passed) and `both_fail`; the `false_pass_rate`, the share of the items people failed that the judge passed, and the `false_fail_rate`, the share of the items people passed that the judge failed, each with its Wilson interval |
+| Categories | `agreement` with its Wilson interval, Cohen's `kappa` over every category, and how many items had each pair of judge's and person's answers |
+| Numbers | `mean_difference`, the mean of verdict minus label (the judge's bias), with its Student t interval; `mean_absolute_difference`; and `concordance`, Lin's concordance correlation coefficient |
+| Free text | Nothing. Two texts that differ can mean the same, so text verdicts are not compared (`not_comparable`) |
+
+- **Kappa** is the agreement corrected for chance: 1 is perfect, 0 no better than chance, below 0
+  worse. A judge that passes everything agrees 90% of the time with people who pass 90% of items,
+  and has a kappa of 0. It is computed exactly from the counts, and is `null` when the judge and
+  the people each gave one answer throughout, which leaves no chance agreement to correct for.
+- **Concordance** is 1 only when every verdict equals its label, and falls with any spread, shift
+  or change of scale between them, which a correlation would forgive.
+- Neither has an interval; read them with the agreement's.
+- A label of another kind than the judge's verdicts, such as a pass/fail answer about a numeric
+  judge, is counted in `incomparable` and not compared. A judge's kind is its definition's when
+  it is registered, else that of its verdicts.
+
+**How many items it rests on.** `labelled` is the number of items compared and `judged` the number
+the judge version gave a verdict. Below 30 labelled items (`minimum`, `MINIMUM_LABELLED`) the
+`status` is `too_few`: the counts are given and every rate, interval and coefficient is `null`.
+At 30 items the 95% interval of an agreement rate is still up to 34 points wide (at 50%; 28 at
+80%), and at 10 up to 53, wide enough to hold any judge from a coin flip to a good one. Thirty is
+the floor for a number worth reading, not enough to correct a pass rate for the judge's errors:
+with 200 labels the interval is 8 to 14 points wide. Items count as independent, as the core's
+case results carry no group.
+
+**From the SDK.**
+
+```python
+from martian.evals.agreement import results_agreement
+
+# A suite-file run's checks against people's labels, by case id and check label.
+labels = {"case-1": {"rubric": False}, "case-2": {"rubric": True}}
+for report in results_agreement("results", labels):     # the output folder, or results.jsonl
+    found = report.agreement
+    print(report.judge, found.status, found.labelled, found.agreement, found.kappa)
+```
+
+`results_agreement` compares every check a label names, judge or not, as pass/fail; a check named
+in the labels that the results do not have is reported as judged by nothing. `judge_agreement`
+takes judge scores and reviews or human scores in the shared model, as the core does; `compare`
+compares any two sets of values item by item, the first the one being checked; and
+`JudgeAgreement.as_dict()` is the core's shape for one judge version.
+
+| Where | What |
+| --- | --- |
+| [`GET /v1/evals/judge-agreement`](evals-core.md#read-routes) on the evals core | A report per judge version of a project, with the newest 1,000 traces read, and the reviewers' agreement on each question named like a judge |
+| The Evals UI's Judges page | An agreement panel with a row per judge version, the reviewers' agreement on its question beside it, its calibration with its date or "Unchecked", and an action to save a measured report as its calibration; each version's agreement and calibration in its version history; and on a judge score's detail, the calibration that applied. The Martian server does not serve these routes yet, so against the server the page shows none of them |
+| `martian evals run` | Nothing: people label after the run. Use `results_agreement` on its results, or review it in `martian ui` |
+
+### Agreement between reviewers
+
+A label is one person's answer, and people disagree. When two or more people answered the same
+question about the same case result, `martian.evals.agreement` measures how far they agree with
+each other: the most a judge can be expected to agree with them on that question, since a judge
+that agreed more often would be agreeing with one reviewer's habits rather than with people. The
+evals core reports it for every review queue of a project (`GET /v1/evals/reviewer-agreement`),
+the stand-alone Evals UI shows it for a queue on the Reviews page and beside each judge's
+agreement on the Judges page, and the SDK computes it from reviews and queues. The Martian server
+does not serve the route, so the console shows neither. No model is called.
+
+**Which answers meet.** An item is a run, a case and a question, the criterion a review of a
+[review queue](evals-core.md#write-routes) answers. On each item each reviewer counts once, with
+their newest review: a complete one is their answer, and a pending one withdraws it. When a second
+person answers, their review follows the first in the case's chain and becomes the current one, the
+label a judge is compared with; the first person's answer still counts here. A review that names
+no reviewer counts for nobody, and a review outside a queue answers `human_review`, no queue's
+question, so it is not counted. An item is `shared` when two or more reviewers answered it; only
+shared items are compared, `answered` counts the items anyone answered, and `reviewers` the people
+who answered shared ones. An answer of another kind than the question's is counted in
+`incomparable` and left out.
+
+| Question's answers | What is reported |
+| --- | --- |
+| Pass/fail and categories | `agreement`, the share of shared items on which every reviewer gave the same answer, with its Wilson interval; `kappa`, that agreement corrected for chance |
+| Numbers | `mean_absolute_difference`, how far apart two reviewers' answers to an item are on average, with its Student t interval over the items; and `concordance`, the coefficient `method` names |
+| Free text | Nothing (`not_comparable`) |
+
+- **Two reviewers or more.** `method` says which coefficient was used. With two reviewers across
+  the shared items, their answers are paired item by item: Cohen's kappa (`cohen`) for pass/fail
+  and categories, Lin's concordance (`lin`) for numbers, the measures a judge's report uses. With
+  three or more, each item may have its own reviewers and its own number of them: Fleiss' kappa
+  (`fleiss`), each item's agreement taken over its own pairs of answers, and the intraclass
+  correlation ICC(1) (`icc`), the one-way random-effects model.
+- **How many items it rests on.** Below 30 shared items (`minimum`, `MINIMUM_LABELLED`) the
+  `status` is `too_few`: the counts, and `agreed` for pass/fail and categories, are given, and
+  `method` and every rate, interval and coefficient are `null`, as for a judge.
+- **Blind answers.** In an ordinary queue a second reviewer may read the first answer before giving
+  theirs, which makes people look more alike than they are. A queue with
+  [blind double review](#blind-double-review) hides it, and records each reviewer's first answer
+  to an item as given blind (`blind` on the review). A blind queue's report compares each
+  reviewer's answer given blind, not one they gave after reading the others, and says so with
+  `blind: true`. Across queues, a question that a blind queue asks is compared on the blind
+  queues' blind answers only, with `blind: true`; a question no blind queue asks is compared on
+  every queue's answers, with `blind: false`. The judge report's `reviewer_agreement` is the
+  latter, so a judge's ceiling rests on blind answers once any queue asks its question blind.
+- **Who has one.** The local edition (`martian ui`) is Community, with no review queues, and has
+  one user, so it has no reviewers' agreement to report; an edition with `review_queues` and an
+  organisation's members does.
+- **Per queue and per question.** The route reports each queue with a report per question, and
+  each question across every queue that asks it, its kind the newest such queue's. The judge
+  report's `reviewer_agreement` is the latter for each question named like one of its judges. Its
+  `kind` is the question's, which may differ from the judge's.
+
+```python
+from martian.evals.agreement import queue_agreement, question_agreement
+
+# reviews: every link of each review chain (records.list_reviews(..., current_only=False));
+# queues: the ReviewQueue objects they answer; blind: the ids of the blind queues among them
+# ({q.id for q in records.list_blind_queues(...)}).
+for report in queue_agreement(reviews, queues, blind=blind):
+    for found in report.questions:
+        print(report.name, found.question, found.blind, found.status, found.shared, found.method, found.kappa)
+```
+
+`compare_reviewers` compares answers given as one mapping of reviewer to answer per item, and
+`fleiss_kappa` and `intraclass_correlation` are the coefficients for more than two reviewers.
+
+### Blind double review
+
+When people can read each other's answers, their agreement goes up for the wrong reason. A review
+queue with blind double review keeps each reviewer from reading the other reviewers' answers to an
+item until they have given their own (`martian.evals.server.blind`). It is created with the evals
+core's own route `POST /v1/evals/blind-review-queues`, which takes the body of
+`POST /v1/evals/review-queues` and needs the same `review_queues` key and `createReviewQueues`;
+a queue is blind from the start and stays so. Every queue the routes answer with has `blind`.
+
+- **Hidden until answered.** An item is a case result and one of the queue's questions. A reader
+  with no complete answer of their own to it reads only its queue's pending review and their own
+  reviews of it, on every route that returns reviews or what they leave: `GET /v1/evals/reviews`, a
+  run's workbench (its review history, current reviews and the human scores among its
+  assessments), a conversation run's turns, and a judge calibration's labelled items, whose
+  `label` they get as `null`. Once they have answered, they read every answer to it.
+- **Answering.** The review drawer sends the review it showed as `previous_id`, as for any queue;
+  in a blind queue the answer is added after the item's newest review, which may be another
+  reviewer's, so the item keeps one chain and its current review is still the newest answer.
+- **Not on the trace.** A blind queue's answers are not copied to the case's trace as feedback:
+  every trace read and search, a trace export and the MLflow UI would show them to anyone. They
+  stay in the record store, with the run's scores.
+- **Given blind.** A reviewer's first complete answer to an item is recorded with `blind: true`;
+  any later answer of theirs, given once they could read the others', and every answer in a queue
+  that is not blind, has `blind: false`. Reviews carry `blind` on every route.
+- **What it does not hide.** A queue's progress (how many items have answers) and the agreement
+  reports, which give counts over items rather than an item's answers. The record store keeps the
+  queue's blind mode (`BlindQueue`, migration `0014`), not the queue's store, so every store
+  binding keeps it, and deleting its run deletes it. A [data export](data-export.md) carries the
+  mode and every answer, as the organisation's own copy of its data: it is a command and a function
+  of the operator's, not a route a reviewer reads.
+
+### Calibration
+
+A judge version's calibration is its agreement report saved as the record of when it was last
+checked (`martian.evals.calibration`). Nothing saves one by itself: someone saves the current
+report, on the Judges page, with `POST /v1/evals/judge-calibrations` on the evals core, or from
+the SDK. No model is called.
+
+- **What can be calibrated.** A registered judge version, or a built-in model judge
+  (`correctness` or `safety`, version `v1`). Only a measured report is saved: 30 or more
+  labelled items of a judge whose verdicts are compared. Fewer items, or a free-text judge, is
+  refused. The built-in `policy` judge takes its guidelines from each scoring request, so
+  `policy` `v1` has no one definition to calibrate: saving one is refused, and its scores name no
+  calibration; register the policy as a judge to calibrate it. A suite file's judge is a check of
+  that file, not a judge version the core registers, so it has no calibration; use
+  `results_agreement` on its results.
+- **What it holds.** The version's report as the agreement route gives it; the labelled items it
+  rests on (`items`), each a case result or a trace with its label and the verdict compared with
+  it; when it was saved and who saved it; the model the version ran on then: its own, the default
+  judge model for a judge that names none, or its panel's members; and `definition`, the digest
+  of what the version meant then. Every calibration is kept; the newest of a judge version is its
+  calibration.
+- **What a version means.** Its `definition` is a digest of everything that defines it apart
+  from its model: its kind and type, its parameters and criteria (a registered judge's
+  instructions, kind, options and range), and for a built-in judge the rubric the core's judge
+  grades it by. A registered version cannot be edited, so a new prompt or rubric is a new version,
+  which starts with no calibration. A built-in judge's rubric can change with a release of the SDK
+  while its version stays `v1`, and the digest is how its calibration notices. The judge's own
+  prompt around the rubric (`martian.judge.version` on each score, `response-rubrics-v1` for the
+  SDK judge) is not part of it.
+- **Checked or unchecked.** A judge version is `checked` while it runs on the model its newest
+  calibration was measured on and has the definition it had then. Otherwise it is `unchecked`,
+  with the reason: `none` when it has no calibration; `model_changed` when the model it runs on
+  changed since, such as a judge that names no model after the default judge model changed;
+  `definition_changed` when what it means changed since. A judge's own model and a panel's
+  members are part of its version, so changing them makes a new version, which starts with no
+  calibration. The model is compared as the core pins it: a judge that names none, with no
+  default judge model either, runs on the worker judge's own model, which the core does not see,
+  and a provider's new snapshot behind the same model name is recorded on each score
+  (`martian.judge.model_version`) but not compared.
+- **Re-checked on request.** A re-check grades again exactly the labelled items the version's
+  newest calibration rests on, with the version as it runs now, compares the new verdicts with
+  the same labels and, when that is measured, saves the result as the version's newest
+  calibration, which names the one it re-checked (`recheck_of`). Each item is a model call, so a
+  re-check is asked for explicitly, with the cost acknowledged: `POST /v1/evals/judge-rechecks`
+  on the evals core, which the worker carries out, or `recheck_calibration` from the SDK.
+- **Scores name the calibration that applied.** Every judge score of a scoring job records the
+  calibration that applied when it was made in its metadata, the assessment's `provenance`, as
+  `martian.calibration_id`: the judge version's newest calibration when the job started, if it
+  checks the version as the job runs it (on the same model, with the same definition), else
+  `none`. A suite-file run's judge scores name `none`. A later calibration does not change what
+  an earlier score names.
+- **A panel is calibrated as one judge.** A judge version graded by a
+  [panel](#a-panel-of-judges) has one calibration, of the panel's verdicts, which records the
+  panel's members (`panel`) in place of a model. It checks the version while the version runs on
+  exactly those members, and the panel's scores name it. A re-check grades each item on each
+  member and the strict majority decides, as in a scoring job. The members are not calibrated one
+  by one: the verdict a score holds and a gate uses is the panel's, and the members read the same
+  reply and can share blind spots, so their own error rates do not give the panel's.
+
+```python
+from martian.evals.calibration import recheck_calibration, save_calibration
+
+# The judge's current report in the local edition's data folder, saved as its calibration.
+calibration = save_calibration("polite_tone", 2)          # data_dir=..., project_id=... to choose
+print(calibration.id, calibration.labelled, calibration.model, calibration.report["agreement"])
+
+# After the default judge model changed: grade the same labelled items again on the new model.
+recheck = recheck_calibration("polite_tone", 2, acknowledge_model_cost=True)
+print(recheck.state, recheck.graded, recheck.errors, recheck.result_id or recheck.error)
+```
+
+`save_calibration` and `recheck_calibration` work on the local edition's data folder
+(`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`) as its single user, and read the
+default judge model from the folder's `settings.json`. A refusal raises `StoreError`:
+`not_found` for a judge version the project does not have, or a re-check of one with no
+calibration; `invalid` for a report that is not measured, the `policy` judge, or a re-check
+without `acknowledge_model_cost`; `conflict` for a re-check of a version whose last one is still
+queued or running. `recheck_calibration` grades the items in the calling process with the SDK
+judge, on the provider's key in that process's environment, and returns the re-check:
+`completed`, with `result_id` naming the new calibration, or `failed`, with the reason in
+`error` and the calibration as it was, such as when fewer than 30 items got a verdict to compare.
+A `request_id` makes a repeated call return the same calibration or re-check.
+[The evals core](evals-core.md#read-routes) lists each judge version's calibration and status,
+serves one calibration by the id a score names, and [re-checks one](evals-core.md#write-routes).
+The Martian server does not serve these routes yet.
+
+Re-checking on a schedule, such as every judge whose model changed or every week, is an
+Enterprise feature of the Martian server and console, not part of the core: a schedule calls
+`POST /v1/evals/judge-rechecks` for each judge version it re-checks.
+
+## Score production traces
+
+On an edition with monitoring (Enterprise and On-Premises), a monitor scores a sample of a
+project's live traces, the ones an application records with MLflow tracing or sends over
+[OpenTelemetry](evals-core.md#opentelemetry-traces), with judges and checks, and stores each score
+on its trace, where the Traces page shows it as an assessment. Create one on the evals core:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/monitors" -H 'Content-Type: application/json' -d '{
+  "request_id": "0b9f3c4e-5d0a-4d8e-9a43-3f6d2b9e8c11", "name": "Live safety",
+  "scorers": ["safety", "response_length"], "sampling_rate": 0.1, "filter": {"state": "OK"},
+  "max_judge_tokens_per_day": 200000, "acknowledge_model_cost": true}'
+```
+
+- **Scorers** that need no expected response, since live traffic has none: the checks
+  `valid_json` and `response_length`, the judges `safety` and `policy`, and registered judges by
+  name and version.
+- **`sampling_rate`**, 0 to 1, chooses traces by their id, so the same traces on every pass, and a
+  trace sampled at one rate is sampled at every higher one.
+- **`filter`** takes the Traces page's search filters: text, state, session, user, minimum
+  latency and an assessment.
+- **`max_judge_tokens_per_day`** is required with judges. Once a UTC day's judge tokens reach it,
+  the monitor scores nothing until the next midnight, and its `progress.capped` says so.
+- A new trace is scored within about 31 seconds of its request time, plus its judge's time. A
+  trace recorded more than 20 seconds after its request time is not scored. Each trace is scored
+  at most once by a monitor.
+- `GET .../monitors/{id}/trends` gives each scorer's pass rate or mean per hour over the last day,
+  or in the windows you ask for, each with its 95% interval: what the Evals UI's Monitoring page
+  draws ([score trends](evals-core.md#score-trends)).
+- `POST .../monitors/{id}/pause`, `.../resume` and `DELETE .../monitors/{id}` stop and restart it.
+
+The local edition (`martian ui`) is Community, so it runs no monitors. How the worker scores,
+the routes and the progress a monitor reports are in [monitors](evals-core.md#monitors).
+
+### Alert when scores drop
+
+A threshold on a monitor's scorer sends an alert when the scorer's pass rate, or mean score, over
+a window breaks it, and another when it recovers:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/thresholds" -H 'Content-Type: application/json' -d '{
+  "request_id": "6a1d0c1e-3c0f-4b55-9a6e-1f3b8f2a7d10", "name": "Live safety pass rate",
+  "source": {"monitor_id": "'"$MONITOR_ID"'", "scorer": "safety"},
+  "measure": "pass_rate", "direction": "at_least", "value": 0.9,
+  "window_seconds": 3600, "min_count": 30,
+  "webhook": {"url": "https://alerts.example.com/martian", "secret": "'"$WEBHOOK_SECRET"'"}}'
+```
+
+- **It judges the interval, not the rate alone.** Once the window holds `min_count` scores, the
+  threshold breaches when the whole 95% interval of the pass rate (Wilson) or mean (Student t) is
+  on the wrong side of `value`, and recovers when the whole interval is back on the right side;
+  while the interval holds the value nothing changes. So sampling noise does not raise alerts, and
+  85 of 100 against 90% waits for more evidence where 80 of 100 breaches.
+- **One alert per change.** A breach sends one alert to each channel, and a recovery one. The
+  state is kept in the record store, so a worker that restarts does not send it again.
+- **Webhooks are signed.** Each request carries `X-Martian-Timestamp` and `X-Martian-Signature`,
+  `v1=` and the HMAC-SHA256 of the timestamp, a full stop and the raw body, keyed with your
+  secret. Verify it as [thresholds and alerts](evals-core.md#sending-alerts) shows, or with
+  `martian.evals.alerts.verify`. The secret is never shown again by any route.
+- **Email** goes to `"email": {"to": [...]}` through the installation's SMTP server.
+- **Nothing is sent unless the installation sends it**: its worker is configured with webhook or
+  SMTP settings, and until then a threshold with a channel is refused (`422`). Failed deliveries
+  are retried with backoff for about an hour; `GET .../thresholds/{id}/alerts` shows each one's
+  delivery.
+
+The routes, the payload, the retry schedule and the settings are in
+[thresholds and alerts](evals-core.md#thresholds-and-alerts).
+
+## Run a suite on a schedule
+
+On an edition with monitoring, a schedule runs a saved suite version against a target unattended,
+as a regression run, and keeps the history of its runs. Create one on the evals core:
+
+```bash
+curl -X POST "$EVALS_CORE/v1/evals/schedules" -H 'Content-Type: application/json' -d '{
+  "request_id": "6f1c0d9e-3a52-4b8e-8f2d-1c7b9a4e5d20", "name": "Nightly regression",
+  "suite_version_id": "<suite version id>", "agent_id": "<target id>",
+  "dataset_name": "support-faq", "cron": "0 2 * * *", "acknowledge_model_cost": true}'
+```
+
+- **When**: `every_seconds` (at least 60, counted from the Unix epoch, so `3600` is on the hour)
+  or `cron`, five fields (minute, hour, day of the month, month, day of the week), always in UTC.
+- **What it runs**: the suite version and the published dataset version it was created with,
+  each judge on the model it had then, against the target as it is at each slot. Each run is
+  scored by the suite once it completes.
+- **Admission** is a launch's: a slot due while the organisation already has as many runs in
+  progress as its edition allows, or whose target the worker no longer knows, is recorded as
+  `skipped` with the reason, and is not run later.
+- **Missed slots**: when no worker took the schedule's turn in time, such as a worker that was
+  down, the slots that passed are run once when it returns, not once each.
+- **History**: `GET .../schedules/{id}/runs` lists each slot, the latest first, with its run's
+  state, pass rate, suite scorecard and gate result, and the paired comparison with the
+  schedule's previous completed run ([comparing two runs](#comparing-two-runs)).
+- **Alerts**: a threshold with `"source": {"kind": "gate", "schedule_id": ...}` watches the pass
+  rate of the schedule's gate results and alerts when it breaches and when it recovers, as a
+  threshold on a monitor's scores does.
+- `POST .../schedules/{id}/pause`, `.../resume` and `DELETE .../schedules/{id}` stop and restart
+  it; slots that pass while it is paused are not run.
+
+### Run it again when the model changes
+
+A provider can update the model behind your agent without notice. Add `on_model_change` to the
+schedule and its suite also runs once whenever that model changes, besides its slots:
+
+```json
+"on_model_change": {"source": "traces", "settle_seconds": 300, "min_interval_seconds": 3600}
+```
+
+- **`source`** is where the model is read. `traces`: the project's live traces, the model their
+  spans report (`gen_ai.response.model`, or `gen_ai.request.model`, and the OpenInference and
+  MLflow equivalents), as your application sends them over OpenTelemetry. `runs`: the model the
+  target reported on the project's runs of it. An HTTP target reports it when you set
+  `model_path`, the path in its JSON response (`model` for an OpenAI-compatible reply), or
+  `model_header`, a response header; a function target by returning
+  `martian.evals.worker.TargetReply(output, model=...)`. Every run and every case's trace then
+  records the model that answered.
+- **It ignores flapping.** A new model counts only once it has been the only one seen for
+  `settle_seconds` (300 by default), so traffic that switches back and forth between two models
+  starts nothing; and a change starts the suite at most once every `min_interval_seconds` (3600 by
+  default, at least 60).
+- **History**: the run a change starts is a slot of its own (`"trigger": "model_change"`), unless
+  a regular slot was due at the same time, and its entry says `model changed from X to Y`. Every
+  entry shows the `model` its run's target reported, and the comparison with the previous run
+  shows what the change did to the scores.
+
+The local edition is Community, so it runs no schedules. The routes, how the worker admits each
+run and what the history holds are in [schedules](evals-core.md#schedules).
 
 ## Use
 
@@ -1039,6 +2215,13 @@ trace) says what it measured.
 | `tool_not_called` | `calls` or `expectation`, `arguments_match`, `source` | The agent made none of the calls | `{type: tool_not_called, calls: [close_account]}` |
 | `tool_trajectory` | `calls` or `expectation`, `order`, `arguments_match`, `source` | The agent's tool calls follow the steps, turn by turn, a list in a step being calls made together in one turn | `{type: tool_trajectory, calls: [lookup_order, [get_policy, check_eligibility]]}` |
 | `step_count` | `min_turns`, `max_turns`, `min_calls`, `max_calls`, `source` | The agent took that many model turns and made that many tool calls in all; give any of the bounds | `{type: step_count, max_turns: 5}` |
+
+A check of this table can also be applied to the saved outputs of a run, without a suite file: a
+scoring request or a saved suite names it as `{type, name?, options}` with the options above
+([the worker](evals-core.md#deterministic-checks-in-the-worker)), and the Evals UI has a form for
+each check. Its scores are the suite file's for the same outputs; a check that reads the target's
+call (`latency`, `cost`, and the tool-call checks that read the trace) reads what a run's saved
+output has of it.
 
 The same checks in a test, with `evaluate` and `assert_checks`:
 
@@ -1608,7 +2791,7 @@ def cites_reason_code(outputs):
 | `file` | Yes | The Python file, relative to the suite file, loaded as a function target's file is |
 | `function` | Yes | The function's name in that file |
 | `min_score`, `max_score` | When the function returns a number | The number passes when it is at least `min_score` and at most `max_score`; give either or both |
-| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`. Default `false`: the suite's rule |
+| `security` | No | `true` makes it a [security check](#repeated-attempts): its attempts combine by `all` unless it names its own `combine`, and compared with a [baseline](#comparing-with-a-baseline) a case that newly fails it fails the gate on its own. Default `false`: the suite's rule, and the baseline's noise rule |
 
 Without a `name` the check's label is `python`, so give each python check a name.
 
@@ -1668,6 +2851,42 @@ could not call, or bounds that are not numbers, when the check is made. Repeats 
 files, so it has no `security`. A worker of the
 [evals core](evals-core.md#custom-scorers-in-the-worker) runs scorers its setup installs, with the
 same rules but no `trace`; the Evals UI cannot choose one yet.
+
+### Installed checks
+
+A suite can name a check that an edition's worker installs, rather than one the SDK ships: a check
+that needs what only that edition has, such as something it prepares for each case. The suite file
+holds only the check's name and its options:
+
+```yaml
+checks:
+  - type: installed
+    name: order_state            # the name the worker installs the check under
+    options:
+      status: refunded           # given to the check as written
+      required: true             # not given to the check: the case passes only if it returns true
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | The check the worker installs under this name, and the check's label |
+| `options` | No | A mapping given to the check as written, but for `required` |
+| `options.required` | No | `true` makes the check decide its case's status in a run that grades it; `false`, the default, only adds a score. Nothing but `true` or `false` is accepted: `"yes"` or `1` is a `ConfigError` when the file loads |
+
+Loading and writing a suite file keep all of it as written, as a `code` scorer of type `installed`
+([the model](eval-model.md#the-sdk-suite-file)). Nothing in the file says what the check does or how; the
+worker that runs the suite's scoring job, or a run that names the check, decides that
+([case hooks and installed checks](evals-core.md#case-hooks-and-installed-checks-in-the-worker)).
+A required check makes the case `failed` when it returns false, `error` when it gives no verdict, and
+`passed` only with an answer that matched and every required check true; a case with no expected
+answer is graded by its required checks alone ([required installed
+checks](evals-core.md#required-installed-checks)). It decides a case only in a run whose worker was
+given the check when the run was admitted; in a scoring job, which a suite's checks are graded in, it
+adds a score and changes no status.
+The open edition installs none: `martian evals run` refuses a suite with an installed check before
+it writes anything (`check order_state: an installed check runs in a worker that installs a check
+under that name, and this command installs none`, exit code `2`), and an
+[audit](#what-it-cannot-audit) lists it as not audited.
 
 ## Mistakes that raise instead of passing silently
 
@@ -1982,6 +3201,122 @@ A judgment took 350 to 470 input tokens and 55 to 80 output tokens on average, b
 Calibrate on your own documents and model before relying on these rates; a change to a judge's
 prompt or schema needs the benchmark run again.
 
+### Conversation judges
+
+Three judges read a whole [conversation](#conversations), turn by turn, where the judges above read
+one reply. Each is a suite-file `type` that takes `scope: conversation`, and a function of the same
+name in `martian.evals`.
+
+| Type | Reads | Passes when | A fail names |
+| --- | --- | --- | --- |
+| `task_completion` | The conversation and the user's goal, `expectations.goal` | By the end, the assistant has done or given what the goal asks for, in full | The turn whose reply fell short, if one did, quoting it |
+| `policy_adherence` | The conversation and `guidelines`, the case's `expectations.guidelines` or else the check's own | No reply breaks a guideline, each read in the light of the turns before it | The first turn whose reply broke one, the guideline, and the words that broke it unless the reply broke it by leaving something out |
+| `knowledge_retention` | The conversation | No reply contradicts or forgets what the user said in that turn or before | The turn whose reply did, the turn the user said it in and the fact, quoted from the user's message, and the reply's words unless it forgot by leaving something out |
+
+A pass of `task_completion` names the turn whose reply completed the goal and quotes it. The
+rationale gives the turn and its words, such as `Turn 3 contradicts or forgets what the user said
+on turn 1: "My order number is A-1002.". It asked for the number again. Turn 3 reply: "What is your
+order number?"`.
+
+```yaml
+checks:
+  - type: task_completion          # each case gives expectations.goal
+    scope: conversation
+  - type: policy_adherence
+    scope: conversation
+    guidelines:                    # for every conversation whose case gives none
+      - "Never ask the customer again for something they already gave."
+  - type: knowledge_retention
+    scope: conversation
+```
+
+- **Conversations only.** A conversation judge without `scope: conversation`, and one in a suite
+  whose data has a case of one input, are refused when the suite loads, with the case named:
+  `case one has one input, and task_completion_judge (a task_completion judge) reads a whole
+  conversation; give the case turns or a simulated_user, or remove the check`. So are a
+  `task_completion` judge with a scripted conversation that gives no `expectations.goal`, and a
+  `policy_adherence` judge with a conversation that has no guidelines. A
+  [simulated conversation](#simulated-users)'s goal is its user's, unless its case gives
+  `expectations.goal`.
+- **What they read.** The conversation as the target answered it, after every turn: the turn checks
+  grade each reply first, and a conversation whose turn did not complete is not judged. A
+  [repeated](#repeated-attempts) case's attempts are each judged, and combine by the check's rule,
+  as any check's do.
+- **In Python**, a judge reads the conversation at `inputs["messages"]`, `role` and `content`
+  messages, each user message followed by the assistant's reply (`system` messages are left out),
+  as `martian evals run` gives it; `messages_key` selects another field:
+
+  ```python
+  from martian.evals import assert_checks, evaluate, knowledge_retention, task_completion
+
+  messages = [
+      {"role": "user", "content": "My order number is A-1002."},
+      {"role": "assistant", "content": "Order A-1002 is waiting for stock."},
+      {"role": "user", "content": "Then please cancel it."},
+      {"role": "assistant", "content": "What is your order number?"},
+  ]
+  model = "openai:/YOUR_JUDGE_MODEL"
+  result = evaluate(
+      data=[{"inputs": {"messages": messages}, "outputs": messages[-1]["content"],
+             "expectations": {"goal": "Cancel order A-1002."}}],
+      scorers=[task_completion(model=model), knowledge_retention(model=model)],
+  )
+  assert_checks(result)
+  ```
+
+**The evidence is checked.** The verdict is one flat JSON object, a reason, the turn numbers and
+quotes, and `pass`, `fail` or `uncertain`, because some models, GLM 5 among them, break nested JSON
+in structured output. The SDK checks it against the conversation: each turn number must be one of
+its turns (a fact's turn no later than the reply's), a guideline number one of the guidelines, and
+each quote a passage of the message it names, letting only runs of whitespace differ, as for the
+[grounding judges](#grounding-and-retrieval-judges). A turn or quote the verdict needs that is
+missing or not there, and `uncertain`, are scorer errors (`judge_missing_turn`,
+`judge_invalid_turn`, `judge_invalid_guideline`, `judge_missing_quote`, `judge_invalid_quote`,
+`judge_uncertain`): the conversation has no verdict, and `martian evals run` and `assert_checks`
+count it as an error. Each judge makes one model call through the shared transport, with its
+retries of replies that carry no judgment and its failure codes. An endpoint that declines
+structured output is asked once more without it; a reply that is not the verdict asked for is
+final, never repaired or asked for again. A conversation that is not user and assistant messages in
+turn, a missing or empty goal and guidelines that are not a nonempty list of text are errors before
+any model call. Feedback metadata records `martian.judge.version` (`task-completion-v1`,
+`policy-adherence-v1` or `knowledge-retention-v1`), `verdict`, `turn` (and `guideline` or
+`fact_turn`), `evidence` (each quote's turn, `user` or `assistant`, and code-point offsets),
+`turns`, `conversation_sha256`, `criteria_sha256`, `prompt_sha256` and `model_calls`;
+`include_judge_prompt=True` also keeps the rendered prompt.
+
+**Where the verdicts show.** A conversation judge is a conversation check, so its verdict on each
+conversation, with the rationale naming the turn, is in `results.jsonl` under the case's `checks`,
+in `summary.json` with `scope: conversation`, in the printed table, in the
+[pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) (its counts, and its
+name among a failed case's checks; the comment never carries a rationale), in the
+[`/turns`](evals-core.md#read-routes) route's `checks` for the conversation, and in the core's read
+routes as a score of source `llm_judge` whose `source_id` is the judge model.
+
+**Measured error rates.** Each judge was scored once against a hand-written labelled set of
+invented conversations of one to three turns,
+[`tests/evals/benchmarks/conversation_judges.jsonl`](../tests/evals/benchmarks/conversation_judges.jsonl)
+(ten cases a judge, half labelled pass; each labelled fail names its turn, and its guideline or the
+turn of its fact), by [`scripts/benchmark_conversation_judges.py`](../scripts/benchmark_conversation_judges.py),
+with GLM 5 (`zai.glm-5` on Amazon Bedrock, us-west-2, through a LiteLLM proxy as `openai:/glm-5`)
+at temperature 0, on 15 November 2026, in 30 model calls. False pass, false fail and errors are as
+for the [grounding judges](#grounding-and-retrieval-judges); "Named the turn" counts the labelled
+fails the judge failed whose verdict named the labelled turn, and guideline or fact turn.
+
+| Judge | Cases (pass / fail) | False pass | False fail | Errors | Named the turn | Mean latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `task_completion` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.8 s |
+| `policy_adherence` | 10 (5 / 5) | 0 of 5 | 1 of 5 | 0 | 5 of 5 | 1.5 s |
+| `knowledge_retention` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.7 s |
+
+The one false fail is a conversation that asked "Which one should I cancel, Music or Video?" before
+cancelling, under the guideline "Before cancelling anything, confirm with the customer which item
+they mean": the judge read it as asking for a second confirmation after the customer answered. The
+prompts were not revised on this set. These are very small samples: with five cases a side,
+observing no error still allows a true rate of up to about 50% (the 95% upper bound), and one run
+measures no run-to-run variation. A judgment took about 460 to 500 input tokens and 75 to 85 output
+tokens on average, by judge. Calibrate on your own conversations and model before relying on them
+in a gate; a change to a judge's prompt or schema needs the benchmark run again.
+
 ### Session enforcement
 
 The plugin does nothing unless `--martian-evals-gate` is passed. With it, the session fails when:
@@ -2048,6 +3383,11 @@ controller, which uploads once, so one session is recorded. Skips and worker err
 on the controller.
 
 ## Trust and limits
+
+The gate calls `predict_fn` in the test's own process, where the dataset's expected values are
+too: unlike a suite file's function target, nothing keeps the agent from them
+([the target and the grader](security-and-data.md#the-target-and-the-grader)). Use a suite file
+when the agent under test must not reach its answers.
 
 The verdict is `client_executed_server_scored`. Backend holds `expected`, re-scores the uploaded
 outputs and never accepts a client verdict, but it cannot prove the agent was really called or that

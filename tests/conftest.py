@@ -10,6 +10,17 @@ from martian_redteam.config import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# CI runners force coloured output: GitHub Actions sets GITHUB_ACTIONS, and runners may set
+# FORCE_COLOR or PY_COLORS. Typer then renders help and error text for a terminal (bold option
+# names) whatever NO_COLOR says, and Rich consoles created at import read FORCE_COLOR when they are
+# made, so the ANSI codes split the words tests look for. Both read the environment once, when the
+# command line is imported, so this is set here, before any test module imports it, and kept for
+# the whole session.
+os.environ.pop("FORCE_COLOR", None)
+os.environ.pop("PY_COLORS", None)
+os.environ["NO_COLOR"] = "1"
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
 
 def _real_martian_folder() -> Path:
     """The developer's own ``~/.martian``, from the account database rather than ``HOME``."""
@@ -46,10 +57,6 @@ def isolated_martian_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     patch = pytest.MonkeyPatch()
     patch.setenv("HOME", str(home))
     patch.setenv("MARTIAN_EVALS_HOME", str(base / "evals"))
-    # CI runners force coloured output (FORCE_COLOR); the command line's help and error text
-    # would then carry ANSI codes that split the words tests look for.
-    patch.delenv("FORCE_COLOR", raising=False)
-    patch.setenv("NO_COLOR", "1")
     try:
         yield home
     finally:

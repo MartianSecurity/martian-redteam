@@ -21,6 +21,7 @@ from martian.evals.server import (
 )
 from martian.evals.server.bootstrap import EvalCapabilities
 from martian.evals.store import MemoryStore, StoreStatus
+from tests.evals.evals_contract import CONTRACT, validate_response
 
 # These tests read no records; an in-memory record store satisfies create_app.
 RECORDS = SqlRecordStore("sqlite://")
@@ -40,6 +41,10 @@ ADMINS = WRITERS | {
     "manageJudges",
 }
 PAID = {"createReviewQueues"}  # needs the review_queues feature
+# The core's own key beside the table's, outside the frozen contract: whether the server serves the
+# Martian server's own routes the Evals UI calls (CI sessions, API keys, the traces export). The core
+# serves none of them.
+HOSTED = "hostedRoutes"
 
 EXPECTED = {
     ("community", "owner"): ADMINS - PAID,
@@ -56,8 +61,8 @@ EXPECTED = {
     ("on_premises", "viewer"): set(),
 }
 
-# The shape of EvalsBootstrapOut in contracts/evals-api.json in MorningHQ/MartianBackend: each
-# object's properties. The server's test pins the same shape.
+# The shape of EvalsBootstrapOut in contracts/evals-api.json in MartianSecurity/MartianBackend: each
+# object's properties, and the core's `hostedRoutes`. The server's test pins the contract's shape.
 SHAPE = {
     "Bootstrap": {"principal", "edition", "entitlements", "capabilities", "status"},
     "BootstrapPrincipal": {"kind", "user", "organisation", "role", "platform_admin"},
@@ -65,7 +70,7 @@ SHAPE = {
     "BootstrapOrganisation": {"id", "name"},
     "BootstrapEdition": {"key", "name"},
     "BootstrapEntitlements": {"features", "limits"},
-    "EvalCapabilities": ADMINS,
+    "EvalCapabilities": ADMINS | {HOSTED},
     "StoreStatus": {"status", "ready", "error_code", "updated_at", "provider", "admission_paused", "routing_epoch"},
 }
 
@@ -84,7 +89,7 @@ def test_the_local_edition_answers_with_its_fixed_principal_in_community():
         },
         "edition": {"key": "community", "name": "Community"},
         "entitlements": {"features": [], "limits": {"concurrent_runs": 1, "concurrent_scoring_jobs": 1}},
-        "capabilities": {name: name in ADMINS - PAID for name in ADMINS},
+        "capabilities": {name: name in ADMINS - PAID for name in ADMINS} | {HOSTED: False},
         "status": {
             "status": "ready",
             "ready": True,
@@ -125,7 +130,7 @@ def test_each_edition_and_role_gets_its_capabilities(edition, role):
         "limits": dict(EDITIONS[edition].limits),
     }
     assert {name for name, allowed in body["capabilities"].items() if allowed} == EXPECTED[(edition, role)]
-    assert set(body["capabilities"]) == ADMINS
+    assert set(body["capabilities"]) == ADMINS | {HOSTED}
     assert (body["status"]["status"], body["status"]["ready"]) == ("provisioning", False)
 
 
@@ -173,7 +178,7 @@ def test_the_highest_role_decides():
 
 
 def test_the_table_and_the_response_name_the_same_capabilities():
-    assert set(CAPABILITIES) == set(EvalCapabilities.model_fields) == ADMINS
+    assert set(CAPABILITIES) == set(EvalCapabilities.model_fields) - {HOSTED} == ADMINS
     assert capabilities_for("owner", ENTERPRISE) == dict.fromkeys(ADMINS, True)
 
 
@@ -183,6 +188,18 @@ def test_the_shape_is_the_frozen_contracts():
     ]
     assert {name: set(schemas[name]["properties"]) for name in SHAPE} == SHAPE
     assert all(set(schemas[name].get("required", [])) == SHAPE[name] for name in SHAPE if name != "StoreStatus")
+    contract = CONTRACT["components"]["schemas"]
+    assert set(contract["EvalCapabilities"]["properties"]) == ADMINS == SHAPE["EvalCapabilities"] - {HOSTED}
+
+
+def test_the_core_serves_none_of_the_hosted_routes_and_its_answer_is_one_the_contract_allows():
+    app = create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER)
+    body = TestClient(app).get("/v1/evals/bootstrap").json()
+    assert body["capabilities"][HOSTED] is False
+    # The contract's EvalCapabilities allows a property it does not name.
+    validate_response("get", "/v1/evals/bootstrap", body)
+    served = {path for path in app.openapi()["paths"]}
+    assert not served & {"/v1/evals/ci-sessions", "/v1/api-keys", "/v1/evals/traces/export"}
 
 
 def test_the_single_local_user_names_no_organisation():

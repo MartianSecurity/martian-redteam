@@ -1,18 +1,38 @@
 """The core's write routes launch, score and review runs, and edit datasets, suites, judges, queues,
 projects and views, through the store, the record store and the worker alone. The first test runs
-on MemoryStore and on the in-process MLflow binding; the rest on MemoryStore."""
+on MemoryStore and on the in-process MLflow binding; the rest on MemoryStore, with the record store
+on SQLite, and one also on Postgres when MARTIAN_TEST_POSTGRES_URL is set."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
+from martian.evals.manifests import CHANGED, PAUSED, manifest_for
+from martian.evals.model import Case
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import COMMUNITY, ENTERPRISE, create_app, organisation_principal
+from martian.evals.server import (
+    COMMUNITY,
+    DEFAULT_PROJECT,
+    ENTERPRISE,
+    SINGLE_USER,
+    create_app,
+    current_principal,
+    organisation_principal,
+    scoring,
+)
+from martian.evals.server.dependencies import optional_worker
+from martian.evals.server.drafts import MAX_UPLOAD_BYTES, _limit_body
 from martian.evals.server.projection import user_out
 from martian.evals.store import MemoryStore
 from martian.evals.store.mlflow_local import MlflowStore
@@ -218,6 +238,22 @@ def test_roles_come_from_the_capability_table(memory: Served):
 # --- scoring ----------------------------------------------------------------------------------
 
 
+def test_the_scorers_read_the_worker_an_edition_binds_on_its_own_application():
+    # The server mounts the core's routers on its own application and binds the core's
+    # dependencies there, without create_app's state (MartianSecurity/MartianBackend app/evals_core.py).
+    app = FastAPI()
+    app.include_router(scoring.router)
+    app.dependency_overrides[current_principal] = lambda: SINGLE_USER
+    with TestClient(app) as client:
+        workers = ((SimpleNamespace(judges=True), True), (SimpleNamespace(judges=False), False), (None, False))
+        for worker, judging in workers:
+            app.dependency_overrides[optional_worker] = lambda found=worker: found
+            answered = client.get("/v1/evals/scorers")
+            assert answered.status_code == 200, answered.text
+            available = {s["name"]: s["available"] for s in answered.json()}
+            assert (available["exact_match"], available["correctness"]) == (True, judging)
+
+
 def test_scoring_needs_a_completed_run_and_a_judge_for_model_scorers(records):
     client, served = serve(MemoryStore(), records, with_judge=False)
     with client:
@@ -350,6 +386,21 @@ def test_judges_are_registered_in_versions_and_scored_by_the_workers_judge(memor
     assert {(a["name"], a["source_id"]) for a in work["assessments"] if not a["error"]} == {("tone", JUDGE_MODEL)}
 
 
+@pytest.mark.parametrize("version", ["²", "١"])
+def test_a_stored_judge_version_in_other_digits_is_unsupported(memory: Served, version):
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1.
+    body = {"request_id": request_id(), "name": "tone", "instructions": "Is the reply in {{ outputs }} polite?"}
+    memory.call("POST", "/v1/evals/judges", 201, json=body)
+    assert isinstance(memory.store, MemoryStore)
+    (versions,) = memory.store._scorers.values()
+    versions[0] = versions[0].model_copy(update={"version": version})
+    listed = memory.call("GET", "/v1/evals/judges", 200, params={"name": "tone"})
+    assert (listed["items"], listed["unsupported"]) == ([], 1)
+    again = {**body, "request_id": request_id(), "expected_version": 1}
+    refused = memory.call("POST", "/v1/evals/judges", 409, json=again)
+    assert refused["detail"] == "Judge changed or has unsupported versions; reload before registering"
+
+
 # --- reviews, queues, questions and annotations ------------------------------------------------
 
 
@@ -429,6 +480,79 @@ def test_a_review_queue_hands_results_to_a_reviewer_and_tracks_their_answers(mem
     memory.call("POST", f"/v1/evals/{run['id']}/items/{chosen[1]}/reviews", 403, json={**answer, "value": 4})
 
 
+POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run on Postgres"),
+        ),
+    ]
+)
+def both_databases(request, tmp_path):
+    """The record store on SQLite, and on Postgres in a schema of its own."""
+    if request.param == "sqlite":
+        store = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
+        yield store
+        store.close()
+        return
+    schema = f"martian_test_{uuid.uuid4().hex[:10]}"
+    store = SqlRecordStore(str(POSTGRES_URL), schema=schema)
+    try:
+        yield store
+    finally:
+        store.close()
+        engine = create_engine(str(POSTGRES_URL))
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
+
+
+def test_a_review_answer_named_like_a_check_leaves_the_checks_score_in_place(both_databases: SqlRecordStore):
+    # MartianSecurity/martian-notes#345: a queue question named like the run's exact-match check.
+    client, served = serve(MemoryStore(), both_databases, entitlements=lambda _p: ENTERPRISE, principal=ADMIN)
+    with client:
+        run = served.completed_run()
+        item = items_by_case(run)["faq-1"]
+        question = {"name": "exact_match", "kind": "boolean", "instruction": "Is it the expected answer?"}
+        body = {"request_id": request_id(), "run_id": run["id"], "name": "Second look", "item_ids": [item["id"]]}
+        queue = served.call("POST", "/v1/evals/review-queues", 201, json={**body, "question": question})
+        (pending,) = served.call("GET", "/v1/evals/reviews", 200, params={"queue_id": queue["id"]})["items"]
+        review = {
+            "request_id": request_id(),
+            "state": "complete",
+            "queue_id": queue["id"],
+            "previous_id": pending["id"],
+        }
+        path = f"/v1/evals/{run['id']}/items/{item['id']}/reviews"
+        answer = served.call("POST", path, 201, json={**review, "value": False, "comment": "Not quite."})
+
+        # The check's verdict stays in the record store, beside the person's answer.
+        kept = asyncio.run(both_databases.list_scores(ADMIN, DEFAULT_PROJECT, run["id"], case_id="faq-1"))
+        assert [(s.scorer, s.source, s.value) for s in kept] == [
+            ("exact_match", "code", True),
+            ("exact_match", "human", False),
+        ]
+        # The run's results show both, each its own assessment, and the review names the person's.
+        for params in ({"item_id": item["id"]}, {}):
+            work = served.call("GET", f"/v1/evals/{run['id']}/workbench", 200, params=params)
+            named = {
+                a["source"]: a for a in work["assessments"] if a["item_id"] == item["id"] and a["name"] == "exact_match"
+            }
+            assert {source: a["value"] for source, a in named.items()} == {"CODE": True, "HUMAN": False}
+            assert answer["assessment_id"] == named["HUMAN"]["id"] != named["CODE"]["id"]
+        # So does the case's trace in the store.
+        trace = served.call("GET", f"/v1/evals/{run['id']}/items/{item['id']}/trace", 200)
+        assert sorted(
+            (a["source"]["source_type"], a["feedback"]["value"])
+            for a in trace["annotations"]
+            if a["assessment_name"] == "exact_match"
+        ) == [("CODE", True), ("HUMAN", False)]
+
+
 def test_the_question_library_keeps_one_definition_per_name(memory: Served):
     question = {"name": "tone", "kind": "categorical", "instruction": "Tone?", "options": ["warm", "cold"]}
     saved = memory.call("POST", "/v1/evals/review-questions", 201, json={"question": question})
@@ -459,6 +583,22 @@ def test_a_trace_annotation_is_written_once_per_request(memory: Served):
     memory.call("POST", f"/v1/evals/traces/tr-{'0' * 32}/annotations", 404, json=body)
     detail = memory.call("GET", f"/v1/evals/traces/{trace_id}", 200)
     assert {a["assessment_name"] for a in detail["info"]["assessments"]} >= {"on_topic", "ideal"}
+
+
+def test_an_expectation_reads_as_an_expectation_and_is_no_verdict(memory: Served):
+    run = memory.completed_run()
+    trace_id = items_by_case(run)["faq-1"]["evals_trace_id"]
+    for kind, name, value in (("feedback", "on_topic", True), ("expectation", "ideal", "Use the link.")):
+        body = {"request_id": request_id(), "kind": kind, "name": name, "value": value}
+        memory.call("POST", f"/v1/evals/traces/{trace_id}/annotations", 201, json=body)
+    info = memory.call("GET", f"/v1/evals/traces/{trace_id}", 200)["info"]
+    found = {a["assessment_name"]: a for a in info["assessments"]}
+    assert (found["ideal"]["expectation"], "feedback" in found["ideal"]) == ({"value": "Use the link."}, False)
+    assert (found["on_topic"]["feedback"], "expectation" in found["on_topic"]) == ({"value": True}, False)
+    # The Traces page lists verdicts: feedback, never an expectation.
+    (row,) = [r for r in memory.call("POST", "/v1/evals/traces/search", 200, json={})["items"] if r["id"] == trace_id]
+    assert "on_topic" in {a["name"] for a in row["assessments"]}
+    assert "ideal" not in {a["name"] for a in row["assessments"]}
 
 
 # --- projects, views and datasets ---------------------------------------------------------------
@@ -499,6 +639,74 @@ def test_saved_views_belong_to_their_owner_unless_shared(memory: Served):
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 409, params={"revision": 1})
     memory.call("DELETE", f"/v1/evals/views/{view['id']}", 204, params={"revision": 2})
     assert memory.call("GET", "/v1/evals/views", 200)["items"] == []
+
+
+async def test_an_upload_length_that_is_not_the_digits_0_to_9_is_left_to_the_upload_check():
+    # A header is Latin-1, so ², which isdigit() accepts and int() refuses, can arrive as a length.
+    assert await _limit_body(Request({"type": "http", "headers": [(b"content-length", b"\xb2")]})) is None
+    oversized = Request({"type": "http", "headers": [(b"content-length", str(MAX_UPLOAD_BYTES * 2 + 1).encode())]})
+    with pytest.raises(HTTPException) as refused:
+        await _limit_body(oversized)
+    assert refused.value.status_code == 413
+
+
+def publish_draft(served: Served, name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+    draft = served.call("POST", "/v1/evals/dataset-drafts", 201, json={"name": name})
+    path, revision = f"/v1/evals/dataset-drafts/{draft['id']}", draft["revision"]
+    for record in records:
+        revision = served.call("POST", f"{path}/records", 201, json={"base_revision": revision, "record": record})[
+            "revision"
+        ]
+    checked = served.call("GET", f"{path}/validation", 200)
+    body = {"base_revision": revision, "expected_sha256": checked["sha256"], "rationale": "Pinned release"}
+    return served.call("POST", f"{path}/publish", 202, json=body)
+
+
+def test_a_published_version_runs_only_while_the_store_holds_what_was_published(memory: Served):
+    publish_draft(
+        memory,
+        "pinned",
+        [
+            {"id": "r1", "input": "Refund?", "expected_output": "Yes."},
+            {"id": "r2", "input": "When?", "expected_output": "Soon."},
+        ],
+    )
+    (manifest,) = asyncio.run(memory.records.list_publications(ADMIN, DEFAULT_PROJECT))
+    assert (manifest.state, manifest.name, manifest.case_ids, manifest.draft_id is not None) == (
+        "published",
+        "pinned",
+        ["r1", "r2"],
+        True,
+    )
+    run = memory.launch(dataset_name="pinned")
+    memory.drain()
+    assert memory.call("GET", f"/v1/evals/{run['id']}", 200)["state"] == "completed"
+    # The version is changed in the store after it was published: a run of it never starts.
+    key = next(k for k, (d, _cases) in memory.store._datasets.items() if d.name == "pinned")  # type: ignore[attr-defined]
+    dataset, cases = memory.store._datasets[key]  # type: ignore[attr-defined]
+    edited = cases[0].model_copy(update={"expectations": {"expected_response": "No."}})
+    memory.store._datasets[key] = (dataset, [edited, *cases[1:]])  # type: ignore[attr-defined]
+    again = memory.launch(dataset_name="pinned")
+    memory.drain()
+    failed = memory.call("GET", f"/v1/evals/{again['id']}", 200)
+    assert (failed["state"], failed["error"], failed["items"]) == ("failed", CHANGED, [])
+
+
+def test_new_runs_wait_while_a_dataset_is_being_published(memory: Served):
+    cases = [Case(id="c1", inputs={"message": "hi"})]
+    stale = manifest_for("p-stale", DEFAULT_PROJECT, "old", cases).model_copy(
+        update={"started_at": datetime.now(UTC) - timedelta(minutes=11)}
+    )
+    asyncio.run(memory.records.begin_publication(ADMIN, DEFAULT_PROJECT, stale))
+    memory.launch()  # a publication past its lease no longer holds runs back
+    memory.drain()
+    asyncio.run(
+        memory.records.begin_publication(ADMIN, DEFAULT_PROJECT, manifest_for("p-now", DEFAULT_PROJECT, "new", cases))
+    )
+    refused = memory.call(
+        "POST", "/v1/evals", 409, json={"agent_id": AGENT, "dataset_name": "support-faq", "request_id": request_id()}
+    )
+    assert refused == {"detail": PAUSED}
 
 
 def test_a_draft_is_edited_published_and_run(memory: Served):

@@ -34,7 +34,10 @@ fields/model dumps and private local MLflow traces are not safe public reports.
 Martian. Its outbound calls are the ones the suite file names:
 
 - **A URL target** (`target.url`) receives one JSON `POST` per case, or per attempt when the
-  suite repeats its cases, carrying that case's input.
+  suite repeats its cases, carrying that case's inputs and never its expectations
+  ([the target and the grader](#the-target-and-the-grader)), and for each combination of the
+  suite's [matrix](evals.md#a-matrix-of-prompts-and-models) once more, with that combination's
+  values.
   The suite file chooses this address, so review a suite file from someone else before running
   it with your credentials loaded. `http` is accepted as well as `https`; use `https` for any
   endpoint that is not on your own machine or network.
@@ -48,8 +51,15 @@ Martian. Its outbound calls are the ones the suite file names:
   never stored. A literal value is stored as it is: keep credentials in the environment.
 - **An LLM judge** receives the case's input, the reply and your criteria at the provider you
   configure.
+- **The cheating inspection's judge**, only with `martian evals inspect-cheating --judge MODEL
+  --accept-judge-cost`, receives each transcript no signal flagged: the case's inputs, the
+  target's steps with what each was asked and returned, and the reply, each cut to 600
+  characters, never the expectations ([the judge](evals.md#the-judge)).
 - **MLflow** receives inputs, replies and judge reasons: a local store by default, or the
   server named in `mlflow.tracking_uri`.
+
+With the [cache of model calls](#the-cache-of-model-calls) on, a call whose reply the cache
+holds is not sent at all.
 
 Every run is also recorded in the local Evals UI's data folder on this machine (`--data-dir`,
 `MARTIAN_EVALS_HOME` or `~/.martian/evals`), which `martian ui` reads: each case's inputs, reply,
@@ -57,6 +67,13 @@ verdicts and reasons as `results.jsonl` holds them (every attempt's, when the su
 cases), its trace with the target's spans, and the
 target as the suite file writes it. Nothing there leaves the machine; treat the folder as you
 treat `results.jsonl`.
+
+`verdicts.json`, which every run also writes, holds no input, reply or judge reason: each case's
+id, verdicts, the SDK's wording of a target failure, a SHA-256 digest of its inputs and
+expectations, and the reasons of the deterministic checks that report counts, sizes or names. It
+is what a later run compares with (`--baseline`). With `baseline-branch`, the
+[evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps the baseline branch's
+copy in the repository's Actions cache, which pull requests, including those from forks, can read.
 
 Redirects are not followed and proxy settings from the environment are not used for the target
 call. Target errors name the failure, never the address, headers or response body.
@@ -78,10 +95,102 @@ See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
 `martian evals export` writes everything the data folder's store and record store hold into the
 folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
-reviews, and run artifacts. It holds no credentials: the local targets and their keys
-(`targets.json`, `target-keys.json`) and `settings.json` are not exported, and a target's
-`${NAME}` references stay unexpanded, as the store keeps them. Treat an export as you treat the
+reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
+and webhook URLs and email recipients among them). It holds no credentials: the local targets and
+their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
+threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
+keeps them. Treat an export as you treat the
 data folder. See [data export](data-export.md).
+
+### The cache of model calls
+
+The [cache](evals.md#a-cache-of-model-calls) is off unless the suite file has a `cache` block or
+the run is given `--cache`. With it on, `martian evals run` stores model replies on disk:
+
+- **Where.** The suite file's `cache.folder`, else `cache` in the local Evals UI's data folder
+  (`--data-dir`, `MARTIAN_EVALS_HOME` or `~/.martian/evals`). The folder and its subfolders are
+  created readable by their owner only (`0700`) and each entry likewise (`0600`). Nothing in it
+  leaves the machine, and nothing outside the run reads it. A function target's process cannot
+  reach it ([the target and the grader](#the-target-and-the-grader)): it holds judgments.
+- **What an entry holds.** One JSON file per reply, named by the SHA-256 digest of its key: the
+  format, the kind (`target` or `judge`), when it was stored, and the reply. A target's reply is
+  the text or value at `response_path` the endpoint returned, or a function target's return
+  value. A judge's is its judgment, the per-criterion verdicts with their reasons, and the
+  reply's metadata, such as the response format and the model version the provider named. An
+  entry holds no request, no header and no key, so the case's input appears in it only where the
+  reply quotes it. Treat the folder as you treat `results.jsonl`: replies can hold whatever the
+  target said.
+- **What the key leaves out.** The key is a digest of the full request, which is never written
+  down. Credentials are not part of it: a header or a query parameter whose name says it holds
+  one (`Authorization`, `Proxy-Authorization`, `Cookie`, and any name that holds `auth`, `key`,
+  `token`, `secret`, `pass`, `credential`, `cookie`, `session` or `signature`, or is `sig`,
+  `code` or `pwd`) is left out, and so is a user name or password in an address; a judge's key is
+  never read into it. Other header values are part of it as sent, with `${NAME}` read from the
+  environment, so a secret kept in a header whose name says nothing of it, such as
+  `X-Customer: ${CUSTOMER_SECRET}`, enters the digest: name such headers for what they hold.
+- **Errors are never stored**, so a cached entry is always a reply the model gave.
+- **Replayed results are marked.** A run that used the cache says so in `summary.json`, the
+  printed summary, the pull-request comment and the recorded run's `provenance.cache`, with how
+  many replies came from the cache.
+- **Sharing a folder** shares the replies in it. Point `cache.folder` at a shared location, or
+  keep the folder in a CI cache, only where everyone who can read it may read the replies, and
+  remember that a pull request from a fork can read the repository's Actions cache. An entry
+  older than `cache.ttl_seconds` is not used, but stays on disk until a successful call replaces
+  it or the folder is deleted.
+
+`martian evals push` is the one command that sends the data folder's content off the machine, and
+only when it is run: each finished run's case inputs and outputs, scores, reasons, scoring jobs and
+traces with their spans go to the server `MARTIAN_API_URL` names, signed in with the API key in
+`MARTIAN_API_TOKEN` over HTTPS (HTTP only to this machine), as the platform connection above.
+Reviews, artifacts, datasets, local targets and their keys, and `settings.json` are not sent; a
+run's target goes as the run keeps it, with `${NAME}` references unexpanded. The command never
+prints the server's answers, only their status. See [pushed runs](evals-core.md#pushed-runs).
+
+## The target and the grader
+
+An agent under test that can reach its grader can read its answers or change its results. So the
+SDK sends a target each case's inputs and nothing else, and keeps what grades it, the expectations,
+the checks and their criteria, custom scorers' code, the results and the stores, where the target
+cannot reach them. How far that goes depends on the kind of target:
+
+| Target | Given | Runs | Cannot reach | Can still reach |
+| --- | --- | --- | --- | --- |
+| A suite file's function target (`martian evals run`) | The case's inputs, as keyword arguments, and the values of the combination of the suite's [matrix](evals.md#a-matrix-of-prompts-and-models) it runs; in a conversation's turn also its history and session id, as far as its parameters take them | In a process of its own, started with the run (`python -P`), which every combination of the matrix calls and which never imports the evals package | The run's memory, where the expectations, checks and scorers are. Its environment has no `MARTIAN_*` variables and none of MLflow's tracking, experiment, registry, run or workspace variables. On Linux with Landlock, the suite file, the data file, each `python` check's file and the `__pycache__` folder beside it, the output folder, a local SQLite or file `mlflow.tracking_uri`, the local Evals UI's data folder and the suite file's own `cache.folder` when the run uses the cache: it cannot read, change, create or remove them, nor create or remove anything directly in the folders that hold them, nor read the memory of the command's process | Everything else its user can: other files, such as a module a scorer imports or another copy of the answers, the names in the hidden folders, the network, and the environment's other variables, such as a judge's model key. Without Landlock (macOS, Windows, an older or unconfigured Linux kernel) the files above too; the command says so and `summary.json` records it as `target_isolation` |
+| A suite file's URL target | One JSON `POST` per case, its body filled from the case's inputs and `{{uuid}}`; a placeholder that names anything else is refused when the suite loads | Wherever the endpoint runs | Nothing of the run's process: it receives the request and nothing else | Whatever its own host lets it. An endpoint on this machine that runs as your user can read the suite's files |
+| A function in the pytest gate (`evaluate`, `predict_fn`) | The case's inputs, as keyword arguments | In the test's own process | Nothing is hidden from it | The test's memory, which holds the dataset's expected values, and its files |
+| A function target in the evals core's worker (`Target(kind="function")`) | The case's inputs, as keyword arguments | In a process of its own for each run, started before its first case | The work's process, which holds the stores and every case's expectations. On Linux with Landlock, the worker's private paths (`WorkerServices.private_paths`), which the setup names: its stores' files | As a suite file's function target. A store on a server, such as Postgres, is reachable over the network by anything that has its address and credentials, which the target's process is not given unless they are in a variable it keeps |
+| A function in the worker's own process (`TargetCall`) | A `Case` with the case's id and inputs only | In the work's process | Nothing is hidden from it: for tests and for code the installation trusts with its stores | The stores, the work's memory and its files |
+| An HTTP target of the worker | As a suite file's URL target; a placeholder that names anything else is refused when the worker checks the target | Wherever the endpoint runs | As a suite file's URL target | As a suite file's URL target |
+| A registered agent | A `Case` with the case's id and inputs only, to the `AgentExecutor` | Through martian-agents | The worker's process and stores | What its own sandbox lets it |
+
+Scorers run after the target replies, in the process that grades: the command's process for a suite
+file, and the work's process in the worker. A judge is given the input, the reply and its
+criteria, and never calls the target.
+
+An edition's [case hooks](evals-core.md#case-hooks-and-installed-checks-in-the-worker) run in the
+work's process too, and are given each case without its expectations or stored output, so they
+cannot hand the target its answers. What a hook adds to the target's inputs
+(`CaseState.target_inputs`) is the edition's to keep free of them; its other state reaches only the
+installed checks and the teardown, and neither is recorded.
+
+`tests/evals/test_grader_isolation.py` proves the function targets' part. Its target looks for the
+answers everywhere it can: in its arguments, in the suite file, the data file, the scorer's file,
+the results folder, MLflow's store and the local Evals UI's data folder, in its environment, in its
+own memory and in the memory of the process that started it. Each answer is a random value placed
+in the data file, the suite file and the scorer, and the test checks that the files and stores hold
+them. The target finds none, in a suite file run and in the worker, though it finds a control value
+in a file beside it and another in its environment, and it can neither change the results and the
+stores nor plant a file beside them.
+
+What isolation leaves reachable, and what an agent tries anyway, shows in its transcript.
+[`martian evals inspect-cheating`](evals.md#inspect-a-run-for-cheating), and the evals core's
+[route for a run](evals-core.md#runs-inspected-for-cheating), read each case's trace and reply for
+signs that the agent reached for its answers, tests or grader: a step that names the run's hidden
+files, an answer key, results or a grader's file, the evals or MLflow API, the run's environment
+variables or another process, a refusal by isolation, an expected answer it had before any step
+produced it, or a reply that writes to the grader. Isolation records nothing itself, so a refused
+attempt shows only where the target's own step records its error. Its miss and false-alarm rates on
+a labelled set are in [how well it catches cheating](evals.md#how-well-it-catches-cheating).
 
 ## Custom Python scorers
 
@@ -95,9 +204,9 @@ how long it runs or how much memory it takes.
 
 | Where | Who adds it | Where the code runs |
 | --- | --- | --- |
-| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts. Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
+| A suite file (`type: python`) | Whoever writes the suite file and its scorer file. Review both before you run a suite from someone else, as you would a function target | In the `martian evals run` process, imported as the run starts, where the run's function target cannot reach it ([above](#the-target-and-the-grader)), and in the `martian evals audit` process, which runs it on the [audit's replies](evals.md#audit-a-suite). Loading, validating or writing a suite file (`martian.evals.suite_file`) only checks the `file`, `function` and bounds as written, and never imports the file |
 | Python (`python_check`) | The test's author | In the test's process |
-| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`) | Only in each piece of work's own process |
+| The [evals core's worker](evals-core.md#custom-scorers-in-the-worker) | Whoever deploys the worker: its setup imports the function and installs it under a name (`WorkerServices.scorers`), and an edition's case hooks and installed checks the same way (`WorkerServices.hooks`, `WorkerServices.checks`) | Only in each piece of work's own process: a custom scorer on a scoring job's saved outputs, an installed check on a run's answered cases and a scoring job's saved outputs. A [monitor](evals-core.md#monitors) runs none, so neither sees a project's production traces: the `Monitor` record refuses a scorer of kind `code`, which both are |
 | The local edition (`martian ui`) | Nobody: it installs none | — |
 
 **Never in the API process.** No route of the evals core takes code, a file or a module to import,
@@ -108,8 +217,11 @@ path that could reach one:
 - **Suite loading and validation** check the shape only, as above.
 - **The scoring dialog's routes**: `GET /v1/evals/scorers` offers the built-in scorers alone, and a
   scoring request or a saved suite (`POST /{run_id}/scores`, `POST /suites`) names built-in
-  scorers only, as the frozen contract does; any other name is refused with `422`. Choosing a
-  custom scorer there needs a contract change (MorningHQ/martian-notes#334).
+  scorers and the [deterministic checks](evals-core.md#deterministic-checks-in-the-worker) of a
+  suite file only, as the frozen contract does; any other name, and a `python` or `installed` check, is refused
+  with `422`. A check's regular expression runs in the worker's process, as a suite file's does on
+  the machine that runs it, and is not time-limited; a worker that serves other people's requests
+  should treat a pattern as such.
 - **Judges** are handed only judge scorers: a request to the SDK or Agents judge never carries a
   custom scorer.
 - **The worker's setup** is imported by module in the API process, to check that a new process can
@@ -131,7 +243,9 @@ holds; beside the setup's store and record store, whose databases hold every org
 records; and with the same files and network. There is no time or memory limit: a scorer that
 never returns holds its scoring job, and one that ends its process fails the work ("The worker
 process ended before this work finished"). Installing a custom scorer on a server is deploying
-code into the worker, with the worker's privileges; review it as such.
+code into the worker, with the worker's privileges; review it as such. The same holds for an
+edition's case hooks and installed checks: they are the edition's code in each work's process, with
+no time limit, and a suite or a record names an installed check by name only.
 
 ## Telemetry
 
@@ -154,12 +268,13 @@ What each part sends without a setting of yours:
 
 | Part | Sends by itself | Sends only when you configure it |
 | --- | --- | --- |
-| `mlflow-skinny` | Usage telemetry, off as above | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
+| `mlflow-skinny` | Usage telemetry, off as above. A model price catalogue from github.com, to price a traced model call and never for a judged call ([below](#judges-and-the-model-catalogue)) | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
 | `opentelemetry-sdk`, under MLflow tracing | Nothing | Spans to the collector `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` names |
 | `databricks-sdk` and `google-auth`, which MLflow brings | Nothing | Databricks and Google Cloud URIs, which the local and on-premises stores do not use |
 | FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
 | The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
-| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)). A judged call connects to its endpoint and to nothing else ([below](#judges-and-the-model-catalogue)) |
+| Threshold alerts | Nothing | A threshold's webhook URL and the SMTP server, once the worker's alert settings name them ([below](#threshold-alerts)) |
 
 `tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
 deterministic check, `martian ui` serving the UI and that run, and the core with a process
@@ -167,7 +282,99 @@ worker running a function target, each in a clean environment (no CI or pytest v
 which MLflow turns its telemetry off by itself, and no telemetry settings) with every connection
 and name lookup for an address other than loopback refused. It fails on any such attempt and on
 MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
-loads nothing from another host.
+loads nothing from another host. It also grades one request with the SDK judge at a loopback
+endpoint, with and without an address policy, with every other address refused, and fails if the
+judge looks up or connects to anything but that endpoint.
+
+## Judges and the model catalogue
+
+A judged call connects to its endpoint and to nothing else. Two things stand in the way of that, and
+the core handles both.
+
+**The model catalogue.** MLflow prices the tokens a model call reports from a catalogue of models and
+their prices that it downloads from github.com
+(`https://github.com/mlflow/mlflow/releases/download/model-catalog%2Flatest`, one `<provider>.json`
+file for each provider). It makes the download at the first priced call of a process and tries it
+four times, with a five-second timeout each, so an installation with no route to github.com waits on
+it before its first verdict, and one that audits its outbound traffic sees the attempts. A judge
+asks for a price only when `MLFLOW_MODEL_CATALOG_URI` names a catalogue (`martian.evals._judge_transport`),
+which MLflow reads: a mirror (`https://`) or a folder (`file://`) with the catalogue's
+`<provider>.json` files under it. With the variable unset or empty, the default, a judged call makes
+no download and its metadata leaves out `mlflow.assessment.judgeCost`, the price of the call.
+Nothing in the core reads that price, and the tokens, the model version and every verdict are
+recorded as before.
+
+The same variable also decides where MLflow prices the model calls of a traced target (the
+`cost` check's `max_usd`, [checks](evals.md#deterministic-checks)): it is not a judged call, so it is
+not changed, and an installation that traces a target's model calls and has no route to github.com
+sets `MLFLOW_MODEL_CATALOG_URI` to a mirror or to an empty address in that process's environment.
+
+**The endpoint's address.** A name can answer one address when it is checked and another when the
+HTTP client connects (DNS rebinding), so checking an endpoint's address before a call does not stop
+a call to an internal one. An edition that calls endpoints other people name passes an address
+policy to `sdk_judge(address_policy=...)`
+([the worker's judge](evals-core.md#the-workers-judge)): the judge then connects to the address
+its policy allowed, which it resolved when the connection opened, and to no other. The core sets no
+policy by itself: a local run calls the endpoint its user named, which may be on the same machine.
+The core's other outbound calls are not pinned: a URL target (`martian evals run` and the worker's
+HTTP targets) and a webhook of a [threshold alert](#threshold-alerts), whose address check resolves
+the name once and the HTTP client again.
+
+`tests/evals/test_no_outbound.py` (a judged call reaches only its endpoint),
+`tests/evals/test_worker_judges.py` (the price) and `tests/evals/test_judge_address_pin.py` (the
+address) prove both.
+
+## Threshold alerts
+
+The alerts of [thresholds](evals-core.md#thresholds-and-alerts) on monitor scores are the evals
+core's own outbound calls. An installation makes none until its operator configures them: the
+worker's `AlertSettings` (`martian.evals.alerts`) send no webhook and no email by default, the
+routes refuse a threshold with a channel the worker does not send, and so an on-premises install
+sends nothing for alerts unless it is set up to (`test_no_outbound.py` runs without alert
+settings and still sees no outbound attempt).
+
+What leaves once a channel is configured:
+
+- **A webhook** is one `POST` per alert, and per retry, to the URL a threshold names, which any
+  member with the `score` capability chooses. It carries the threshold's definition and name, the
+  monitor's id, the scorer, and the window's count, estimate and interval: no trace, prompt,
+  response, rationale or user. The URL is `https`, or `http` only to `localhost`; redirects are not
+  followed and proxy settings from the environment are not used. Before each attempt the host is
+  resolved, and a loopback, private, link-local or reserved address is refused unless the
+  installation sets `WebhookSettings(private_addresses=True)`, so on an installation that does not,
+  a member cannot aim alerts at the worker's own network. A name that resolves to another address
+  between that check and the connection is not caught; where that matters, run the worker where it
+  cannot reach internal services.
+- **An email** carries the same content as plain text to the threshold's recipients, through the
+  SMTP server the operator names, with STARTTLS by default.
+
+Secrets:
+
+- **The webhook secret** is given once, by the member who creates the threshold, and signs each
+  request (HMAC-SHA256 over the timestamp and the body; the receiver's check is in
+  [sending alerts](evals-core.md#sending-alerts)). The record store keeps it in a column of its own
+  (`martian_thresholds.secret`), not in the threshold's record, and only `threshold_secret`, which
+  the worker calls to sign, reads it back. No route returns it (a threshold shows
+  `"signed": true`), an alert's stored record and payload do not hold it, no log line holds it, and
+  `martian evals export` exports the threshold without it: a threshold imported into a fresh
+  install shows `"signed": false` and sends no signed webhook until a member gives it a secret
+  again (`POST /v1/evals/thresholds/{id}/secret`, once, for a webhook with none). It is stored as
+  given, not encrypted: whoever can read the record-store database can read it, as they can every
+  record there, and on Postgres row-level security keeps it to its organisation. To change it,
+  delete the threshold and create another.
+- **The SMTP password** is part of the worker's settings, given by the operator in code from their
+  own secret store. No record holds it, so no export does, and the settings' repr and the log
+  lines leave it out.
+- **Logs and errors.** A failed attempt is logged, and kept as the alert's `last_error`, as a status
+  or an error class (`HTTP 503`, `ConnectTimeout`, `SMTP 550`): never the URL, a header, the body,
+  the secret, the password or a recipient. The HTTP client's own request log (HTTPX at `INFO`),
+  if an installation turns it on, names the URL, so a webhook URL holds no credential: the
+  signature authenticates an alert, and a URL with a user name or password is refused.
+
+`tests/evals/test_thresholds.py` checks that the default settings send nothing and open no
+connection, that the loopback receiver is refused without `private_addresses`, that no route
+answer, log line or alert holds the secret, and that failures are logged without the address.
+`tests/evals/test_data_export.py` checks that no file of an export holds a threshold's secret.
 
 ## The local edition has no login
 
@@ -188,10 +395,32 @@ included; a run records the key only as the reference `${MARTIAN_TARGET_KEY}`. A
 cannot point an existing target, and so its key, at another address: a target cannot be edited.
 They can still remove targets and define new ones. See [local targets](evals-core.md#local-targets).
 
+## What a run response shows
+
+The record store keeps a run's whole provenance for the server; the evals core's routes show
+only what a run's readers may see, through one allowlist of keys
+([run provenance](evals-core.md#run-provenance)). Every route that answers with a run or with
+its provenance, in the hosted server's core and in the local edition alike, leaves out:
+
+- the CI token that uploaded a CI run, its id and its name (`token_id`, `token_name`), and the
+  digests of the upload request and of its items (`request_digest`, `items_digest`), which the
+  server's CI gate records in the run's `provenance.ci`. A CI run's attribution is shown as its
+  `ci` with the public keys only: commit, ref, repository, workflow run URL, kit version,
+  threshold and minimum coverage;
+- anything a worker pins with a target beyond its kind, id, name and digest, such as a registered
+  agent's connection and approval;
+- any key the allowlist does not name, whoever writes it.
+
+Other things the routes show whole are what the server shows as well: a score's metadata (an
+assessment's `provenance`: the judge's model, versions, digests of what it read and its usage,
+never a key, which a judge request does not carry) and a trace's tags and metadata, which the
+traced application or the worker records. A target's URL and headers, a suite's run settings and
+a judge model's endpoint are not in a run response.
+
 ## What store errors contain
 
-An error of the evals store or the record store never quotes what was written. When either
-refuses a request, its `StoreError` names the operation, the store method such as
+An error of the evals store, the record store or the work queue never quotes what was written.
+When any of them refuses a request, its `StoreError` names the operation, the store method such as
 `record_trace`, and what was refused. For a write the database refused, that is the table, the
 column or constraint when Postgres names one, and the driver's error class and code:
 `record_trace: the database refused a value for trace_request_metadata (StringDataRightTruncation, SQLSTATE 22001)`.
@@ -206,10 +435,14 @@ line.
 - A `StoreError` does not keep the error it was raised from, not even as a suppressed context,
   so no traceback or error reporter reaches the values. The names above are what an operator
   debugs with.
-- Both stores' database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
+- The work queue (`SqlWorkQueue`, in the record store's database) maps its refusals the same way:
+  `put: the database refused a value for martian_work_queue (...)`. Holding an entry that is in the
+  queue already raises `AlreadyHeld`, a `conflict` `StoreError` of the same kind, never the
+  driver's `IntegrityError`, which Postgres fills with the entry's id and organisation.
+- The stores' and the queue's database engines hide statement values (SQLAlchemy's `hide_parameters`), so a
   database failure that is not a refusal holds none either. The record store raises such a
   failure, a lost connection for example, as SQLAlchemy's own error, and MLflow logs some itself,
-  such as SQLite's "database is locked". What they carry is the statement, with placeholders, and
+  such as SQLite's "database is locked". The queue raises such a failure as SQLAlchemy's own error too. What they carry is the statement, with placeholders, and
   the database's own message for the failure.
 - Not covered: MLflow shortens a trace tag value over 8,000 characters given to
   `EvalStore.set_trace_tag` and logs a warning quoting its first 100 characters. No route sets a
@@ -220,8 +453,9 @@ line.
 database refuses, directly for a metadata value over 8,000 characters and through a run of the
 worker for spans holding the prompt, which a trigger refuses, a tag key and a description MLflow
 refuses, a case result, a run two writers create at once, a draft case through its route, and a
-score whose write fails. It finds the canary in no error, API answer or log line, MLflow's
-included, on SQLite and on Postgres.
+score whose write fails. `tests/evals/test_queue_errors.py` does the same for a duplicate `hold` and
+a kind the database refuses, in the queue's errors and in an API answer carrying them. Each finds
+the canary in no error, API answer or log line, MLflow's included, on SQLite and on Postgres.
 
 ## Runtime reporting data boundary
 
@@ -291,17 +525,20 @@ The `evals` extra pins `mlflow-skinny` 3.18.0, the first release with both fixes
   `MlflowStore` is not exposed on any release: it gives MLflow only ids of MLflow's own form
   (`tr-` and 32 hex digits) and derives one from any other id.
   `tests/evals/test_mlflow_compat.py` checks both the refusal and the derived ids.
-- **The hosted MLflow server** (MorningHQ/martian-evals) runs its own pinned release on Postgres,
+- **The hosted MLflow server** (MartianSecurity/martian-evals) runs its own pinned release on Postgres,
   not the file store. Only Backend holds credentials for it, and Backend sends only derived
-  `tr-` ids; MorningHQ/MartianBackend's evals workbench guide states that side.
+  `tr-` ids; MartianSecurity/MartianBackend's evals workbench guide states that side.
 
 ## Licence, attribution and vulnerability reports
 
-Every file in this repository is Apache-2.0 (`LICENSE`); no file carries another licence.
+Every file in this repository is Apache-2.0 (`LICENSE`) except the third-party code bundled in the
+Evals UI build in `src/martian/ui/`: its JavaScript bundles hold third-party packages under MIT, ISC
+and Apache-2.0, and its Inter font files are OFL-1.1, each listed with its licence text in
+`src/martian/ui/third-party-licenses.md`. The UI's own code is Apache-2.0.
 Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
-`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 

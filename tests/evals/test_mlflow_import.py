@@ -6,6 +6,7 @@ The source is a real tracking store that MLflow itself writes, with the mlflow-s
 pins, in a process of its own: ``tests/fixtures/mlflow/write_store.py`` says what it holds.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -39,10 +40,12 @@ from martian.evals.mlflow_import import (
     verdict,
 )
 from martian.evals.model import Project
+from martian.evals.server.principal import SINGLE_USER
 from tests.evals.evals_contract import validate_response
 
 WRITER = Path(__file__).resolve().parents[1] / "fixtures" / "mlflow" / "write_store.py"
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
+needs_postgres = pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run on Postgres")
 
 
 def write_store(folder: Path, url: str | None = None) -> None:
@@ -109,8 +112,8 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
         "projects": 1,
         "datasets": 1,
         "traces": 11,
-        "scores": 13,
-        "annotations": 2,
+        "scores": 14,
+        "annotations": 3,
         "expectations": 7,
         "runs": 2,
         "case results": 6,
@@ -149,10 +152,16 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
     assert [(a["name"], a["value"], a["source"]) for a in first["assessments"]] == [
         ("helpful", True, {"source_type": "HUMAN", "source_id": "alice@example.com"})
     ]
+    # Trace search lists verdicts, so the expectation is on the trace's detail only.
     assert {(a["name"], a["value"], a["source"]["source_type"]) for a in second["assessments"]} == {
-        ("expected_response", "No. Refunds are available within 30 days of purchase.", "HUMAN"),
         ("correct", "no", "LLM_JUDGE"),
     }
+    second_info = client.get(f"/v1/evals/traces/{second['id']}", params={"project_id": project}).json()["info"]
+    expected = {a["assessment_name"]: a for a in second_info["assessments"]}["expected_response"]
+    assert (expected["expectation"], "feedback" in expected) == (
+        {"value": "No. Refunds are available within 30 days of purchase."},
+        False,
+    )
     # MLflow keeps the feedback a correction overrides; only the correction is copied.
     assert [(a["name"], a["value"], a["rationale"]) for a in third["assessments"]] == [("helpful", True, "It is fine.")]
 
@@ -186,7 +195,7 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
     }
     assert items["Where is my order?"]["output"] == "Your order ships in two days."
     work = client.get(f"/v1/evals/{baseline['id']}/workbench").json()
-    scores = {(a["item_id"], a["name"]): a["value"] for a in work["assessments"]}
+    scores = {(a["item_id"], a["name"]): a["value"] for a in work["assessments"] if a["source"] == "CODE"}
     order = items["Where is my order?"]["id"]
     assert (scores[(order, "exact_match")], scores[(order, "answer_length")]) == (False, 29)
     # The case's trace is the evaluation's, with its spans and assessments.
@@ -215,6 +224,122 @@ def test_traces_sessions_datasets_annotations_and_runs_open_in_the_local_edition
         ("experiment", "scratch (2)", "deleted in MLflow, with 1 trace"),
         ("experiment", "Default (0)", "no traces or runs"),
         ("run", "prompt-tuning (support-bot)", "no traces; MLflow keeps its 1 parameter and 1 metric"),
+    }
+
+
+def test_same_named_assessments_of_different_sources_are_each_their_own_score(written, tmp_path):
+    # One case of the baseline run has a code scorer's, a judge's and a person's feedback, all
+    # named exact_match: the code's and the judge's are the case's scores, the person's an
+    # annotation, and each score links to its own assessment in the data folder's store.
+    home = tmp_path / "evals-home"
+    report = import_mlflow_store(str(written / "mlflow.db"), home)
+    (run,) = [run for run in report.runs if run.code == "mlflow-baseline"]
+    assert sorted((s.name, s.kind) for s in run.scorers) == [
+        ("answer_length", "code"),
+        ("exact_match", "code"),
+        ("exact_match", "llm_judge"),
+    ]
+    client = local_ui(home)
+    baseline = next(run for run in client.get("/v1/evals").json() if run["run_code"] == "mlflow-baseline")
+    items = {item["prompt"]: item["id"] for item in client.get(f"/v1/evals/{baseline['id']}").json()["items"]}
+    order = items["Where is my order?"]
+    scores = [
+        a
+        for a in client.get(f"/v1/evals/{baseline['id']}/workbench").json()["assessments"]
+        if (a["item_id"], a["name"]) == (order, "exact_match")
+    ]
+    assert sorted((a["source"], a["value"]) for a in scores) == [("CODE", False), ("LLM_JUDGE", "yes")]
+    trace = client.get(f"/v1/evals/{baseline['id']}/items/{order}/trace").json()
+    stored = {
+        a["assessment_id"]: (a["source"]["source_type"], a["feedback"]["value"])
+        for a in trace["annotations"]
+        if a["assessment_name"] == "exact_match"
+    }
+    assert sorted(stored.values()) == [("CODE", False), ("HUMAN", False), ("LLM_JUDGE", "yes")]
+    assert {stored[a["native_id"]] for a in scores} == {("CODE", False), ("LLM_JUDGE", "yes")}
+
+
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=needs_postgres)])
+def stores(request, tmp_path):
+    """A store in a data folder, and a record store on SQLite, or on Postgres in a schema of its own."""
+    from sqlalchemy import create_engine, text
+
+    from martian.evals.records.sql import SqlRecordStore
+    from martian.evals.store.mlflow_local import MlflowStore
+
+    home = tmp_path / "stores"
+    home.mkdir()
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    schema = f"martian_test_{uuid.uuid4().hex[:10]}"
+    if request.param == "sqlite":
+        records = SqlRecordStore(f"sqlite:///{home / 'martian.db'}")
+    else:
+        assert POSTGRES_URL is not None
+        records = SqlRecordStore(POSTGRES_URL, schema=schema)
+    yield store, records
+    records.close()
+    if request.param == "postgres":
+        engine = create_engine(POSTGRES_URL)
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
+
+
+def test_a_second_assessment_of_one_name_and_source_on_a_case_is_reported_not_dropped(source, stores):
+    # On the baseline run's case "Where is my order?", the person's exact_match feedback becomes a
+    # second judge's, after the first judge's, and a code expectation of the dataset's
+    # expected_response comes after the person's. The case keeps the first of each and the report
+    # names the other; the trace keeps both.
+    order = "(SELECT trace_id FROM assessments WHERE name = 'exact_match' AND source_type = 'HUMAN')"
+    change(
+        source,
+        "INSERT INTO assessments (assessment_id, trace_id, name, assessment_type, value, error, created_timestamp,"
+        " last_updated_timestamp, source_type, source_id, run_id, span_id, rationale, overrides, valid,"
+        " assessment_metadata, experiment_id, trace_timestamp_ms, aggregate_value, is_numeric_value)"
+        " SELECT 'a-second-expectation', trace_id, name, assessment_type, '\"Ask support.\"', error,"
+        " created_timestamp + 1, last_updated_timestamp + 1, 'CODE', 'sync', run_id, span_id, rationale, overrides,"
+        " valid, assessment_metadata, experiment_id, trace_timestamp_ms, aggregate_value, is_numeric_value"
+        f" FROM assessments WHERE trace_id = {order} AND name = 'expected_response'",
+        "UPDATE assessments SET source_type = 'LLM_JUDGE', source_id = 'openai:/gpt-4o',"
+        " assessment_id = 'a-second-judge' WHERE name = 'exact_match' AND source_type = 'HUMAN'",
+    )
+    store, records = stores
+    plan = read_mlflow_store(str(source))
+    report = copy_mlflow_store(plan, store, records)
+    (run,) = [run for run in report.runs if run.code == "mlflow-baseline"]
+    results = asyncio.run(records.list_results(SINGLE_USER, run.project_id, run.id)).items
+    case = next(r for r in results if r.inputs == {"question": "Where is my order?"})
+    scores = asyncio.run(records.list_scores(SINGLE_USER, run.project_id, run.id, case_id=case.case_id))
+    assert [(s.scorer, s.source, s.value) for s in scores if s.scorer == "exact_match"] == [
+        ("exact_match", "code", False),
+        ("exact_match", "llm_judge", "yes"),
+    ]
+    assert case.expectations == {"expected_response": "Track your order under Orders in your account."}
+    trace_id = case.store.trace_id
+    assert trace_id is not None
+    mlflow_trace = asyncio.run(store.get_trace(SINGLE_USER, run.project_id, trace_id))
+    assert mlflow_trace is not None
+    source_trace = mlflow_trace.metadata["mlflow_source.trace_id"]
+    kept = {
+        (s.scorer, s.source, s.value) for s in mlflow_trace.scores if s.scorer in {"exact_match", "expected_response"}
+    }
+    assert kept >= {
+        ("exact_match", "llm_judge", "yes"),
+        ("exact_match", "llm_judge", False),
+        ("expected_response", "code", "Ask support."),
+    }
+    skipped = {(s.kind, s.name, s.reason) for s in plan.skipped if s.name.startswith(("exact_match", "expected"))}
+    assert skipped == {
+        (
+            "assessment",
+            f"exact_match (a-second-judge) on {source_trace}",
+            "the case of its run keeps the first assessment of its name and source; the trace keeps this one",
+        ),
+        (
+            "assessment",
+            f"expected_response (a-second-expectation) on {source_trace}",
+            "the case of its run keeps the first expectation of its name; the trace keeps this one",
+        ),
     }
 
 
@@ -421,7 +546,7 @@ def test_the_command_reports_what_was_copied_and_what_was_not(written, source, t
         "    run mlflow-baseline (completed): 3 cases: 1 passed, 2 failed, 0 errors, 0 without a verdict",
         "    run mlflow-candidate (completed): 3 cases: 2 passed, 1 failed, 0 errors, 0 without a verdict",
         "  dataset support-questions: 3 cases, version 1",
-        "  New: 1 project, 1 dataset, 11 traces, 13 scores, 2 annotations, 7 expectations, 2 runs, 6 case results",
+        "  New: 1 project, 1 dataset, 11 traces, 14 scores, 3 annotations, 7 expectations, 2 runs, 6 case results",
     ]
     assert lines[7:11] == [
         "Not copied:",

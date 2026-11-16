@@ -1,7 +1,7 @@
 """The store interface the evals core reads and writes through.
 
 The core never talks to MLflow or a database directly: an edition gives it an ``EvalStore``. The
-local edition binds ``mlflow-skinny`` in-process (MorningHQ/martian-notes#106) and the server
+local edition binds ``mlflow-skinny`` in-process (MartianSecurity/martian-notes#106) and the server
 binds its MLflow server over REST (#105). ``MemoryStore`` is the reference implementation, and
 ``tests/evals/store_contract.py`` is the behaviour every binding must pass.
 
@@ -12,18 +12,24 @@ own. Every method takes and returns the shared eval data model's objects, never 
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
+from martian.evals._digits import ascii_digits
 from martian.evals.model import (
+    MAX_PROMPT_LENGTH,
+    PROMPT_NAME,
     SESSION_TRACE_LIMIT,
     Case,
     Counts,
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     ReviewQuestion,
     ReviewQueue,
@@ -46,6 +52,22 @@ REQUEST_PREVIEW_TRUNCATED = "martian.request_preview_truncated"
 the trace's request instead of the whole; ``get_trace`` gives it whole. Absent otherwise."""
 RESPONSE_PREVIEW_TRUNCATED = "martian.response_preview_truncated"
 """The same for the trace's response."""
+TEXT_SEARCH_REACH = 1000
+"""How much of a trace's request and of its response a free-text search looks in, in every
+binding: the whole of one up to this many characters, and the first ``TEXT_SEARCH_REACH - 3``
+(997) of a longer one, which is what MLflow's 1,000-character preview holds of it before its
+``...``. Looking further means scanning the content of every span in the project without an
+index (``docs/trace-store-limits.md``)."""
+
+
+def text_matches(text: str, name: str, request: str, response: str) -> bool:
+    """Whether a search's free ``text`` is, ignoring case, in a trace's name or in the part of its
+    request or its response a search looks in (:data:`TEXT_SEARCH_REACH`)."""
+
+    def searched(value: str) -> str:
+        return value if len(value) <= TEXT_SEARCH_REACH else value[: TEXT_SEARCH_REACH - 3]
+
+    return text.lower() in f"{name}\n{searched(request)}\n{searched(response)}".lower()
 
 
 class StoreStatus(BaseModel):
@@ -79,6 +101,58 @@ def check_session_search(query: TraceQuery, max_traces: int) -> None:
         raise StoreError("invalid", "a session search starts from the first trace; leave out the cursor")
     if not 1 <= max_traces <= SESSION_TRACE_LIMIT:
         raise StoreError("invalid", f"a session search reads between 1 and {SESSION_TRACE_LIMIT} traces")
+
+
+CURSOR_DIGITS = 18
+"""The most digits an offset cursor has, so that it fits SQL's 64-bit ``OFFSET``."""
+
+TRACE_DELETE_LIMIT = 1000
+"""The most traces one call deletes (``EvalStore.delete_traces`` and ``delete_traces_before``) or
+forgets (``RecordStore.forget_traces``)."""
+
+
+def check_trace_deletion(*, trace_ids: list[str] | None = None, limit: int | None = None) -> None:
+    """Refuse a trace deletion no binding takes: more than :data:`TRACE_DELETE_LIMIT` ids, or a
+    limit outside 1 to :data:`TRACE_DELETE_LIMIT`."""
+    if trace_ids is not None and len(trace_ids) > TRACE_DELETE_LIMIT:
+        raise StoreError("invalid", f"name at most {TRACE_DELETE_LIMIT} traces a call")
+    if limit is not None and not 1 <= limit <= TRACE_DELETE_LIMIT:
+        raise StoreError("invalid", f"limit must be between 1 and {TRACE_DELETE_LIMIT}")
+
+
+def cursor_offset(cursor: str | None) -> int:
+    """The offset an offset cursor names: 0 without one, else the digits 0-9 a ``next_cursor``
+    holds. Any other cursor is refused as ``invalid``, naming the parameter."""
+    if not cursor:
+        return 0
+    if len(cursor) > CURSOR_DIGITS or not ascii_digits(cursor):
+        raise StoreError("invalid", "cursor is not a next_cursor this store returned")
+    return int(cursor)
+
+
+def check_prompt(name: str, text: str | None = None, *, message: str = "", description: str = "") -> None:
+    """Refuse a prompt name, text, commit message or description no binding keeps, as ``invalid``."""
+    if not re.fullmatch(PROMPT_NAME, name):
+        raise StoreError(
+            "invalid", "a prompt name is 1 to 64 letters, digits and . _ -, starting with a letter or digit"
+        )
+    if text is not None and not 1 <= len(text) <= MAX_PROMPT_LENGTH:
+        raise StoreError("invalid", f"a prompt's text is 1 to {MAX_PROMPT_LENGTH:,} characters")
+    if len(message) > 1000 or len(description) > 1000:
+        raise StoreError("invalid", "a commit message or description is at most 1,000 characters")
+
+
+def check_imported_prompt(prompt: Prompt, versions: list[PromptVersion]) -> None:
+    """Refuse, as ``invalid``, a prompt and versions that ``EvalStore.import_prompt`` cannot keep as
+    they are: one :func:`check_prompt` refuses, a version of another prompt, or versions not
+    numbered 1, 2, 3 and on, in order."""
+    check_prompt(prompt.name, description=prompt.description)
+    for version in versions:
+        check_prompt(version.name, version.text, message=version.message)
+    if any(version.name != prompt.name for version in versions):
+        raise StoreError("invalid", "every version imported with a prompt is one of that prompt's")
+    if [version.version for version in versions] != list(range(1, len(versions) + 1)):
+        raise StoreError("invalid", "a prompt's versions are imported numbered from 1, in order")
 
 
 @runtime_checkable
@@ -149,7 +223,8 @@ class EvalStore(Protocol):
         """Traces without their spans. A page may hold fewer than ``limit`` traces, or none, and
         still have a ``next_cursor``: only a ``next_cursor`` of ``None`` ends the search. A binding
         may give a preview of a long request or response, and says so in the trace's metadata
-        (``REQUEST_PREVIEW_TRUNCATED``)."""
+        (``REQUEST_PREVIEW_TRUNCATED``). Free text matches as :func:`text_matches` says: the
+        start of a long request or response only (``TEXT_SEARCH_REACH``)."""
         ...
 
     async def search_sessions(
@@ -173,6 +248,23 @@ class EvalStore(Protocol):
         """Make these traces part of the run."""
         ...
 
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        """Delete these traces of the project for good, at most :data:`TRACE_DELETE_LIMIT` a call:
+        each one, its spans, its scores and its items in review queues, so none of it reads back.
+        An id the project does not hold is left out. Returns the ids it deleted, in the order
+        given. The records that name a deleted trace are the record store's to forget
+        (``RecordStore.forget_traces``)."""
+        ...
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        """Delete for good, as :meth:`delete_traces` does, the project's oldest traces whose request
+        time is before ``before``, at most ``limit`` (1 to :data:`TRACE_DELETE_LIMIT`) of them.
+        Returns their ids, oldest first; a caller deletes until a call returns fewer than
+        ``limit``."""
+        ...
+
     # Scores: judge, check and human verdicts on a trace.
     async def log_score(self, principal: Principal, project_id: str, trace_id: str, score: Score) -> Score:
         """Fills ``store.assessment_id``."""
@@ -190,6 +282,48 @@ class EvalStore(Protocol):
         ...
 
     async def scorer_versions(self, principal: Principal, project_id: str, name: str) -> list[ScorerVersion]: ...
+
+    # Prompts, versioned by name. An organisation's, not a project's. In MLflow, its prompt registry.
+    async def create_prompt(self, principal: Principal, name: str, *, description: str = "") -> Prompt:
+        """Create the prompt, or return the existing one with the same name and description; the
+        same name with another description is ``conflict``. Fills ``created_at`` and
+        ``created_by``, the principal's user id."""
+        ...
+
+    async def get_prompt(self, principal: Principal, name: str) -> Prompt | None: ...
+
+    async def list_prompts(self, principal: Principal) -> list[Prompt]:
+        """Every prompt, by name."""
+        ...
+
+    async def add_prompt_version(
+        self, principal: Principal, name: str, text: str, *, message: str = ""
+    ) -> PromptVersion:
+        """Add the next version of the prompt, with this text and commit message, by the principal.
+        The version, the digest and the time are assigned. A prompt that does not exist is
+        ``not_found``. Every call adds a version, even of text the latest version has."""
+        ...
+
+    async def prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        """The prompt's versions, oldest first. A prompt that does not exist is ``not_found``."""
+        ...
+
+    async def find_prompt_versions(self, principal: Principal, digest: str) -> list[PromptVersion]:
+        """Every version of any prompt whose text has this content digest (``prompt_digest``),
+        oldest first."""
+        ...
+
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        """Create the prompt with its versions as an install it was exported from had them: the
+        prompt's description, and each version's text, commit message and number, with who created
+        each and when (``created_by``, ``created_at``) kept, not the caller and the current time
+        that ``create_prompt`` and ``add_prompt_version`` record (:mod:`martian.evals.data_export`).
+        An unset ``created_by`` stays unset, and an unset ``created_at`` is the current time. A
+        prompt that exists is ``conflict``; versions :func:`check_imported_prompt` refuses are
+        ``invalid``. Returns the versions as stored."""
+        ...
 
     # Review questions and review queues.
     async def save_question(self, principal: Principal, project_id: str, question: ReviewQuestion) -> ReviewQuestion:
@@ -239,10 +373,17 @@ __all__ = [
     "REQUEST_PREVIEW_TRUNCATED",
     "RESPONSE_PREVIEW_TRUNCATED",
     "STORE_METHODS",
+    "TEXT_SEARCH_REACH",
+    "TRACE_DELETE_LIMIT",
     "EvalStore",
     "MemoryStore",
     "StoreError",
     "StoreState",
     "StoreStatus",
+    "check_imported_prompt",
+    "check_prompt",
     "check_session_search",
+    "check_trace_deletion",
+    "cursor_offset",
+    "text_matches",
 ]

@@ -1,4 +1,4 @@
-"""Nothing leaves the machine, and MLflow's telemetry is off (MorningHQ/martian-notes#169).
+"""Nothing leaves the machine, and MLflow's telemetry is off (MartianSecurity/martian-notes#169).
 
 The product's own processes run here with the guard in ``tests/evals/outbound_guard``, which
 refuses and records every connection, datagram and name lookup for an address that is not
@@ -13,8 +13,14 @@ that environment, so the others prove something.
   local edition (``martian ui``) serving the Evals UI and that run.
 - The evals core with a process worker, running a function target in a run's own process.
 - The Evals UI the wheel ships loads nothing from another host.
+- A judged call: the SDK judge, with and without an address policy, grades one request at a
+  loopback endpoint, as the worker does for a request that names an endpoint, and that endpoint is
+  the only address it connects to or looks up. MLflow prices a judge's tokens from a model
+  catalogue it downloads from github.com unless it is told not to (MLFLOW_MODEL_CATALOG_URI,
+  MartianSecurity/martian-notes#533), which an installation with no route out cannot reach.
 
-Calls to a model or a target the user configures are the user's choice; nothing here makes one.
+Calls to a model or a target the user configures are the user's choice; nothing here makes one,
+except the judged call's, to a loopback endpoint of its own.
 """
 
 from __future__ import annotations
@@ -209,6 +215,28 @@ def test_the_core_and_its_process_worker_send_nothing_out(tmp_path):
     assert (run["state"], run["passed"], run["failed"]) == ("completed", 1, 1), run
     assert attempts(folder) == ""
     assert ran(folder, "-m", "tests.evals.no_outbound_fixture") and ran(folder, "-m", "martian.evals.worker")
+
+
+@pytest.mark.parametrize("mode", ["open", "pinned"])
+def test_a_judged_call_reaches_only_its_endpoint(tmp_path, mode):
+    folder, environment = guarded(tmp_path)
+    judged = subprocess.run(
+        [sys.executable, "-m", "tests.evals.judged_call_fixture", mode],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=PROCESS_SECONDS,
+    )
+    assert judged.returncode == 0, judged.stdout + judged.stderr
+    # The endpoint answered the one request, and the judge counted the tokens it reported.
+    assert json.loads(judged.stdout.splitlines()[-1]) == {
+        "passed": True,
+        "tokens": 15,
+        "received": ["/v1/chat/completions"],
+    }
+    assert attempts(folder) == ""
+    assert ran(folder, "-m", "tests.evals.judged_call_fixture", mode)
 
 
 def test_the_packaged_ui_loads_nothing_from_another_host():

@@ -23,6 +23,8 @@ READ_OPERATIONS = [
     ("get", "/v1/evals/projects"),
     ("post", "/v1/evals/traces/search"),
     ("post", "/v1/evals/sessions/search"),
+    ("post", "/v1/evals/overview"),
+    ("post", "/v1/evals/quality-issues/search"),
     ("get", "/v1/evals/traces/{trace_id}"),
     ("get", "/v1/evals/traces/{trace_id}/payload"),
     ("get", "/v1/evals/datasets"),
@@ -31,7 +33,7 @@ READ_OPERATIONS = [
 ]
 
 # The fields of the server's untyped responses, from the code that builds them in
-# MorningHQ/MartianBackend: public_job, public_assessment, public_review (app/evals_workbench.py),
+# MartianSecurity/MartianBackend: public_job, public_assessment, public_review (app/evals_workbench.py),
 # project_out (app/api/evals_explorer.py), project_trace and sessions (app/evals_explorer.py), safe_trace and
 # compare_runs (app/evals_workbench.py), compare_assessments and scorecard (app/evals_quality.py).
 JOB = {"id", "run_id", "config", "state", "error", "created_at", "finished_at", "total", "succeeded", "errors"}
@@ -40,6 +42,9 @@ ASSESSMENT = {"id", "item_id", "job_id", "name", "value", "rationale", "source",
 ASSESSMENT |= {"error", "native_id", "telemetry_state", "created_at"}
 REVIEW = {"id", "item_id", "queue_id", "criterion", "previous_id", "actor_id", "assignee_id", "assessment_id"}
 REVIEW |= {"state", "value", "comment", "created_at"}
+# The core's addition to the server's fields: whether the answer was given blind
+# (MartianSecurity/martian-notes#357). The response is untyped, so the contract allows it.
+REVIEW |= {"blind"}
 WORKBENCH = {"jobs", "assessments", "reviews", "latest_reviews", "latest_reviews_truncated", "members", "queues"}
 WORKBENCH |= {"selected_job", "pagination", "truncated", "scorecard", "calibration"}
 TRACE_ROW = {"id", "name", "state", "timestamp", "timestamp_ms", "latency_ms", "request", "response", "session_id"}
@@ -59,6 +64,9 @@ CARD = {"name", "kind", "categories", "total", "evaluated", "missing", "errors",
 CARD |= {"confidence_95", "mean", "p50", "p95", "minimum", "maximum", "gate", "policy"}
 # The core's own addition (martian.evals.stats); the server's scorecard does not have it yet.
 CARD |= {"mean_confidence_95"}
+# summarize and quality_issues (app/evals_explorer.py).
+OVERVIEW = {"requests", "errors", "latency", "tokens", "cost", "feedback", "has_more", "limit", "bucket_ms", "series"}
+ISSUES = {"items", "has_more", "traces_examined", "limit", "method"}
 
 
 @pytest.fixture
@@ -69,8 +77,8 @@ def served(tmp_path):
     records.close()
 
 
-def test_the_copy_is_version_3_of_the_servers_contract():
-    assert CONTRACT["info"]["version"] == VERSION == "3"
+def test_the_copy_is_version_4_of_the_servers_contract():
+    assert CONTRACT["info"]["version"] == VERSION == "4"
     assert CONTRACT["info"]["title"] == "Martian Evals API"
 
 
@@ -127,7 +135,7 @@ def test_a_refused_parameter_is_the_contracts_validation_error(served):
 
 
 def test_the_ui_trace_query_is_the_contracts():
-    # initialQuery in the Evals UI (packages/evals/src/lib/eval-explorer.js in MorningHQ/MartianSecurityFrontend).
+    # initialQuery in the Evals UI (packages/evals/src/lib/eval-explorer.js in MartianSecurity/MartianFrontend).
     validate_request(
         "TraceQuery",
         {"project_id": None, "q": "", "state": "", "session_id": "", "user_id": "", "order": "newest", "limit": 25},
@@ -172,6 +180,16 @@ def test_untyped_responses_have_the_servers_fields(served):
     assert set(sessions["items"][0]) == {"id", "turns", "errors", "started_at", "last_at", "preview", "tokens"}
     filtered = client.post("/v1/evals/sessions/search", json={"min_latency_ms": 500}).json()
     assert set(filtered) == set(sessions) and filtered["items"]
+
+    overview = client.post("/v1/evals/overview", json={}).json()
+    assert set(overview) == OVERVIEW and overview["requests"] == 7
+    assert set(overview["latency"]) == {"count", "p50", "p95"} and set(overview["tokens"]) == {"reported", "total"}
+    assert set(overview["series"][0]) == {"timestamp_ms", "requests", "errors", "latency_ms"}
+    assert overview["feedback"]["helpful"] == {"kind": "boolean", "count": 1, "pass_rate": 1.0}
+    issues = client.post("/v1/evals/quality-issues/search", json={}).json()
+    assert set(issues) == ISSUES and issues["traces_examined"] == 7
+    assert all(set(group) == {"id", "name", "count", "open", "traces"} for group in issues["items"])
+    assert all(set(row) == TRACE_ROW for group in issues["items"] for row in group["traces"])
 
     trace_id = seeded.traces[(seeded.candidate.id, "faq-1")]
     detail = client.get(f"/v1/evals/traces/{trace_id}").json()

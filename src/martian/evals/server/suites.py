@@ -1,6 +1,6 @@
 """Saved suites and registered judges: a port of ``GET`` and ``POST /suites`` of the server's
 ``app/api/evals_quality.py`` and ``GET`` and ``POST /judges`` of ``app/api/evals_explorer.py``
-(MorningHQ/MartianBackend).
+(MartianSecurity/MartianBackend).
 
 - A suite here is the console's: the built-in scorers it runs and the policies that gate them. It is
   a ``Suite`` in the record store's default project, and each change is a new version. A version's
@@ -9,6 +9,10 @@
   ``llm_judge`` scorer of type ``instructions`` whose ``criteria`` hold the definition and the
   ``operation_id`` (the ``request_id``) that registered it, and whose ``model`` and ``endpoint``
   are the model it runs on. Each registration is a new version.
+- ``POST /judge-panels`` is the core's own: it registers a version of a judge graded by a panel of
+  judge models (``ScorerVersion.panel``, :mod:`martian.evals.panel`), which the contract's
+  ``POST /judges`` has no field for. The version is otherwise registered as ``POST /judges``
+  registers one, and ``GET /judges`` lists it with its ``panel``.
 - The default judge model, for judges that name none, is the edition's ``JudgeSettings``: an
   organisation's on the server, a local setting in the local edition.
 
@@ -23,8 +27,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from martian.evals._digits import ascii_digits
 from martian.evals.judge_settings import JudgeModel
-from martian.evals.model import Policy, ScorerVersion, Suite, suite_digest
+from martian.evals.model import PanelMember, Policy, ScorerVersion, Suite, suite_digest
 from martian.evals.server.dependencies import (
     JudgeSettingsDep,
     PrincipalDep,
@@ -32,8 +37,10 @@ from martian.evals.server.dependencies import (
     StoreDep,
     require_capability,
 )
+from martian.evals.server.principal import Principal
 from martian.evals.server.projection import (
     DEFAULT_PROJECT,
+    checks_out,
     derived_id,
     policy_out,
     project_key,
@@ -41,7 +48,15 @@ from martian.evals.server.projection import (
     user_out,
 )
 from martian.evals.server.runs import writable_project
-from martian.evals.server.write_schemas import JudgeModelOut, JudgeModelRequest, JudgeVersionRequest, SuiteRequest
+from martian.evals.server.scoring import requested_checks
+from martian.evals.server.write_schemas import (
+    JudgeModelOut,
+    JudgeModelRequest,
+    JudgePanelRequest,
+    JudgeVersionRequest,
+    SuiteRequest,
+)
+from martian.evals.store import EvalStore
 from martian.evals.worker.scorers import builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
@@ -73,6 +88,7 @@ def suite_out(suite: Suite) -> dict[str, Any]:
             ),
             "revision": CRITERIA_REVISION,
             "policies": [policy_out(p) for p in sorted(suite.policies, key=lambda p: p.scorer)],
+            **checks_out(suite.scorers),
         },
         "digest": suite.digest,
         "actor_id": user_out(suite.created_by) if suite.created_by else None,
@@ -111,7 +127,10 @@ async def save_suite(body: SuiteRequest, principal: PrincipalDep, records: Recor
     draft = Suite(
         id=suite_id,
         name=body.name.strip(),
-        scorers=[builtin_scorer(name, guidelines=body.guidelines) for name in sorted(body.scorers)],
+        scorers=sorted(
+            [builtin_scorer(name, guidelines=body.guidelines) for name in body.scorers] + requested_checks(body),
+            key=lambda scorer: scorer.name,
+        ),
         policies=[
             Policy(scorer=p.name, direction=p.direction, threshold=p.threshold, minimum_coverage=p.minimum_coverage)
             for p in sorted(body.policies, key=lambda p: p.name)
@@ -139,21 +158,27 @@ def is_judge(scorer: ScorerVersion) -> bool:
         scorer.kind == "llm_judge"
         and scorer.type == JUDGE_TYPE
         and all(field in scorer.criteria for field in JUDGE_FIELDS)
-        and scorer.version.isdigit()
+        and ascii_digits(scorer.version)
     )
 
 
 def judge_out(scorer: ScorerVersion) -> dict[str, Any]:
+    """A judge version as the judge routes answer it. A judge graded by a panel also has ``panel``
+    in its definition, each member's ``model`` and ``endpoint``; a judge without one is answered
+    as the contract's judges are."""
+    definition: dict[str, Any] = {
+        **{field: scorer.criteria[field] for field in JUDGE_FIELDS},
+        "model": scorer.model,
+        "endpoint": scorer.endpoint,
+    }
+    if scorer.panel:
+        definition["panel"] = [member.model_dump(mode="json") for member in scorer.panel]
     return {
         "name": scorer.name,
         "version": int(scorer.version),
         "native_id": None,
         "operation_id": scorer.criteria.get("operation_id"),
-        "definition": {
-            **{field: scorer.criteria[field] for field in JUDGE_FIELDS},
-            "model": scorer.model,
-            "endpoint": scorer.endpoint,
-        },
+        "definition": definition,
         "created_at_ms": None,
     }
 
@@ -182,12 +207,15 @@ async def judges(
     }
 
 
-@explorer.post(
-    "/judges", status_code=201, response_model=None, dependencies=[Depends(require_capability("manageJudges"))]
-)
-async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
+async def _register(
+    body: JudgeVersionRequest, principal: Principal, store: EvalStore, panel: list[PanelMember]
+) -> dict[str, Any]:
+    """Register a new version of a judge, graded by ``panel`` when it names one, or return the
+    version the same request registered."""
     key = await writable_project(store, principal, body.project_id)
     definition = body.model_dump(mode="json", include={*JUDGE_FIELDS, *MODEL_FIELDS})
+    if panel:
+        definition["panel"] = [member.model_dump(mode="json") for member in panel]
     versions = await store.scorer_versions(principal, key, body.name)
     supported = [v for v in versions if is_judge(v)]
     if mine := next((v for v in supported if v.criteria.get("operation_id") == str(body.request_id)), None):
@@ -206,6 +234,7 @@ async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, sto
             type=JUDGE_TYPE,
             model=body.model,
             endpoint=body.endpoint,
+            panel=panel,
             criteria={
                 **{field: definition[field] for field in JUDGE_FIELDS},
                 "operation_id": str(body.request_id),
@@ -213,6 +242,23 @@ async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, sto
         ),
     )
     return judge_out(registered)
+
+
+@explorer.post(
+    "/judges", status_code=201, response_model=None, dependencies=[Depends(require_capability("manageJudges"))]
+)
+async def register_judge(body: JudgeVersionRequest, principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
+    return await _register(body, principal, store, [])
+
+
+@explorer.post(
+    "/judge-panels", status_code=201, response_model=None, dependencies=[Depends(require_capability("manageJudges"))]
+)
+async def register_panel_judge(body: JudgePanelRequest, principal: PrincipalDep, store: StoreDep) -> dict[str, Any]:
+    # The core's own: a new version of a judge graded by a panel of judge models, which the
+    # contract's JudgeVersionRequest has no field for.
+    panel = [PanelMember(model=member.model, endpoint=member.endpoint) for member in body.panel]
+    return await _register(body, principal, store, panel)
 
 
 # --- the default judge model ---------------------------------------------------------------------

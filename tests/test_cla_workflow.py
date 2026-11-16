@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/cla.yml").read_text(encoding="utf-8"))
 JOB = WORKFLOW["jobs"]["cla"]
 SIGNATURE = "I have read the CLA Document and I hereby sign the CLA"
-PUBLISHED = "https://github.com/MorningHQ/martian-redteam/blob/main/"
+PUBLISHED = "https://github.com/MartianSecurity/martian-redteam/blob/main/"
 
 
 def test_the_check_runs_on_pull_request_events_and_comments_only():

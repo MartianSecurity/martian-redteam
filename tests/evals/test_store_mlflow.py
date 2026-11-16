@@ -215,6 +215,7 @@ class MlflowPagingContract:
                     user_id=f"u{number % 2}",
                     tags={"route": f"r{number % 2}"},
                     run_id="r1" if number < 6 else None,
+                    latency_ms=100.0 * (11 - number),  # the newest the fastest
                 ),
             )
         # Each query's page of three (or fewer when fewer match) is all MLflow returns.
@@ -229,6 +230,10 @@ class MlflowPagingContract:
             ({"since": T0 + timedelta(minutes=10)}, 2),
             ({"until": T0 + timedelta(minutes=1)}, 1),
             ({"run_id": "r1"}, 3),
+            ({"min_latency_ms": 850}, 3),
+            ({"min_latency_ms": 999.5}, 2),
+            ({"slowest_first": True}, 3),
+            ({"slowest_first": False, "min_latency_ms": 650}, 3),
         ):
             reads.clear()
             page = await store.search_traces(ORG_A, TraceQuery(project_id="p1", limit=3, **fields))  # type: ignore[arg-type]
@@ -409,6 +414,54 @@ class TraceLayoutContract:
         ]
 
 
+class TraceDeletionContract:
+    """A deleted trace is gone from MLflow's own tables, not marked deleted: its row, its tags and
+    metadata, its spans, its assessments and its place in a review queue. MLflow keeps one row: a
+    linked trace's association with its MLflow run, which holds the two ids and nothing else."""
+
+    async def test_a_deleted_trace_leaves_no_row_in_mlflows_tables_but_its_run_link(self, store: EvalStore) -> None:
+        from sqlalchemy import MetaData, String, Table, func, inspect, or_, select
+
+        from martian.evals.model import ReviewQuestion, ReviewQueue, Score
+        from martian.evals.store.mlflow_local import MlflowStore, _mlflow_trace_id
+
+        assert isinstance(store, MlflowStore)
+        await store.create_project(ORG_A, Project(id="p1", name="Support agent"))
+        await store.start_run(ORG_A, Run(id="r1", project_id="p1", source="local", state="running"))
+        span = Span(id="s1", name="model call", kind="LLM", status="ok", inputs={"q": 1}, outputs="a")
+        for trace_id in ("gone", "kept"):
+            await store.record_trace(ORG_A, trace(trace_id, spans=[span], session_id="s", tags={"team": "a"}))
+            await store.log_score(ORG_A, "p1", trace_id, Score(scorer="rubric_judge", source="llm_judge", value=True))
+        await store.link_traces(ORG_A, "p1", "r1", ["gone", "kept"])
+        question = ReviewQuestion(name="correct", instruction="Is the answer correct?")
+        await store.save_question(ORG_A, "p1", question)
+        queue = ReviewQueue(id="q1", run_id="r1", name="Check", questions=[question], case_ids=["c1", "c2"])
+        await store.create_queue(ORG_A, "p1", queue, ["gone", "kept"])
+
+        def rows_naming(native_id: str) -> dict[str, int]:
+            """How many rows of each of MLflow's tables hold the trace's MLflow id in a text column."""
+            engine = store._store.engine
+            found = {}
+            with engine.connect() as connection:
+                for name in inspect(engine).get_table_names():
+                    table = Table(name, MetaData(), autoload_with=engine)
+                    texts = [column for column in table.columns if isinstance(column.type, String)]
+                    if texts:
+                        holding = or_(*(column == native_id for column in texts))
+                        found[name] = connection.execute(
+                            select(func.count()).select_from(table).where(holding)
+                        ).scalar()
+            return {name: count for name, count in found.items() if count}
+
+        gone, kept = _mlflow_trace_id("gone"), _mlflow_trace_id("kept")
+        before = rows_naming(gone)
+        trace_tables = {"trace_info", "trace_tags", "trace_request_metadata", "spans", "assessments"}
+        assert trace_tables | {"review_queue_items", "entity_associations"} <= set(before)
+        assert await store.delete_traces(ORG_A, "p1", ["gone"]) == ["gone"]
+        assert rows_naming(gone) == {"entity_associations": 1}
+        assert rows_naming(kept) == before
+
+
 def artifact_root_of_length(tmp_path: Path, length: int) -> Path:
     """A folder under ``tmp_path`` whose absolute path is ``length`` characters long."""
     root = tmp_path.resolve()
@@ -494,7 +547,12 @@ class ArtifactRootContract:
 
 
 class TestMlflowStoreOnSqlite(
-    StoreContract, MlflowTracingContract, MlflowPagingContract, TraceLayoutContract, ArtifactRootContract
+    StoreContract,
+    MlflowTracingContract,
+    MlflowPagingContract,
+    TraceLayoutContract,
+    ArtifactRootContract,
+    TraceDeletionContract,
 ):
     @pytest.fixture
     def tracking_uri(self, tmp_path) -> str:
@@ -521,7 +579,12 @@ class TestMlflowStoreOnSqlite(
 @pytest.mark.skipif(not POSTGRES_URL, reason="set MARTIAN_TEST_POSTGRES_URL to run the store contract on Postgres")
 @pytest.mark.usefixtures("unpooled")
 class TestMlflowStoreOnPostgres(
-    StoreContract, MlflowTracingContract, MlflowPagingContract, TraceLayoutContract, ArtifactRootContract
+    StoreContract,
+    MlflowTracingContract,
+    MlflowPagingContract,
+    TraceLayoutContract,
+    ArtifactRootContract,
+    TraceDeletionContract,
 ):
     @pytest.fixture
     def schema(self) -> str:

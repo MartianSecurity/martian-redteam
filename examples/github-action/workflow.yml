@@ -1,11 +1,24 @@
-# Example customer workflow: run an eval suite file on every pull request and
-# keep one comment per suite with its result. Copy into .github/workflows/ in
-# your repository and replace the suite paths with yours. See
-# docs/gate-and-ci.md.
+# Example customer workflow: run an eval suite file on every pull request,
+# keep one comment per suite with its result, and compare each pull request
+# with the last result of main. Copy into .github/workflows/ in your
+# repository and replace the suite paths with yours. See docs/gate-and-ci.md.
 #
 # As written it runs the two sample suites next to this file: `passing` exits 0
 # and `failing` exits 1, so one job is green and one red, each with its own
 # comment. comments/passed.md and comments/failed.md show the two comments.
+#
+# With baseline-branch, each push to main keeps its result in this
+# repository's Actions cache (case ids and verdicts only: no input, reply or
+# judge reason), and a pull request is compared with the last one kept, case
+# by case. Its job then fails on a change worse than noise, on any case that
+# newly fails a security check, or on a failed case main has no result for,
+# and its comment names each case that went from pass to fail. So once main
+# has kept a result, `failing` passes a pull request that leaves it as it is,
+# and fails one that adds a failing case. comments/compared.md shows `failing`
+# compared with a result of `passing`, as if a pull request had broken two of
+# its cases: both newly leak, so it fails. Until a push to main has kept
+# a result, the comment says there is no baseline yet and the job is gated on
+# its own. Remove baseline-branch to gate every run on its own.
 #
 # Both suites grade stored replies with deterministic checks, so the job needs
 # no Martian account, no model key and no secret, only the workflow token. A
@@ -16,13 +29,15 @@
 # request's code. Pull requests from forks and from Dependabot get a read-only
 # token, and the result then goes to the job summary only.
 #
-# Pin MorningHQ/martian-redteam to a release tag or a full commit SHA that has
+# Pin MartianSecurity/martian-redteam to a release tag or a full commit SHA that has
 # .github/actions/evals; replace the placeholder SHA below. @main moves under you.
 
 name: Evals
 
 on:
   pull_request:
+  push:
+    branches: [main] # keeps the baseline that pull requests are compared with
 
 permissions:
   contents: read
@@ -36,10 +51,10 @@ jobs:
       fail-fast: false
       matrix:
         suite: [passing, failing]
-    # One run per pull request and suite at a time, so two quick pushes cannot
-    # both create the comment.
+    # One run per pull request (or branch) and suite at a time, so two quick
+    # pushes cannot both create the comment.
     concurrency:
-      group: evals-${{ github.event.pull_request.number }}-${{ matrix.suite }}
+      group: evals-${{ github.event.pull_request.number || github.ref }}-${{ matrix.suite }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,13 +62,14 @@ jobs:
           persist-credentials: false
 
       - name: Run evals and comment
-        uses: MorningHQ/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
+        uses: MartianSecurity/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
         with:
           suite: examples/github-action/${{ matrix.suite }}/evals.yaml
           output: results/${{ matrix.suite }}
+          baseline-branch: main
 
       # results.jsonl and mlflow.db hold prompts and replies in clear text, so
-      # this keeps only the counts and the JUnit report.
+      # this keeps only the counts, the JUnit report and the verdicts.
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -62,4 +78,6 @@ jobs:
           path: |
             results/${{ matrix.suite }}/summary.json
             results/${{ matrix.suite }}/junit.xml
+            results/${{ matrix.suite }}/verdicts.json
+            results/${{ matrix.suite }}/comparison.json
           if-no-files-found: ignore

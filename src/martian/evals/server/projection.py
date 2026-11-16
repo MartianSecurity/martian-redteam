@@ -11,6 +11,9 @@ stay a port of the server's and the mapping is in one place:
   each is the same in every response.
 - A person is named by a UUID (``user_out``): their id when it is one, else one derived from it,
   so the local user ``local`` has an id the routes that take a user accept.
+- A run's provenance is shown only through an allowlist of what its readers see
+  (``reader_provenance``); the record store keeps the rest, such as a CI run's token and digests,
+  for the server.
 - A case's text (``prompt``, ``expected``, ``output``) is what the server shows: the first text
   under ``message``, ``prompt``, ``question`` or ``content`` of the inputs, and under
   ``expected_response``, ``answer`` or ``content`` of the expectations. Inputs or expectations
@@ -40,12 +43,14 @@ from martian.evals.model import (
     ReviewQueue,
     Run,
     Score,
+    ScorerVersion,
     ScoringJob,
     Trace,
     TraceState,
     TurnResult,
     Value,
     digest,
+    is_expectation,
 )
 from martian.evals.repeats import flaky, reliability
 from martian.evals.server.schemas import EvalItemOut, EvalRunDetailOut, EvalRunOut
@@ -120,10 +125,12 @@ def suite_version_id(suite_id: str, version: int) -> uuid.UUID:
 
 
 def score_id(score: Score) -> uuid.UUID:
-    """The API id of a stored score."""
-    return uuid.uuid5(
-        _IDS, f"score\x00{score.run_id}\x00{score.case_id}\x00{score.scorer}\x00{score.scoring_job_id or ''}"
-    )
+    """The API id of a stored score, derived from its key in the record store: run, case, scorer,
+    scoring job and source. A person's score leaves its source out, so the id each review recorded
+    for its answer (``Review.score_id``) before the source joined the key still names it; a check's
+    or a judge's names it, so it differs from a person's answer of the same name."""
+    key = f"score\x00{score.run_id}\x00{score.case_id}\x00{score.scorer}\x00{score.scoring_job_id or ''}"
+    return uuid.uuid5(_IDS, key if score.source == "human" else f"{key}\x00{score.source}")
 
 
 def iso(when: datetime | None) -> str | None:
@@ -265,11 +272,11 @@ def turn_out(turn: TurnResult) -> dict[str, Any]:
 
 def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, Any]:
     """A conversation case's result, for the core's own turns route: its verdict and each check's
-    verdict on the whole conversation (``scores``, the run's own scores of the case), its session
-    id, which its turns' traces share, its latency, its turns, and whether a simulator wrote its
-    user's turns (``simulated``). With repeats these are the attempt's that stands for the case;
-    the attempts route has every attempt's."""
-    own = [score for score in scores if score.scoring_job_id is None]
+    verdict on the whole conversation (``scores``, the run's own scores of the case, not a
+    person's answer of the same name), its session id, which its turns' traces share, its latency,
+    its turns, and whether a simulator wrote its user's turns (``simulated``). With repeats these
+    are the attempt's that stands for the case; the attempts route has every attempt's."""
+    own = [score for score in scores if score.scoring_job_id is None and score.source != "human"]
     return {
         "id": result_id(result.run_id, result.case_id),
         "dataset_item_id": result.case_id,
@@ -285,10 +292,124 @@ def conversation_out(result: CaseResult, scores: Sequence[Score]) -> dict[str, A
     }
 
 
-def _run_fields(run: Run) -> dict[str, Any]:
+def agent_of(run: Run) -> str | None:
+    """The registered agent a run calls, or ``None`` for any other target."""
     target = run.target
+    return target.agent_id if target and target.kind == "agent" and target.agent_id else None
+
+
+READER_PROVENANCE: dict[str, tuple[str, ...] | None] = {
+    "dataset": ("id", "name", "digest", "content_sha256"),
+    "agent": ("id", "artifact_revision", "revision_source"),
+    "model_version": None,
+    "prompt_version": None,
+    "target": ("kind", "agent_id", "name", "digest"),
+    "suite": ("id", "version", "version_id", "name", "digest", "model_judges"),
+    "repeats": ("attempts", "combine", "checks"),
+    # How many of a run's cases are conversations, and the model that played their simulated
+    # users (martian.evals.run_record).
+    "conversations": None,
+    "simulator": ("model", "parameters", "version"),
+    "repeat_of": None,
+    "sdk_version": None,
+    # A run's limits and the one it stopped at (martian.evals.limits).
+    "limits": ("max_seconds", "max_judge_tokens"),
+    "stopped": ("limit", "value", "used", "message"),
+    # A suite-file run's combination of its matrix (martian.evals.matrix), the registered prompt
+    # version each of its values matched, one object per axis (martian.evals.prompts), and its use
+    # of the cache of model calls (martian.evals.cache): that it was on, and the hits, calls made
+    # and replies stored of the target's and the judges' calls. Never the cache's settings, such as
+    # its folder, a path on the machine that ran it.
+    "matrix": ("id", "values", "axes", "invocation"),
+    "prompts": ("axis", "value", "name", "version", "digest"),
+    "cache": ("on", "target", "judge"),
+    # The model a run's target reported (martian.evals.worker.execute), and the schedule and slot a
+    # run was admitted for (martian.evals.worker.schedule).
+    "model": ("name", "cases"),
+    "schedule": ("id", "name", "slot", "trigger", "model_change"),
+    # Where an imported run came from (martian.evals.inspect_import, promptfoo_import, mlflow_import).
+    "inspect": (
+        "log",
+        "log_sha256",
+        "format",
+        "log_version",
+        "status",
+        "eval_id",
+        "run_id",
+        "eval_set_id",
+        "task",
+        "task_id",
+        "task_version",
+        "task_file",
+        "model",
+        "created",
+        "epochs",
+        "dataset",
+        "tags",
+        "packages",
+        "results",
+        "model_usage",
+    ),
+    "promptfoo": (
+        "results",
+        "results_sha256",
+        "results_version",
+        "eval_id",
+        "timestamp",
+        "provider",
+        "description",
+        "prompts",
+        "stats",
+        "metadata",
+    ),
+    "mlflow": (
+        "source",
+        "schema_revision",
+        "experiment_id",
+        "experiment",
+        "run_id",
+        "run_name",
+        "status",
+        "user",
+        "run_type",
+        "metrics",
+        "params",
+        "tags",
+        "datasets",
+    ),
+}
+"""What of a run's provenance its readers see: each key, with the keys of its object (or of each
+object of its list), or None for a key whose value is text, a number, a boolean or null. Anything
+else a run's provenance holds stays in the record store for the server's own use: a CI run's
+``ci``, with the CI token's id and name and the digests of the upload request and its items (the
+run routes show its public keys as ``ci``), and whatever else a worker pins with a target, such as
+a registered agent's connection and approval."""
+
+
+def reader_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
+    """The part of a run's provenance that its readers see (:data:`READER_PROVENANCE`). Every route
+    that answers with a run, or with its provenance, shows this and never the rest."""
+    shown: dict[str, Any] = {}
+    for key, keys in READER_PROVENANCE.items():
+        if key not in provenance:
+            continue
+        value = provenance[key]
+        if keys is None and (value is None or isinstance(value, str | int | float | bool)):
+            shown[key] = value
+        elif keys is not None and isinstance(value, dict):
+            shown[key] = {name: value[name] for name in keys if name in value}
+        elif keys is not None and isinstance(value, list):
+            shown[key] = [
+                {name: item[name] for name in keys if name in item} for item in value if isinstance(item, dict)
+            ]
+    return shown
+
+
+def _run_fields(run: Run, agent_name: str | None) -> dict[str, Any]:
+    target = run.target
+    ci = run.provenance.get("ci") if isinstance(run.provenance.get("ci"), dict) else dict(run.provenance)
     # A worker that knows its targets by name pins the name with the target, as the local
-    # edition's does; a registered agent's name is the server's.
+    # edition's does; a registered agent's name comes from the edition's lookup.
     pinned = run.provenance.get("target")
     name = pinned.get("name") if isinstance(pinned, dict) else None
     return {
@@ -300,7 +421,7 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "project_id": project_out(run.project_id),
         "max_items": run.max_cases if run.max_cases is not None else run.counts.cases,
         "planned_count": run.counts.cases,
-        "provenance": dict(run.provenance),
+        "provenance": reader_provenance(run.provenance),
         "truncated": run.truncated,
         "passed": run.counts.passed,
         "failed": run.counts.failed,
@@ -308,22 +429,25 @@ def _run_fields(run: Run) -> dict[str, Any]:
         "errored": run.counts.errors,
         "error": run.error,
         "agent_id": uuid.UUID(target.agent_id) if target and target.kind == "agent" and target.agent_id else NO_AGENT,
-        "agent_name": name if isinstance(name, str) else None,
+        "agent_name": agent_name or (name if isinstance(name, str) else None),
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "cancel_requested_at": run.cancel_requested_at,
         "source": run.source,
-        "ci": dict(run.provenance) if run.source == "ci" else None,
+        "ci": ci if run.source == "ci" else None,
     }
 
 
-def run_out(run: Run) -> EvalRunOut:
-    return EvalRunOut(**_run_fields(run))
+def run_out(run: Run, agent_name: str | None = None) -> EvalRunOut:
+    """A run in the contract's shape. ``agent_name`` is its agent's display name, when the edition
+    can name it; ``provenance`` is :func:`reader_provenance`; a CI run's ``ci`` is the public keys
+    of its provenance's ``ci``, or of its whole provenance (``EvalRunOut.public_ci``)."""
+    return EvalRunOut(**_run_fields(run, agent_name))
 
 
-def run_detail(run: Run, results: list[CaseResult]) -> EvalRunDetailOut:
-    return EvalRunDetailOut(**_run_fields(run), items=[item_out(result) for result in results])
+def run_detail(run: Run, results: list[CaseResult], agent_name: str | None = None) -> EvalRunDetailOut:
+    return EvalRunDetailOut(**_run_fields(run, agent_name), items=[item_out(result) for result in results])
 
 
 def dataset_identity(run: Run) -> str | None:
@@ -385,6 +509,7 @@ class ReviewRow:
     state: str
     value: Value
     comment: str
+    blind: bool
     created_at: datetime | None
 
     @classmethod
@@ -401,6 +526,7 @@ class ReviewRow:
             state=review.state,
             value=review.value,
             comment=review.comment,
+            blind=review.blind,
             created_at=review.created_at,
         )
 
@@ -418,6 +544,15 @@ def policy_out(policy: Policy) -> dict[str, Any]:
     }
 
 
+def checks_out(scorers: Sequence[ScorerVersion]) -> dict[str, Any]:
+    """The deterministic checks among ``scorers`` as a request names them, ``{"checks": [...]}``, or nothing
+    when there are none, so that what has no checks is answered as it was before they existed."""
+    from martian.evals.worker.checks import is_check
+
+    found = sorted((scorer for scorer in scorers if is_check(scorer)), key=lambda scorer: scorer.name)
+    return {"checks": [{"type": s.type, "name": s.name, "options": dict(s.parameters)} for s in found]} if found else {}
+
+
 def job_config(job: ScoringJob) -> dict[str, Any]:
     """The server's ``config`` of a scoring job: its scorers by name, the policy judge's guidelines,
     the policies that gate it and the suite version it applies, and a digest of the pinned scorer
@@ -432,6 +567,7 @@ def job_config(job: ScoringJob) -> dict[str, Any]:
         "guidelines": next((str(s.criteria.get("guidelines", "")) for s in job.scorers if s.name == "policy"), ""),
         "policies": [policy_out(policy) for policy in policies],
         "definition_digest": digest(pinned),
+        **checks_out(job.scorers),
     }
     if job.suite_id is not None and job.suite_version is not None:
         config["suite_id"] = job.suite_id
@@ -476,20 +612,22 @@ def queue_out(queue: ReviewQueue) -> dict[str, Any]:
 
 
 def mlflow_assessment(score: Score, trace_id: str) -> dict[str, Any]:
-    """A score as an MLflow feedback assessment."""
-    feedback: dict[str, Any] = {"value": score.value}
-    if score.error:
-        feedback["error"] = {"error_message": score.error}
+    """A score as an MLflow assessment: an expectation for an expectation, feedback otherwise."""
     found: dict[str, Any] = {
         "assessment_id": score.store.assessment_id,
         "assessment_name": score.scorer,
         "trace_id": trace_id,
         "source": {"source_type": SCORE_SOURCE[score.source], "source_id": score.source_id},
-        "feedback": feedback,
         "create_time": iso(score.created_at),
         "last_update_time": iso(score.created_at),
         "valid": True,
     }
+    if is_expectation(score):
+        found["expectation"] = {"value": score.value}
+    else:
+        found["feedback"] = {"value": score.value}
+        if score.error:
+            found["feedback"]["error"] = {"error_message": score.error}
     if score.rationale:
         found["rationale"] = score.rationale
     if score.metadata:
@@ -523,6 +661,7 @@ def trace_row(trace: Trace) -> dict[str, Any]:
                 "error": score.error or None,
             }
             for score in trace.scores
+            if not is_expectation(score)
         ],
         "triage": _triage(trace.tags.get("martian.evals.triage")),
         "run_id": trace.run_id,

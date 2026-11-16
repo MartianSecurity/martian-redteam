@@ -15,25 +15,30 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
 | `src/martian/evals/stats.py` | Confidence intervals for pass rates and mean scores, grouped or not ([evals](evals.md#pass-rates-and-confidence-intervals)), and the paired tests and label of a comparison of two runs ([comparing two runs](evals.md#comparing-two-runs)) |
+| `src/martian/evals/agreement.py` | A judge version's agreement with people's labels: agreement, Cohen's kappa, false-pass and false-fail rates, and the bias and concordance of numeric scores ([evals](evals.md#judge-agreement-with-human-labels)); and people's agreement with each other per review queue and question, with Cohen's or Fleiss' kappa and Lin's concordance or the intraclass correlation ([evals](evals.md#agreement-between-reviewers)) |
+| `src/martian/evals/panel.py` | A panel of judges: the strict-majority rule, the flat metadata of every member's vote, and `judge_panel` for the SDK judges ([evals](evals.md#a-panel-of-judges)) |
+| `src/martian/evals/calibration.py` | A judge version's calibration: whether its newest one checks the model it runs on and what it means (`judge_definition`), what a judge score names as the calibration that applied, and `save_calibration` and `recheck_calibration` for the local data folder ([evals](evals.md#calibration)) |
 | `src/martian/evals/model/` | Shared eval data model and the results-record mapping |
 | `src/martian/evals/records/` | Record store on SQLite or Postgres, Alembic migrations (`migrations/`), change events |
-| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`) and OpenTelemetry's `POST /v1/traces` (`otlp.py`), shaped by `projection.py` and `quality.py` |
-| `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, the work itself (`execute.py`), the console's built-in scorers (`scorers.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
+| `src/martian/evals/server/` | Evals core: `create_app` with injected store, record store, principal and worker, the edition-to-entitlement map and `require_entitlement`, the capability table and `require_capability`, `/v1/evals/status`, `/v1/evals/bootstrap`, the read routes (`runs.py`, `traces.py`, `datasets.py`, and the core's own `agreement.py` and `calibration.py`, which also saves a calibration and asks for its re-check), the write routes (`launch.py`, `scoring.py`, `reviews.py`, `suites.py`, `projects.py`, `views.py`, `drafts.py`, bodies in `write_schemas.py`), OpenTelemetry's `POST /v1/traces` (`otlp.py`), and the core's own monitor and threshold routes (`monitors.py`, `thresholds.py`), shaped by `projection.py` and `quality.py` |
+| `src/martian/evals/worker/` | The worker interface the write routes hand runs, scoring jobs and re-checks to, the work itself (`execute.py`, and `recheck.py` for a calibration's re-check), the console's built-in scorers (`scorers.py`), the per-case hooks and installed checks an edition adds (`hooks.py`), the targets it calls (`targets.py`: HTTP targets called directly, registered agents through martian-agents), the judges it grades with (`judges.py`: the SDK judge, and martian-agents as an optional executor), the one-organisation in-process worker (`inprocess.py`), and one process per run (`process.py`, started as `python -m martian.evals.worker`) |
 | `src/martian/evals/store/` | Store interface, the in-memory store and the in-process `mlflow-skinny` binding (`mlflow_local.py`) |
+| `src/martian/evals/thresholds.py`, `alerts.py` | Thresholds on monitor scores judged on their 95% intervals, with the state machine that raises one alert per breach and recovery, and the alerts' delivery by signed webhook and SMTP ([evals core](evals-core.md#thresholds-and-alerts)) |
 | `src/martian/evals/trace_conventions.py` | The versioned table that maps OpenTelemetry GenAI, OpenInference and MLflow span attributes onto the trace fields ([evals core](evals-core.md#trace-conventions)) |
 | `src/martian/evals/local.py` | The local edition behind `martian ui`: the data folder and its stores, the core on SQLite, the session call and the built UI on 127.0.0.1, or on the container's interfaces in the image |
 | `src/martian/evals/local_targets.py`, `local_runs.py` | The local edition's targets and their keys, and its worker, launch and run again, each run queued in the data folder and run in a process of its own |
 | `src/martian/evals/run_record.py` | A suite-file run recorded in the local edition's data folder: run, case results, scores and traces through the store and the record store |
 | `src/martian/evals/inspect_import.py` | Inspect AI `.eval` and `.json` logs read against Inspect's log schema and recorded in the data folder as runs, the same way |
-| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results |
+| `src/martian/evals/promptfoo_import.py`, `promptfoo_convert.py` | promptfoo results files recorded in the data folder as runs, one per provider, through the Inspect importer's `record_imported_run`; promptfoo configs written as suite files with what does not convert listed. `examples/promptfoo/` holds a hand-written config, its stand-in target and results, and `tests/evals/promptfoo/` results promptfoo 0.125.1 wrote for two providers |
 | `src/martian/evals/data_export.py` | An organisation's data exported through the store and the record store as JSON Lines files with a manifest, resumed after an interruption, and imported into a fresh install ([data export](data-export.md)) |
 | `src/martian/evals/mlflow_import.py` | An MLflow tracking store's schema revision checked, the store read without writing, and its experiments, traces, datasets, assessments and evaluation runs copied into an organisation |
 | `Dockerfile` | The local edition as an image for one user on a small server: the wheel in `dist/` with the `evals` extra and the dependencies `uv.lock` pins; `scripts/check_image.py` checks a release's image holds the wheel's SDK and Evals UI ([evals core](evals-core.md#the-local-edition-in-a-container), [releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/ui/` | The built Evals UI the wheel ships, copied in by `scripts/vendor_ui.py` and pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) |
 | `scripts/sbom.py`, `scripts/licence-policy.json` | The release's CycloneDX bills of materials for the wheel and the image, and the licence check against the allowed list ([releasing](releasing.md#bills-of-materials-and-the-licence-check)) |
-| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, `_policy.py` the patterns, checksums and refusal reading of the policy checks, and `_tool_calls.py` the reading of an agent's tool calls, turn by turn, from its reply or its trace, and their matching; the suite file runner checks options with all four. `_custom.py` holds the rules of a custom Python check, shared by `python_check`, the runner's `type: python` and the worker's installed scorers |
+| `src/martian/evals/checks.py` | The deterministic checks; `_json_schema.py` holds the JSON Schema subset `json_schema` applies, `_numeric.py` the exact reading of numbers, paths and tables the numeric and table checks use, `_policy.py` the patterns, checksums and refusal reading of the policy checks, and `_tool_calls.py` the reading of an agent's tool calls, turn by turn, from its reply or its trace, and their matching; the suite file runner checks options with all four. `_custom.py` holds the rules of a custom Python check, shared by `python_check`, the runner's `type: python`, the worker's installed scorers and its installed checks, and the `required` option of an installed check |
 | `src/martian/evals/_judge_transport.py` | Judge model call, error codes and rate-limit retry |
-| `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and nothing else; `tests/evals/test_mlflow_private.py` names any a new MLflow release removes |
+| `src/martian/evals/cache.py` | The cache of model calls a suite-file run replays: keys without credentials, entries on disk, an attempt number per identical request ([evals](evals.md#a-cache-of-model-calls)) |
+| `src/martian/evals/_mlflow.py` | Every MLflow internal the SDK uses, and the span calls of a function target in a process of its own; `tests/evals/test_mlflow_private.py` names any internal a new MLflow release removes. The one exception is that process itself (`_target_process.py`), which never imports the evals package: it imports the two internals its tracing needs, which `_mlflow.py` lists and the guard allows in that file only (`OWN_IMPORTS`, with the reason) |
 | `src/martian_redteam/protocol.py` | Wait-body JSON, envelope unwrap, Retry-After |
 | `src/martian_redteam/client.py` | httpx client, retries, schema errors |
 | `src/martian_redteam/orchestrator.py` | Probe loop and summaries |
@@ -195,9 +200,15 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   telemetry client if it starts; the test fails on any record. Its processes get a clean
   environment, because MLflow turns its telemetry off by itself under CI or pytest variables
   ([telemetry](security-and-data.md#telemetry)). The child processes import
-  `tests/evals/no_outbound_fixture.py`, so run it from the repository root.
-- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the two sample comments when the comment format changes.
-- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
+  `tests/evals/no_outbound_fixture.py` and `tests/evals/judged_call_fixture.py` (one judged call at a
+  loopback endpoint, with and without an address policy), so run it from the repository root.
+- `tests/evals/test_judge_address_pin.py` covers a judge's address policy
+  (`martian.evals._pinned_address`): loopback servers on `127.0.0.1` and `127.0.0.2` stand for the
+  public and the internal address of one name, whose lookups the test scripts, and count the
+  connections they accept. Its TLS tests generate a certificate with `cryptography`, which the
+  `evals` extra brings in through MLflow.
+- `tests/test_evals_pr_comment.py` covers the evals action's comment script (`scripts/evals_pr_comment.py`): it runs both sample suites in `examples/github-action`, the failing one again with the passing one's output folder as its baseline, and the matrix example `examples/evals/matrix`, requires the rendered bodies to equal `examples/github-action/comments/`, and drives find-and-edit against a loopback fake of the GitHub issue-comments API. Regenerate the four sample comments when the comment format changes. `tests/evals/test_baseline.py` covers `--baseline` (`martian.evals.baseline`): what `verdicts.json` keeps and leaves out, a seeded regression beyond noise that fails the gate, a few broken cases within noise that do not, one case that newly fails a security check, which fails it on its own, the failed cases with no result to compare with that do, and a check's digest, which leaves out the scope and panel it does not set and counts a panel's members, not `judge.model`. `tests/evals/test_matrix.py` covers a suite's matrix (`martian.evals.matrix`): one result and one recorded run per combination, the values in a URL target's body and a function target's arguments, resume and repeats per combination, each combination compared with its own baseline, and the matrices refused before any case. `tests/evals/test_cache.py` covers the cache of model calls (`martian.evals.cache`) against one counting loopback server that stands in for a URL target and an OpenAI-compatible judge: a second identical run makes no call to either, a changed prompt misses, failed calls are never stored, each attempt of a repeated case keeps its own entry, credentials stay out of the key and the entries, function targets are cached only when the suite says so, entries expire, a replayed judgment spends none of `max_judge_tokens`, nor does a panel whose members were all replayed, each member cached by its own model, and a run stopped at a limit still records its use of the cache, and the summary, the printed line, the pull-request comment and the recorded run's provenance say the run used the cache. The action's cache steps run only on GitHub.
+- `tests/test_sbom.py` covers the bills of materials and the licence check (`scripts/sbom.py`) on probe fixtures: a GPL, AGPL or unnamed licence in a dependency or in the UI's bundled packages fails, conclusions and exceptions apply only to the licence they name, the Evals UI is recorded as first-party Apache-2.0 and `NOTICE` attributes it, and the packages of the shipped UI pass the policy. It does not install the wheel or start the image.
 - `tests/evals/test_policy_checks.py` measures each policy check on its labelled set in `tests/evals/policy_sets/` and fails unless the error-rate table in `docs/evals.md` gives the same numbers; when a check or its set changes, copy the row the failure prints into that table. Every value in the sets is synthetic, and each secret in `no_secrets.jsonl` has one character written as a JSON escape so the file holds no secret shape.
 - `tests/evals/test_grounding_judges.py` drives the grounding judges with a fake provider and
   checks the shape of their labelled set, `tests/evals/benchmarks/grounding_judges.jsonl`.
@@ -205,6 +216,14 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   `scripts/benchmark_grounding_judges.py --model openai:/<model> --out results.jsonl` (with the
   provider's key and address in the environment) makes one call per case, about 75 in all, and
   prints each judge's false pass and false fail rates for [the evals guide](evals.md#grounding-and-retrieval-judges).
+- `tests/evals/test_conversation_judges.py` drives the conversation judges with a fake provider:
+  their flat verdicts, the turns and quotes checked against the conversation, the suite file's
+  refusals, and a scripted and a simulated conversation run through `martian evals run`, with the
+  verdicts in `results.jsonl`, the summary, the pull-request comment and the core's routes. It also
+  checks the shape of their labelled set, `tests/evals/benchmarks/conversation_judges.jsonl`, which
+  `scripts/benchmark_conversation_judges.py --model openai:/<model> --out results.jsonl` scores with
+  a real model, one call per case, 30 in all, outside CI, for
+  [the evals guide](evals.md#conversation-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 - `tests/test_cla_workflow.py` reads `.github/workflows/cla.yml`: its two events and the comments
   that start it, one step that is the SHA-pinned action with no checkout or script, its
@@ -232,6 +251,13 @@ so a test keeps its state to itself:
 - The MLflow tracking URI and active experiment, `martian.evals.state.STATE` and environment
   variables are process-wide, so each worker has its own. Fixtures that change them restore them
   afterwards.
+- A busy machine runs every test slower, so a test does not sleep for a lease to run out or a
+  retry to come due in its own process: it moves the clock the code reads (`_now` in
+  `martian.evals.records.queue`, `martian.evals.alerts` and the other modules that have one). It
+  waits for the event it asserts rather than sleeping a fixed time, and holds a hung target until
+  the run has ended rather than bounding how long the run took. Waiting on the wall clock is left
+  to what only it can show, such as another process's lease or a monitor's scoring delay, with a
+  wide margin.
 
 For debugging (`--pdb`, `-s`) or a failure that appears only in parallel, run serially by leaving
 out `-n auto` or passing `-n 0`. Each worker imports MLflow, and some tests start further pytest
@@ -278,7 +304,7 @@ the second step checked on `main` before.
 To move the pin, run the suite on the candidate, change `mlflow-skinny==` in `pyproject.toml`, run
 `uv lock`, and update the version in [SDK and CI](sdk-and-ci.md) and
 [release preparation](releasing.md). The hosted MLflow server's version is set separately in
-MorningHQ/martian-evals.
+MartianSecurity/martian-evals.
 
 ## Adding a vulnerability
 
@@ -324,6 +350,6 @@ now covers both SDK modules; no eval typing exemption remains.
 
 | Repo | Role |
 | --- | --- |
-| [MorningHQ/martian-redteam](https://github.com/MorningHQ/martian-redteam) | This SDK |
-| [MorningHQ/martian-agents](https://github.com/MorningHQ/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
+| [MartianSecurity/martian-redteam](https://github.com/MartianSecurity/martian-redteam) | This SDK |
+| [MartianSecurity/martian-agents](https://github.com/MartianSecurity/martian-agents) | Hosted graphs, Aegra, Bedrock, infra |
 | confident-ai/deepteam (local checkout only) | Taxonomy reference, not a publishable fork |

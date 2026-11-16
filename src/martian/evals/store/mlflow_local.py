@@ -21,10 +21,11 @@ How the shared model sits in MLflow:
   outputs of the trace's root span, which the binding writes and does not read back as one of the
   trace's spans, and as MLflow's previews in ``trace_info``, shortened to
   :data:`TRACE_PREVIEW_LENGTH` characters. The trace's own spans are that root span's children in
-  MLflow. A search reads only the previews, so its text filter matches only them, and the trace's
-  metadata says which were shortened (``REQUEST_PREVIEW_TRUNCATED``). A trace an earlier release
-  wrote keeps its request and response whole in ``martian.request`` and ``martian.response``
-  metadata instead.
+  MLflow. A search reads only the previews, and the trace's metadata says which were shortened
+  (``REQUEST_PREVIEW_TRUNCATED``). Its free text looks in them without their ``...``, which is
+  what every binding searches (``TEXT_SEARCH_REACH``). A trace an earlier release wrote keeps its
+  request and response whole in ``martian.request`` and ``martian.response`` metadata instead, and
+  is searched to the same reach.
 - A trace belongs to the run its ``martian.run_id`` tag names. A trace without the tag that MLflow
   tracing recorded while a run's MLflow run was active names that MLflow run in its
   ``mlflow.sourceRun`` metadata, and belongs to that run; one recorded inside an MLflow run that is
@@ -37,6 +38,11 @@ How the shared model sits in MLflow:
   request and response from it, before it maps.
 - A score is a feedback assessment on its trace.
 - A registered scorer is an MLflow scorer whose serialized form carries the scorer.
+- A prompt is a prompt of MLflow's prompt registry, in the workspace, with its creator in the
+  ``martian.prompt.created_by`` tag; a prompt version is an MLflow prompt version, its text the
+  template, its commit message MLflow's, its digest and author in the ``martian.prompt.digest`` and
+  ``martian.prompt.author`` version tags. MLflow keeps the registry in its model registry tables,
+  beside the tracking tables in the same database.
 - A review question is a label schema; a review queue is an MLflow review queue named by the
   queue id, with its definition in an experiment tag.
 - Run artifacts are files in the run's artifact folder,
@@ -45,10 +51,13 @@ How the shared model sits in MLflow:
   ``runs.artifact_uri``.
 
 A trace search is MLflow's own search, paged by MLflow, with every filter of the query MLflow has:
-run, session, user, tags, ids, states and time. This process checks each trace MLflow returns
+run, session, user, model (the ``mlflow.trace.model`` metadata the binding writes), tags, ids,
+states and time. This process checks each trace MLflow returns
 against the whole query, which applies the text filter and a value MLflow's filter syntax cannot
 quote; a search with such a filter reads at most :data:`TRACE_SCAN_LIMIT` traces a call and
-returns what matched among them, with a cursor that reads on. A search for a run's traces is two
+returns what matched among them, with a cursor that reads on. MLflow's own ``trace.text`` filter
+would reach a whole request and response, but it scans the content of every span in the project
+without an index, so the binding does not use it. A search for a run's traces is two
 MLflow searches, one on the tag and one on ``mlflow.sourceRun`` for untagged traces, merged in
 order. A session search reads its first traces the same way and groups them in this process.
 """
@@ -58,6 +67,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -86,8 +96,10 @@ from mlflow.exceptions import MlflowException
 from mlflow.genai.label_schemas import InputCategorical, InputNumeric, InputPassFail, InputText, LabelSchemaType
 
 from martian.evals._mlflow import (
+    IS_PROMPT_TAG_KEY,
     RUN_ARTIFACT_URI_LENGTH,
     TRACE_PREVIEW_LENGTH,
+    PromptRegistryStore,
     ServerWorkspaceContext,
     SpansLocation,
     TraceTagKey,
@@ -113,6 +125,8 @@ from martian.evals.model import (
     DatasetVersion,
     Page,
     Project,
+    Prompt,
+    PromptVersion,
     QueueItem,
     ReviewQuestion,
     ReviewQueue,
@@ -127,15 +141,22 @@ from martian.evals.model import (
     Trace,
     TraceQuery,
     digest,
+    prompt_digest,
+    query_keeps,
     sessions_from_traces,
 )
 from martian.evals.model import TraceState as ModelTraceState
 from martian.evals.store import (
     REQUEST_PREVIEW_TRUNCATED,
     RESPONSE_PREVIEW_TRUNCATED,
+    TRACE_DELETE_LIMIT,
     StoreError,
     StoreStatus,
+    check_imported_prompt,
+    check_prompt,
     check_session_search,
+    check_trace_deletion,
+    text_matches,
 )
 from martian.evals.trace_conventions import map_trace
 
@@ -150,6 +171,8 @@ USER_KEY = "mlflow.trace.user"
 """The trace metadata key MLflow tracing records the application's user in (``TraceMetadataKey.TRACE_USER``)."""
 SOURCE_RUN_KEY = "mlflow.sourceRun"
 """The trace metadata key MLflow tracing records the active MLflow run in (``TraceMetadataKey.SOURCE_RUN``)."""
+MODEL_KEY = "mlflow.trace.model"
+"""The trace metadata key the binding keeps a trace's model in, which a search filters on."""
 LONGEST_ARTIFACT_ROOT = RUN_ARTIFACT_URI_LENGTH - len(f"/{'0' * 32}/artifacts")
 """The longest artifact root the store takes on Postgres, 157 characters: a run's artifact folder,
 the root and ``/<MLflow run id>/artifacts``, must fit in MLflow's ``runs.artifact_uri``. SQLite does
@@ -164,10 +187,21 @@ apply, free text above all, stops after this many and returns what matched among
 cursor that reads on: a page may then hold fewer traces than its limit, or none."""
 _SCAN_CHUNK = 500
 """Traces read from MLflow at a time by a search this process filters."""
+_DELETE_CHUNK = 100
+"""Traces named in one MLflow search or delete when deleting traces."""
 _CURSOR_OFFSET = re.compile(r"[0-9]{1,18}")
 """One MLflow search's offset in a cursor: at most 18 of the digits 0-9, so it fits SQL's 64-bit
 ``OFFSET`` and ``int()`` reads it as written."""
 _CURSOR_REFUSED = "cursor is not a next_cursor this store returned"
+
+PROMPT_CREATED_BY = "martian.prompt.created_by"
+"""The prompt tag that keeps who created a prompt."""
+PROMPT_DIGEST = "martian.prompt.digest"
+"""The prompt version tag that keeps the digest of its text, which a run's prompt is matched by."""
+PROMPT_AUTHOR = "martian.prompt.author"
+"""The prompt version tag that keeps who added the version."""
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 _MLFLOW_TRACE_ID = re.compile(r"^tr-[0-9a-f]{32}$")
 _MLFLOW_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -253,6 +287,8 @@ class MlflowStore:
         self._workspaces: Any = WorkspaceSqlAlchemyStore(url)
         self._store: Any = WorkspaceStore(url, str(self._artifact_root))  # type: ignore[no-untyped-call]
         hide_sql_parameters(self._store)
+        self._prompts: Any = PromptRegistryStore(url)  # type: ignore[no-untyped-call]
+        hide_sql_parameters(self._prompts)
         self._ready: set[str] = set()
 
     # --- plumbing ----------------------------------------------------------------------------
@@ -583,7 +619,7 @@ class MlflowStore:
             for key, value in (
                 (SESSION_KEY, trace.session_id),
                 (USER_KEY, trace.user_id),
-                ("mlflow.trace.model", trace.model),
+                (MODEL_KEY, trace.model),
                 (
                     "mlflow.trace.tokenUsage",
                     None if trace.tokens is None else json.dumps({"total_tokens": trace.tokens}),
@@ -661,7 +697,7 @@ class MlflowStore:
         it, so that every trace it returns matches."""
         whole = not query.text
         filters = []
-        for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id)):
+        for key, value in ((SESSION_KEY, query.session_id), (USER_KEY, query.user_id), (MODEL_KEY, query.model)):
             if value is not None:
                 if _SAFE_FILTER_VALUE.match(value):
                     filters.append(f"metadata.`{key}` = '{value}'")
@@ -682,6 +718,16 @@ class MlflowStore:
             filters.append(f"trace.timestamp_ms >= {_ms_at_or_after(query.since)}")
         if query.until is not None:
             filters.append(f"trace.timestamp_ms < {_ms_at_or_after(query.until)}")
+        if query.min_latency_ms is not None:
+            # MLflow keeps a latency in whole milliseconds, so this keeps exactly the traces at or
+            # over it. Its column is 64-bit; above that, it keeps only a trace at the top, which
+            # the check in this process then leaves out.
+            filters.append(f"trace.execution_time_ms >= {min(math.ceil(query.min_latency_ms), 2**63 - 1)}")
+        if query.verdicts:
+            # Checked in this process (``query_keeps``): MLflow's feedback filter counts only the
+            # assessments no later one overrides, and adds the other traces of a session that has a
+            # session assessment.
+            whole = False
         if query.run_id is None or not _SAFE_FILTER_VALUE.match(query.run_id):
             return [_Search(" AND ".join(filters) or None, whole=whole and query.run_id is None)]
         # A run's traces are the ones tagged with it and the untagged ones MLflow tracing recorded
@@ -703,11 +749,21 @@ class MlflowStore:
         searches = self._searches(experiment_id, query)
         for search, offset in zip(searches, _cursor_offsets(query.cursor, len(searches)), strict=True):
             search.offset = offset
-        # MLflow breaks a tie in time by its trace id, ascending, either way.
+        # MLflow breaks a tie in time by its trace id, ascending, either way. Ordered by latency, it
+        # puts the traces without one last, either way.
         order_by = ["timestamp_ms ASC" if query.oldest_first else "timestamp_ms DESC"]
+        if query.slowest_first is not None:
+            order_by.insert(0, "execution_time_ms DESC" if query.slowest_first else "execution_time_ms ASC")
 
-        def key(info: TraceInfo) -> tuple[int, str]:
-            return (info.request_time if query.oldest_first else -info.request_time, info.trace_id)
+        def key(info: TraceInfo) -> tuple[bool, int, int, str]:
+            latency = info.execution_duration
+            by_latency = 0 if latency is None or query.slowest_first is None else latency
+            return (
+                latency is None and query.slowest_first is not None,
+                -by_latency if query.slowest_first else by_latency,
+                info.request_time if query.oldest_first else -info.request_time,
+                info.trace_id,
+            )
 
         found: list[Trace] = []
         runs: dict[str, str] = {}
@@ -734,7 +790,7 @@ class MlflowStore:
             trace = _trace(search.rows.popleft(), query.project_id, runs=runs)
             search.offset += 1
             read += 1
-            if _matches(trace, query):
+            if _matches(trace, query) and query_keeps(trace, query):
                 found.append(trace)
         more = any(search.rows or not search.done for search in searches)
         return found, ".".join(str(search.offset) for search in searches) if more else None
@@ -798,6 +854,50 @@ class MlflowStore:
                 self._store.set_trace_tag(info.trace_id, "martian.run_id", run_id)
 
         await self._call(principal, work)
+
+    def _hard_delete(self, experiment_id: str, mlflow_ids: list[str]) -> None:
+        """Delete these traces of the experiment with MLflow's own delete, which removes each one's
+        row and, with it, its tags, metadata, spans and assessments, and its review queue items."""
+        for start in range(0, len(mlflow_ids), _DELETE_CHUNK):
+            self._store.delete_traces(experiment_id, trace_ids=mlflow_ids[start : start + _DELETE_CHUNK])
+
+    async def delete_traces(self, principal: Principal, project_id: str, trace_ids: list[str]) -> list[str]:
+        check_trace_deletion(trace_ids=trace_ids)
+        wanted = list(dict.fromkeys(trace_ids))
+
+        def work() -> list[str]:
+            experiment_id = self._experiment(project_id).experiment_id
+            mlflow_ids = sorted({_mlflow_trace_id(trace_id) for trace_id in wanted})
+            held: set[str] = set()
+            for start in range(0, len(mlflow_ids), _DELETE_CHUNK):
+                chunk = mlflow_ids[start : start + _DELETE_CHUNK]
+                listed = ", ".join(f"'{mlflow_id}'" for mlflow_id in chunk)
+                infos, _ = self._store.search_traces(
+                    locations=[experiment_id], filter_string=f"trace.request_id IN ({listed})", max_results=len(chunk)
+                )
+                held.update(info.trace_id for info in infos)
+            self._hard_delete(experiment_id, sorted(held))
+            return [trace_id for trace_id in wanted if _mlflow_trace_id(trace_id) in held]
+
+        return await self._call(principal, work)
+
+    async def delete_traces_before(
+        self, principal: Principal, project_id: str, before: datetime, *, limit: int = TRACE_DELETE_LIMIT
+    ) -> list[str]:
+        check_trace_deletion(limit=limit)
+
+        def work() -> list[str]:
+            experiment_id = self._experiment(project_id).experiment_id
+            infos, _ = self._store.search_traces(
+                locations=[experiment_id],
+                filter_string=f"trace.timestamp_ms < {_ms_at_or_after(before)}",
+                max_results=limit,
+                order_by=["timestamp_ms ASC"],
+            )
+            self._hard_delete(experiment_id, [info.trace_id for info in infos])
+            return [(info.tags or {}).get("martian.trace_id", info.trace_id) for info in infos]
+
+        return await self._call(principal, work)
 
     # --- scores ------------------------------------------------------------------------------
 
@@ -882,6 +982,114 @@ class MlflowStore:
             except MlflowException:
                 return []
             return sorted((_scorer(v) for v in versions), key=lambda s: int(s.version))
+
+        return await self._call(principal, work)
+
+    # --- prompts -----------------------------------------------------------------------------
+
+    async def create_prompt(self, principal: Principal, name: str, *, description: str = "") -> Prompt:
+        check_prompt(name, description=description)
+
+        def work() -> Prompt:
+            if (existing := self._prompts.get_prompt(name)) is not None:
+                found = _prompt(existing)
+                if found.description != description:
+                    raise StoreError("conflict", "a prompt with this name already exists")
+                return found
+            tags = {PROMPT_CREATED_BY: principal.user_id}
+            return _prompt(self._prompts.create_prompt(name, description=description or None, tags=tags))
+
+        return await self._call(principal, work)
+
+    async def get_prompt(self, principal: Principal, name: str) -> Prompt | None:
+        def work() -> Prompt | None:
+            found = self._prompts.get_prompt(name)
+            return None if found is None else _prompt(found)
+
+        return await self._call(principal, work)
+
+    async def list_prompts(self, principal: Principal) -> list[Prompt]:
+        def work() -> list[Prompt]:
+            found: list[Prompt] = []
+            token = None
+            while True:
+                page = self._prompts.search_prompts(max_results=100, page_token=token)
+                found.extend(_prompt(prompt) for prompt in page)
+                if not (token := page.token):
+                    return sorted(found, key=lambda prompt: prompt.name)
+
+        return await self._call(principal, work)
+
+    async def add_prompt_version(
+        self, principal: Principal, name: str, text: str, *, message: str = ""
+    ) -> PromptVersion:
+        check_prompt(name, text, message=message)
+
+        def work() -> PromptVersion:
+            if self._prompts.get_prompt(name) is None:
+                raise StoreError("not_found", "prompt not found")
+            tags = {PROMPT_DIGEST: prompt_digest(text), PROMPT_AUTHOR: principal.user_id}
+            return _prompt_version(
+                self._prompts.create_prompt_version(name, text, description=message or None, tags=tags)
+            )
+
+        return await self._call(principal, work)
+
+    async def prompt_versions(self, principal: Principal, name: str) -> list[PromptVersion]:
+        def work() -> list[PromptVersion]:
+            if self._prompts.get_prompt(name) is None:
+                raise StoreError("not_found", "prompt not found")
+            found: list[PromptVersion] = []
+            token = None
+            while True:
+                page = self._prompts.search_prompt_versions(name, max_results=100, page_token=token)
+                found.extend(_prompt_version(version) for version in page)
+                if not (token := page.token):
+                    return sorted(found, key=lambda version: version.version)
+
+        return await self._call(principal, work)
+
+    async def import_prompt(
+        self, principal: Principal, prompt: Prompt, versions: list[PromptVersion]
+    ) -> list[PromptVersion]:
+        check_imported_prompt(prompt, versions)
+        name = prompt.name
+
+        def work() -> list[PromptVersion]:
+            if self._prompts.get_prompt(name) is not None:
+                raise StoreError("conflict", "a prompt with this name already exists")
+            made_by = {} if prompt.created_by is None else {PROMPT_CREATED_BY: prompt.created_by}
+            self._prompts.create_prompt(name, description=prompt.description or None, tags=made_by)
+            for version in versions:
+                author = {} if version.created_by is None else {PROMPT_AUTHOR: version.created_by}
+                made = self._prompts.create_prompt_version(
+                    name,
+                    version.text,
+                    description=version.message or None,
+                    tags={PROMPT_DIGEST: version.digest, **author},
+                )
+                if int(made.version) != version.version:
+                    raise StoreError(
+                        "conflict", f"version {version.version} of prompt {name} got number {made.version}"
+                    )
+            # MLflow stamps the current time on what it creates; keep the export's.
+            times = {version.version: _ms(version.created_at) for version in versions}
+            self._prompts.keep_prompt_times(name, _ms(prompt.created_at), times)
+            return [_prompt_version(self._prompts.get_prompt_version(name, version.version)) for version in versions]
+
+        return await self._call(principal, work)
+
+    async def find_prompt_versions(self, principal: Principal, digest: str) -> list[PromptVersion]:
+        if not _DIGEST.fullmatch(digest):
+            return []
+
+        def work() -> list[PromptVersion]:
+            # MLflow searches prompt versions only when the filter names its prompt tag.
+            matching = self._prompts.search_model_versions(
+                filter_string=f"tag.`{IS_PROMPT_TAG_KEY}` = 'true' AND tag.`{PROMPT_DIGEST}` = '{digest}'"
+            )
+            found = [_prompt_version(self._prompts.get_prompt_version(m.name, m.version)) for m in matching]
+            return sorted(found, key=lambda version: (version.created_at or _EPOCH, version.name, version.version))
 
         return await self._call(principal, work)
 
@@ -1294,7 +1502,7 @@ def _trace(
     known = {
         SESSION_KEY,
         USER_KEY,
-        "mlflow.trace.model",
+        MODEL_KEY,
         "mlflow.trace.tokenUsage",
         "mlflow.trace.cost",
         "martian.request",
@@ -1313,7 +1521,7 @@ def _trace(
         run_id=run_id,
         session_id=metadata.get(SESSION_KEY),
         user_id=metadata.get(USER_KEY),
-        model=metadata.get("mlflow.trace.model"),
+        model=metadata.get(MODEL_KEY),
         tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
         cost=cost.get("total_cost") if isinstance(cost, dict) else None,
         tags={k: v for k, v in tags.items() if not k.startswith("mlflow.")},
@@ -1368,14 +1576,22 @@ def _matches(trace: Trace, query: TraceQuery) -> bool:
         return False
     if query.user_id is not None and trace.user_id != query.user_id:
         return False
+    if query.model is not None and trace.model != query.model:
+        return False
     if query.trace_ids and trace.id not in query.trace_ids:
         return False
     if query.states and trace.state not in query.states:
         return False
     if any(trace.tags.get(key) != value for key, value in query.tags.items()):
         return False
-    if query.text and query.text.lower() not in f"{trace.name}\n{trace.request}\n{trace.response}".lower():
-        return False
+    if query.text:
+        # A search reads MLflow's previews; the "..." ending one the binding shortened is not text.
+        request, response = (
+            shown[:-3] if trace.metadata.get(key) == "true" else shown
+            for shown, key in ((trace.request, REQUEST_PREVIEW_TRUNCATED), (trace.response, RESPONSE_PREVIEW_TRUNCATED))
+        )
+        if not text_matches(query.text, trace.name, request, response):
+            return False
     when = trace.request_time
     if query.since is not None and (when is None or when < query.since):
         return False
@@ -1388,6 +1604,29 @@ def _scorer(found: Any) -> ScorerVersion:
     if stored is None:
         return ScorerVersion(name=found.scorer_name, kind="llm_judge", type="mlflow", version=str(found.scorer_version))
     return ScorerVersion.model_validate({**stored, "version": str(found.scorer_version)})
+
+
+def _prompt(found: Any) -> Prompt:
+    tags = dict(found.tags or {})
+    return Prompt(
+        name=found.name,
+        description=found.description or "",
+        created_at=_from_ms(found.creation_timestamp),
+        created_by=tags.get(PROMPT_CREATED_BY),
+    )
+
+
+def _prompt_version(found: Any) -> PromptVersion:
+    tags = dict(found.tags or {})
+    return PromptVersion(
+        name=found.name,
+        version=int(found.version),
+        text=found.template,
+        digest=prompt_digest(found.template),
+        message=found.commit_message or "",
+        created_at=_from_ms(found.creation_timestamp),
+        created_by=tags.get(PROMPT_AUTHOR),
+    )
 
 
 def _label_input(question: ReviewQuestion) -> Any:

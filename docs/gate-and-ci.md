@@ -61,20 +61,28 @@ provider/key setup; it is executed locally and can have side effects.
 The [evals action](../.github/actions/evals/action.yml) runs one
 [suite file](evals.md#run-a-suite-file-locally) with `martian evals run` and
 reports it on the pull request. Reference it as
-`MorningHQ/martian-redteam/.github/actions/evals@<tag or full SHA>` after
+`MartianSecurity/martian-redteam/.github/actions/evals@<tag or full SHA>` after
 `actions/checkout`. [examples/github-action](../examples/github-action/) holds
-a [workflow](../examples/github-action/workflow.yml), a passing and a failing
-suite, and the two comments they produce
-([passed](../examples/github-action/comments/passed.md),
-[failed](../examples/github-action/comments/failed.md)).
+a [workflow](../examples/github-action/workflow.yml), a passing suite and a
+failing one that is the passing suite with two replies broken, and the
+comments they produce: [passed](../examples/github-action/comments/passed.md),
+[failed](../examples/github-action/comments/failed.md),
+[compared](../examples/github-action/comments/compared.md), the failing suite
+compared with a result of the passing one, as a pull request that broke two
+of its cases would be compared with `main`: both newly fail a security check,
+so it fails although two changed cases are within noise; and
+[matrix](../examples/github-action/comments/matrix.md), the
+[matrix example](../examples/evals/matrix/evals.yaml)'s two models and two
+prompts.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `suite` | required | The suite file, relative to the workspace |
-| `output` | `results/evals` | Folder for `results.jsonl`, `summary.json` and `junit.xml`; one per suite |
+| `output` | `results/evals` | Folder for `results.jsonl`, `summary.json`, `junit.xml` and `verdicts.json`; one per suite |
 | `github-token` | the workflow token | Writes the comment |
-| `comment-key` | the suite path | Names the comment; give each job its own key when several jobs run one suite on a pull request, such as a model matrix |
+| `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request. A suite's own [matrix](evals.md#a-matrix-of-prompts-and-models) needs none: its combinations share one comment and one baseline |
 | `comment-author` | `github-actions[bot]` | Login that writes the comment; change it only with another token |
+| `baseline-branch` | empty: off | Branch whose last result a pull request is compared with, usually the default branch; see [compared with the last result of main](#compared-with-the-last-result-of-main) |
 
 - **No Martian account.** The run is local, as on a laptop. A suite that grades
   stored replies with deterministic checks needs no secret at all. An LLM judge
@@ -92,7 +100,10 @@ suite, and the two comments they produce
   [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
   that stopped says how many cases it did not run and which limit it reached;
   its counts, rates and reliability are of the cases it finished.
-  A suite with a [policy check](evals.md#false-refusals) adds how many of its
+  A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on
+  says so first, in bold, with how many target and judge calls replayed a
+  reply an earlier run stored. A suite with a
+  [policy check](evals.md#false-refusals) adds how many of its
   benign cases were refused, so a model that refuses everything cannot look
   as if it passed. Below it are per-check counts, each pass rate with its 95%
   interval ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),
@@ -107,15 +118,23 @@ suite, and the two comments they produce
   row and the simulator's model,
   and up to 25 failed and 25 unfinished case
   IDs with the checks that did not pass, `(simulated)` beside a simulated
-  case and, for a conversation, the numbers of the turns that failed. Inputs, replies and judge reasons stay
+  case and, for a conversation, the numbers of the turns that failed. A suite
+  with a [matrix](evals.md#a-matrix-of-prompts-and-models) has one row per
+  combination instead, up to 25: its counts, pass rate and interval, its reliability
+  with repeats, its false refusals with a policy check, its comparison with a
+  baseline, and how it ended; then, for up to ten combinations, their cases
+  that went from pass to fail, failed or have no verdict, five of each by
+  name. Inputs, replies and judge reasons stay
   out of the comment; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
   instead of repeating an earlier result. The same text goes to the job summary
   on every event, and the comment is written only for `pull_request` events.
 - **The exit code is the gate.** The action fails with the suite's exit code
-  after reporting. It uploads nothing; upload `summary.json` and `junit.xml`
-  with `if: always()`, and keep `results.jsonl` and `mlflow.db` out of shared
-  artifacts, because they hold prompts and replies.
+  after reporting; compared with a baseline, that is the comparison's gate
+  (below). It uploads nothing; upload `summary.json`, `junit.xml`,
+  `verdicts.json` and `comparison.json` with `if: always()`, and keep
+  `results.jsonl` and `mlflow.db` out of shared artifacts, because they hold
+  prompts and replies.
 - **Permissions.** The job needs `contents: read` and `pull-requests: write`,
   nothing more. Pull requests from forks and from Dependabot get a read-only
   token: GitHub refuses the comment with 403, the action prints a warning, and
@@ -123,6 +142,78 @@ suite, and the two comments they produce
   step. Trigger on `pull_request`, never `pull_request_target`: the suite runs
   the pull request's code, and `pull_request_target` would give that code a
   write token and the repository's secrets.
+
+### Compared with the last result of main
+
+On its own, a run fails on any failed case, so a case that already fails on
+`main` fails every pull request, and the comment cannot say what the pull
+request changed. With `baseline-branch: main`, and the workflow triggered on
+`push` to `main` as well as on `pull_request`, the action compares each pull
+request with the last result of `main`, case by case:
+
+- **Where the result is kept.** On a push to `baseline-branch`, a run in
+  which every case has a verdict (exit 0 or 1) keeps its `verdicts.json` and
+  the commit in the repository's GitHub Actions cache, one entry per
+  `comment-key`. On a `pull_request`, the action restores the newest entry,
+  from the pull request's base branch or the default branch, and runs
+  `martian evals run <suite> --baseline <folder>`. The cache needs no
+  permission in the job, no write access to the repository and no paid
+  service, and only a push to `baseline-branch` writes the baseline: a cache
+  entry written in a pull request's run is visible to that pull request only,
+  and the action writes none. Other events, and a push to another branch, run
+  without a baseline. To compare a run with a result kept some other way,
+  run the command yourself with `--baseline`
+  ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+- **What is kept.** `verdicts.json` holds each case's id, verdict and check
+  verdicts, a digest of its inputs and expectations, and the reasons of the
+  deterministic checks that report counts, sizes or names. It holds no input,
+  reply or judge reason, so a pull request from a fork, which can read the
+  cache, sees no more than the case ids and verdicts.
+- **The comparison** pairs a case of the pull request with the same case on
+  `main`: the same id, inputs and expectations, and a verdict in both runs. The
+  exact McNemar test labels the change **better**, **worse** or **within
+  noise** ([comparing two runs](evals.md#comparing-two-runs)). With fewer than
+  six changed cases a change is always within noise.
+- **The gate.** Compared with `main`, the job fails when the change is worse
+  than noise; when a case newly fails a security check, whatever the label; or
+  when a case with no result on `main` to compare with failed: a new case, one
+  whose inputs or expectations changed, or one without a verdict on `main`.
+  Cases that failed on `main` too, and a few cases that went from pass to fail
+  on other checks, within noise, do not fail it. A case without a verdict still
+  fails the job.
+- **Security checks fail the gate case by case.** One leaked secret or
+  followed injection is never noise. A case that newly fails a
+  [security check](evals.md#repeated-attempts) (`not_contains`, `not_matches`,
+  `tool_not_called` and the policy checks other than `no_refusal`, the types in
+  `martian.evals.runner.SECURITY_CHECKS`, and a
+  [`python` check](evals.md#custom-python-checks) marked `security: true`)
+  fails the job on its own: it fails
+  the check here and passed it on `main`, or `main` had no such check, also
+  when the case already failed another check on `main`. A case that failed the
+  same security check on `main` is a known failure and does not fail the job.
+  Other checks keep the noise rule, `no_refusal` and LLM judges among them,
+  even a judge that guards a secret.
+- **What the comment says.** The headline says `passed against main` or
+  `failed against main`, then the label with the counts it rests on, the
+  p-value and the smallest change it can tell, and the cases it could not pair.
+  **Cases that newly failed a security check, which fails the gate** names each
+  such case with those checks and their reasons; **Cases that went from pass to
+  fail** names each other case that did, with its failed checks and their
+  reasons.
+  A reason that could quote the reply, an LLM judge's or a numeric, table or
+  schema check's, shows as `—`; `results.jsonl` has it. A suite whose checks or
+  attempts per case changed since `main` says so, because the label then
+  measures that change too. `comparison.json` lists the security cases under
+  `security_regressed`.
+- **A matrix.** The kept `verdicts.json` holds every combination's verdicts,
+  and each combination of a pull request is compared with the same
+  combination on `main`, by its id. A combination `main` has no result of,
+  such as one a pull request adds, says `no baseline yet` in its row and is
+  gated on its own.
+- **No baseline yet.** Until a push to `main` has kept a result for the suite,
+  or after GitHub has evicted it (an entry unused for seven days, or beyond the
+  repository's cache size), the comment says there is no baseline yet and the
+  pull request is gated on its own, so any failed case fails it.
 
 ## Limits and privacy
 
@@ -138,6 +229,7 @@ text; approve those data flows before using production data.
 
 Repository CI is separate: lint, strict types, Python 3.12/3.13 tests, package and
 a credential-free action smoke (validate, and the evals action on both sample
-suites, commenting on this repository's pull requests). Fast tests use fixtures
-and loopback services.
+suites, commenting on this repository's pull requests; the passing sample keeps
+its result on `main` and compares each pull request with it). Fast tests use
+fixtures and loopback services.
 Real service/model/UI qualification is recorded in [validation](validation.md).
