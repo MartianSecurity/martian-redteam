@@ -51,14 +51,26 @@ KEPT = ("PATH", "LANG", "LC_ALL", "TMPDIR")
 """The only variables a guarded process inherits from the test's environment."""
 
 TEXT_HOSTS = frozenset(
-    {"react.dev", "base-ui.com", "www.w3.org", "local.invalid", "agent.example", "models.example", "localhost"}
+    {
+        "react.dev",
+        "base-ui.com",
+        "www.w3.org",
+        "local.invalid",
+        "agent.example",
+        "models.example",
+        "localhost",
+        "docs.martiansecurity.ai",
+        "github.com",
+    }
 )
 """Hosts the built UI's scripts name without loading anything from them: the links in React's and
 Base UI's error messages, XML namespace names, the placeholder base the UI resolves relative
-addresses against, and the example addresses shown as placeholder text in the local target and
+addresses against, the example addresses shown as placeholder text in the local target and
 judge model forms (``https://agent.example/api/chat``, ``https://models.example/v1``,
-``http://localhost:4000/v1``). A new host in a rebuilt UI fails the bundle test until someone
-checks it."""
+``http://localhost:4000/v1``), and the sidebar's links, which open only when the user clicks them
+in a new tab: the documentation (``https://docs.martiansecurity.ai``, and its page on running red
+team assessments from the SDK) and this repository (``https://github.com/MartianSecurity/martian-redteam``).
+A new host in a rebuilt UI fails the bundle test until someone checks it."""
 
 
 def guarded(tmp_path: Path) -> tuple[Path, dict[str, str]]:
