@@ -268,12 +268,12 @@ What each part sends without a setting of yours:
 
 | Part | Sends by itself | Sends only when you configure it |
 | --- | --- | --- |
-| `mlflow-skinny` | Usage telemetry, off as above | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
+| `mlflow-skinny` | Usage telemetry, off as above. A model price catalogue from github.com, to price a traced model call and never for a judged call ([below](#judges-and-the-model-catalogue)) | Runs and traces to the MLflow server that `mlflow.tracking_uri` in a suite file or an application's `MLFLOW_TRACKING_URI` names; a Databricks workspace for a `databricks` tracking URI. The local edition's store opens its own SQLite files and ignores the tracking URI |
 | `opentelemetry-sdk`, under MLflow tracing | Nothing | Spans to the collector `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` names |
 | `databricks-sdk` and `google-auth`, which MLflow brings | Nothing | Databricks and Google Cloud URIs, which the local and on-premises stores do not use |
 | FastAPI, Starlette, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX, Requests, Typer, Rich | Nothing; none has telemetry | — |
 | The Evals UI | Nothing. Its scripts, styles and Inter font files are in the wheel, `martian ui` serves them, and the UI calls only `/v1` on its own origin. It has no analytics | — |
-| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)) |
+| Judges and targets | Nothing | The model provider a judge names and the address of a URL target ([above](#local-suite-runs)). A judged call connects to its endpoint and to nothing else ([below](#judges-and-the-model-catalogue)) |
 | Threshold alerts | Nothing | A threshold's webhook URL and the SMTP server, once the worker's alert settings name them ([below](#threshold-alerts)) |
 
 `tests/evals/test_no_outbound.py` proves it. It runs a local run of a function target with a
@@ -282,7 +282,47 @@ worker running a function target, each in a clean environment (no CI or pytest v
 which MLflow turns its telemetry off by itself, and no telemetry settings) with every connection
 and name lookup for an address other than loopback refused. It fails on any such attempt and on
 MLflow's telemetry client starting in any of those processes, and checks that the shipped UI
-loads nothing from another host.
+loads nothing from another host. It also grades one request with the SDK judge at a loopback
+endpoint, with and without an address policy, with every other address refused, and fails if the
+judge looks up or connects to anything but that endpoint.
+
+## Judges and the model catalogue
+
+A judged call connects to its endpoint and to nothing else. Two things stand in the way of that, and
+the core handles both.
+
+**The model catalogue.** MLflow prices the tokens a model call reports from a catalogue of models and
+their prices that it downloads from github.com
+(`https://github.com/mlflow/mlflow/releases/download/model-catalog%2Flatest`, one `<provider>.json`
+file for each provider). It makes the download at the first priced call of a process and tries it
+four times, with a five-second timeout each, so an installation with no route to github.com waits on
+it before its first verdict, and one that audits its outbound traffic sees the attempts. A judge
+asks for a price only when `MLFLOW_MODEL_CATALOG_URI` names a catalogue (`martian.evals._judge_transport`),
+which MLflow reads: a mirror (`https://`) or a folder (`file://`) with the catalogue's
+`<provider>.json` files under it. With the variable unset or empty, the default, a judged call makes
+no download and its metadata leaves out `mlflow.assessment.judgeCost`, the price of the call.
+Nothing in the core reads that price, and the tokens, the model version and every verdict are
+recorded as before.
+
+The same variable also decides where MLflow prices the model calls of a traced target (the
+`cost` check's `max_usd`, [checks](evals.md#deterministic-checks)): it is not a judged call, so it is
+not changed, and an installation that traces a target's model calls and has no route to github.com
+sets `MLFLOW_MODEL_CATALOG_URI` to a mirror or to an empty address in that process's environment.
+
+**The endpoint's address.** A name can answer one address when it is checked and another when the
+HTTP client connects (DNS rebinding), so checking an endpoint's address before a call does not stop
+a call to an internal one. An edition that calls endpoints other people name passes an address
+policy to `sdk_judge(address_policy=...)`
+([the worker's judge](evals-core.md#the-workers-judge)): the judge then connects to the address
+its policy allowed, which it resolved when the connection opened, and to no other. The core sets no
+policy by itself: a local run calls the endpoint its user named, which may be on the same machine.
+The core's other outbound calls are not pinned: a URL target (`martian evals run` and the worker's
+HTTP targets) and a webhook of a [threshold alert](#threshold-alerts), whose address check resolves
+the name once and the HTTP client again.
+
+`tests/evals/test_no_outbound.py` (a judged call reaches only its endpoint),
+`tests/evals/test_worker_judges.py` (the price) and `tests/evals/test_judge_address_pin.py` (the
+address) prove both.
 
 ## Threshold alerts
 

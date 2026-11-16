@@ -23,6 +23,7 @@ from martian.evals._judge_transport import (
 from martian.evals.cache import HIT_KEY
 
 if TYPE_CHECKING:
+    from martian.evals._pinned_address import AddressPolicy
     from martian.evals.cache import ModelCallCache
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
@@ -596,10 +597,13 @@ def _response_judge(
     headers: Mapping[str, str] | None,
     endpoint: str | None = None,
     cache: ModelCallCache | None = None,
+    address_policy: AddressPolicy | None = None,
 ) -> Scorer:
     """The three judges' shared implementation. ``endpoint`` is the base address of the
     OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
-    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to."""
+    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to.
+    ``address_policy`` is the worker's: the judge connects only to an address it allows, at the
+    address the endpoint's name resolved to when the connection opened (``sdk_judge``)."""
     if type(verify) is not bool:
         raise ValueError("verify must be a boolean")
     params, extra_headers = _judge_options(
@@ -721,6 +725,7 @@ def _response_judge(
             endpoint=endpoint,
             cache=cache,
             judge_version=version,
+            address_policy=address_policy,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -754,6 +759,7 @@ def _response_judge(
                 endpoint=endpoint,
                 cache=cache,
                 judge_version=version,
+                address_policy=address_policy,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
