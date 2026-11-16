@@ -1559,8 +1559,9 @@ WorkerServices(store, records, hooks=(Prepared(),), checks={"final_state": final
   is graded, in the opposite order. Teardown runs whether the case passed or failed, its target
   raised or timed out, a later hook's setup raised, or the work was cancelled during the case; it
   is given the case's error so far, empty when the target answered. A case the run skips calls no
-  target and runs no hook: one with no usable prompt or expected text, and a conversation case
-  (`Case.turns` or `Case.simulated_user`), which the worker does not run. Each call of a case's
+  target and runs no hook: one with no usable prompt or expected text (a case with no expected
+  text is run when a [required check](#required-installed-checks) grades it), and a conversation
+  case (`Case.turns` or `Case.simulated_user`), which the worker does not run. Each call of a case's
   target is set up afresh: the worker calls each case once ([the unit is the
   case](#checkpoints-and-resuming)), and a case run again after its worker stopped or its run was
   resumed is set up again. A scoring job, a monitor's pass and a schedule's turn run no hooks; the
@@ -1595,15 +1596,68 @@ WorkerServices(store, records, hooks=(Prepared(),), checks={"final_state": final
   with (`admit_run(..., checks=[...])`, which an edition's own launch passes; the contract's launch
   names none), grade each case whose target answered, on a thread, after the call and before the
   teardown, so they read the case's state while it lives. Their scores sit beside the exact-match
-  score in the case's checkpoint and on its trace; the case's status stays the exact match's. A
-  scoring job's installed checks grade the saved outputs with `state=None`: the case's state ended
-  with its teardown. No route of the frozen contract names an installed check, a schedule's run is
-  admitted with none, and a [monitor](#monitors) refuses one, as it refuses every `code` scorer.
+  score in the case's checkpoint and on its trace; the case's status stays the exact match's unless
+  the check is [required](#required-installed-checks). A scoring job's installed checks grade the
+  saved outputs with `state=None`: the case's state ended with its teardown. No route of the frozen
+  contract names an installed check, a schedule's run is admitted with none, and a
+  [monitor](#monitors) refuses one, as it refuses every `code` scorer.
 - **Conversations.** The worker skips a conversation case before any hook, with its reason, so
   neither hooks nor a run's installed checks see one. `martian evals run`, which runs
   conversations, installs neither and refuses a suite with an installed check. A scoring job's
   installed check grades a conversation's saved result as a custom scorer does, its `outputs` the
   conversation's messages, with `state=None`.
+
+#### Required installed checks
+
+An installed check that must hold for a case to pass says so in its options: `required: true`, beside
+the options the check reads (`installed_check(name, options, required=True)` writes it; a suite file
+writes `required: true` among the check's `options`, [installed checks](evals.md#installed-checks)).
+A run's case, the one a run admitted with the check grades, is then decided by it. For each case the
+run calls its target for:
+
+| What happened | Status | The case's `error` (its reason) |
+| --- | --- | --- |
+| The call or a hook failed | `error` | The failure, as before |
+| A required check gave no verdict: it raised, returned what it may not, returned a number, or is not installed | `error` | `Required check <name> gave no verdict: <why>` for each such check, with the `failed` reason of each required check that returned `false`, in the run's order |
+| No required check gave no verdict, and a required check returned `false` or the answer did not match the expected answer | `failed` | `Required check <name> failed: <its reason>` for each required check that returned `false`; empty when only the answer did not match |
+| The answer matched, when the case has an expected answer, and every required check returned `true` | `passed` | Empty |
+
+Several reasons are joined with `; `. A case
+with no expected answer is graded by its required checks alone, and is run for them: a run with no
+required check skips it, as it always did. A check that is not required adds its score and decides
+nothing, whatever it returned or raised.
+
+- **The run's counts and rate follow.** The status is what the run counts (`passed`, `failed`,
+  `errored`, `skipped` of `GET /v1/evals/{id}`, and the items' `status` and `error`), so a case whose
+  agent replied correctly and whose environment shows no change is `failed` there, and the run's
+  pass rate, which is derived from those counts, is the environment's. A case's exact-match score is
+  recorded only for a case with an expected answer; every check's score is recorded as before.
+- **The option is the core's.** `required` is read by the core and not given to the check, so a
+  check's `options` are what they are without it, in a run and in a scoring job. It is `true` or
+  `false` and nothing else: `"yes"`, `1` or `null` are refused when a suite file loads, when
+  `admit_run` takes the checks, and, for a record that skipped both, the worker fails the run with
+  the same message before its first case, so a check meant to decide is never left advisory by a
+  mistyped option. An existing installed check that used its own option called `required` must
+  rename it.
+- **Only a run decides.** A scoring job grades saved outputs: a required check there adds its score,
+  as any check does, and never changes a stored case's status or a run's counts. A suite's installed
+  checks are graded by its scoring job, so a suite file's `required: true` takes effect when the
+  edition's own launch admits the run with those checks (`admit_run(..., checks=[...])`). A run
+  resumed after it stopped, and a run taken again after its worker stopped, keep the cases they had
+  finished as they were decided and decide the rest by the same rule. `POST
+  /v1/local/runs/{run_id}/again` admits the new run with the installed checks of the run it repeats.
+- **Nothing else changes.** The frozen contract (version 3 and the unreleased 4) and the scorer's
+  model are as they were: `required` is an entry of the free-form `options`, not a field. A run
+  with no required check records exactly what it did before, status, reason, scores and counts
+  included.
+
+`tests/evals/test_required_checks.py` runs a test edition whose hook gives each case the effect its
+environment shows and whose required check grades it: every combination of an answer that matched, did not
+match or has no expected answer with a required check that is true, false, gives no verdict or returns a
+number, an optional check that is false beside them, two required checks, the run's counts and items,
+a run with no required check, a case whose target raised, a conversation case, the option kept from
+the check, a scoring job that decides nothing, a resumed run, a run again, the options that are refused
+(at admission, in a suite file and by the worker), and a suite file written, read and run.
 
 `tests/evals/test_case_hooks.py` installs a test edition's hooks and checks: the hooks open a
 ledger for each case, which the agent writes to, and run around every case in order, also when the
