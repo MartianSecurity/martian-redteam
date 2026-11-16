@@ -498,6 +498,8 @@ The SDK accepts only typed operation results. It does not filter attack text or 
 ## Supply chain and CI hygiene
 
 - Pin GitHub Actions by SHA in this repo and in `examples/github-actions.yml`
+- `pull_request_target` only in `.github/workflows/cla.yml`, which never checks out or runs the
+  pull request's code ([CLA check](development.md#contributor-license-agreement-check))
 - `uv.lock` is required in CI (`uv sync --locked`)
 - `persist-credentials: false` on checkout
 - Contents-read permission on the example workflow

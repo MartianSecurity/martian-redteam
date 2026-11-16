@@ -1,0 +1,55 @@
+# Asks the author of every commit in a pull request to sign the individual Contributor License
+# Agreement (cla/individual.md) by commenting on the pull request, and records each signature in
+# signatures/cla.json on the cla-signatures branch. See CONTRIBUTING.md and
+# docs/development.md#contributor-license-agreement-check.
+#
+# Security: pull_request_target and issue_comment run this file from the default branch with a
+# write token, whatever the pull request changes. This workflow never checks out or runs the pull
+# request's code: its only step is the pinned action, which reads the pull request's commits and
+# comments through the API and writes its comment and the signatures file. Do not add a checkout,
+# a script or another action to it.
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, closed, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  cla:
+    name: CLA
+    # A comment starts the check only on a pull request, and only when it is the signature or
+    # "recheck".
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+      (github.event.comment.body == 'recheck' ||
+      github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # re-run the failed check after a signature
+      contents: write # write signatures/cla.json on the cla-signatures branch
+      pull-requests: write # comment on the pull request, and lock it once it is closed
+    steps:
+      - name: Check the Contributor License Agreement
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/MartianSecurity/martian-redteam/blob/main/cla/individual.md
+          path-to-signatures: signatures/cla.json
+          branch: cla-signatures
+          # Exact names only: the action's "*" pattern is unanchored and would match any name
+          # containing the rest.
+          allowlist: kloudd,dependabot[bot],github-actions[bot]
+          custom-notsigned-prcomment: >-
+            <br/>Thank you for your pull request. Before we can accept it, $you need to sign the
+            MartianSecurity
+            [Individual Contributor License Agreement](https://github.com/MartianSecurity/martian-redteam/blob/main/cla/individual.md).
+            If your employer has rights to your work, it may need to sign the
+            [corporate agreement](https://github.com/MartianSecurity/martian-redteam/blob/main/cla/corporate.md)
+            as well. To sign, post a comment on this pull request with exactly the text below.<br/>

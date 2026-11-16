@@ -23,7 +23,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment, WAF
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off
-10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot
+10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot, the Contributor License Agreement check
 11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line
 
 ## SDK release
@@ -38,5 +38,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`). This repository is the home of the open-source
   evals core; see [its names and layout](architecture.md#open-source-evals-core) and
   [its editions](evals-core.md#editions-and-entitlements).
+- Contributing: [CONTRIBUTING.md](../CONTRIBUTING.md), under a Contributor License Agreement with
+  MartianSecurity ([`cla/`](../cla/))
 - Distribution: `martian-sdk` (Python 3.12+, uv)
 - Modules: `martian.evals`, `martian.redteam`; legacy imports remain supported
