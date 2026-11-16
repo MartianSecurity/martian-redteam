@@ -1705,8 +1705,11 @@ the error code `judge_panel_no_majority`.
 
 **A registered judge.** `POST /v1/evals/judge-panels` on the evals core registers a version of a
 judge graded by a panel, and the core's worker grades it once on each member's model
-([evals core](evals-core.md#write-routes)). The Evals UI does not register panels or show a
-panel's members yet, and the Martian server does not serve the route.
+([evals core](evals-core.md#write-routes)). In `martian ui`, the Judges page's judge dialog
+registers one, from 2 to 9 models each with an optional endpoint, as a pass or fail judge; the
+judge's row names it a panel of that many models, and a panel score's detail shows the decision
+and each member's vote. The Martian server does not serve the route, so against the server the
+dialog offers a single model only.
 
 **What is recorded.** The score's value is the panel's verdict, and its rationale gives the count
 and each member's vote and reason. Its metadata holds the decision and every vote as flat

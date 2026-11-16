@@ -146,9 +146,9 @@ edition](evals-core.md#the-local-edition-martian-ui)). It reads paths, not pages
 open each page with `martian ui --data-dir <a scratch folder>` and look for failed `/v1` requests
 before committing the build.
 
-**Size.** Installed, the UI is about 1.1 MB in 43 files: JavaScript, CSS, the Inter font files
-(about 220 KB) and `third-party-licenses.md` (about 50 KB). Compressed, it adds about 470 KB to the
-wheel and about 460 KB to the sdist. `ls -l dist` after `uv build` shows the current figures.
+**Size.** Installed, the UI is about 1.1 MB in 47 files: JavaScript, CSS, the Inter font files
+(about 220 KB) and `third-party-licenses.md` (about 50 KB). Compressed, it adds about 500 KB to the
+wheel and about 480 KB to the sdist. `ls -l dist` after `uv build` shows the current figures.
 
 **Licences.** The build's own code is the `@martian/evals`, `@martian/design-system` and
 `@martian/client` packages of the frontend, which are Apache-2.0; `NOTICE` attributes them, with the
