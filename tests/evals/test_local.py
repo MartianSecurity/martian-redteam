@@ -87,6 +87,17 @@ def test_the_built_ui_is_served_beside_the_api(tmp_path, ui):
     assert client.get("/assets/missing.js").status_code == 404
 
 
+def test_the_page_is_revalidated_and_the_hashed_build_files_are_kept(tmp_path, ui):
+    # After an SDK upgrade a cached page would name the previous build's assets, which are gone.
+    (ui / "ui-version.json").write_text("{}", encoding="utf-8")
+    client = TestClient(create_local_app(tmp_path / "home", ui), base_url=LOCAL)
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert client.get("/index.html").headers["cache-control"] == "no-cache"
+    assert client.get("/ui-version.json").headers["cache-control"] == "no-cache"
+    assert client.get("/assets/index.js").headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert "cache-control" not in client.get("/assets/missing.js").headers
+
+
 @pytest.mark.parametrize("host", ["127.0.0.1:7600", "localhost:7600"])
 def test_the_local_names_are_answered(tmp_path, ui, host):
     client = TestClient(create_local_app(tmp_path / "home", ui), base_url=LOCAL)
