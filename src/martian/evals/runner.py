@@ -442,7 +442,9 @@ class CheckSpec(_Model):
     min_score: float | None = Field(default=None, allow_inf_nan=False)
     max_score: float | None = Field(default=None, allow_inf_nan=False)
     security: bool = False
-    # An installed check: the options the worker's check is given, as written. Its name is `name`.
+    # An installed check: the options the worker's check is given, as written, but for `required: true`,
+    # which makes the check decide its case's status in a run and which the check is not given
+    # (_custom.REQUIRED_OPTION). Its name is `name`.
     options: dict[str, Any] | None = None
     # How this check's verdicts over a case's attempts combine, when the suite repeats its cases.
     combine: CombineRule | None = None
@@ -512,8 +514,10 @@ class CheckSpec(_Model):
             if not self.function.isidentifier():
                 raise ValueError("function must be the name of a function in the file")
             _custom.bounds(self.min_score, self.max_score)
-        if self.type in INSTALLED_CHECKS and not self.name:
-            raise ValueError("an installed check needs a name: the name a worker installs the check under")
+        if self.type in INSTALLED_CHECKS:
+            if not self.name:
+                raise ValueError("an installed check needs a name: the name a worker installs the check under")
+            _custom.required(self.options)  # the option that makes the check decide its case: true or false
         return self
 
     def tool_options(self) -> _tool_calls.ToolOptions:

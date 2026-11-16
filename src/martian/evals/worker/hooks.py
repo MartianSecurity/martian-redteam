@@ -27,6 +27,12 @@ installs none.
   ``options``, and returns what a custom scorer returns (:mod:`martian.evals._custom`). A run's
   installed checks grade each case while its state lives, between the target's answer and the
   teardown; a scoring job's grade saved outputs and are given ``state=None``.
+- **Required checks.** An installed check whose options say ``required: true``
+  (:func:`installed_check`, :func:`is_required`) decides the status of the case a run grades it on:
+  ``passed`` only when the answer matched, when the case has an expected answer, and every required
+  check returned true; ``failed`` when one returned false; ``error`` when one gave no verdict. The
+  check's reason is the case's. A check without the option only adds a score, as before, and a
+  scoring job's required check does too: a job never changes a stored case's status.
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from martian.evals._custom import INSTALLED_TYPES
+from martian.evals import _custom
+from martian.evals._custom import INSTALLED_TYPES, REQUIRED_OPTION
 from martian.evals.model import Case, Run, ScorerVersion
 
 if TYPE_CHECKING:
@@ -103,15 +110,22 @@ def with_target_inputs(sent: Case, state: CaseState) -> Case:
     return sent.model_copy(update={"inputs": {**sent.inputs, **state.target_inputs}})
 
 
-def installed_check(name: str, options: dict[str, Any] | None = None) -> ScorerVersion:
-    """A scorer naming the check a worker installs under ``name``, with ``options`` for it."""
-    return ScorerVersion(
-        name=name, kind="code", type=INSTALLED_TYPE, parameters={"options": dict(options)} if options else {}
-    )
+def installed_check(name: str, options: dict[str, Any] | None = None, *, required: bool = False) -> ScorerVersion:
+    """A scorer naming the check a worker installs under ``name``, with ``options`` for it.
+    ``required`` adds the option that makes the check decide its case's status
+    (:data:`~martian.evals._custom.REQUIRED_OPTION`); a suite file writes the same option itself."""
+    given = {**(options or {}), **({REQUIRED_OPTION: True} if required else {})}
+    return ScorerVersion(name=name, kind="code", type=INSTALLED_TYPE, parameters={"options": given} if given else {})
 
 
 def is_installed(scorer: ScorerVersion) -> bool:
     return scorer.kind == "code" and scorer.type == INSTALLED_TYPE
+
+
+def is_required(scorer: ScorerVersion) -> bool:
+    """Whether ``scorer`` is an installed check marked required. Raises ``ValueError`` when its
+    ``required`` option is not ``true`` or ``false`` (:func:`~martian.evals._custom.required`)."""
+    return is_installed(scorer) and _custom.required(scorer.parameters.get("options"))
 
 
 async def set_up(hooks: tuple[CaseHooks, ...], context: CaseContext, prepared: list[CaseHooks]) -> str:
@@ -150,6 +164,7 @@ __all__ = [
     "hooked_case",
     "installed_check",
     "is_installed",
+    "is_required",
     "set_up",
     "tear_down",
     "with_target_inputs",

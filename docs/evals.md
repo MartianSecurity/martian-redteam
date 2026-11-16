@@ -2862,18 +2862,27 @@ holds only the check's name and its options:
 checks:
   - type: installed
     name: order_state            # the name the worker installs the check under
-    options: {status: refunded}  # given to the check as written
+    options:
+      status: refunded           # given to the check as written
+      required: true             # not given to the check: the case passes only if it returns true
 ```
 
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `name` | Yes | The check the worker installs under this name, and the check's label |
-| `options` | No | A mapping given to the check as written |
+| `options` | No | A mapping given to the check as written, but for `required` |
+| `options.required` | No | `true` makes the check decide its case's status in a run that grades it; `false`, the default, only adds a score. Nothing but `true` or `false` is accepted: `"yes"` or `1` is a `ConfigError` when the file loads |
 
-Loading and writing a suite file keep both as written, as a `code` scorer of type `installed`
+Loading and writing a suite file keep all of it as written, as a `code` scorer of type `installed`
 ([the model](eval-model.md#the-sdk-suite-file)). Nothing in the file says what the check does or how; the
 worker that runs the suite's scoring job, or a run that names the check, decides that
 ([case hooks and installed checks](evals-core.md#case-hooks-and-installed-checks-in-the-worker)).
+A required check makes the case `failed` when it returns false, `error` when it gives no verdict, and
+`passed` only with an answer that matched and every required check true; a case with no expected
+answer is graded by its required checks alone ([required installed
+checks](evals-core.md#required-installed-checks)). It decides a case only in a run whose worker was
+given the check when the run was admitted; in a scoring job, which a suite's checks are graded in, it
+adds a score and changes no status.
 The open edition installs none: `martian evals run` refuses a suite with an installed check before
 it writes anything (`check order_state: an installed check runs in a worker that installs a check
 under that name, and this command installs none`, exit code `2`), and an

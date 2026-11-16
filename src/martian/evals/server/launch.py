@@ -79,7 +79,7 @@ from martian.evals.store import EvalStore, StoreError
 
 # `execute` as a module: the worker package imports these routes while it is importing it.
 from martian.evals.worker import InterruptedRuns, Work, Worker, execute
-from martian.evals.worker.hooks import is_installed
+from martian.evals.worker.hooks import is_installed, is_required
 from martian.evals.worker.scorers import builtin_scorer
 from martian.evals.worker.targets import TargetRefused
 
@@ -172,9 +172,12 @@ async def admit_run(
 
     ``checks`` are checks the worker installs (:func:`~martian.evals.worker.hooks.installed_check`),
     which the run keeps beside exact match in its ``scorers`` and grades each answered case with,
-    with the case's state from the worker's hooks. No route of the contract names one."""
+    with the case's state from the worker's hooks. One marked ``required: true`` in its options
+    decides the case's status as well. No route of the contract names one."""
     if not all(is_installed(check) for check in checks):
         raise ValueError("a run's checks are installed checks: code scorers of type installed")
+    for check in checks:
+        is_required(check)  # raises when its required option is not true or false, before the run is recorded
     await ensure_run_place(store, records, principal, entitlements)
     if await publishing(records, principal, DEFAULT_PROJECT, _now()):
         raise HTTPException(409, PAUSED)

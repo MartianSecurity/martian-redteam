@@ -95,6 +95,7 @@ from martian.evals.server.write_schemas import EvalRunRequest, ResumeRequest
 from martian.evals.store import EvalStore, StoreError
 from martian.evals.worker import ProcessWorker, QueueWorker, Work, WorkerServices, dump_work, sdk_judge
 from martian.evals.worker.execute import INTERRUPTED, LIMITS_KEY, interrupt
+from martian.evals.worker.hooks import is_installed
 from martian.evals.worker.queue import entry_id
 from martian.evals.worker.targets import TargetRefused, http_pin
 
@@ -572,6 +573,7 @@ async def run_again(
         max_cases=original.max_cases,
         suite=suite,
         provenance={"repeat_of": original.id, **limits_provenance(body.limits or _own_limits(original))},
+        checks=[scorer for scorer in original.scorers if is_installed(scorer)],  # a required one still decides
     )
     return run_out(run)
 

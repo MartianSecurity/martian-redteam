@@ -7,7 +7,8 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   was admitted with) up to its case limit, calls the target once per case with no retry, giving it
   the case's id and inputs and nothing else (:func:`~martian.evals.worker.targets.sent_case`), and
   grades each output by exact match. Each case that called the target gets a trace in the store,
-  with its exact-match score; a case with no usable prompt or expected text is skipped, and so is a
+  with its exact-match score; a case with no usable prompt or expected text is skipped (a case with
+  no expected text runs when a required installed check grades it), and so is a
   conversation case (``Case.turns``, or a ``Case.simulated_user`` whose turns a simulator writes),
   which ``martian evals run`` runs turn by turn. A failed
   call is the case's error: an HTTP target's in its own words (``TargetCallError``), which name
@@ -25,6 +26,12 @@ A port of ``app/evals_execution.py`` and ``_execute_scores`` in ``app/evals_work
   answered case with the case's state from its hooks, before the teardown, beside its exact-match
   score (:mod:`martian.evals.worker.hooks`, :data:`InstalledChecks`). A hook's failure is the
   case's error. A case the run skips, a conversation case included, runs no hook and no check.
+- An installed check marked ``required: true`` in its options decides the case's status
+  (:func:`_decided`): ``passed`` only when the answer matched, if the case has an expected answer,
+  and every required check returned true; ``failed`` when one returned false, with its reason as
+  the case's ``error``; ``error`` when one gave no verdict. A case with no expected answer is
+  graded by its required checks alone. A check that is not required, and a scoring job's check of
+  any kind, only adds a score: a job never changes a stored case's status.
 - A scoring job scores every case result of a completed run (at most 1,000) with each of its
   scorers: the built-in code scorers here, a custom Python scorer (kind ``code``) by the function
   the worker's setup installs under its name (:data:`InstalledScorers`), an installed check by the
@@ -63,7 +70,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -107,6 +114,7 @@ from martian.evals.worker.hooks import (
     CaseState,
     hooked_case,
     is_installed,
+    is_required,
     set_up,
     tear_down,
     with_target_inputs,
@@ -157,6 +165,8 @@ process, which a run's or a scoring job's scorer of type ``installed`` names. Ea
 the case's ``inputs``, the ``outputs``, the case's ``expectations``, the case's ``state`` from its
 hooks (``None`` in a scoring job) and the check's ``options`` (:mod:`martian.evals.worker.hooks`)."""
 CHECK_NOT_INSTALLED = "This worker has no installed check named {name}"
+NOT_TRUE_OR_FALSE = "it returned a number, not true or false"
+REASON_LENGTH = 1800
 
 
 def _now() -> datetime:
@@ -305,6 +315,12 @@ async def _run_cases(
     if (changed := changed_target(run, await pin_for(run))) is not None:
         await _fail_run(records, principal, run, changed)
         return
+    try:
+        # The installed checks that decide a case; a malformed option fails the run, never leaves a check advisory.
+        grading = replace(grading, required=frozenset(scorer.name for scorer in run.scorers if is_required(scorer)))
+    except ValueError as error:
+        await _fail_run(records, principal, run, str(error))
+        return
     if isinstance(call, FunctionProcessCall):  # its process, started before the first case's time runs
         try:
             await call.ready()
@@ -417,10 +433,12 @@ def _skipped(run: Run, position: int, case: Case, reason: str) -> CaseResult:
 @dataclass(frozen=True)
 class _Grading:
     """What the worker's setup installed around each case of a run: its hooks, and the checks the
-    run's ``installed`` scorers name."""
+    run's ``installed`` scorers name, and the names of those that are required: the ones that
+    decide a case's status."""
 
     hooks: tuple[CaseHooks, ...] = ()
     checks: InstalledChecks = field(default_factory=dict)
+    required: frozenset[str] = frozenset()
 
 
 async def _called(call: TargetCall, sent: Case, timeout_seconds: float) -> tuple[Any, str | None, str, float]:
@@ -456,11 +474,12 @@ async def _run_case(
     """Call the target with one case, between its hooks' setup and teardown, and record its trace,
     with the model the target reported, if any. Returns the case's result, its scores (exact match
     and the run's installed checks) and that model. A conversation case is skipped before any hook:
-    the worker runs no conversation, so neither its hooks nor its installed checks see one."""
+    the worker runs no conversation, so neither its hooks nor its installed checks see one. A case
+    with no expected answer is skipped too, unless a required installed check grades it."""
     if case.turns or case.simulated_user is not None:
         return _skipped(run, position, case, CONVERSATION), [], None
     prompt, expected = prompt_text(case.inputs), expected_text(case.expectations)
-    if not prompt or not expected:
+    if not prompt or not (expected or grading.required):
         return _skipped(run, position, case, UNUSABLE), [], None
     tid = trace_id()
     state = CaseState()
@@ -501,10 +520,10 @@ async def _run_case(
         )
         return unanswered, [], None
     text = text_of(output)
-    matched = exact_match(text, expected)
-    status: CaseStatus = "error" if failure else "passed" if matched else "failed"
+    matched = exact_match(text, expected) if expected else None  # a case with no expected answer has no match
+    status, reason = _decided(failure, matched, checked, grading.required)
     scores = []
-    if not error:
+    if not error and matched is not None:
         scores.append(
             Score(
                 run_id=run.id,
@@ -527,7 +546,7 @@ async def _run_case(
             id=tid,
             project_id=run.project_id,
             name=f"{run.code} {case.id}",
-            state="error" if failure else "ok",
+            state="error" if status == "error" else "ok",
             request_time=started,
             latency_ms=latency,
             request=prompt,
@@ -559,7 +578,7 @@ async def _run_case(
         inputs=case.inputs,
         expectations=case.expectations,
         output=output,
-        error=failure,
+        error=reason,
         latency_ms=latency,
         finished_at=_now(),
         store=StoreRef(
@@ -577,6 +596,39 @@ async def _run_case(
             score = score.model_copy(update={"store": logged_check.store})
         scores.append(score)
     return result, scores, model
+
+
+def _decided(
+    failure: str, matched: bool | None, checked: Sequence[Score], required: frozenset[str]
+) -> tuple[CaseStatus, str]:
+    """A case's status and its reason (``CaseResult.error``), once its target has been called.
+
+    ``error`` when the call, a hook or a required check failed: the failure itself, and each
+    required check that gave no verdict. Otherwise ``passed`` only when the answer matched, if the
+    case has an expected answer (``matched`` is None when it has none), and every required check
+    returned true; else ``failed``, with the reason of each required check that returned false. A
+    check that is not in ``required`` only adds its score. With no required check this is the
+    exact match's verdict and no reason, as the status was before checks could be required."""
+    if failure:
+        return "error", failure
+    problems: list[str] = []
+    no_verdict = False
+    for score in checked:
+        if score.scorer not in required:
+            continue
+        if score.error or not isinstance(score.value, bool):
+            no_verdict = True
+            problems.append(_required_reason(score.scorer, "gave no verdict", score.error or NOT_TRUE_OR_FALSE))
+        elif not score.value:
+            problems.append(_required_reason(score.scorer, "failed", score.rationale))
+    reason = "; ".join(problems)[:REASON_LENGTH]
+    if no_verdict:
+        return "error", reason
+    return ("failed" if problems or matched is False else "passed"), reason
+
+
+def _required_reason(name: str, what: str, reason: str) -> str:
+    return f"Required check {name} {what}: {reason}" if reason else f"Required check {name} {what}"
 
 
 async def _installed_scores(
@@ -615,13 +667,14 @@ async def _installed_scores(
 def _given(
     scorer: ScorerVersion, inputs: Mapping[str, Any], output: Any, expectations: Mapping[str, Any], state: Any
 ) -> dict[str, Any]:
-    """Everything an installed check may read (``_custom.CHECK_ARGUMENTS``)."""
+    """Everything an installed check may read (``_custom.CHECK_ARGUMENTS``). Its ``options`` are the
+    scorer's, but for ``required``, which is the core's own and which the check is not given."""
     return {
         "inputs": dict(inputs),
         "outputs": output,
         "expectations": dict(expectations),
         "state": state,
-        "options": dict(scorer.parameters.get("options") or {}),
+        "options": _custom.without_required(scorer.parameters.get("options")),
     }
 
 
