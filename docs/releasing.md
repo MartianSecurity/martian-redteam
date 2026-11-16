@@ -20,7 +20,7 @@ uv sync --locked --all-extras
 uv run --all-extras ruff format --check src tests examples scripts
 uv run --all-extras ruff check src tests examples scripts
 uv run --all-extras mypy src
-uv run --all-extras pytest -q
+uv run --all-extras pytest -q -n auto
 uv build
 uv run --all-extras twine check --strict dist/*
 uv run --all-extras python scripts/check_release.py --install
