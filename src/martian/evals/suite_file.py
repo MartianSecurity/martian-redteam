@@ -12,8 +12,9 @@ an agent target, pass policies or two judge models. ``martian evals run`` loads 
 :func:`load_suite_file`, so it refuses the same fields. Header values stay as written, ``${NAME}``
 unexpanded. A ``python`` check is a ``code`` scorer whose parameters name its file and function;
 neither loading nor writing imports that file. An ``installed`` check is a ``code`` scorer named
-after the check a worker installs, with its ``options`` in its parameters; the file says nothing
-else about it, and ``martian evals run`` refuses to run it.
+after the check a worker installs, with its ``options`` in its parameters, ``required: true``
+among them when it decides its case; the file says nothing else about it, and ``martian evals run``
+refuses to run it.
 
 A JSONL row with ``turns`` is a conversation case (``Case.turns``), and a check's ``scope`` is its
 scorer's (:mod:`martian.evals.conversations`). Loading refuses a conversation the suite cannot run:
@@ -126,7 +127,7 @@ SUITE_FILE_FIELDS = {
     "checks.min_score": "ScorerVersion.parameters.min_score",
     "checks.max_score": "ScorerVersion.parameters.max_score",
     "checks.security": "ScorerVersion.parameters.security",
-    "checks.options": "ScorerVersion.parameters.options (an installed check), as written",
+    "checks.options": "ScorerVersion.parameters.options (an installed check), as written, required: true included",
     "checks.combine": "Suite.repeats.checks, by the check's label",
     "checks.scope": "ScorerVersion.scope; left out when it is turn, the default",
     "repeats": "Suite.repeats.attempts",

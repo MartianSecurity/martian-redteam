@@ -60,6 +60,11 @@ CHECK_ARGUMENTS = ("inputs", "outputs", "expectations", "state", "options")
 """The arguments an installed check may read: a custom scorer's in a worker, the case's state from its
 hooks (``None`` in a scoring job) and the options the suite gives the check."""
 
+REQUIRED_OPTION = "required"
+"""The option of an installed check that makes it decide its case's status: ``required: true`` among
+the check's ``options``. The core reads it and does not give it to the check, so the name is the
+core's in every installed check's options, and ``true`` or ``false`` is the only value it takes."""
+
 ERROR_LENGTH = 300
 
 Score = bool | int | float
@@ -103,6 +108,21 @@ def arguments(function: Any, allowed: Sequence[str] = ARGUMENTS) -> tuple[str, .
     if not reads:
         raise ValueError(f"the scorer {name} reads none of {choices}")
     return tuple(reads)
+
+
+def required(options: Mapping[str, Any] | None) -> bool:
+    """Whether an installed check's ``options`` mark it required (:data:`REQUIRED_OPTION`). Raises
+    ``ValueError`` when the option is there and is not ``true`` or ``false``: a check meant to decide
+    its case is never left advisory because its option was misspelled as text or a number."""
+    found = (options or {}).get(REQUIRED_OPTION, False)
+    if not isinstance(found, bool):
+        raise ValueError(f"the option {REQUIRED_OPTION} of an installed check is true or false")
+    return found
+
+
+def without_required(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """An installed check's ``options`` as its function is given them: everything but :data:`REQUIRED_OPTION`."""
+    return {name: value for name, value in (options or {}).items() if name != REQUIRED_OPTION}
 
 
 def bounds(min_score: Any, max_score: Any) -> None:
@@ -216,6 +236,7 @@ __all__ = [
     "CHECK_ARGUMENTS",
     "CODE_TYPES",
     "INSTALLED_TYPES",
+    "REQUIRED_OPTION",
     "WORKER_ARGUMENTS",
     "ScorerError",
     "arguments",
@@ -225,6 +246,8 @@ __all__ = [
     "load_function",
     "load_module",
     "module_name",
+    "required",
     "result_of",
     "verdict",
+    "without_required",
 ]
