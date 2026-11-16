@@ -24,7 +24,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       PUBLISH_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
@@ -79,7 +79,7 @@ jobs:
           uv run --all-extras ruff format --check src tests examples scripts
           uv run --all-extras ruff check src tests examples scripts
           uv run --all-extras mypy src
-          uv run --all-extras pytest -q
+          uv run --all-extras pytest -q -n auto
       - name: Build and validate distributions
         run: |
           uv build
