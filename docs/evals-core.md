@@ -82,7 +82,8 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 
 Annotating a single item or trace, and scoring one run, stay in every edition. The three red team
 keys name what only the hosted product has: an environment, a planned campaign and Martian's
-engine. Their code is not in this repository; the keys are here so that every edition reads one map.
+engine. Their code is not in this repository; the keys are here so that every edition reads one map. The
+[red team quickstart](redteam-quickstart.md#editions) compares the editions for Red Team.
 
 `LIMITS` holds the limit keys, each added with the code that enforces it.
 `Entitlements.limit(key)` returns `None` for a limit an edition does not set, which is no limit;
