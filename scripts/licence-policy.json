@@ -18,7 +18,7 @@
   ],
   "first_party": [
     {"component": "pypi:martian-sdk", "reason": "This repository's package."},
-    {"component": "npm:@martian/*", "licence": "Apache-2.0", "reason": "The Evals UI's own packages, @martian/evals, @martian/design-system and @martian/client, built in MartianSecurity/MartianFrontend, where each is Apache-2.0 with a LICENSE and NOTICE. The build's ui-version.json names no licence, so this entry records it; NOTICE attributes them."}
+    {"component": "npm:@martian/*", "licence": "Apache-2.0", "reason": "The Evals UI's own packages, @martian/evals, @martian/redteam, @martian/design-system and @martian/client, built in MartianSecurity/MartianFrontend, where each is Apache-2.0 with a LICENSE and NOTICE. The build's ui-version.json names no licence, so this entry records it; NOTICE attributes them."}
   ],
   "concluded": [
     {

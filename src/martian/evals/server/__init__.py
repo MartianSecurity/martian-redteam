@@ -41,6 +41,13 @@ send alerts, ``schedules`` the schedules that run a saved suite against a target
 contract does not have: a run's attempts in ``runs``, the judges' agreement with people and people's
 agreement with each other in ``agreement``, each judge version's calibration in ``calibration``, the
 prompt versions in ``prompts``, and ``push``, under ``/v1/push``.
+
+Every edition's app also serves the red team core's ``/v1/redteam`` routes
+(:mod:`martian.redteam.server`), which read red team runs from the same record store with the same
+principal. They are left out of the app's OpenAPI document: their contract is
+``martian/redteam/server/contract/redteam-api-v1.json``. Starting and stopping a red team run needs
+a launcher the edition binds as ``app.state.martian_redteam_launcher``; without one those two routes
+answer ``501``.
 """
 
 from __future__ import annotations
@@ -174,7 +181,8 @@ def create_app(
 ) -> FastAPI:
     """The evals core as an application. ``principal`` is a FastAPI dependency, so it can read the
     request (a session cookie, a header) through its own parameters. A request the store or the
-    record store refuses is answered ``404``, ``409`` or ``422`` by the ``StoreError``'s kind."""
+    record store refuses is answered ``404``, ``409`` or ``422`` by the ``StoreError``'s kind. The app
+    serves the red team core's ``/v1/redteam`` routes beside the evals routes."""
     if not isinstance(store, EvalStore):
         raise TypeError("store must implement martian.evals.store.EvalStore")
     if not isinstance(records, RecordStore):
@@ -183,6 +191,9 @@ def create_app(
         raise TypeError("worker must implement martian.evals.worker.Worker")
     if judge_settings is not None and not isinstance(judge_settings, JudgeSettings):
         raise TypeError("judge_settings must implement martian.evals.judge_settings.JudgeSettings")
+    # Imported here: the red team routes import this package's dependencies.
+    from martian.redteam.server import router as redteam_router
+
     if isinstance(worker, Lifecycle):
         fastapi_options["lifespan"] = _with_worker(worker, fastapi_options.get("lifespan"))
     app = FastAPI(title="Martian Evals", **fastapi_options)
@@ -222,6 +233,9 @@ def create_app(
         otlp.router,
     ):
         app.include_router(part)
+    # Left out of this app's OpenAPI document: the red team contract is generated from the router on
+    # its own, and both cores name a schema ``Attempt``, which FastAPI would rename in this document.
+    app.include_router(redteam_router, include_in_schema=False)
     return app
 
 
