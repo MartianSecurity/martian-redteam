@@ -87,7 +87,7 @@ def method_names() -> list[str]:
     return list(dict.fromkeys(entry.name for entry in _METHODS.values()))
 
 
-def transforms() -> list[Transform]:
+def all_transforms() -> list[Transform]:
     return list({id(item): item for item in _TRANSFORMS.values()}.values())
 
 
@@ -171,6 +171,6 @@ __all__ = [
     "resolve",
     "settings_of",
     "transform",
-    "transforms",
+    "all_transforms",
     "unregister_method",
 ]

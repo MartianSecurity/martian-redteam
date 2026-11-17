@@ -24,6 +24,7 @@ from martian.redteam.methods.registry import (
     LEGACY,
     MethodError,
     MethodFactory,
+    all_transforms,
     method_names,
     methods_of,
     needs_attacker,
@@ -31,7 +32,6 @@ from martian.redteam.methods.registry import (
     register_transform,
     resolve,
     transform,
-    transforms,
     unregister_method,
 )
 from martian.redteam.methods.rewrites import Rewrite
@@ -58,6 +58,6 @@ __all__ = [
     "register_transform",
     "resolve",
     "transform",
-    "transforms",
+    "all_transforms",
     "unregister_method",
 ]

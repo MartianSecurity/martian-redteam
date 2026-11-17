@@ -29,8 +29,16 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `ROT13` | `rot13` | transform | static | 1 | 1 | A filter that matches plain text: a prompt injection in ROT13 |
 | `Base64` | `base64` | transform | static | 1 | 1 | A filter that matches plain text: a prompt injection in Base64 |
 | `Leetspeak` | `leetspeak` | transform | static | 1 | 1 | A filter that matches words: a prompt injection with letters as digits |
+| `Hex` | `hex` | transform | static | 1 | 1 | A filter that matches plain text: the UTF-8 bytes as hex pairs |
+| `Homoglyph` | `homoglyph` | transform | static | 1 | 1 | A filter that matches exact words: Latin letters become Cyrillic letters that look the same |
+| `InvisibleUnicode` | `invisible_unicode` | transform | static | 1 | 1 | A reviewer or filter that reads what is shown: printable ASCII becomes Unicode tag characters, which render as nothing but some models read |
+| `Morse` | `morse` | transform | static | 1 | 1 | A filter that matches plain text: Morse code, letters by spaces and words by ` / `; characters with no code are left out |
+| `AlternatingCase` | `alternating_case` | transform | static | 1 | 1 | A filter that matches words case by case: letters alternate lower and upper case |
+| `PayloadSplit` | `payload_split` | transform | static | 1 | 1 | A filter that reads one piece at a time: three quoted parts and a request to join and answer them |
 
-The three rewrites take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). Their results and attempt fingerprints are what they were before methods had an interface.
+Every transform runs locally with no model call and no network, and is a pure function of the text: the same attack always becomes the same message. Its tests check a round trip (or, for alternating case and Morse, the property that holds) on generated texts.
+
+The three rewrites take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The six version 0.2 methods (the first six rows) have the results and attempt fingerprints they had before methods had an interface.
 
 ## Layers
 
