@@ -189,6 +189,27 @@ def test_the_core_serves_the_whole_contract_but_the_ci_gate_the_trace_export_and
     assert contract - served == NOT_SERVED
 
 
+def test_the_core_serves_the_red_team_routes_and_leaves_them_out_of_its_openapi(records):
+    """Every edition's app serves the red team core's routes (MartianSecurity/martian-notes#289). Their
+    shapes are their own contract's (tests/redteam/test_api_contract.py), so the app's OpenAPI document
+    leaves them out and its evals schemas keep their names."""
+    from fastapi.testclient import TestClient
+
+    from martian.redteam.server.contract import checked_in, operations
+
+    app = create_app(store=MemoryStore(), records=records, principal=lambda: SINGLE_USER)
+    client = TestClient(app)
+    assert client.get("/v1/redteam/runs").json() == {"items": [], "next_cursor": None}
+    assert client.get("/v1/redteam/catalog").status_code == 200
+    # The routes with a run in their path answer for the run, not as an unknown path.
+    for path in ("/v1/redteam/runs/r-1", "/v1/redteam/runs/r-1/attempts", "/v1/redteam/runs/r-1/findings"):
+        assert client.get(path).json() == {"detail": "Red team run not found"}, path
+    assert client.post("/v1/redteam/runs/r-1/stop").status_code == 501
+    hosted = operations()["paths"]
+    assert {path for path in checked_in()["paths"] if path not in hosted} >= {"/v1/redteam/runs", "/v1/redteam/catalog"}
+    assert not [path for path in app.openapi()["paths"] if path.startswith("/v1/redteam")]
+
+
 def test_write_responses_are_ones_the_contract_allows(records):
     client, core = serve(MemoryStore(), records, entitlements=lambda _p: ENTERPRISE)
     with client:
