@@ -638,12 +638,18 @@
       },
       "Counts": {
         "additionalProperties": false,
-        "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above; ``suspected`` those a model judged only. They are never added together.",
+        "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above, ``attempted`` those whose strongest evidence is a tool call that did not run,\n``suspected`` those a model judged only. They are never added together.",
         "properties": {
           "attacker_errors": {
             "default": 0,
             "minimum": 0.0,
             "title": "Attacker Errors",
+            "type": "integer"
+          },
+          "attempted": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attempted",
             "type": "integer"
           },
           "attempts": {
@@ -990,6 +996,15 @@
             "title": "Attempt Ids",
             "type": "array"
           },
+          "counted_as": {
+            "enum": [
+              "confirmed",
+              "attempted",
+              "suspected"
+            ],
+            "title": "Counted As",
+            "type": "string"
+          },
           "evidence_level": {
             "$ref": "#/components/schemas/EvidenceLevel"
           },
@@ -1090,7 +1105,8 @@
           "vulnerability_type",
           "objective_class",
           "evidence_level",
-          "label"
+          "label",
+          "counted_as"
         ],
         "title": "Finding",
         "type": "object"

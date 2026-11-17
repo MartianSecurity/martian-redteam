@@ -20,7 +20,6 @@ from typing import Any
 
 from martian._privacy import RedactionPolicy, redact_data, report_text
 from martian.redteam.model import RedteamRun
-from martian.redteam.verify.rules import confirmed
 
 JSON_NAME = "redteam-run.json"
 MARKDOWN_NAME = "redteam-report.md"
@@ -152,7 +151,10 @@ def render_markdown(run: RedteamRun) -> str:
             f"{counts.judge_errors} judge, {counts.infrastructure_errors} infrastructure.",
         ]
     lines += ["", "## Findings", ""]
-    lines.append(f"{counts.confirmed} confirmed (level 2 and above), {counts.suspected} suspected (judge only).")
+    lines.append(
+        f"{counts.confirmed} confirmed (level 2 and above), {counts.attempted} attempted actions (a matching "
+        f"tool call that is not known to have run), {counts.suspected} suspected (judge only)."
+    )
     if run.findings:
         lines.append("")
         lines += _table(
@@ -164,7 +166,7 @@ def render_markdown(run: RedteamRun) -> str:
                     finding.label,
                     int(finding.evidence_level),
                     finding.severity,
-                    "confirmed" if confirmed(finding.evidence_level) else "suspected",
+                    finding.counted_as,
                 ]
                 for finding in run.findings
             ],

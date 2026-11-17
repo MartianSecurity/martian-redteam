@@ -115,9 +115,9 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 
 | Field | Meaning |
 | --- | --- |
-| `goal` | What the attacker tries to make the target do |
+| `goal` | What the attacker tries to make the target do. The attacker is told it. A goal that names a `tool` is checked as a tool call (the check `goal`, a requested call counting), unless a `tool_call` check already names that tool |
 | `objective` | `disclosure`, `control`, `action` or `persistence`. Without it, the vulnerability's own objective class applies |
-| `checks` | Up to 10 checks, stated before the attack runs. Without checks, a probe is decided by the judge |
+| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
 | `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
 
 A `goal` takes these fields:
@@ -181,7 +181,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 ## How a run works
 
-1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
 3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A `receipt` check is undetermined in this release, which has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
 
@@ -195,7 +195,7 @@ The command exits 0 when the gate passes, 1 when it fails and 2 when the run cou
 
 | Field | Meaning |
 | --- | --- |
-| `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above. `suspected` also fails on a finding a model judged only |
+| `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above, attempted actions included. `suspected` also fails on a finding a model judged only |
 | `severity` | Only findings of vulnerabilities at this severity or above fail the gate |
 | `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true |
 | `ignore_target_errors` | Do not fail on calls of the target that failed. Default false |

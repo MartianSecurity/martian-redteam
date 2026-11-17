@@ -77,7 +77,11 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
             executed=given.get("executed", False),
             observed=given.get("observed", True),
         )
-        return {"hit": hit, "executed": detail["executed"]}
+        found = {"hit": hit, "executed": detail["executed"]}
+        for key in ("requested", "executed_calls", "wrong_arguments"):
+            if key in vector["expected"]:
+                found[key] = detail[key]
+        return found
     if rule == "judge_result":
         return {"hit": judge_result(given["verdict"])}
     if rule == "attempt_outcome":
@@ -114,7 +118,7 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     if rule == "label":
         level = EvidenceLevel(given["level"])
         words = label(level, executed=given.get("executed"), objective=given.get("objective"))
-        return {"label": words, "confirmed": confirmed(level)}
+        return {"label": words, "confirmed": confirmed(level, given.get("executed"))}
     raise ValueError(f"unknown rule {rule!r}")
 
 

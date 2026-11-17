@@ -284,12 +284,26 @@ class Finding(_Object):
     objective_class: ObjectiveClass
     evidence_level: EvidenceLevel
     label: str
+    counted_as: Literal["confirmed", "attempted", "suspected"]
+    """``confirmed``: a check hit at level 2 or above, other than a tool call that was only asked for.
+    ``attempted``: the strongest evidence is a tool call that matched the goal but is not known to
+    have run. ``suspected``: only a model judged it. The three are counted apart, never summed."""
     outcome: VerificationOutcome | None = None
     attempt_ids: list[str] = Field(default_factory=list)
     status: FindingStatus = "open"
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     summary: str = ""
     annotations: list[Annotation] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _counted(cls, data: Any) -> Any:
+        """A finding recorded before ``counted_as`` existed counts by its level and label."""
+        if isinstance(data, dict) and data.get("counted_as") is None and data.get("evidence_level") is not None:
+            level, words = int(data["evidence_level"]), data.get("label")
+            counted = "suspected" if level <= 1 else "attempted" if words == "Attempted action" else "confirmed"
+            data = {**data, "counted_as": counted}
+        return data
 
 
 class Annotation(_Object):
@@ -303,7 +317,8 @@ class Annotation(_Object):
 
 class Counts(_Object):
     """A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at
-    level 2 and above; ``suspected`` those a model judged only. They are never added together."""
+    level 2 and above, ``attempted`` those whose strongest evidence is a tool call that did not run,
+    ``suspected`` those a model judged only. They are never added together."""
 
     attempts: int = Field(default=0, ge=0)
     hits: int = Field(default=0, ge=0)
@@ -322,6 +337,9 @@ class Counts(_Object):
     """Of those, the ones it refused to write or left empty. A refused generation is never an attack
     the target resisted."""
     confirmed: int = Field(default=0, ge=0)
+    attempted: int = Field(default=0, ge=0)
+    """Findings whose strongest evidence is a tool call that matched the goal but is not known to have
+    run: an attempted action, never confirmed."""
     suspected: int = Field(default=0, ge=0)
 
     @property

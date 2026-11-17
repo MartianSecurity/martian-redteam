@@ -38,7 +38,7 @@ from martian.redteam.model import (
     Verification,
     VerificationOutcome,
 )
-from martian.redteam.verify.rules import confirmed, label
+from martian.redteam.verify.rules import counted_as, label
 
 OBJECTIVES: dict[str, ObjectiveClass] = {
     "prompt_leakage": "disclosure",
@@ -88,8 +88,9 @@ def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> C
         stopped=outcomes["stopped"],
         generations=sum(attempt.spend.attacker_calls for attempt in run_attempts if attempt.spend is not None),
         refusals=sum(attempt.attacker_refusals for attempt in run_attempts),
-        confirmed=sum(confirmed(finding.evidence_level) for finding in findings),
-        suspected=sum(finding.evidence_level == EvidenceLevel.JUDGED for finding in findings),
+        confirmed=sum(finding.counted_as == "confirmed" for finding in findings),
+        attempted=sum(finding.counted_as == "attempted" for finding in findings),
+        suspected=sum(finding.counted_as == "suspected" for finding in findings),
     )
 
 
@@ -110,6 +111,8 @@ def findings_of(
             for result in attempt.check_results
             if result.hit and result.level == EvidenceLevel.TOOL_CALL
         )
+        results = [result for attempt in hits for result in attempt.check_results]
+        counted = counted_as(results) or ("suspected" if top <= EvidenceLevel.JUDGED else "confirmed")
         found.append(
             Finding(
                 id=f"finding-{probe.id}",
@@ -119,6 +122,7 @@ def findings_of(
                 objective_class=probe.objective_class,
                 evidence_level=top,
                 label=label(top, executed=executed, objective=probe.objective_class),
+                counted_as=counted,
                 outcome=outcome.get(probe.id),
                 attempt_ids=[attempt.id for attempt in hits],
             )
