@@ -277,7 +277,8 @@ class Tools(_Model):
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
-    ``{session_api}/sessions`` before the first attack."""
+    ``{session_api}/sessions`` before the first attack: the proxy's, or in an environment the
+    Martian server's."""
 
     @field_validator("session_api")
     @classmethod
@@ -296,8 +297,6 @@ class Tools(_Model):
         names = [server.name for server in self.proxy]
         if len(set(names)) != len(names):
             raise ValueError("each proxied server has its own name")
-        if self.session_api is not None and not self.proxy:
-            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
 
@@ -403,12 +402,23 @@ class RunFile(_Model):
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
     output_folder: str = "results"
-    environment: str | None = Field(default=None, min_length=1)
+    environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
+    agent: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    """The registered agent an environment run tests, by its id on the Martian server: its approval,
+    sandbox bindings and checks. Without it, the API key must be bound to the agent."""
 
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        if self.agent is not None and self.environment is None:
+            raise ValueError("agent names the registered agent of an environment run; set environment")
+        if self.environment is not None and self.tools.proxy:
+            raise ValueError("an environment's gateway is the tool boundary; tools.proxy applies to a run without one")
+        if self.tools.session_api is not None and not self.tools.proxy and self.environment is None:
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:

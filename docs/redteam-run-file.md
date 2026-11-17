@@ -57,6 +57,7 @@ gate: { fail_on: confirmed, severity: high }
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
 | `output_folder` | no | Where reports are written. Default `results` |
+| `agent` | no | The registered agent an environment run tests, by its id on the Martian server. Needs `environment`. Without it, the API key must be bound to the agent |
 | `environment` | no | A Martian environment to run in, by name. It needs a connection to a Martian server ([environments](#environments)) |
 
 ## Target
@@ -166,7 +167,7 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | Field | Meaning |
 | --- | --- |
 | `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
-| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` or `environment` |
 
 Each entry of `proxy` takes these fields:
 
@@ -179,7 +180,7 @@ Each entry of `proxy` takes these fields:
 | `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
 | `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
-`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
+`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session (in an environment, the server's) to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
 
 The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
@@ -235,6 +236,14 @@ A gate block of the first version (`fail_on: confirmed` or `suspected`, `severit
 
 ## Environments
 
-An environment is a Martian Simulation world on a Martian server: applications with seeded records, reset before each attempt, whose records a state check reads. This package holds no environment and runs none itself. A run file only names one with `environment`.
+An environment is a Martian Simulation world on a Martian server: applications with seeded records, reset before each attempt, whose records a state check reads. This package holds no environment and runs none itself. A run file only names one with `environment`, and the server does the rest. The engine still runs here, against your agent, with the service `models` chooses.
 
-`martian redteam validate` checks such a file offline, like any other. `martian redteam run` needs `MARTIAN_API_URL` and `MARTIAN_API_TOKEN` for it. Without them the run stops with exit code 2 before it builds the target or calls a model, and says what to set. This release cannot yet start the run when the connection is set either: it stops with exit code 2 and says so.
+`martian redteam validate` checks such a file offline, like any other. `martian redteam run` needs `MARTIAN_API_URL` and `MARTIAN_API_TOKEN` (an API key with `redteam:run`). Without them the run stops with exit code 2 before it builds the target or calls a model, and says what to set.
+
+With them, the run goes like this:
+
+1. **Admission.** The run asks the server for a run in the environment (`POST /v1/redteam/environment-runs`) for `agent`, the registered agent the run tests, with the names of the file's state checks. The server refuses an agent that is not approved for red team runs, an environment or a state check it does not know, an edition without environments and a sandbox another run is using. The run then stops with exit code 2 and the server's reason, before any model call.
+2. **The agent's tools.** The server answers with a session in the shape it hands a cloud agent (`AssessmentSession`), whose MCP connections are the server's run-scoped gateway in front of the environment's applications. The run writes it to `tool-session.json` in `output_folder` and posts it to `tools.session_api` when set, as the [recording proxy](#tools)'s session is handed over. The agent binds its tools with `bind_tools(session, action_id=...)` exactly as it does locally; its code does not change. `tools.proxy` does not apply: the gateway is the tool boundary.
+3. **End.** When the run ends, however it ends, it tells the server (with the run key the server issued for this run alone), and the server releases the session and the sandboxes. The report's `provenance.environment` names the server's run.
+
+`--resume` does not apply to a run in an environment: it starts again in a reset world.

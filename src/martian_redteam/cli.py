@@ -311,10 +311,12 @@ def _run_version_2(
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import write_reports
     from martian.redteam.engine.runs import (
+        SESSION_FILE,
         SessionHandoverError,
         TargetUnavailable,
         build_service,
         build_target,
+        environment_boundary,
         execute,
         tool_boundary,
         unsupported,
@@ -324,6 +326,7 @@ def _run_version_2(
         ServiceSelectionError,
         require_environment_connection,
     )
+    from martian.redteam.environment import EnvironmentRunError
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
     from martian.redteam.targets import TargetChanged
@@ -345,7 +348,9 @@ def _run_version_2(
         }
     )
     run_file = run_file.model_copy(update={"budget": budget})
-    if missing := unsupported(run_file):
+    if run_file.environment is not None and resume is not None:
+        _stop("--resume continues a local run; a run in an environment starts again in a reset world.")
+    if missing := unsupported(run_file, environments=True):
         _stop("This run file asks for what this release cannot do: " + "; ".join(missing))
     try:
         plan(run_file)
@@ -369,15 +374,42 @@ def _run_version_2(
             keeper.close()
             _stop(f"No red team run {resume} is in the local store.")
 
+    run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
+    admitted: Any = None
+
     async def go() -> Any:
+        nonlocal admitted
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
             target = build_target(run_file.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
+            if run_file.environment is not None:
+                admitted = await environment_boundary(run_file, stack, folder=destination, label=run_id)
+                console.print(
+                    f"Admitted in environment {admitted.run.environment} as {admitted.run.run_code}; "
+                    f"the agent's tool session is in {destination / SESSION_FILE}",
+                    markup=False,
+                )
+                provenance = {
+                    **provenance,
+                    "environment": {
+                        "name": admitted.run.environment,
+                        "run_id": admitted.run.id,
+                        "run_code": admitted.run.run_code,
+                    },
+                }
             target = await tool_boundary(run_file, target, stack, folder=destination)
             run = await execute(
-                run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
+                run_file,
+                service=service,
+                target=target,
+                provenance=provenance,
+                store=keeper,
+                resume=earlier,
+                run_id=run_id,
             )
+            if admitted is not None:
+                admitted.ended(run.state)
             return run, service
 
     try:
@@ -389,6 +421,7 @@ def _run_version_2(
         SessionHandoverError,
         ConnectionError,
         TargetChanged,
+        EnvironmentRunError,
     ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
@@ -409,6 +442,13 @@ def _run_version_2(
     console.print(f"Wrote {written} and {markdown}")
     if keeper is not None:
         console.print(f"Kept in the local store as {run.id}")
+    if admitted is not None and admitted.finish_error:
+        errors.print(
+            "Warning: " + safe_text(admitted.finish_error) + "; the server ends the run at its time limit.",
+            style="yellow",
+            markup=False,
+            soft_wrap=True,
+        )
     if reused := run.provenance.get("resumed_attempts"):
         console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
     for warning in decided.warnings:

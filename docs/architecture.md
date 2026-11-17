@@ -165,7 +165,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/model/` | The shared red team data model, and the maps from the version 0.2 report, CI session rows and the engine's campaign summary ([red team model](redteam-model.md)) | Exists |
 | `src/martian/redteam/verify/` | The verdict rules and their published test vectors ([verdicts](redteam-verdicts.md)); later the verifiers | The rules exist |
 | `src/martian/redteam/store/` | Red team runs in the evals core's record store, as eval runs of kind `redteam` | Exists |
-| `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; `create_app` mounts them and `martian ui` binds the engine's `LocalLauncher`, so the local edition serves them and starts runs. The hosted backend does not mount them yet (MartianSecurity/martian-notes#299) |
+| `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; `create_app` mounts them and `martian ui` binds the engine's `LocalLauncher`, so the local edition serves them and starts runs. The hosted backend mounts them too |
 | `src/martian/redteam/report/` | The report standard computed from a run ([red team reports](redteam-reports.md)), its Markdown, HTML, CSV, SARIF and JUnit outputs, and the comparison of two runs | Exists |
 | `src/martian/redteam/gate.py` | The gate of a version 2 run: fail and warn thresholds by evidence level and severity, and what undetermined attempts and each kind of error do ([run file gate](redteam-run-file.md#gate)) | Exists |
 | `src/martian/redteam/pins.py` | Confirmed findings pinned as regression tests and re-run with no model ([pinned findings](redteam-reports.md#pinned-findings)) | Exists |
@@ -175,6 +175,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/proxy/` | The recording MCP proxy between an agent and its own tool servers: record, inject and block, with a call ledger and local sessions ([red team targets](redteam-targets.md#recording-proxy)). Not an environment | Exists |
 | `src/martian/redteam/engine/` | The engine: the plan, attack, verify loop of a version 2 run (`run.py`, `plan.py`) with its budget ledger (`budget.py`), gate and reports; the local service that generates and judges attacks with the user's own models (`local.py`) and the choice between it and the hosted client (`service.py`); `LocalLauncher` for the run routes; and the version 0.2 probe loop | Exists |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
+| `src/martian/redteam/environment.py` | The client of a Martian server's environment runs: admission, the session for the agent's tools, finishing the run. Holds no environment ([environments](redteam-run-file.md#environments)) | Exists |
 
 ## CI and scoring
 

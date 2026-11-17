@@ -1,11 +1,11 @@
 # Red team API
 
-Every red team route is under `/v1/redteam`. The routes are frozen as version 3 in `src/martian/redteam/server/contract/redteam-api-v3.json`, an OpenAPI document.
+Every red team route is under `/v1/redteam`. The routes are frozen as version 4 in `src/martian/redteam/server/contract/redteam-api-v4.json`, an OpenAPI document.
 
 The contract has two parts:
 
-- **The core's routes.** `martian.redteam.server` serves them. They read the evals core's record store. `martian.evals.server.create_app` mounts the router, so the local edition (`martian ui`) serves them with its Red Team pages. The hosted backend mounts the evals routers on its own and does not mount this one yet (MartianSecurity/martian-notes#299). The app leaves the routes out of its OpenAPI document: this contract is theirs.
-- **The SDK operation routes.** The hosted backend serves these four routes. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
+- **The core's routes.** `martian.redteam.server` serves them. They read the evals core's record store. `martian.evals.server.create_app` mounts the router, so the local edition (`martian ui`) serves them with its Red Team pages. The hosted backend mounts it too. The app leaves the routes out of its OpenAPI document: this contract is theirs.
+- **The SDK routes.** The hosted backend serves these: the four operations and the environment runs. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
 
 ## Routes
 
@@ -26,6 +26,8 @@ The contract has two parts:
 | `POST /v1/redteam/evaluate` | Hosted: judge a reply |
 | `GET /v1/redteam/operations/{operation_id}` | Hosted: read an operation |
 | `POST /v1/redteam/operations/{operation_id}/cancel` | Hosted: cancel an operation |
+| `POST /v1/redteam/environment-runs` | Hosted: admit a run in a Martian environment for an approved agent; answers the session for the agent's tools and a run key ([environments](redteam-run-file.md#environments)) |
+| `POST /v1/redteam/environment-runs/{run_id}/finish` | Hosted, with the run key: end the run, releasing its session and instances |
 
 Starting and stopping a run needs a launcher bound by the edition (`app.state.martian_redteam_launcher`). An installation without one answers `501`. The local edition (`martian ui`) binds `LocalLauncher`, reading a run file's relative `file` from the folder `martian ui` was started in. `martian.redteam.engine.launcher.LocalLauncher` runs the engine in the server's process: `start` saves the run as `running` and answers at once, the run is kept after each attempt, and `stop` cancels it and keeps it as `cancelled`. A run file it cannot run (a target kind this release cannot call, no service, a judge check without a judge model) is answered `422`, and a `request_id` a run already has `409`. A run file that is not valid is answered `422`, naming each problem. A run file that names an `environment` needs the edition's `redteam_environments` feature key ([editions](evals-core.md#editions-and-entitlements)); without it the route answers `403` before any launcher runs, for example "The Community edition does not include red team environments".
 

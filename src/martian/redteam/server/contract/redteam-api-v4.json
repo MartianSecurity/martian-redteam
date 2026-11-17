@@ -785,6 +785,169 @@
         "title": "Counts",
         "type": "object"
       },
+      "EnvironmentRunOut": {
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "environment_id": {
+            "format": "uuid",
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "implant_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Implant Profiles",
+            "type": "array"
+          },
+          "run_code": {
+            "title": "Run Code",
+            "type": "string"
+          },
+          "run_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Key"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/app__redteam_environment_runs__SessionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "state_checks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "State Checks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "run_code",
+          "agent_id",
+          "environment_id",
+          "environment",
+          "state",
+          "expires_at",
+          "state_checks",
+          "implant_profiles"
+        ],
+        "title": "EnvironmentRunOut",
+        "type": "object"
+      },
+      "EnvironmentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "environment": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Environment",
+            "type": "string"
+          },
+          "implant_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Implant Profiles",
+            "type": "array"
+          },
+          "instance_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Instance Ids",
+            "type": "array"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "max_seconds": {
+            "default": 3600,
+            "maximum": 14400.0,
+            "minimum": 60.0,
+            "title": "Max Seconds",
+            "type": "integer"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "state_checks": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "State Checks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "environment"
+        ],
+        "title": "EnvironmentRunRequest",
+        "type": "object"
+      },
       "ErrorCounts": {
         "additionalProperties": false,
         "properties": {
@@ -1327,6 +1490,26 @@
         "title": "Findings",
         "type": "object"
       },
+      "FinishRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "enum": [
+              "completed",
+              "stopped",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "FinishRequest",
+        "type": "object"
+      },
       "GateOutcome": {
         "additionalProperties": false,
         "description": "The gate's result, when the report was written by a run that applied one: ``passed`` (exit\n0), what failed it and what it only warns about.",
@@ -1461,6 +1644,40 @@
           "counted_as"
         ],
         "title": "LevelCount",
+        "type": "object"
+      },
+      "McpConnectionOut": {
+        "properties": {
+          "allowed_tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Tools",
+            "type": "array"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "headers",
+          "allowed_tools"
+        ],
+        "title": "McpConnectionOut",
         "type": "object"
       },
       "MethodRefusals": {
@@ -3155,13 +3372,51 @@
         ],
         "title": "WithinK",
         "type": "object"
+      },
+      "app__redteam_environment_runs__SessionOut": {
+        "description": "What an agent binds its tools with: ``AssessmentSession`` in the SDK.",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "mcp_connections": {
+            "items": {
+              "$ref": "#/components/schemas/McpConnectionOut"
+            },
+            "title": "Mcp Connections",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "campaign_id",
+          "target_id",
+          "expires_at",
+          "mcp_connections"
+        ],
+        "title": "SessionOut",
+        "type": "object"
       }
     }
   },
   "info": {
-    "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 1). Generated by scripts/redteam_contract.py; do not edit by hand.",
+    "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 2). Generated by scripts/redteam_contract.py; do not edit by hand.",
     "title": "Martian red team API",
-    "version": "3"
+    "version": "4"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3183,6 +3438,105 @@
         "summary": "Get Redteam Catalog",
         "tags": [
           "redteam"
+        ]
+      }
+    },
+    "/v1/redteam/environment-runs": {
+      "post": {
+        "operationId": "admit_environment_run_v1_redteam_environment_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "MartianApiKey": []
+          }
+        ],
+        "summary": "Admit Environment Run",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    },
+    "/v1/redteam/environment-runs/{run_id}/finish": {
+      "post": {
+        "operationId": "finish_environment_run_v1_redteam_environment_runs__run_id__finish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Finish Environment Run",
+        "tags": [
+          "sdk-redteam"
         ]
       }
     },
