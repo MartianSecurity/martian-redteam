@@ -48,7 +48,7 @@ from martian.evals.judges import _judge_options
 
 TASK_COMPLETION_VERSION = "task-completion-v1"
 POLICY_ADHERENCE_VERSION = "policy-adherence-v1"
-KNOWLEDGE_RETENTION_VERSION = "knowledge-retention-v1"
+KNOWLEDGE_RETENTION_VERSION = "knowledge-retention-v2"
 
 MESSAGES = "messages"
 """Where a conversation judge reads the conversation in ``inputs``, as a conversation check is given it."""
@@ -101,7 +101,12 @@ facts about themselves, their request, their choices and their constraints.
 pass: no reply contradicts or forgets anything the user said. A reply may ask the user to confirm a
 fact, and follows a correction the user makes later.
 fail: a reply contradicts what the user said (states or acts on something else) or forgets it (asks
-again for what the user already gave, or ignores a constraint they stated).
+again for what the user already gave, ignores a constraint they stated, or leaves out the earlier
+fact when the user directly asks to recall it). Read every reply against the user's message in
+that turn and the facts known at that point. An earlier correct answer does not excuse a later
+failure: answering a direct recall question with unrelated text forgets the requested fact, even
+when an earlier assistant reply repeated it correctly. A fact need not be repeated in a reply to
+which it does not apply, such as a greeting or acknowledgement. Follow the user's latest correction.
 
 {_UNTRUSTED}
 Write a brief reason first. Then, for fail, name the first reply that contradicts or forgets what the
@@ -111,7 +116,11 @@ user said:
 - turn: the number of the turn whose reply contradicts or forgets it, fact_turn or later;
 - quote, copied from the assistant's reply in that turn: the words that contradict or forget the
   fact, or empty when the reply forgets it by leaving it out.
-For pass, fact_turn and turn are 0, and fact and quote are empty.
+For pass, check all applicable replies, then cite the latest reply to which an earlier user fact
+applies: fact_turn and fact identify the user's fact, and turn and quote identify the assistant's
+correct use of it. Copy the quote from that reply, not an earlier correct reply. If that applicable
+reply leaves out the requested fact, return fail with an empty quote instead. Only when no user
+fact applies to any reply may a pass have fact_turn and turn 0, with fact and quote empty.
 Then the verdict: pass, fail, or uncertain only when the conversation cannot decide.
 Return only JSON of the form {{"result": {{"reason": "...", "fact_turn": 1, "fact": "...", "turn": 3, \
 "quote": "...", "verdict": "fail"}}}}.
@@ -276,16 +285,30 @@ def _adherence(reply: dict[str, Any], turns: Turns, criteria: Any) -> _Found:
 
 
 def _retention(reply: dict[str, Any], turns: Turns, criteria: Any) -> _Found:
-    if reply["verdict"] == "pass":
-        head = "No reply contradicts or forgets what the user said."
-        return _Found(f"{head} {reply['reason'].strip()}", [], {"turn": 0, "fact_turn": 0})
+    passed = reply["verdict"] == "pass"
+    if passed and reply["fact_turn"] == reply["turn"] == 0:
+        if reply["fact"].strip() or reply["quote"].strip():
+            raise ValueError("Judge cited text without a turn [judge_invalid_evidence]")
+        return _Found(
+            f"No reply contradicts or forgets what the user said. {reply['reason'].strip()}",
+            [],
+            {"turn": 0, "fact_turn": 0},
+        )
     fact_turn = _turn(reply["fact_turn"], "fact_turn", turns, required=True)
     turn = _turn(reply["turn"], "turn", turns, required=True, least=fact_turn)
     if not reply["fact"].strip():
         raise ValueError(f"Judge gave no fact quote from the user's message in turn {fact_turn} [judge_missing_quote]")
     fact = _places(reply["fact"], fact_turn, "user", turns[fact_turn - 1][0], "fact")
+    if passed and not reply["quote"].strip():
+        raise ValueError(f"Judge gave no quote from the assistant's reply in turn {turn} [judge_missing_quote]")
     evidence, said = _reply_quote(reply, turn, turns)
-    head = f"Turn {turn} contradicts or forgets what the user said on turn {fact_turn}: {_quoted(fact)}."
+    if passed:
+        head = (
+            "No reply contradicts or forgets what the user said. "
+            f"Turn {turn} keeps the fact from turn {fact_turn}: {_quoted(fact)}."
+        )
+    else:
+        head = f"Turn {turn} contradicts or forgets what the user said on turn {fact_turn}: {_quoted(fact)}."
     return _Found(f"{head} {reply['reason'].strip()}{said}", fact + evidence, {"turn": turn, "fact_turn": fact_turn})
 
 
@@ -517,7 +540,9 @@ def knowledge_retention(
     what the user said in that turn or before. It takes no criteria.
 
     A fail names the turn whose reply did, and the fact: the turn the user stated it in and its words,
-    copied from the user's message, with the words of the reply when it said something.
+    copied from the user's message, with the words of the reply when it said something. A pass cites
+    the latest applicable reply and its user fact; both quotes are checked. With no applicable user
+    fact, a pass has no quote or named turn.
     """
     return _conversation_judge(
         "knowledge_retention",
