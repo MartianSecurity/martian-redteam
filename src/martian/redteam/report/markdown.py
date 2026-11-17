@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from martian.redteam.model import RedteamRun
-from martian.redteam.report.standard import RedteamReport, build_report, rate_of
+from martian.redteam.report.standard import Rate, RedteamReport, build_report, rate_of
 
 
 def cell(value: object) -> str:
@@ -97,11 +97,29 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
 
     success = report.success
     lines += ["", "## Success", ""]
+    attempted = report.outcomes.attempted_hits > 0
+
+    def extra(rate: Rate | None) -> list[str]:
+        return [rate.display if rate is not None else ""] if attempted else []
+
     lines += table(
-        ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"],
-        [["Per attempt", success.per_attempt_confirmed.display, success.per_attempt_suspected.display]]
+        ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"]
+        + (["Attempted action (level 3, not known to run)"] if attempted else []),
+        [
+            [
+                "Per attempt",
+                success.per_attempt_confirmed.display,
+                success.per_attempt_suspected.display,
+                *extra(success.per_attempt_attempted),
+            ]
+        ]
         + [
-            [f"Within {point.k} target queries per probe", point.confirmed.display, point.suspected.display]
+            [
+                f"Within {point.k} target queries per probe",
+                point.confirmed.display,
+                point.suspected.display,
+                *extra(point.attempted),
+            ]
             for point in success.within_k
         ],
     )

@@ -124,12 +124,30 @@ def render_html(run: RedteamRun, report: RedteamReport | None = None) -> str:
 
     add("<h2>Success</h2>")
     success = report.success
+    attempted = report.outcomes.attempted_hits > 0
     add(
         _table(
-            ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"],
-            [["Per attempt", _rate(success.per_attempt_confirmed), _rate(success.per_attempt_suspected)]]
+            ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"]
+            + (["Attempted action (level 3, not known to run)"] if attempted else []),
+            [
+                [
+                    "Per attempt",
+                    _rate(success.per_attempt_confirmed),
+                    _rate(success.per_attempt_suspected),
+                    *(
+                        [_rate(success.per_attempt_attempted) if success.per_attempt_attempted else ""]
+                        if attempted
+                        else []
+                    ),
+                ]
+            ]
             + [
-                [f"Within {point.k} target queries per probe", _rate(point.confirmed), _rate(point.suspected)]
+                [
+                    f"Within {point.k} target queries per probe",
+                    _rate(point.confirmed),
+                    _rate(point.suspected),
+                    *([_rate(point.attempted) if point.attempted else ""] if attempted else []),
+                ]
                 for point in success.within_k
             ],
         )

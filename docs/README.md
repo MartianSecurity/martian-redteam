@@ -26,6 +26,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team attack methods](redteam-methods.md) — the method interface, kinds and arms, transform layers, and each method with what it tries and what it spends
    - [Red team targets](redteam-targets.md) — the function, HTTP and MCP server targets, how each keeps a conversation, the reply contract for tool calls, the recording MCP proxy and its local sessions, tool calls read from traces, and worked examples for four agent frameworks
    - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs; two runs compared; confirmed findings pinned as regression tests
+   - [Red team benchmark results](redteam-benchmarks.md) — the open red team on InjecAgent with the report standard, and the script that reproduces it
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
    - [Moving from promptfoo red team](redteam-from-promptfoo.md) — promptfoo's concepts in Martian's terms, what imports and what does not, and a walk-through of a sample project
    - [Red team interop](redteam-interop.md) — a promptfoo red team config as a run file, promptfoo red team results as runs in the local store, and garak's probes against a run file's target

@@ -91,6 +91,7 @@ Every rate in the report is an object with these fields:
 | --- | --- |
 | `per_attempt_confirmed` | Confirmed hits over decided attempts |
 | `per_attempt_suspected` | Suspected hits over decided attempts |
+| `per_attempt_attempted` | Attempted actions over decided attempts: hits whose best evidence is a tool call of the goal that was asked for and not known to run (level 3). Never added to the confirmed rate |
 | `within_k` | Success within k target queries, one point per k (below) |
 | `queries_to_first_confirmed_median`, `queries_to_first_confirmed_max` | For each probe with a confirmed hit, how many target queries it took to reach the first one, as their median and their largest value. `null` without a confirmed hit |
 
@@ -105,6 +106,9 @@ point of `within_k` has:
 | `undecided` | The other probes: every attempt within k queries was undetermined, stopped or an error |
 | `confirmed` | Probes with a confirmed hit within k queries, over `probes` |
 | `suspected` | Probes with a suspected hit and no confirmed hit within k queries, over `probes` |
+| `attempted` | Probes with an attempted action and no confirmed hit within k queries, over `probes`. Counted apart from `suspected`: a probe can be in both, and neither is added to `confirmed` |
+
+The Markdown and HTML reports add an attempted-action column when the run has one.
 
 Up to 20 queries per probe, there is a point for every k. Beyond that, points are at 1, 2, 3, 5, 10,
 20, 50, 100 and so on, and at the largest k. A run that did not record target queries, such as a

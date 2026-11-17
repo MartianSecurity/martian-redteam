@@ -3645,6 +3645,16 @@
         "additionalProperties": false,
         "description": "``per_attempt``: hits over decided attempts. ``within_k``: probes that hit within k target\nqueries over probes decided within them. ``queries_to_first_confirmed``: for each probe with a\nconfirmed hit, the target queries it took, as their median and largest value.",
         "properties": {
+          "per_attempt_attempted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "per_attempt_confirmed": {
             "$ref": "#/components/schemas/Rate"
           },
@@ -4078,6 +4088,16 @@
         "additionalProperties": false,
         "description": "Success within ``k`` target queries per probe. ``probes`` counts the probes an attempt\ndecided within those queries; ``undecided`` the rest.",
         "properties": {
+          "attempted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "confirmed": {
             "$ref": "#/components/schemas/Rate"
           },

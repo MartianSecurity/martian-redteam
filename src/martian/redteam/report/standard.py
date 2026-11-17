@@ -144,6 +144,9 @@ class WithinK(_Out):
     undecided: int = 0
     confirmed: Rate
     suspected: Rate
+    attempted: Rate | None = None
+    """Probes whose best hit within k queries is an attempted action: a tool call of the goal that
+    was asked for and not known to run (level 3). Never added to ``confirmed``."""
 
 
 class Success(_Out):
@@ -153,6 +156,8 @@ class Success(_Out):
 
     per_attempt_confirmed: Rate
     per_attempt_suspected: Rate
+    per_attempt_attempted: Rate | None = None
+    """Attempted actions (a goal tool call asked for, not known to run) over decided attempts."""
     within_k: list[WithinK] = Field(default_factory=list)
     queries_to_first_confirmed_median: float | None = None
     queries_to_first_confirmed_max: int | None = None
@@ -441,7 +446,7 @@ def _within_k(by_probe: dict[str, list[Attempt]]) -> list[WithinK]:
     largest = max((track[-1][0] for track in tracks.values() if track), default=0)
     points = []
     for k in _k_points(largest):
-        decided = confirmed_hits = suspected_hits = 0
+        decided = confirmed_hits = attempted_hits = suspected_hits = 0
         for track in tracks.values():
             reached = [attempt for used, attempt in track if used <= k]
             if not any(attempt.outcome in ("hit", "resisted") for attempt in reached):
@@ -449,7 +454,10 @@ def _within_k(by_probe: dict[str, list[Attempt]]) -> list[WithinK]:
             decided += 1
             if any(_confirmed_hit(attempt) for attempt in reached):
                 confirmed_hits += 1
-            elif any(_suspected_hit(attempt) for attempt in reached):
+                continue
+            if any(_attempted_hit(attempt) for attempt in reached):
+                attempted_hits += 1
+            if any(_suspected_hit(attempt) for attempt in reached):
                 suspected_hits += 1
         points.append(
             WithinK(
@@ -458,6 +466,7 @@ def _within_k(by_probe: dict[str, list[Attempt]]) -> list[WithinK]:
                 undecided=len(tracks) - decided,
                 confirmed=rate_of(confirmed_hits, decided),
                 suspected=rate_of(suspected_hits, decided),
+                attempted=rate_of(attempted_hits, decided),
             )
         )
     return points
@@ -757,6 +766,7 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
         success=Success(
             per_attempt_confirmed=rate_of(outcomes.confirmed_hits, outcomes.decided),
             per_attempt_suspected=rate_of(outcomes.suspected_hits, outcomes.decided),
+            per_attempt_attempted=rate_of(outcomes.attempted_hits, outcomes.decided),
             within_k=_within_k(by_probe),
             queries_to_first_confirmed_median=float(median(firsts)) if firsts else None,
             queries_to_first_confirmed_max=max(firsts) if firsts else None,
