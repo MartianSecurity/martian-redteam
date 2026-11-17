@@ -162,6 +162,12 @@ class CheckResult(_Object):
     error: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     detail: dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
+    """What produced the result: ``rule`` for a check decided by code, ``judge:<model>`` or
+    ``judge:service`` for a model, ``listener`` for the receipt listener, ``server`` for a state check."""
+    verifier: str = ""
+    """The verifier and its version, such as ``text-v1``. A re-judged attempt names the one that
+    decided it again."""
 
 
 class Evidence(_Object):
@@ -191,6 +197,11 @@ class Probe(_Object):
     criteria: str | None = None
     checks: list[Check] = Field(default_factory=list)
     planned_attempts: int = Field(default=1, ge=1)
+    task: str = ""
+    """A benign task the target should still complete under attack: sent with the attack, and alone
+    in the negative control."""
+    task_checks: list[Check] = Field(default_factory=list)
+    """The checks that show the benign task completed."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -202,8 +213,13 @@ class Attempt(_Object):
     number: int = Field(ge=1)
     outcome: AttemptOutcome
     level: EvidenceLevel | None = None
-    """The highest level a hit reached; ``None`` without a hit."""
+    """The highest level a hit reached. An attempt whose attack reached the target and did not hit is
+    at level 0, delivered; one that never reached the target has none."""
     input: str | None = None
+    """What the attacker wrote."""
+    planted: str | None = None
+    """What the harness sent with the attack in the same message, such as a note holding the run's
+    canary. The first turn holds the message the target received."""
     output: str | None = None
     turns: list[Turn] = Field(default_factory=list)
     check_results: list[CheckResult] = Field(default_factory=list)
@@ -214,6 +230,11 @@ class Attempt(_Object):
     role: Literal["attack", "repetition", "control"] = "attack"
     """``repetition``: a fresh run of a hit, to reproduce it. ``control``: the same probe without the
     attack, which must not show the signal."""
+    task_completed: bool | None = None
+    """Whether the probe's benign task completed in this attempt: every task check hit (``True``), one
+    did not (``False``), or it could not be told (``None``, also when the probe has no task)."""
+    task_results: list[CheckResult] = Field(default_factory=list)
+    """The task checks' results."""
     target_calls: int = Field(default=0, ge=0)
     spend: Spend | None = None
     """What the attempt spent. ``None`` when the source did not record it."""
@@ -234,15 +255,26 @@ class Attempt(_Object):
 
     @model_validator(mode="after")
     def _consistent(self) -> Attempt:
-        if self.outcome == "hit" and self.level is None:
-            raise ValueError("a hit names the evidence level it reached")
-        if self.outcome != "hit" and self.level is not None:
-            raise ValueError("only a hit has an evidence level")
+        if self.outcome == "hit" and (self.level is None or self.level == EvidenceLevel.DELIVERED):
+            raise ValueError("a hit names the evidence level it reached, 1 or above")
+        if self.outcome != "hit" and self.level not in (None, EvidenceLevel.DELIVERED):
+            raise ValueError("only a hit has an evidence level above 0, delivered")
         if self.outcome == "error" and not (self.error or self.error_code or self.error_kind):
             raise ValueError("an attempt that errored says why")
         if (self.outcome == "stopped") != (self.stopped_by is not None):
             raise ValueError("a stopped attempt, and only a stopped one, names the budget limit that stopped it")
         return self
+
+
+class TaskCompletion(_Object):
+    """A probe's benign task, completed with and without the attack."""
+
+    with_attack: int = Field(default=0, ge=0)
+    """Attack attempts in which the task completed."""
+    with_attack_decided: int = Field(default=0, ge=0)
+    """Attack attempts in which completion could be told."""
+    without_attack: bool | None = None
+    """Whether it completed in the negative control, which sent the task alone."""
 
 
 class Verification(_Object):
@@ -261,6 +293,8 @@ class Verification(_Object):
     """The behaviour reproduced on evidence weaker than the objective needs."""
     summary: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
+    control_attempt_id: str | None = None
+    task_completion: TaskCompletion | None = None
 
 
 class Finding(_Object):
@@ -273,12 +307,26 @@ class Finding(_Object):
     objective_class: ObjectiveClass
     evidence_level: EvidenceLevel
     label: str
+    counted_as: Literal["confirmed", "attempted", "suspected"]
+    """``confirmed``: a check hit at level 2 or above, other than a tool call that was only asked for.
+    ``attempted``: the strongest evidence is a tool call that matched the goal but is not known to
+    have run. ``suspected``: only a model judged it. The three are counted apart, never summed."""
     outcome: VerificationOutcome | None = None
     attempt_ids: list[str] = Field(default_factory=list)
     status: FindingStatus = "open"
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     summary: str = ""
     annotations: list[Annotation] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _counted(cls, data: Any) -> Any:
+        """A finding recorded before ``counted_as`` existed counts by its level and label."""
+        if isinstance(data, dict) and data.get("counted_as") is None and data.get("evidence_level") is not None:
+            level, words = int(data["evidence_level"]), data.get("label")
+            counted = "suspected" if level <= 1 else "attempted" if words == "Attempted action" else "confirmed"
+            data = {**data, "counted_as": counted}
+        return data
 
 
 class Annotation(_Object):
@@ -292,7 +340,8 @@ class Annotation(_Object):
 
 class Counts(_Object):
     """A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at
-    level 2 and above; ``suspected`` those a model judged only. They are never added together."""
+    level 2 and above, ``attempted`` those whose strongest evidence is a tool call that did not run,
+    ``suspected`` those a model judged only. They are never added together."""
 
     attempts: int = Field(default=0, ge=0)
     hits: int = Field(default=0, ge=0)
@@ -311,6 +360,9 @@ class Counts(_Object):
     """Of those, the ones it refused to write or left empty. A refused generation is never an attack
     the target resisted."""
     confirmed: int = Field(default=0, ge=0)
+    attempted: int = Field(default=0, ge=0)
+    """Findings whose strongest evidence is a tool call that matched the goal but is not known to have
+    run: an attempted action, never confirmed."""
     suspected: int = Field(default=0, ge=0)
 
     @property
@@ -419,6 +471,7 @@ __all__ = [
     "RunState",
     "Spend",
     "TargetRef",
+    "TaskCompletion",
     "ToolCall",
     "Turn",
     "Verification",

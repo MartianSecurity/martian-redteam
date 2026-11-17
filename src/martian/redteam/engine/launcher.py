@@ -44,6 +44,7 @@ from martian.redteam.engine.runs import (
     TargetUnavailable,
     build_service,
     build_target,
+    run_canary,
     tool_boundary,
     unsupported,
 )
@@ -52,6 +53,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
 from martian.redteam.store import RedteamStore
+from martian.redteam.verify.canary import planted_run_file
 
 RESUMABLE = ("cancelled", "stopped", "failed")
 """The states a run can be resumed from. A ``running`` run whose task is gone, because the server
@@ -104,6 +106,10 @@ class LocalLauncher:
         if run_file.target.file is not None and not Path(run_file.target.file).is_absolute():
             target = run_file.target.model_copy(update={"file": str((self.base_dir / run_file.target.file).resolve())})
             run_file = run_file.model_copy(update={"target": target})
+        sample = run_file.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = run_file.verification.model_copy(update={"calibration": str((self.base_dir / sample).resolve())})
+            run_file = run_file.model_copy(update={"verification": settings})
         return run_file
 
     async def start(
@@ -124,11 +130,14 @@ class LocalLauncher:
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
-            target = build_target(run_file.target, base=self.base_dir, environ=self._environ(target_id, run_file))
+            # A resumed run plants the canary its earlier session planted.
+            canary = run_canary(earlier)
+            planted = planted_run_file(run_file, canary)
+            target = build_target(planted.target, base=self.base_dir, environ=self._environ(target_id, run_file))
             stack.push_async_callback(target.close)
             folder = Path(run_file.output_folder)
             target = await tool_boundary(
-                run_file, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
+                planted, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
             )
 
             # Kept beside the run, after redaction, which would hide a key's ${NAME} reference.
@@ -148,6 +157,7 @@ class LocalLauncher:
                 checkpoint=keep,
                 provenance=provenance,
                 resume=earlier,
+                canary=canary,
             )
         except HTTPException:
             await stack.aclose()

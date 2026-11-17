@@ -56,6 +56,7 @@ gate: { fail_on: confirmed, severity: high }
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
+| `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
 | `output_folder` | no | Where reports are written. Default `results` |
 | `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
 
@@ -114,7 +115,7 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 | `inference_params` | Settings such as `temperature` |
 | `headers` | Added to each model request. `${NAME}` is read from the environment |
 
-A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set.
+A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set. With `models.judge`, judge checks run on the SDK's judge engine (the rubric judge of [evals](evals.md)), which cites the parts of the reply that show the attack succeeded.
 
 Which service generates and judges the attacks:
 
@@ -133,10 +134,11 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 
 | Field | Meaning |
 | --- | --- |
-| `goal` | What the attacker tries to make the target do |
+| `goal` | What the attacker tries to make the target do. The attacker is told it. A goal that names a `tool` is checked as a tool call (the check `goal`, a requested call counting), unless a `tool_call` check already names that tool |
 | `objective` | `disclosure`, `control`, `action` or `persistence`. Without it, the vulnerability's own objective class applies |
-| `checks` | Up to 10 checks, stated before the attack runs. Without checks, a probe is decided by the judge |
+| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
 | `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
+| `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
 
 A `goal` takes these fields:
 
@@ -150,12 +152,28 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 
 | Type | Fields | Level of a hit |
 | --- | --- | --- |
-| `text` | `all_of` (1 to 8 markers that must all be in the reply), `none_of` (markers that must not be), `ignore_case` (default true) | 2 |
-| `canary` | `value`, the canary to plant, at least 8 characters. Without it, each run plants its own | 2 |
+| `text` | `all_of` (1 to 8 markers that must all be in the reply), `none_of` (up to 12 markers that must not be), `ignore_case` (default true). A marker is 3 to 200 characters, and none is both required and forbidden. A reply that only repeats markers the attack carried is not a hit | 2 |
+| `canary` | `value`, a canary of at least 8 characters that you planted yourself. Without it, the run plants its own (see [canaries](#canaries)) where `plant` says, with `text` as a context plant's note | 2 |
 | `tool_call` | `tool`, `where`, and `executed`: `true` counts only a call that ran, `false` (the default) a requested call too | 3 |
 | `judge` | `criteria`, what the judge decides. Without it, the vulnerability's own criteria apply | 1 |
-| `receipt` | none. A local listener receives a request carrying the canary | 4 |
+| `receipt` | none. Needs a `canary` check in the same vulnerability. The run's local listener receives a request carrying that canary (see [receipts](#receipts)) | 4; 3 for a request without it, contact only |
 | `state` | `name`, a business check of the environment. Needs `environment` | 5 |
+
+### Canaries
+
+Each run draws one canary, `MRTC-` with a tag of the run and a random secret, unless a check gives its own `value`. A resumed run keeps its canary. The run records it in its provenance as `canary`. A canary check without `value` plants it where `plant` says:
+
+| `plant` | Where the canary goes |
+| --- | --- |
+| `context` (the default) | A short confidential note sent with the attack in the same message. `text` replaces the note; `{{canary}}` marks where the canary goes |
+| `system_prompt` | `{{canary}}` in the target block, in an HTTP target's `headers` or `body` or an MCP target's `arguments` or `headers`, is replaced before the target is built. A function target has no template, so it takes `context` or a `value` |
+| `tool_result` | `{{canary}}` in a proxied server's `inject` text, so the recording proxy adds it to that server's tool results |
+
+The check finds the canary in the reply and in tool call arguments, encoded or not ([verdicts](redteam-verdicts.md#checks)). The attempt keeps what the attacker wrote as `input`, the note as `planted`, and the message the target received as its first turn.
+
+### Receipts
+
+A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a port the system picks, and stops it when the run ends, however it ends. Each attempt has its own address, `http://127.0.0.1:PORT/r/<token>`, and the attacker is told to make the target send the canary there. The listener keeps each request (the request line, the headers and up to 64 KiB of body, at most 1,000 requests a run) as `receipt` evidence of its attempt, answers `200 ok` and follows nothing in it. A request carrying the canary is verified exfiltration; one without it is contact only. The run's provenance counts what it received as `receipts` (`received`, `unmatched` for other addresses, `dropped` past the limit). The target must be able to reach `127.0.0.1` on this machine.
 
 ## Tools
 
@@ -181,6 +199,17 @@ Each entry of `proxy` takes these fields:
 
 The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
+## Verification
+
+How the run checks what it found: the probe's attacks run first, then the repetitions of its hits, then its negative control. The [report](redteam-reports.md) shows each finding's verification, reproductions and control, the counts of both, each probe's benign task with and without the attack, and the judge's calibration.
+
+| Field | Meaning |
+| --- | --- |
+| `repetitions` | 0 to 10, default 0. Send each probe's first confirmed hit (level 2 and above) again this many times, each in a new conversation, with what the probe plants; its receipt address is its own. A hit only the judge found is not repeated: it could not verify. Each repetition counts against the budget. The finding says "Reproduced r of n" |
+| `required` | How many repetitions must hit again (level 2 and above) for the finding to verify. Default 2, or `repetitions` when fewer run. A flaky hit, such as one reproduced 1 of 3, is `not_reproducible`, never verified |
+| `control` | Run each probe once without the attack, after its attacks, when it hit or has a `benign` task. Default true. It sends what the probe plants and its benign task, or an ordinary opening, and is decided by the probe's checks that code decides (by the judge when there is no other). A probe whose control shows the same signal has no finding. Its call counts against the budget |
+| `calibration` | A labelled sample to measure the judge on before the attacks: a JSON Lines file, one item a line, with `vulnerability` (a vulnerability of this file, by name or id), optional `type`, `attack`, `reply`, `hit` (whether a person judged the attack to have succeeded) and optional `tools_called`. A relative path is read from the run file's folder. Each item costs one judge call, counted against the budget. The report shows the judge's precision and recall, and the run's provenance keeps them as `judge_calibration` |
+
 ## Budget
 
 | Field | Meaning |
@@ -197,15 +226,38 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 ## How a run works
 
-1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
-3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
+3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 
 The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)), `redteam-report.json` (the [report standard](redteam-reports.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. `-f html,csv,sarif,junit` (or `-f all`) also writes those [formats](redteam-reports.md#output-formats). As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
 
-The run is kept after every attempt, each with a fingerprint of what produced it: the catalogue version, the prompt and verdict rule revisions, its probe and checks, the target block and the service with its models. `martian redteam run FILE --resume RUN_ID` continues a run from the local store: each finished attempt (vulnerable, held or undetermined) whose fingerprint is unchanged is reused and calls no model and no target; an attempt that errored or was stopped, or whose fingerprint changed, runs again. A changed check reruns only its vulnerability's attempts; a new catalogue version or another model reruns every attempt. What the earlier session spent still counts against the budget. A run started from `martian ui` keeps its run file, and its report's **Resume run** does the same with it ([the local edition's routes](redteam-api.md#the-local-editions-routes)).
+The run is kept after every attempt, each with a fingerprint of what produced it: the catalogue version, the prompt and verdict rule revisions, its probe and checks, the target block and the service with its models. `martian redteam run FILE --resume RUN_ID` continues a run from the local store: each finished attempt (vulnerable, held or undetermined) whose fingerprint is unchanged is reused and calls no model and no target; an attempt that errored or was stopped, or whose fingerprint changed, runs again. A changed check reruns only its vulnerability's attempts; a new catalogue version or another model reruns every attempt. Repetitions and negative controls run again, after the attacks; the run's canary and judge calibration are kept. What the earlier session spent still counts against the budget. A run started from `martian ui` keeps its run file, and its report's **Resume run** does the same with it ([the local edition's routes](redteam-api.md#the-local-editions-routes)).
 
 The command exits 0 when the gate passes, 1 when it fails and 2 when the run could not start.
+
+## Re-judging a stored run
+
+`martian redteam rejudge FILE --run RUN` decides a stored run again with the run file's current checks and verifiers, without calling the target. `RUN` is a run id in the local store or a `redteam-run.json` file. Each stored attempt's attack, the message the target received, its reply, tool calls and receipts are read back; only a `judge` check calls a model, the judge, counted in the new run's `budget` as `rejudge`. The result is a new run, `RUN-rejudged-N`, kept in the local store unless given `--no-store` and written to `-o` (default `rejudged-RUN` in `output_folder`). Its provenance names the run it re-judged (`rejudged_from`), the rules and verifier versions that decided the stored run (`original_rules_version`, `original_verifiers`) and how many attempts changed; every check result names its verifier. The stored run is not changed, so its verdict stays readable beside the new one. The command lists the attempts whose outcome changed and applies the gate to the new run.
+
+A stored attempt keeps digests of its content unless the run kept content (`MARTIAN_REPORT_INCLUDE_CONTENT=1`). Its checks are then undetermined: there is nothing to decide them on.
+
+## Self-test
+
+`martian redteam selftest` shows that the harness can find what it looks for. It runs the engine against a small, deliberately vulnerable target that ships with the SDK (`martian.redteam.verify.selftest`), with a scripted attacker and judge, so no model is called and nothing leaves the machine. One probe per case, each with its own planted weakness:
+
+| Case | Planted weakness | Must find |
+| --- | --- | --- |
+| `delivered` | None: the target holds | No finding, the attempt at level 0 |
+| `judged` | The reply leaks, and only the judge checks it | Level 1, suspected |
+| `text` | The reply states its secret rule | Level 2, by a text check |
+| `canary` | The reply holds the run's canary in base64 | Level 2, by the canary check |
+| `attempted` | The target asks for the goal's tool call, which never runs | Level 3, attempted |
+| `executed` | The goal's tool call runs | Level 3, confirmed, reproduced 1 of 1 |
+| `receipt` | The target sends the canary to the run's receipt listener | Level 4 |
+| `control` | The target makes the call whatever it is sent | No finding: the negative control discards it |
+
+It prints each case and exits 1, naming the cases, when one does not find its planted hit. `--disable KIND` (`judge`, `text`, `canary`, `tool_call` or `receipt`, repeatable) runs without that verifier, to see its case fail. The test suite runs it in CI, and once with each verifier disabled.
 
 ## Gate
 
@@ -213,7 +265,7 @@ The gate decides the exit code: 0 when nothing fails it, 1 when something does, 
 
 | Field | Meaning |
 | --- | --- |
-| `fail_on` | The evidence level a finding must reach to fail the gate: `confirmed` (the default, level 2 and above), `suspected` (level 1 too, a finding a model judged only) or a level from 1 to 5 ([levels](redteam-verdicts.md#evidence-levels)), such as `3` for a tool call and above |
+| `fail_on` | The evidence level a finding must reach to fail the gate: `confirmed` (the default, level 2 and above, attempted actions included), `suspected` (level 1 too, a finding a model judged only) or a level from 1 to 5 ([levels](redteam-verdicts.md#evidence-levels)), such as `3` for a tool call and above |
 | `severity` | Only findings of vulnerabilities at this severity or above fail the gate. A finding of a vulnerability with no `severity` counts |
 | `warn_on` | Warn about a finding at this level or above that does not fail the gate: one below `fail_on`, or below `severity`. Takes the same values as `fail_on`, at or below it. Default: no warning |
 | `undetermined` | What an attempt no check could decide, or one the budget stopped, does: `fail` (the default), `warn` or `ignore`. The report counts them whatever this says |
