@@ -110,7 +110,7 @@ def test_cross_field_rules(tmp_path):
     assert problems(write(tmp_path, state)) == [
         "(file): vulnerabilities[0]: a state check reads an environment; set environment"
     ]
-    assert problems(write(tmp_path, {**state, "environment": "refund-desk"})) == []
+    assert problems(write(tmp_path, {**state, "environment": "refund-desk", "tools": {}})) == []
     no_judge = {**VALID, "models": {"attacker": "openai:/a"}}
     assert "needs models.judge" in problems(write(tmp_path, no_judge))[0]
 
