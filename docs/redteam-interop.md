@@ -1,11 +1,13 @@
 # Red team interop
 
-Bring red team work from other tools. Nothing here installs or calls the other tool's service.
+Bring red team work from other tools. Nothing here installs another tool or calls its service.
 
 | Tool | What comes over | Command |
 | --- | --- | --- |
 | promptfoo | A red team config, as a [version 2 run file](redteam-run-file.md) | `martian redteam convert promptfoo` |
 | promptfoo | Red team results, as runs in the local store that `martian ui` opens | `martian redteam import promptfoo` |
+| garak | Its probes, sent to a run file's target, with the results as a run | `martian redteam garak` |
+| garak | A garak report, as a run in the local store | `martian redteam import garak` |
 
 [Moving from promptfoo red team](redteam-from-promptfoo.md) walks through both with the sample
 project in [`examples/promptfoo-redteam`](../examples/promptfoo-redteam).
@@ -121,3 +123,56 @@ Every imported hit is suspected, never confirmed: promptfoo's graders are models
 the checks were not stated before the attack, and nothing was re-run. The run's `limitations` say so,
 and its catalogue version is `promptfoo`. Re-run the converted config to get findings this engine
 decides.
+
+## garak probes
+
+[garak](https://github.com/NVIDIA/garak) (Apache-2.0) has the widest set of fixed probes. It is not
+bundled and not a dependency: install it in the same environment (`pip install garak`), which brings
+its own large dependencies, such as PyTorch.
+
+```bash
+martian redteam garak redteam.yaml --probes encoding                    # garak's probes, this run file's target
+martian redteam garak redteam.yaml --probes dan.DanInTheWild --generations 3 --garak-arg=--seed --garak-arg=1
+```
+
+`martian redteam garak` runs `python -m garak` with garak's `function` generator pointed at
+`martian.redteam.interop.garak#generate`. That function sends each prompt to the run file's target in
+a conversation of its own and returns the reply. garak's report goes to `garak.report.jsonl` in the
+output folder (`-o`, else the run file's `output_folder`). The command then reads the report as a red
+team run, writes `redteam-run.json`, `redteam-report.json` and `redteam-report.md` there, keeps the run
+in the local store unless given `--no-store`, and applies the run file's [gate](redteam-run-file.md#gate):
+exit code `0` when it passes and `1` when it fails.
+
+Without garak the command is skipped with a message that says so and exits with `2`, as a run that
+could not start does. A run file with `environment` or `tools.proxy` is refused: garak calls the
+target directly. A function, HTTP or MCP target works.
+
+Without the command, run garak yourself and import its report:
+
+```bash
+MARTIAN_GARAK_RUN_FILE=redteam.yaml MARTIAN_GARAK_LEDGER=calls.jsonl \
+  garak --target_type function --target_name martian.redteam.interop.garak#generate --probes encoding
+martian redteam import garak ~/.local/share/garak/garak_runs/garak.<run id>.report.jsonl \
+  --run-file redteam.yaml --ledger calls.jsonl
+```
+
+| Variable | What `generate` reads |
+| --- | --- |
+| `MARTIAN_GARAK_RUN_FILE` | The version 2 run file whose target garak attacks. Required |
+| `MARTIAN_GARAK_LEDGER` | A file to append each call to: the prompt, the reply and the tool calls the target reported, readable by its user only. A tool-call check needs it |
+
+How a garak report becomes a [`RedteamRun`](redteam-model.md):
+
+| garak | Red team model |
+| --- | --- |
+| A probe class, such as `encoding.InjectBase64` | A probe: vulnerability `garak.encoding`, type `InjectBase64`, attack method `garak`. `Probe.metadata["garak"]` keeps the class and its intent |
+| An evaluated attempt (`status` 2) and each of its outputs | One `Attempt` per output, its input the prompt's last user message |
+| A detector's score of that output | A check result `garak:<detector>` of kind `judge`: a hit at level 1, suspected, at or above 0.5 (garak's default threshold); undetermined when there is no score |
+| The run file's `text` checks, `canary` checks with a `value`, and `tool_call` checks | Applied to every output. A hit is confirmed at the check's level: 2 for text and canary, 3 for a tool call, which reads the calls the ledger recorded |
+| An output that is empty (`null`) | An `error` of kind `target` |
+| `transient.run_id`, `transient.starttime_iso`, `_config.version` | The run's id `garak-<run id>`, its start and `provenance["garak"]["version"]` |
+
+garak's detectors are reported as suspected because they are not the checks this run file stated. The
+run file's `judge` checks are not applied: no model is called. The run is kept with its content as
+digests, as `martian redteam run` keeps one. garak's own report and hit log hold the prompts and
+replies in clear text; the ledger is removed when `martian redteam garak` finishes.
