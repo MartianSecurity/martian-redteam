@@ -8,7 +8,7 @@ the settings, and the first message connects.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from martian.evals._pinned_address import AddressPolicy
@@ -22,11 +22,13 @@ def target_from_run_file(
     base: str | Path = ".",
     private: Iterable[str | Path] = (),
     address_policy: AddressPolicy | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> Target:
     """The target of ``block``. ``base`` is the run file's folder, for a relative ``file``;
     ``private`` what a function target's process must not reach; ``address_policy`` pins the
-    connections of an HTTP target (:mod:`martian.redteam.targets.http`). An MCP target needs the
-    ``mcp`` extra; its stdio server starts in ``base``."""
+    connections of an HTTP target (:mod:`martian.redteam.targets.http`); ``environ`` stands in for the
+    environment when an HTTP or MCP target's ``${NAME}`` is read. An MCP target needs the ``mcp``
+    extra; its stdio server starts in ``base``."""
     from martian.evals.runner import DEFAULT_TARGET_TIMEOUT_SECONDS, TargetRef
 
     if block.kind == "function":
@@ -41,6 +43,7 @@ def target_from_run_file(
             session=block.session,
             tool_calls_path=block.tool_calls_path,
             address_policy=address_policy,
+            environ=environ,
         )
     from martian.redteam.targets.mcp import McpServerTarget
 
@@ -49,6 +52,7 @@ def target_from_run_file(
         block.mcp,
         timeout_seconds=block.timeout_seconds or DEFAULT_TARGET_TIMEOUT_SECONDS,
         base=base,
+        environ=environ,
     )
 
 

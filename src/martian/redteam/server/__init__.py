@@ -308,17 +308,16 @@ async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
     return CatalogOut(version=CATALOG_VERSION, vulnerabilities=vulnerabilities, attacks=attacks, frameworks=frameworks)
 
 
-@router.post("/runs", response_model=RunSummary, status_code=202)
-async def start_redteam_run(
-    body: RunStart, request: Request, principal: PrincipalDep, entitlements: EntitlementsDep
-) -> RunSummary:
+def check_run_file(mapping: dict[str, Any], entitlements: Any) -> None:
+    """Refuse a run file that is not valid (``422``, naming each problem) or that names an
+    environment the edition does not include (``403``), before any launcher runs."""
     from pydantic import ValidationError
 
     from martian.evals.server.dependencies import ensure_entitled
     from martian.redteam.runfile import RunFile
 
     try:
-        run_file = RunFile.model_validate(body.run_file)
+        run_file = RunFile.model_validate(mapping)
     except ValidationError as error:
         reasons = [
             ".".join(str(part) for part in item["loc"]) + ": " + str(item["msg"]).removeprefix("Value error, ")
@@ -327,6 +326,13 @@ async def start_redteam_run(
         raise HTTPException(422, "; ".join(reasons)) from None
     if run_file.environment is not None:
         ensure_entitled(entitlements, ENVIRONMENTS)
+
+
+@router.post("/runs", response_model=RunSummary, status_code=202)
+async def start_redteam_run(
+    body: RunStart, request: Request, principal: PrincipalDep, entitlements: EntitlementsDep
+) -> RunSummary:
+    check_run_file(body.run_file, entitlements)
     run = await _launcher(request).start(principal, body)
     return _summary(run)
 
@@ -352,5 +358,6 @@ __all__ = [
     "RunPage",
     "RunStart",
     "RunSummary",
+    "check_run_file",
     "router",
 ]

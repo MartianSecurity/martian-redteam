@@ -46,9 +46,12 @@ SESSION_FILE = "tool-session.json"
 folder, readable by its user only, for as long as the run lasts."""
 
 
-def build_target(block: TargetBlock, *, base: str | Path | None = None) -> Target:
+def build_target(
+    block: TargetBlock, *, base: str | Path | None = None, environ: Mapping[str, str] | None = None
+) -> Target:
     """The target a run file's ``target`` block names. ``base`` is where an MCP target's stdio server
-    starts: the run file's folder."""
+    starts: the run file's folder. ``environ`` stands in for the environment when ``${NAME}`` in an
+    HTTP or MCP target is read; by default it is the process's."""
     if block.kind == "function":
         from martian.redteam.targets.callback import function_target
 
@@ -56,7 +59,7 @@ def build_target(block: TargetBlock, *, base: str | Path | None = None) -> Targe
         return function_target(block.file, block.function or "target")
     from martian.redteam.targets.factory import target_from_run_file
 
-    return target_from_run_file(block, base=base if base is not None else ".")
+    return target_from_run_file(block, base=base if base is not None else ".", environ=environ)
 
 
 async def tool_boundary(
