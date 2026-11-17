@@ -45,7 +45,7 @@ jobs:
           branch: cla-signatures
           # Exact names only: the action's "*" pattern is unanchored and would match any name
           # containing the rest.
-          allowlist: kloudd,dependabot[bot],github-actions[bot]
+          allowlist: kloudd,artreimus,dependabot[bot],github-actions[bot]
           custom-notsigned-prcomment: >-
             <br/>Thank you for your pull request. Before we can accept it, $you need to sign the
             MartianSecurity

@@ -112,7 +112,8 @@ no longer have Node 20 and run JavaScript actions on Node 24.
   a signature. It needs no `statuses` permission and no personal access token.
 - **Signatures.** `signatures/cla.json` on the `cla-signatures` branch, written with the workflow
   token. Branch protection or a ruleset on that branch blocks the writes.
-- **Allowlist.** `kloudd`, `dependabot[bot]` and `github-actions[bot]`, by exact name. The
+- **Allowlist.** The staff accounts `kloudd` and `artreimus`, and `dependabot[bot]` and
+  `github-actions[bot]`, by exact name. The
   action's `*` pattern is unanchored, so do not use one. The action matches a commit's GitHub
   login, or its git author name when the commit's e-mail is linked to no account, so a commit with
   an unlinked e-mail and an allowlisted name skips the check: check that such commits on a pull
