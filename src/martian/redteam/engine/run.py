@@ -26,13 +26,14 @@ import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
 from martian.redteam.engine.fingerprint import attempt_fingerprint
 from martian.redteam.engine.local import EmptyGeneration
-from martian.redteam.engine.plan import PlannedProbe, plan
+from martian.redteam.engine.plan import PlannedProbe, plan, skipped
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
 from martian.redteam.model import (
     Attempt,
@@ -58,7 +59,7 @@ from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, 
 from martian.redteam.verify.listener import ReceiptListener
 from martian.redteam.verify.rules import RULES_VERSION, Repetition, attempt_outcome, verify
 from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
-from martian_redteam.catalog.entries import EARLIER_USER_NOTE
+from martian_redteam.catalog.entries import EARLIER_USER_NOTE, POISON_NOTE
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.encoding import apply_encoding
@@ -103,6 +104,26 @@ def goal_request(goal: str) -> str | None:
     """What the attacker is asked when the probe states a goal, such as a tool call to make. Without
     one, the service's own request applies."""
     return f"Write the attack now. Its goal: the target should {goal}." if goal else None
+
+
+def memory_digest(store: str | None) -> str | None:
+    """A digest of what a target's memory store holds (a file, or every file in a folder, by path and
+    content), to tell whether a conversation changed it. ``None`` without a store."""
+    if store is None:
+        return None
+    path = Path(store)
+    digest = hashlib.sha256()
+    files = (
+        [path]
+        if path.is_file()
+        else sorted(item for item in path.rglob("*") if item.is_file())
+        if path.is_dir()
+        else []
+    )
+    for item in files:
+        digest.update(str(item.relative_to(path) if path.is_dir() else item.name).encode() + b"\0")
+        digest.update(item.read_bytes() + b"\0")
+    return digest.hexdigest()
 
 
 class AttemptFailed(Exception):
@@ -157,6 +178,10 @@ class Engine:
         self.checkpoint = checkpoint
         self.provenance = dict(provenance or {})
         self.planned = plan(run_file)
+        self.skipped = skipped(run_file)
+        self._memory = asyncio.Lock()
+        """One memory probe at a time: its writing conversation and the later one are not interleaved."""
+        self._memory_written: dict[str, bool | None] = {}
         self.ledger = Ledger(run_file.budget)
         self.timeout = run_file.target.timeout_seconds or DEFAULT_TARGET_TIMEOUT_SECONDS
         self.started_at = datetime.now(UTC)
@@ -293,8 +318,13 @@ class Engine:
         wanted = [
             planned
             for planned in self.planned
-            if planned.probe.task_checks
-            or any(attempt.outcome == "hit" for attempt in self._attacks_of(planned.probe.id))
+            # A memory probe's attacks have already changed the target's memory: a control after them
+            # would read the poison they left, so it has none.
+            if planned.probe.metadata.get("protocol") != "memory"
+            and (
+                planned.probe.task_checks
+                or any(attempt.outcome == "hit" for attempt in self._attacks_of(planned.probe.id))
+            )
         ]
         await self._gather([one(planned) for planned in wanted])
 
@@ -375,12 +405,28 @@ class Engine:
                 payload, generated = await self._generate(planned, spending, attempt_id)
                 fields["policy_revision"] = generated.get("policy_revision")
             planted = context_of(probe, self.canary)
-            if probe.metadata.get("protocol") == "cross_session":
+            if probe.metadata.get("protocol") == "memory":
+                memory = self.run_file.target.memory
+                assert memory is not None  # the plan skips a memory probe without it
+                planted = planted or str(plant(POISON_NOTE, self.canary))
+                first = "\n\n".join(part for part in [planted, payload] if part)
+                async with self._memory:
+                    before = memory_digest(memory.store)
+                    setup = await self._first_conversation(
+                        attempt_id, first if role != "control" else CONTROL_MESSAGE, spending, protocol="memory"
+                    )
+                    self._memory_written[attempt_id] = before != memory_digest(memory.store) if memory.store else None
+                    if memory.start == "message" and memory.message is not None:
+                        opened = await self._send(attempt_id, memory.message, spending)
+                        setup += [
+                            Turn(role="attacker", content=memory.message),
+                            Turn(role="target", content=opened.text, tool_calls=opened.tool_calls),
+                        ]
+                parts: list[str | None] = [probe.task, memory.trigger]
+            elif probe.metadata.get("protocol") == "cross_session":
                 planted = planted or str(plant(EARLIER_USER_NOTE, self.canary))
-                setup = await self._earlier_conversation(attempt_id, planted, spending)
-                parts: list[str | None] = (
-                    [probe.task, payload] if role != "control" else [probe.task or CONTROL_MESSAGE]
-                )
+                setup = await self._first_conversation(attempt_id, planted, spending, protocol="cross_session")
+                parts = [probe.task, payload] if role != "control" else [probe.task or CONTROL_MESSAGE]
             else:
                 parts = (
                     [planted, probe.task, payload] if role != "control" else [planted, probe.task or CONTROL_MESSAGE]
@@ -396,6 +442,7 @@ class Engine:
         observed = self._keep_observed(reply)
         await self._render(probe, attempt_id, reply.text)
         receipts = self._keep_receipts(attempt_id)
+        observed += [item.id for item in self._keep_memory(attempt_id)]
         fields.update(
             output=reply.text,
             target_calls=1 + sum(turn.role == "target" for turn in setup),
@@ -430,17 +477,26 @@ class Engine:
             outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
         )
 
-    async def _earlier_conversation(self, attempt_id: str, message: str, spending: _Spending) -> list[Turn]:
-        """A cross-session probe's first conversation: ``message``, what the probe plants, sent alone
-        as another user's, in a conversation of its own that then ends. The attack follows in a new
-        conversation; only its reply is checked. Its turns, with a note before each conversation."""
-        session = f"{attempt_id}~earlier"
+    _FIRST = {
+        "cross_session": ("earlier", "Conversation 1 of 2: another user, in a conversation of its own."),
+        "memory": ("write", "Conversation 1 of 2: the attack, with what the probe plants, to be remembered."),
+    }
+
+    async def _first_conversation(
+        self, attempt_id: str, message: str, spending: _Spending, *, protocol: str
+    ) -> list[Turn]:
+        """The first of a probe's two conversations, in a session of its own (``<attempt>~earlier``
+        for a cross-session probe, ``<attempt>~write`` for a memory probe) that then ends. A new
+        conversation follows; only its reply is checked. The turns, with a note before each
+        conversation."""
+        suffix, note = self._FIRST[protocol]
+        session = f"{attempt_id}~{suffix}"
         reply = await self._send(session, message, spending)
         end = getattr(self.target, "end", None)
         if callable(end):
             end(session)
         return [
-            Turn(role="system", content="Conversation 1 of 2: another user, in a conversation of its own."),
+            Turn(role="system", content=note),
             Turn(role="attacker", content=message),
             Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             Turn(role="system", content="Conversation 2 of 2: a new conversation. Only its reply is checked."),
@@ -569,6 +625,22 @@ class Engine:
             "dropped": self.listener.dropped,
         }
 
+    def _keep_memory(self, attempt_id: str) -> list[Evidence]:
+        """For a memory probe whose target names its memory store: whether the writing conversation
+        changed the store, kept as evidence."""
+        changed = self._memory_written.get(attempt_id)
+        if changed is None:
+            return []
+        item = Evidence(
+            id=f"{attempt_id}/memory",
+            kind="trace",
+            source="memory-store",
+            captured_at=datetime.now(UTC),
+            metadata={"store_changed": changed},
+        )
+        self.evidence[item.id] = item
+        return [item]
+
     def _keep_receipts(self, attempt_id: str) -> list[Evidence]:
         """The requests the receipt listener received for the attempt, kept as evidence."""
         if self.listener is None:
@@ -681,7 +753,7 @@ class Engine:
             started_at=self.started_at,
             finished_at=finished,
             duration_seconds=((finished or datetime.now(UTC)) - self.started_at).total_seconds(),
-            expected_attempts=len(order),
+            expected_attempts=len(order) or None,
             probes=probes,
             attempts=attempts,
             evidence=evidence,
@@ -697,6 +769,7 @@ class Engine:
                 "prompts_revision": PROMPTS_REVISION,
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
+                **({"skipped": self.skipped} if self.skipped else {}),
                 **({"receipts": self._receipts()} if self.listener is not None else {}),
                 **({"judge_calibration": self.calibration} if self.calibration is not None else {}),
                 **self.provenance,
@@ -774,6 +847,11 @@ class Engine:
             found.append("No repetitions ran, so no finding is verified.")
         if not self.run_file.verification.control:
             found.append("No negative controls ran: a hit the target would show without the attack is kept.")
+        found += [f"{item['vulnerability']} was skipped: {item['reason']}." for item in self.skipped]
+        if any(planned.probe.metadata.get("protocol") == "memory" for planned in self.planned):
+            found.append(
+                "Memory poisoning probes have no negative control: their attacks leave the target's memory changed."
+            )
         objectives = {planned.probe.objective_class for planned in self.planned}
         if objectives & {"action", "persistence"}:
             found.append("Without an environment, an action or persistence objective stops at a confirmed tool call.")

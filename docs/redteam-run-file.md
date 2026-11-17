@@ -77,6 +77,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `session` | For a `url` target: how the conversation's id travels besides `{{session_id}}` in `body`. See below |
 | `tool_calls_path` | For a `url` target: where the JSON answer lists the tool calls the target made or asked for, such as `choices.0.message.tool_calls`. Read by the [reply contract](redteam-targets.md#reply-contract) |
 | `mcp` | An MCP server as the target. See below |
+| `memory` | The target keeps a memory across conversations, for [memory poisoning](catalog.md#memory-poisoning). Without it, memory poisoning probes are skipped. See below |
 
 Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` that takes `session_id` or `history` parameters is given them.
 
@@ -104,6 +105,15 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 | `schema_sha256` | The SHA-256 of the tool's input schema as canonical JSON. Without it, the run pins the schema its first message sees. A different schema stops the run |
 
 `timeout_seconds` applies to an `mcp` target too.
+
+`memory` takes these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `start` | How a new session starts: `new_conversation` (the default), a conversation with a new id; or `message`, which also opens the new conversation with `message` |
+| `message` | With `start: message`, the first message of a new conversation, such as `/new` |
+| `trigger` | The ordinary message the later conversation sends. Default `Hello. What can you help me with today?` |
+| `store` | Optional. The file or folder the target keeps its memory in, read from the run file's folder when relative. The run records whether the writing conversation changed it |
 
 ## Models
 

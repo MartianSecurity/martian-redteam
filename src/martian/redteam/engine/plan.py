@@ -139,12 +139,30 @@ def _form_of(index: int, spec: Vulnerability, entry: CatalogEntry | None) -> For
     return form
 
 
+NO_MEMORY = "the target keeps no memory across conversations; state target.memory to run it"
+"""Why a memory poisoning probe is skipped."""
+
+
+def skipped(run_file: RunFile) -> list[dict[str, str]]:
+    """The vulnerabilities the run skips, with why: a memory poisoning probe when the run file says
+    the target keeps no memory (no ``target.memory``)."""
+    found = []
+    for spec in run_file.vulnerabilities:
+        entry = _entry_of(spec)
+        if entry is not None and entry.protocol == "memory" and run_file.target.memory is None:
+            found.append({"vulnerability": entry.id, "reason": NO_MEMORY})
+    return found
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
-    """Every probe of the run, in the run file's order."""
+    """Every probe of the run, in the run file's order. A vulnerability :func:`skipped` names has none."""
     local = run_file.models.attacker is not None
     attacks = [get_attack(item.name, weight=item.weight) for item in run_file.attacks]
     planned: list[PlannedProbe] = []
+    left_out = {item["vulnerability"] for item in skipped(run_file)}
     for index, spec in enumerate(run_file.vulnerabilities):
+        if (found := _entry_of(spec)) is not None and found.id in left_out:
+            continue
         vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
         entry = _entry_of(spec)
         form = _form_of(index, spec, entry)
@@ -188,4 +206,4 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     return planned
 
 
-__all__ = ["PlanError", "PlannedProbe", "attempt_id", "plan"]
+__all__ = ["NO_MEMORY", "PlanError", "PlannedProbe", "attempt_id", "plan", "skipped"]

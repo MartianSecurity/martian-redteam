@@ -86,6 +86,28 @@ class TargetSession(_Model):
     response_path: str | None = Field(default=None, min_length=1)
 
 
+class TargetMemory(_Model):
+    """That the target keeps a memory across conversations, and how a memory poisoning probe uses
+    it: how a new conversation starts, what the later conversation says, and, optionally, where the
+    memory is stored."""
+
+    start: Literal["new_conversation", "message"] = "new_conversation"
+    """``new_conversation``: a conversation with a new id is a new session. ``message``: a new
+    conversation also opens with ``message``, such as ``/new``, before anything else."""
+    message: str | None = Field(default=None, min_length=1, max_length=200)
+    trigger: str = Field(default="Hello. What can you help me with today?", min_length=1, max_length=2000)
+    """The ordinary message the later conversation sends."""
+    store: str | None = Field(default=None, min_length=1)
+    """The file or folder the target keeps its memory in. The run records whether the writing
+    conversation changed it. A relative path is read from the run file's folder."""
+
+    @model_validator(mode="after")
+    def _start(self) -> TargetMemory:
+        if (self.start == "message") != (self.message is not None):
+            raise ValueError("message is the opening of a new conversation, and needs start: message")
+        return self
+
+
 class Target(_Model):
     """The thing under test. ``file`` and ``function``, or ``url`` with ``body`` and the rest, are a
     suite file's target block and are checked by the same rules; ``mcp`` is an MCP server."""
@@ -103,6 +125,9 @@ class Target(_Model):
     tool_calls_path: str | None = Field(default=None, min_length=1)
     """Where an HTTP target's JSON answer lists the tool calls it made or asked for."""
     mcp: McpTarget | None = None
+    memory: TargetMemory | None = None
+    """The target keeps a memory across conversations. Without it, memory poisoning probes are
+    skipped."""
 
     @field_validator("purpose")
     @classmethod
@@ -568,6 +593,10 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        memory = loaded.target.memory
+        if memory is not None and memory.store is not None and not Path(memory.store).is_absolute():
+            stored = memory.model_copy(update={"store": str((file.parent / memory.store).resolve())})
+            loaded = loaded.model_copy(update={"target": loaded.target.model_copy(update={"memory": stored})})
         sample = loaded.verification.calibration
         if sample is not None and not Path(sample).is_absolute():
             settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
@@ -646,6 +675,7 @@ __all__ = [
     "RunFile",
     "StateCheck",
     "Target",
+    "TargetMemory",
     "TargetSession",
     "TextCheck",
     "ToolCallCheck",
