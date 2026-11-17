@@ -171,5 +171,8 @@ A run stops at the first limit it reaches and its report says which.
 | --- | --- |
 | `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above. `suspected` also fails on a finding a model judged only |
 | `severity` | Only findings of vulnerabilities at this severity or above fail the gate |
-| `fail_on_infrastructure_error` | Fail when the attacker, the judge or the platform failed. Default true |
+| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true |
 | `ignore_target_errors` | Do not fail on calls of the target that failed. Default false |
+| `undetermined` | `fail` (the default) fails the run when no check could decide an attempt. `ignore` leaves those out; the report still counts them |
+
+The gate also fails a finding of a vulnerability with no `severity` when `severity` is set, a run with no attempt, and a run that made fewer attempts than it planned.

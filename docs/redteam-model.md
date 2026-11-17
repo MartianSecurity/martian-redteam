@@ -15,9 +15,9 @@
 | `Evidence` | Raw evidence captured at a trusted boundary: a reply, a tool call, a receipt, a state diff |
 | `Verification` | What a probe's repetitions and negative control established |
 | `Finding` | What a run reports for a probe that hit, with its level, label, status and annotations |
-| `Counts` | Attempts by outcome, and findings confirmed (level 2 and above) and suspected (level 1), never summed |
+| `Counts` | Attempts by outcome and errors by class, and findings confirmed (level 2 and above) and suspected (level 1), never summed. `decided` is hits plus resisted, and `hit_rate` is hits over decided attempts |
 
-An attempt's `outcome` is `hit`, `resisted`, `undetermined` or `error`. A hit carries its evidence level; no other outcome does.
+An attempt's `outcome` is one of three verdicts: `hit` (the target was vulnerable), `resisted` (it held) or `undetermined` (no check could decide). An attempt that did not complete is `error`, outside the verdicts, and `error_kind` says whose failure it was: `target`, `attacker` (the model that writes attacks), `judge` (the model that judges replies) or `infrastructure` (the platform or the harness). A hit carries its evidence level; no other outcome does. Rates are computed over decided attempts, with the undetermined and error counts shown beside them.
 
 ## Maps from today's formats
 
@@ -37,7 +37,7 @@ An attempt's `outcome` is `hit`, `resisted`, `undetermined` or `error`. A hit ca
 | `test_cases[].reason` | That check result's `rationale` |
 | `test_cases[].input`, `actual_output` | `Attempt.input`, `Attempt.output` |
 | `test_cases[].turns` | `Attempt.turns`; roles `human`, `ai`, `tool` become `attacker`, `target`, `tool`; each tool name a `ToolCall` |
-| `test_cases[].error`, `error_kind`, error code | `Attempt.error`, `error_kind`, `error_code`, with outcome `error` |
+| `test_cases[].error`, `error_kind`, error code | `Attempt.error`, `error_kind`, `error_code`, with outcome `error`. Back in this format, an `attacker` or `judge` error is an `infrastructure` error, the only other kind it has |
 | `test_cases[].simulation_operation_id`, `evaluation_operation_id` | `Attempt.operations["simulate"]`, `["evaluate"]` |
 | `vulnerability_type_results[].gated` | `Probe.gated` |
 | `vulnerability_type_results`, `errored`, `infrastructure_errors`, `target_errors` | Computed from the test cases. A report whose own values differ keeps them in `extra` |

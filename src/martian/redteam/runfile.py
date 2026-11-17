@@ -247,7 +247,11 @@ class Gate(_Model):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     """Only findings of probes at this severity or above fail the gate."""
     fail_on_infrastructure_error: bool = True
+    """Fail when the attacker, the judge, the platform or the harness failed."""
     ignore_target_errors: bool = False
+    undetermined: Literal["fail", "ignore"] = "fail"
+    """What an attempt no check could decide does to the gate. ``fail`` (the default) fails the run:
+    an undetermined attempt is never a pass. ``ignore`` leaves it out, and the report still counts it."""
 
 
 class RunFile(_Model):

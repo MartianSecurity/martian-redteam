@@ -45,12 +45,16 @@ VerificationOutcome = Literal["verified", "consistent", "not_reproducible", "unv
 ReproductionStatus = Literal["reproduced_clean", "state_dependent", "not_reproduced", "untested"]
 
 AttemptOutcome = Literal["hit", "resisted", "undetermined", "error"]
-"""``hit``: a check found the attack succeeded. ``resisted``: every check ran and none did.
-``undetermined``: a check could not decide (an unreadable judgment, a missing observation).
-``error``: the attempt did not complete: the attacker, the judge or the target failed."""
+"""Three outcomes decide an attempt, and errors stay outside them. ``hit`` (the target was
+vulnerable): a check found the attack succeeded. ``resisted`` (the target held): every check ran and
+none did. ``undetermined``: a check could not decide (an unreadable judgment, a missing observation).
+``error``: the attempt did not complete, and ``Attempt.error_kind`` says whose failure it was. Rates are
+computed over decided attempts (hits and resisted), with the undetermined count beside them."""
 
 CheckKind = Literal["judge", "text", "canary", "tool_call", "receipt", "state"]
-ErrorKind = Literal["infrastructure", "target"]
+ErrorKind = Literal["infrastructure", "target", "attacker", "judge"]
+"""Whose failure stopped an attempt: the platform or the harness (``infrastructure``), the target, the
+model that writes the attacks, or the model that judges the replies."""
 RunSource = Literal["local", "console", "ci", "campaign"]
 RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled", "stopped"]
 FindingStatus = Literal["open", "accepted", "fixed", "false_positive"]
@@ -250,8 +254,21 @@ class Counts(_Object):
     errors: int = Field(default=0, ge=0)
     infrastructure_errors: int = Field(default=0, ge=0)
     target_errors: int = Field(default=0, ge=0)
+    attacker_errors: int = Field(default=0, ge=0)
+    judge_errors: int = Field(default=0, ge=0)
     confirmed: int = Field(default=0, ge=0)
     suspected: int = Field(default=0, ge=0)
+
+    @property
+    def decided(self) -> int:
+        """Attempts a check decided: hits and resisted. Rates are computed over these."""
+        return self.hits + self.resisted
+
+    @property
+    def hit_rate(self) -> float | None:
+        """Hits over decided attempts; ``None`` when no attempt was decided. Read it beside
+        ``undetermined`` and ``errors``, which it leaves out."""
+        return self.hits / self.decided if self.decided else None
 
 
 class TargetRef(_Object):

@@ -2,7 +2,7 @@
 and the catalogue; start and stop a run; annotate a finding.
 
 Every edition serves the same routes: the local edition through ``martian ui`` and the hosted
-backend by mounting this router. Their shapes are frozen in ``contract/redteam-api-v1.json``, with
+backend by mounting this router. Their shapes are frozen in ``contract/redteam-api-v<N>.json``, with
 the four SDK operation routes the hosted backend serves (simulate, evaluate, read and cancel an
 operation) copied unchanged from its ``contracts/redteam-operations.json``. ``docs/redteam-api.md``
 describes them; :mod:`martian.redteam.server.contract` builds and checks the file.

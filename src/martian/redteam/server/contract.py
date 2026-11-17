@@ -1,11 +1,11 @@
 """The ``/v1/redteam`` API as a versioned contract.
 
-``contract/redteam-api-v1.json`` is the OpenAPI document of every red team route and the schemas they
-use: the core's routes (:mod:`martian.redteam.server`), generated from the router, and the hosted
-backend's four SDK operation routes, copied unchanged from its ``contracts/redteam-operations.json``
-into ``contract/redteam-operations.json``. ``scripts/redteam_contract.py`` writes the file, and refuses
-when the routes changed and :data:`REDTEAM_API_VERSION` was not raised. ``tests/redteam`` fails when
-the routes drift from the file.
+``contract/redteam-api-v<N>.json``, N being :data:`REDTEAM_API_VERSION`, is the OpenAPI document of
+every red team route and the schemas they use: the core's routes (:mod:`martian.redteam.server`),
+generated from the router, and the hosted backend's four SDK operation routes, copied unchanged from
+its ``contracts/redteam-operations.json`` into ``contract/redteam-operations.json``.
+``scripts/redteam_contract.py`` writes the file, and refuses when the routes changed and
+:data:`REDTEAM_API_VERSION` was not raised. ``tests/redteam`` fails when the routes drift from the file.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-REDTEAM_API_VERSION = 1
+REDTEAM_API_VERSION = 2
 FOLDER = Path(__file__).resolve().parent / "contract"
 CONTRACT_PATH = FOLDER / f"redteam-api-v{REDTEAM_API_VERSION}.json"
 OPERATIONS_PATH = FOLDER / "redteam-operations.json"

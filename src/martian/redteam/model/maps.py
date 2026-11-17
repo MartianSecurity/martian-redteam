@@ -83,6 +83,8 @@ def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> C
         errors=outcomes["error"],
         infrastructure_errors=kinds["infrastructure"],
         target_errors=kinds["target"],
+        attacker_errors=kinds["attacker"],
+        judge_errors=kinds["judge"],
         confirmed=sum(confirmed(finding.evidence_level) for finding in findings),
         suspected=sum(finding.evidence_level == EvidenceLevel.JUDGED for finding in findings),
     )
@@ -302,7 +304,9 @@ def to_risk_assessment(run: RedteamRun) -> Any:
             score=_score_of(attempt),
             reason=(judge.rationale or None) if judge is not None else None,
             error=attempt.error or None if attempt.outcome == "error" or attempt.error else None,
-            error_kind=attempt.error_kind,
+            # The version 0.2 report knows target and infrastructure errors only: a failure of the
+            # attacker or the judge model is not the target's, so it is an infrastructure error there.
+            error_kind="target" if attempt.error_kind == "target" else (attempt.error_kind and "infrastructure"),
             graph_revision=attempt.graph_revision,
             policy_revision=attempt.policy_revision,
             simulation_operation_id=attempt.operations.get("simulate"),

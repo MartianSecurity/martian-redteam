@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict
 from martian._privacy import RedactionPolicy
 from martian.redteam.catalog.prompts import PROMPTS_REVISION, evaluator_system_prompt, simulator_system_prompt
 from martian.redteam.runfile import ModelConfig
-from martian_redteam.client import ClientError
+from martian_redteam.client import ClientError, UndecidedJudgment
 from martian_redteam.types import (
     BinaryScore,
     EvaluatorContext,
@@ -70,7 +70,7 @@ class EmptyGeneration(LocalServiceError):
     """The attacker answered, but its reply held no attack: empty, or not the JSON asked for."""
 
 
-class UnreadableJudgment(LocalServiceError):
+class UnreadableJudgment(LocalServiceError, UndecidedJudgment):
     """The judge answered, but its judgment could not be read. It decides nothing: undetermined."""
 
 
