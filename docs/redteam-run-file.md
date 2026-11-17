@@ -61,7 +61,7 @@ gate: { fail_on: confirmed, severity: high }
 
 ## Target
 
-The target block is a suite file's target block (see [evals](evals.md)), plus `purpose`, `session` and `mcp`. Give exactly one of `file`, `url` or `mcp`. The same `file` or `url` block works in a suite file and in a run file. [Red team targets](redteam-targets.md) says how each kind is called and how a conversation is kept.
+The target block is a suite file's target block (see [evals](evals.md)), plus `purpose`, `session`, `tool_calls_path` and `mcp`. Give exactly one of `file`, `url` or `mcp`. The same `file` or `url` block works in a suite file and in a run file. [Red team targets](redteam-targets.md) says how each kind is called and how a conversation is kept.
 
 | Field | Meaning |
 | --- | --- |
@@ -74,6 +74,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `response_path` | Where the reply is in the JSON answer, such as `reply` or `choices.0.message.content` |
 | `timeout_seconds` | The longest one call of the target may take, 1 to 600 |
 | `session` | For a `url` target: how the conversation's id travels besides `{{session_id}}` in `body`. See below |
+| `tool_calls_path` | For a `url` target: where the JSON answer lists the tool calls the target made or asked for, such as `choices.0.message.tool_calls`. Read by the [reply contract](redteam-targets.md#reply-contract) |
 | `mcp` | An MCP server as the target. See below |
 
 Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` that takes `session_id` or `history` parameters is given them.

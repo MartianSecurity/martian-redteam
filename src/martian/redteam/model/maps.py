@@ -203,7 +203,8 @@ def from_risk_assessment(
                     Turn(
                         role=_ROLES_OUT[turn.role],  # type: ignore[arg-type]
                         content=turn.content,
-                        tool_calls=[ToolCall(name=name) for name in turn.tools_called],
+                        tool_calls=[ToolCall.model_validate(call.model_dump()) for call in turn.tool_calls]
+                        or [ToolCall(name=name) for name in turn.tools_called],
                     )
                     for turn in case.turns
                 ],
@@ -272,6 +273,17 @@ def _score_of(attempt: Attempt) -> Literal[0, 1] | None:
     return 0 if hit else 1
 
 
+def _legacy_calls(calls: Sequence[ToolCall]) -> list[Any]:
+    """A turn's tool calls as a version 0.2 turn keeps them. Calls that are names only stay names
+    (``tools_called``), as a version 0.2 report had them, so a report read in and written back is
+    unchanged."""
+    from martian_redteam.types import ToolCallRecord
+
+    if all(call == ToolCall(name=call.name) for call in calls):
+        return []
+    return [ToolCallRecord.model_validate(call.model_dump()) for call in calls]
+
+
 def to_risk_assessment(run: RedteamRun) -> Any:
     """A red team run as a version 0.2 ``RiskAssessment``. Only attack attempts become test cases:
     the format has no place for repetitions or controls."""
@@ -296,6 +308,7 @@ def to_risk_assessment(run: RedteamRun) -> Any:
                     role=_ROLES_IN.get(turn.role, "tool"),  # type: ignore[arg-type]
                     content=turn.content,
                     tools_called=[call.name for call in turn.tool_calls],
+                    tool_calls=_legacy_calls(turn.tool_calls),
                 )
                 for turn in attempt.turns
             ],

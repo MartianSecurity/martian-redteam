@@ -8,7 +8,8 @@ up the run. The process starts with the first message and ends with :meth:`Funct
 Each message is sent as the keyword argument ``message``, the suite file's default input. A function
 that takes ``session_id`` or ``history`` is also given the conversation's id and its earlier turns
 (:mod:`martian.redteam.targets.conversations`), as a suite file's conversation cases give them. Its
-return value must be JSON: text, or what :mod:`martian.redteam.targets.reply` reads. A function that
+return value must be JSON: text, or ``{"text": ..., "tool_calls": [...]}``, the reply contract of
+:mod:`martian.redteam.targets.reply`. A function that
 raises is a :class:`~martian.evals.runner.TargetCallError` naming the exception's type only; its
 text may hold anything and is not kept.
 """
@@ -26,7 +27,7 @@ from martian.evals.isolation import TargetProcess, TargetRaised
 from martian.evals.runner import TargetCallError, TargetRef
 from martian.redteam.targets import TargetReply
 from martian.redteam.targets.conversations import Conversations
-from martian.redteam.targets.reply import reply_text
+from martian.redteam.targets.reply import reply_from
 
 MESSAGE = "message"
 
@@ -75,9 +76,9 @@ class FunctionTarget:
             except TargetRaised as raised:
                 raise TargetCallError(f"the target raised {raised}") from None
             latency = (time.perf_counter() - started) * 1000
-            text = reply_text(value)
-            conversation.answered(message, text)
-            return TargetReply(text=text, session=conversation.session, latency_ms=latency)
+            reply = reply_from(value, session=conversation.session, latency_ms=latency)
+            conversation.answered(message, reply.text)
+            return reply
 
     def end(self, session: str) -> None:
         self._conversations.end(session)

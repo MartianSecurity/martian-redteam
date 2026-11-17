@@ -11,8 +11,10 @@ environment.
 Each message is one turn of a conversation (:mod:`martian.redteam.targets.conversations`). The body's
 ``{{session_id}}`` is the conversation's id, ``{{history}}`` its earlier turns and ``{{messages}}``
 those and the new message, so the body decides whether the history is resent or only the newest turn
-is sent. ``{{input}}`` is the message. The run file's ``target.session`` adds two things a server may need: the
-id in a header as well, and an id the server issues itself, read from each reply.
+is sent. ``{{input}}`` is the message. ``tool_calls_path`` names where the JSON answer lists the tool
+calls the target made or asked for, read by the reply contract (:mod:`martian.redteam.targets.reply`).
+The run file's ``target.session`` adds two things a server may need: the id in a header as well, and
+an id the server issues itself, read from each reply.
 
 With an ``address_policy`` (:mod:`martian.evals._pinned_address`) every connection goes to an address
 the policy allowed, by number, as the judges' connections do; an edition that calls endpoints other
@@ -44,7 +46,7 @@ from martian.evals.runner import (
 from martian.redteam.runfile import TargetSession as SessionSettings
 from martian.redteam.targets import TargetReply
 from martian.redteam.targets.conversations import Conversations
-from martian.redteam.targets.reply import read_path, reply_text
+from martian.redteam.targets.reply import read_path, reply_text, tool_calls
 
 
 class HttpTarget:
@@ -57,6 +59,7 @@ class HttpTarget:
         reference: TargetRef,
         *,
         session: SessionSettings | None = None,
+        tool_calls_path: str | None = None,
         address_policy: AddressPolicy | None = None,
     ) -> None:
         if reference.url is None:
@@ -70,6 +73,7 @@ class HttpTarget:
         }
         self._steps = _response_steps(reference.response_path, "target.response_path")
         self._session_steps = _response_steps(self._session.response_path, "target.session.response_path")
+        self._call_steps = _response_steps(tool_calls_path, "target.tool_calls_path")
         self._conversations = Conversations(issued_by_server=self._session.response_path is not None)
         self._client: httpx.AsyncClient | None = None
 
@@ -94,8 +98,13 @@ class HttpTarget:
                 if not isinstance(issued, str | int) or isinstance(issued, bool) or str(issued) == "":
                     raise TargetCallError("the target's response has no session id at target.session.response_path")
                 conversation.id = str(issued)
+            calls = (
+                tool_calls(read_path(_json(response), self._call_steps), "target.tool_calls_path")
+                if self._call_steps
+                else []
+            )
             conversation.answered(message, text)
-            return TargetReply(text=text, session=conversation.session, latency_ms=latency)
+            return TargetReply(text=text, tool_calls=calls, session=conversation.session, latency_ms=latency)
 
     def end(self, session: str) -> None:
         """Forget a conversation; sending with its session again starts a new one."""

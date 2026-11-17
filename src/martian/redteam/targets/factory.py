@@ -38,6 +38,7 @@ def target_from_run_file(
         return HttpTarget(
             TargetRef.model_validate(block.suite_target_fields()),
             session=block.session,
+            tool_calls_path=block.tool_calls_path,
             address_policy=address_policy,
         )
     raise ValueError(f"no {block.kind} target in this release")

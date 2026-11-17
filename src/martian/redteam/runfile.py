@@ -73,6 +73,8 @@ class Target(_Model):
     timeout_seconds: float | None = Field(default=None, ge=1, le=600)
     session: TargetSession | None = None
     """An HTTP target's conversation id in a header, or issued by the server."""
+    tool_calls_path: str | None = Field(default=None, min_length=1)
+    """Where an HTTP target's JSON answer lists the tool calls it made or asked for."""
     mcp: McpTarget | None = None
 
     @field_validator("purpose")
@@ -87,6 +89,8 @@ class Target(_Model):
         suite_fields = self.suite_target_fields()
         if self.session is not None and self.url is None:
             raise ValueError("session applies to a url target")
+        if self.tool_calls_path is not None and self.url is None:
+            raise ValueError("tool_calls_path applies to a url target; an mcp target has its own")
         if self.mcp is not None:
             if suite_fields:
                 raise ValueError(f"an mcp target takes none of {', '.join(sorted(suite_fields))}")

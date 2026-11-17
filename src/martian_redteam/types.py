@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from martian._errors import error_code, saved_error_code
 from martian._privacy import RedactionPolicy
@@ -30,14 +30,40 @@ def _require_exact_int(value: object) -> object:
 BinaryScore = Annotated[Literal[0, 1], BeforeValidator(_require_exact_int)]
 
 
+class ToolCallRecord(BaseModel):
+    """One tool call of a turn: the tool, its arguments, and whether it ran. ``executed`` is ``True``
+    when the call ran, ``False`` when it was refused or blocked, and ``None`` when only the request
+    is known. ``result`` is what the tool returned, as text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    call_id: str | None = None
+    executed: bool | None = None
+    result: str | None = None
+
+
 class Turn(BaseModel):
-    """One conversation turn from the target or simulator."""
+    """One conversation turn from the target or simulator. ``tool_calls`` are the turn's tool calls
+    with their arguments; ``tools_called`` are their names, the older form, which a callback may
+    still return alone. Given only ``tool_calls``, the names are filled in from them."""
 
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["human", "ai", "tool"]
     content: str
     tools_called: list[str] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _names(self) -> Turn:
+        names = [call.name for call in self.tool_calls]
+        if self.tool_calls and not self.tools_called:
+            self.tools_called = names
+        elif self.tool_calls and self.tools_called != names:
+            raise ValueError("tools_called names the same calls as tool_calls, in order")
+        return self
 
 
 class TestCase(BaseModel):
@@ -79,6 +105,25 @@ class VulnerabilityTypeResult(BaseModel):
     failing: int = Field(ge=0)
     errored: int = Field(ge=0)
     gated: bool
+
+
+def _report_values(value: Any, *, include_target_content: bool, policy: RedactionPolicy) -> Any:
+    """A tool call's arguments as a report keeps them: every text in them is target content, hidden
+    unless the report includes target content, and redacted by the run's policy either way."""
+    from martian._privacy import report_text
+
+    if isinstance(value, str):
+        return report_text(
+            value, include_content=include_target_content, redact_env="MARTIAN_EVALS_REDACT_OUTPUTS", policy=policy
+        )
+    if isinstance(value, list):
+        return [_report_values(item, include_target_content=include_target_content, policy=policy) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _report_values(item, include_target_content=include_target_content, policy=policy)
+            for key, item in value.items()
+        }
+    return value
 
 
 class RiskAssessment(BaseModel):
@@ -152,6 +197,18 @@ class RiskAssessment(BaseModel):
                     policy=self._redaction,
                 )
                 turn["tools_called"] = [safe_text(t, policy=self._redaction) for t in turn["tools_called"]]
+                for call in turn["tool_calls"]:
+                    call["name"] = safe_text(call["name"], policy=self._redaction)
+                    call["arguments"] = _report_values(
+                        call["arguments"], include_target_content=include_target_content, policy=self._redaction
+                    )
+                    if call["result"] is not None:
+                        call["result"] = report_text(
+                            call["result"],
+                            include_content=include_target_content,
+                            redact_env="MARTIAN_EVALS_REDACT_OUTPUTS",
+                            policy=self._redaction,
+                        )
         return RiskAssessment.model_validate(data)._bind_redaction(self._redaction)
 
     def save(self, to: str | Path, *, include_target_content: bool = False) -> Path:

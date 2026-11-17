@@ -15,8 +15,8 @@ async def close() -> None
 
 The `file` and `url` blocks are a suite file's target block, read by the suite file's own rules, so the same block works in an [eval suite](evals.md) and a red team run.
 
-- **Function** (`file`, `function`). The function runs in a process of its own, as a suite file's function target does, and cannot read the run's private files on Linux. It is called with the keyword argument `message`. Its return value must be JSON. Text is the reply; any other value is kept as its JSON text. A function that raises is a target error that names the exception's type only.
-- **HTTP** (`url`, `headers`, `body`, `response_path`, `timeout_seconds`). One JSON `POST` per message: no retry, no redirect, no proxy from the environment. `${NAME}` in `url` and header values is read from the environment. The reply is the response's text, or the value at `response_path`; a value that is not text is kept as its JSON. A failed call names the setting to check and never repeats the address, a header or the response.
+- **Function** (`file`, `function`). The function runs in a process of its own, as a suite file's function target does, and cannot read the run's private files on Linux. It is called with the keyword argument `message`. Its return value must be JSON: text, or the [reply contract](#reply-contract)'s object. Any other value is kept as its JSON text. A function that raises is a target error that names the exception's type only.
+- **HTTP** (`url`, `headers`, `body`, `response_path`, `timeout_seconds`). One JSON `POST` per message: no retry, no redirect, no proxy from the environment. `${NAME}` in `url` and header values is read from the environment. The reply is the response's text, or the value at `response_path`; a value that is not text is kept as its JSON. `tool_calls_path` names where the answer lists its tool calls. A failed call names the setting to check and never repeats the address, a header or the response.
 
 `HttpTarget(reference, address_policy=...)` pins every connection to an address the policy allows, as the judges' connections are pinned. An edition that calls endpoints other people name passes one. A local run calls the endpoint its user named and passes none.
 
@@ -37,3 +37,35 @@ What the target sends:
 | HTTP | `{{session_id}}` in `body`. `session.header` also sends it in a header | `{{history}}` is the earlier turns; `{{messages}}` is those and the new message. A body with only `{{input}}` sends the newest turn |
 
 A server that issues its own ids sets `session.response_path`. The first turn of a conversation sends an empty id, and each reply's id at that path is sent with the next turn.
+
+## Reply contract
+
+A target reports the tool calls it made or asked for, so a check can ask whether the agent called `issue_refund` with an amount above a limit, and whether the call ran:
+
+- an HTTP target: the list at `tool_calls_path` in its JSON answer. An answer with nothing at the path made no calls;
+- a function: an object `{"text": "...", "tool_calls": [...]}` with no other keys;
+- a version 0.2 callback: a `Turn` with `tool_calls`, or its names-only `tools_called`.
+
+Each tool call is an object, or a tool's name as text (which says nothing about arguments or whether it ran):
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The tool. OpenAI's `{"function": {"name", "arguments"}}` form is read too |
+| `arguments` | An object, or JSON text of one. `args` and Anthropic's `input` are read too |
+| `id` or `call_id` | The call's id |
+| `executed` | `true` when the call ran, `false` when it was refused or blocked. Leave it out when the agent only asked for the call: a check that needs an executed call never counts one without it |
+| `result` | What the tool returned, as text or any JSON |
+
+A call the reply contract cannot read is the target's error, never an empty list: an item without a name, arguments that are not an object, or `executed` that is not `true` or `false`.
+
+```json
+{
+  "reply": "Your refund is on its way.",
+  "tool_calls": [
+    {"name": "lookup_order", "arguments": {"order": 7}, "executed": true},
+    {"name": "issue_refund", "arguments": {"order": 7, "amount": 80}, "executed": true, "result": "refunded"}
+  ]
+}
+```
+
+A version 0.2 report keeps the calls on each turn. Their arguments and results are target content: the report hides them unless it includes target content, and the run's redaction applies either way.
