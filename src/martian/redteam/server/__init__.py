@@ -96,13 +96,38 @@ class FindingList(_Out):
     items: list[Finding]
 
 
+class CatalogForm(_Out):
+    """One way to decide a probe of a catalogue entry: its checks, and what a hit proves."""
+
+    id: str
+    label: str
+    checks: list[dict[str, Any]]
+    goal: str | None = None
+    """``tool``: the run file's goal tool call is a check of this form; ``tool_with_canary``: and it
+    must carry the run's canary."""
+    level: int
+    """The highest evidence level a hit of this form reaches."""
+    deterministic: bool
+    proves: str
+    needs: str = ""
+
+
 class CatalogVulnerability(_Out):
     name: str
     id: str
     label: str
+    group: str
     objective_class: str
+    severity: str
+    """The default severity of its findings."""
     gated: bool
     types: list[str]
+    forms: list[CatalogForm]
+    """The first is the default."""
+    frameworks: list[str]
+    """Framework items, as ``<framework id>:<item id>``."""
+    source: str
+    licence: str
 
 
 class CatalogAttack(_Out):
@@ -281,22 +306,25 @@ async def annotate_redteam_finding(
 
 @router.get("/catalog", response_model=CatalogOut)
 async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
-    from martian.redteam.catalog import ATTACKS, CATALOG_VERSION, FRAMEWORKS, VULNERABILITIES
-    from martian.redteam.model.maps import objective_of
+    from martian.redteam.catalog import ATTACKS, CATALOG_VERSION, ENTRIES, FRAMEWORKS
 
-    vulnerabilities = []
-    for name, factory in VULNERABILITIES.items():
-        item = factory()
-        vulnerabilities.append(
-            CatalogVulnerability(
-                name=name,
-                id=item.id,
-                label=item.label,
-                objective_class=objective_of(item.id),
-                gated=item.gated,
-                types=list(item.allowed_types),
-            )
+    vulnerabilities = [
+        CatalogVulnerability(
+            name=name,
+            id=item.id,
+            label=item.label,
+            group=item.group,
+            objective_class=item.objective,
+            severity=item.severity,
+            gated=item.gated,
+            types=list(item.types),
+            forms=[CatalogForm.model_validate(form.describe()) for form in item.forms],
+            frameworks=list(item.frameworks),
+            source=item.source,
+            licence=item.licence,
         )
+        for name, item in ENTRIES.items()
+    ]
     attacks = [
         CatalogAttack(name=name, id=attack.id, label=attack.label, kind=attack.kind)
         for name, attack in ((name, make()) for name, make in ATTACKS.items())
@@ -345,6 +373,7 @@ __all__ = [
     "PREFIX",
     "AnnotationIn",
     "AttemptPage",
+    "CatalogForm",
     "CatalogOut",
     "FindingList",
     "Launcher",

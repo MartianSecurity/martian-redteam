@@ -29,6 +29,7 @@ from martian.redteam.server.contract import (
     undeclared_change,
 )
 from martian.redteam.store import RedteamStore
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.types import EvaluatorContext, RiskAssessment, SimulatorContext
 
@@ -128,7 +129,7 @@ async def test_existing_sdk_clients_send_and_read_what_the_contract_allows():
         )
     _validate("SimulateRequest", sent[0])
     _validate("EvaluateRequest", sent[1])
-    assert sent[0]["catalog_version"] == CATALOG_VERSION
+    assert sent[0]["catalog_version"] == HOSTED_CATALOG_VERSION == "0.2.0"
 
 
 @pytest.fixture
@@ -172,6 +173,10 @@ def test_a_stored_run_is_served_in_the_shapes_the_contract_names(served):
     catalog = client.get("/v1/redteam/catalog")
     _response("get", "/v1/redteam/catalog", "200", catalog.json())
     assert catalog.json()["version"] == CATALOG_VERSION
+    leakage = next(item for item in catalog.json()["vulnerabilities"] if item["id"] == "prompt_leakage")
+    assert (leakage["objective_class"], leakage["severity"], leakage["licence"]) == ("disclosure", "high", "Apache-2.0")
+    assert leakage["forms"][0]["id"] == "reply" and leakage["forms"][0]["level"] == 1
+    assert "owasp_llm_2025:LLM07" in leakage["frameworks"]
     assert client.get("/v1/redteam/runs/missing").status_code == 404
     assert client.get(f"/v1/redteam/runs/rt-1/evidence/{uuid4()}").status_code == 404
 

@@ -11,7 +11,7 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def test_catalog_command_lists_builtins() -> None:
-    result = runner.invoke(app, ["catalog"])
+    result = runner.invoke(app, ["catalog"], env={"COLUMNS": "400"})
     assert result.exit_code == 0
     assert "PromptLeakage" in result.stdout
     assert "prompt_injection" in result.stdout

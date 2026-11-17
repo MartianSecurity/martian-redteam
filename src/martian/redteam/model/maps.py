@@ -39,23 +39,11 @@ from martian.redteam.model import (
     VerificationOutcome,
 )
 from martian.redteam.verify.rules import counted_as, label, supported
+from martian_redteam.catalog.entries import ENTRIES
 
-OBJECTIVES: dict[str, ObjectiveClass] = {
-    "prompt_leakage": "disclosure",
-    "pii_leakage": "disclosure",
-    "excessive_agency": "action",
-    "rbac": "action",
-    "ssrf": "action",
-    "sql_injection": "action",
-    "shell_injection": "action",
-    "toxicity": "control",
-    "illegal_activity": "control",
-    "bias": "control",
-    "misinformation": "control",
-    "robustness": "control",
-}
-"""The objective class of each built-in vulnerability of catalogue 0.2. A custom vulnerability is a
-``control`` objective: its criteria judge what the target said."""
+OBJECTIVES: dict[str, ObjectiveClass] = {item.id: item.objective for item in ENTRIES.values()}
+"""The objective class of each built-in vulnerability, from its catalogue entry. A custom
+vulnerability is a ``control`` objective: its criteria judge what the target said."""
 
 JUDGE = "judge"
 """The check id of the hosted judge, the only check a version 0.2 probe has."""
@@ -387,6 +375,8 @@ def to_risk_assessment(run: RedteamRun) -> Any:
         ]
     assessment: RiskAssessment = summary.model_copy(
         update={
+            # The catalogue the run was made with, not the one this SDK has.
+            "catalog_version": run.catalog_version,
             "purpose": run.purpose,
             "graph_revision": run.graph_revision,
             "policy_revision": run.policy_revision,

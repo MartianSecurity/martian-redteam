@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError, field_va
 from martian._errors import error_code, message, reference
 from martian._privacy import RedactionPolicy
 from martian.config import ConfigError, MartianConfig
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.types import EvaluatorContext, EvaluatorOutput, SimulatorContext, SimulatorOutput
 
@@ -218,7 +218,7 @@ class Client:
             identifier = UUID(str(operation_id)) if operation_id is not None else uuid4()
         except ValueError:
             raise ConfigError("operation_id must be a UUID") from None
-        payload = {"operation_id": str(identifier), "catalog_version": CATALOG_VERSION, **body}
+        payload = {"operation_id": str(identifier), "catalog_version": HOSTED_CATALOG_VERSION, **body}
         if self.agent_id is not None:
             payload["agent_id"] = str(self.agent_id)
         try:

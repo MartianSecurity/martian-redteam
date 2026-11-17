@@ -1,8 +1,10 @@
 """Plan: expand a version 2 run file into probes, each with its checks fixed before the attack runs.
 
 One probe per vulnerability, type and attack method, with ``budget.attempts_per_probe`` attempts. A
-goal that names a tool is checked as a tool call. A vulnerability with neither checks nor such a goal
-is decided by the judge. The plan calls no model and loads no target.
+goal that names a tool is checked as a tool call. A built-in vulnerability with neither checks nor
+such a goal is decided by its catalogue entry's default form (the judge, for every entry of catalogue
+0.2); a custom one by the judge. A vulnerability without ``severity`` takes its entry's default. The
+plan calls no model and loads no target.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from martian.redteam.model import Check, Probe
 from martian.redteam.model.maps import objective_of, probe_id
 from martian.redteam.runfile import CheckDecl, Goal, RunFile, Vulnerability
 from martian_redteam.catalog.attacks import Attack, get_attack
+from martian_redteam.catalog.entries import CatalogEntry, Form, find_entry
 from martian_redteam.catalog.vulnerabilities import Vulnerability as CatalogVulnerability
 from martian_redteam.catalog.vulnerabilities import get_vulnerability
 
@@ -44,9 +47,20 @@ def _check_spec(check: CheckDecl) -> dict[str, Any]:
     return {key: value for key, value in spec.items() if value is not None}
 
 
-def _checks(declared: list[CheckDecl], goal: Goal | None = None) -> list[Check]:
+def _form_checks(form: Form) -> list[CheckDecl]:
+    """A catalogue form's checks, as the run file declares checks."""
+    from pydantic import TypeAdapter
+
+    adapter: TypeAdapter[CheckDecl] = TypeAdapter(CheckDecl)
+    return [adapter.validate_python(dict(check)) for check in form.checks]
+
+
+def _checks(declared: list[CheckDecl], goal: Goal | None = None, form: Form | None = None) -> list[Check]:
     """The probe's checks. A goal that names a tool is checked as a tool call (the ``goal`` check)
-    unless a declared tool-call check already names that tool. Without any check, the judge decides."""
+    unless a declared tool-call check already names that tool. Without a declared check or such a
+    goal, the catalogue form's checks decide, and without a form the judge."""
+    if not declared and form is not None and not (goal is not None and goal.tool is not None):
+        declared = _form_checks(form)
     checks = []
     kinds = [check.type for check in declared]
     for index, check in enumerate(declared, start=1):
@@ -81,6 +95,11 @@ def _goal(spec: Vulnerability) -> str:
     return f"call {spec.goal.tool}" + (f" with {where}" if where else "")
 
 
+def _entry_of(spec: Vulnerability) -> CatalogEntry | None:
+    """The catalogue entry a run file's vulnerability names; ``None`` for a custom one."""
+    return find_entry(spec.name)
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
     """Every probe of the run, in the run file's order."""
     local = run_file.models.attacker is not None
@@ -88,7 +107,9 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     planned: list[PlannedProbe] = []
     for index, spec in enumerate(run_file.vulnerabilities):
         vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
-        checks = _checks(list(spec.checks), spec.goal)
+        entry = _entry_of(spec)
+        checks = _checks(list(spec.checks), spec.goal, entry.default_form if entry is not None else None)
+        severity = spec.severity or (entry.severity if entry is not None else None)
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
             raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
@@ -110,9 +131,9 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     planned_attempts=run_file.budget.attempts_per_probe,
                     task=spec.benign.task if spec.benign else "",
                     task_checks=_task_checks(spec),
-                    metadata={"severity": spec.severity, "attack_kind": attack.kind},
+                    metadata={"severity": severity, "attack_kind": attack.kind},
                 )
-                planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity))
+                planned.append(PlannedProbe(probe, vulnerability, attack, severity))
     return planned
 
 

@@ -25,7 +25,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team targets](redteam-targets.md) — the function, HTTP and MCP server targets, how each keeps a conversation, the reply contract for tool calls, the recording MCP proxy and its local sessions, tool calls read from traces, and worked examples for four agent frameworks
    - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs; two runs compared; confirmed findings pinned as regression tests
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
-6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
+6. [Catalog](catalog.md) — catalogue 1.0: each vulnerability's objective, forms and what each proves, default severity, framework tags, source and licence; the version rule; attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment with red team results, WAF
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off

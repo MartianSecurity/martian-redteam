@@ -1,8 +1,46 @@
 # Catalog
 
-The catalog is **IDs, types, labels, weights, and gate policy**, and the generator and judge prompts in `martian.redteam.catalog.prompts`: the goal of each vulnerability, the method of each LLM attack and the judge's rubric of each vulnerability. The local engine and the hosted engine in martian-agents both build their prompts from that one copy, and `PROMPTS_REVISION` names the catalogue version and a digest of the text. Built-in SDK objects never send criteria strings.
+The catalogue lists what can go wrong with an agent, and for each entry how a hit is proven. Its entries are in `martian_redteam.catalog.entries` (`ENTRIES`, re-exported by `martian.redteam.catalog`); the generator and judge prompts that go with them are in `martian.redteam.catalog.prompts`. The local engine and the hosted engine in martian-agents both build their prompts from that one copy, and `PROMPTS_REVISION` names the catalogue version and a digest of the text. Built-in SDK objects never send criteria strings.
 
-`CATALOG_VERSION` is `0.2.0`. It is written onto every `RiskAssessment`.
+`CATALOG_VERSION` is `1.0.0`. It is written onto every run and every `RiskAssessment`. The hosted SDK operations (`/v1/redteam/simulate` and `/evaluate`) accept catalogue `0.2.0` only, so the hosted client sends `HOSTED_CATALOG_VERSION`, `0.2.0`; the hosted engine reads an id it does not know as it reads a custom vulnerability's.
+
+## Entries
+
+Each built-in vulnerability is a catalogue entry with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The YAML name, such as `PromptLeakage` |
+| `id` | The id in reports, such as `prompt_leakage` |
+| `label` | A short label |
+| `group` | `access`, `disclosure`, `injection`, `agency`, `memory`, `supply_chain` or `content` |
+| `types` | The types a run file can select. Omitting `types` selects all |
+| `gated` | Whether the version 0.2 gate counts it by default |
+| `objective` | `disclosure`, `control`, `action` or `persistence`: what a hit establishes, which decides what evidence can verify it ([verdicts](redteam-verdicts.md)) |
+| `forms` | The ways a probe of the entry is decided, the default first. See [forms](#forms) |
+| `severity` | The default severity of its findings. A run file's `severity` overrides it |
+| `frameworks` | The framework items it maps to, as `<framework id>:<item id>`, such as `owasp_llm_2025:LLM07` |
+| `source` and `licence` | Where the entry's names come from, and under what licence |
+
+`martian redteam catalog` prints every field, and `GET /v1/redteam/catalog` serves them ([red team API](redteam-api.md)).
+
+## Forms
+
+A form is a set of checks stated before the attack, and what a hit of them proves. It has an `id`, its `checks` (the run file's [check types](redteam-run-file.md#vulnerabilities)), `goal` when the run file's goal tool call is one of its checks, the evidence `level` a hit reaches, whether code decides it (`deterministic`), `proves` and `needs`, what the target must offer.
+
+A version 2 run file's vulnerability is decided by, in order: the `checks` it declares (with its goal's tool call), else its goal's tool call when the goal names a tool, else the entry's default form. A custom vulnerability without checks is decided by the judge.
+
+Every entry has the `reply` form: the judge reads the reply. A hit of it is suspected, level 1, and is never counted as confirmed. Each entry of catalogue 0.2 has `reply` as its default form, so a run file written for 0.2 is decided as before.
+
+## Version
+
+The catalogue version changes whenever anything a run file can name, or a verdict depends on, changes:
+
+- **Major**: an id, a YAML name or a type is removed or renamed, or an entry's objective or a form's checks change meaning. The old name keeps resolving.
+- **Minor**: an entry, a type, a form or a framework tag is added, or a default severity or gate flag changes.
+- **Patch**: a label, a source or the words of what a form proves change.
+
+A new version changes `PROMPTS_REVISION`, and a resumed run reruns every attempt.
 
 ## Lookup
 
@@ -24,7 +62,74 @@ get_attack("rot13")
 vulnerabilities_for("owasp_llm_2025")
 ```
 
-`uv run martian-redteam catalog` prints the same tables.
+`martian redteam catalog` (or `martian-redteam catalog`) prints the same tables.
+
+## Vulnerabilities
+
+| YAML name | Id | Group | Objective | Severity | Gated by default | Types | Forms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `PromptLeakage` | `prompt_leakage` | disclosure | disclosure | high | **yes** | `system_prompt`, `instructions`, `credentials` | `reply` |
+| `ExcessiveAgency` | `excessive_agency` | agency | action | high | **yes** | `functionality`, `permissions`, `autonomy` | `reply` |
+| `Toxicity` | `toxicity` | content | control | medium | no | `insults`, `profanity`, `hate` | `reply` |
+| `IllegalActivity` | `illegal_activity` | content | control | medium | no | `violent_crimes`, `cybercrime`, `fraud` | `reply` |
+| `PIILeakage` | `pii_leakage` | disclosure | disclosure | high | no | `direct_disclosure`, `session_leak`, `database_access` | `reply` |
+| `Bias` | `bias` | content | control | medium | no | `religion`, `politics`, `gender`, `race` | `reply` |
+| `Misinformation` | `misinformation` | content | control | medium | no | `factual_errors`, `unsupported_claims`, `expertize_misrepresentation` | `reply` |
+| `RBAC` | `rbac` | access | action | high | **yes** | `role_bypass`, `privilege_escalation`, `unauthorized_role_assumption` | `reply` |
+| `SSRF` | `ssrf` | access | action | high | **yes** | `internal_service_access`, `cloud_metadata_access`, `port_scanning` | `reply` |
+| `SQLInjection` | `sql_injection` | access | action | critical | **yes** | `blind_sql_injection`, `union_based_injection`, `error_based_injection` | `reply` |
+| `ShellInjection` | `shell_injection` | access | action | critical | **yes** | `command_injection`, `system_command_execution`, `shell_escape_sequences` | `reply` |
+| `Robustness` | `robustness` | injection | control | medium | no | `input_overreliance`, `hijacking` | `reply` |
+
+Omitting `types` selects all |
+| `gated` | Whether the version 0.2 gate counts it by default |
+| `objective` | `disclosure`, `control`, `action` or `persistence`: what a hit establishes, which decides what evidence can verify it ([verdicts](redteam-verdicts.md)) |
+| `forms` | The ways a probe of the entry is decided, the default first. See [forms](#forms) |
+| `severity` | The default severity of its findings. A run file's `severity` overrides it |
+| `frameworks` | The framework items it maps to, as `<framework id>:<item id>`, such as `owasp_llm_2025:LLM07` |
+| `source` and `licence` | Where the entry's names come from, and under what licence |
+
+`martian redteam catalog` prints every field, and `GET /v1/redteam/catalog` serves them ([red team API](redteam-api.md)).
+
+## Forms
+
+A form is a set of checks stated before the attack, and what a hit of them proves. It has an `id`, its `checks` (the run file's [check types](redteam-run-file.md#vulnerabilities)), `goal` when the run file's goal tool call is one of its checks, the evidence `level` a hit reaches, whether code decides it (`deterministic`), `proves` and `needs`, what the target must offer.
+
+A version 2 run file's vulnerability is decided by, in order: the `checks` it declares (with its goal's tool call), else its goal's tool call when the goal names a tool, else the entry's default form. A custom vulnerability without checks is decided by the judge.
+
+Every entry has the `reply` form: the judge reads the reply. A hit of it is suspected, level 1, and is never counted as confirmed. Each entry of catalogue 0.2 has `reply` as its default form, so a run file written for 0.2 is decided as before.
+
+## Version
+
+The catalogue version changes whenever anything a run file can name, or a verdict depends on, changes:
+
+- **Major**: an id, a YAML name or a type is removed or renamed, or an entry's objective or a form's checks change meaning. The old name keeps resolving.
+- **Minor**: an entry, a type, a form or a framework tag is added, or a default severity or gate flag changes.
+- **Patch**: a label, a source or the words of what a form proves change.
+
+A new version changes `PROMPTS_REVISION`, and a resumed run reruns every attempt.
+
+## Lookup
+
+YAML `name` and Python factories accept:
+
+- PascalCase class names: `PromptLeakage`, `PromptInjection`
+- snake_case ids: `prompt_leakage`, `prompt_injection`
+- hyphenated aliases are normalized to underscores
+
+Unknown names raise `KeyError`. Unknown types on a built-in raise `ValueError` (fail closed).
+
+```python
+from martian_redteam import PromptLeakage
+from martian_redteam.catalog import get_attack, get_vulnerability, vulnerabilities_for
+
+PromptLeakage(types=["system_prompt"])
+get_vulnerability("prompt_leakage", ["system_prompt"])
+get_attack("rot13")
+vulnerabilities_for("owasp_llm_2025")
+```
+
+`martian redteam catalog` (or `martian-redteam catalog`) prints the same tables.
 
 ## Vulnerabilities (v0.2.0)
 
@@ -94,7 +199,7 @@ vulnerabilities:
 
 `id` and `criteria` are required for `name: custom` / `CustomVulnerability`. Empty criteria is rejected.
 
-## Attacks (v0.2.0)
+## Attacks
 
 | YAML name | Id | Kind | Behavior |
 | --- | --- | --- | --- |

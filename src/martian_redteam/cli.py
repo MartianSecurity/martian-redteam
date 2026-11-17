@@ -840,19 +840,36 @@ def validate_command(
 
 @app.command("catalog")
 def catalog_command() -> None:
-    """Print built-in vulnerability, attack, and framework ids."""
-    vulns = Table(title="Vulnerabilities")
+    """Print the catalogue: each vulnerability with its objective, forms and checks, default severity,
+    framework tags, source and licence; the attacks; and the framework maps."""
+    from martian_redteam.catalog.entries import CATALOG_VERSION, ENTRIES
+
+    vulns = Table(title=f"Vulnerabilities (catalogue {CATALOG_VERSION})")
     vulns.add_column("YAML name")
     vulns.add_column("Id")
+    vulns.add_column("Objective")
+    vulns.add_column("Severity")
     vulns.add_column("Gated")
     vulns.add_column("Types")
-    for vuln_name, vuln_factory in VULNERABILITIES.items():
-        vulnerability = vuln_factory()
+    vulns.add_column("Forms (default first)")
+    vulns.add_column("Frameworks")
+    vulns.add_column("Source and licence")
+    for vuln_name in VULNERABILITIES:
+        item = ENTRIES[vuln_name]
+        forms = "\n".join(
+            f"{form.id}: {_form_checks(form)}, level {form.level}" + (" (default)" if index == 0 else "")
+            for index, form in enumerate(item.forms)
+        )
         vulns.add_row(
             vuln_name,
-            vulnerability.id,
-            "yes" if vulnerability.gated else "no",
-            ", ".join(vulnerability.allowed_types),
+            item.id,
+            item.objective,
+            item.severity,
+            "yes" if item.gated else "no",
+            ", ".join(item.types),
+            forms,
+            ", ".join(item.frameworks) or "unmapped",
+            f"{item.source} ({item.licence})",
         )
     console.print(vulns)
 
@@ -872,6 +889,16 @@ def catalog_command() -> None:
     for framework in FRAMEWORKS.values():
         frameworks.add_row(framework.id, framework.coverage, ", ".join(framework.vulnerability_ids))
     console.print(frameworks)
+
+
+def _form_checks(form: Any) -> str:
+    """A form's checks in a few words: each check's type, and the goal's tool call when it uses one."""
+    kinds = [str(check["type"]) for check in form.checks]
+    if form.goal == "tool":
+        kinds.append("goal tool call")
+    elif form.goal == "tool_with_canary":
+        kinds.append("goal tool call carrying the canary")
+    return " + ".join(kinds)
 
 
 if __name__ == "__main__":
