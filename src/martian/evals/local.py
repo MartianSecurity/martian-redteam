@@ -30,7 +30,8 @@ default judge model in ``settings.json`` or the judge's own. A run whose server 
 again when the next one starts. When it starts, the server finishes as interrupted each queued or
 running run that is not in the queue at all (:func:`~martian.evals.local_runs.finish_interrupted`).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes, its OpenTelemetry ``POST /v1/traces``,
+The API is under ``/v1``: the core's ``/v1/evals`` routes, the red team core's ``/v1/redteam`` routes,
+which read the red team runs ``martian redteam run`` keeps in the same folder, its OpenTelemetry ``POST /v1/traces``,
 which takes the fixed principal's traces without credentials, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
 ``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``

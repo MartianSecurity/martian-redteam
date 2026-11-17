@@ -32,11 +32,16 @@ testpaths = ["tests"]
 """
 
 
-def write_build(folder: Path, *, commit: str = COMMIT, dirty: bool = False) -> Path:
+APPS = {"@martian/evals": "0.1.0", "@martian/redteam": "0.1.0"}
+
+
+def write_build(folder: Path, *, commit: str = COMMIT, dirty: bool = False, apps: dict | None = APPS) -> Path:
     (folder / "assets").mkdir(parents=True)
     (folder / "index.html").write_text("<!doctype html><title>Martian Evals</title>", encoding="utf-8")
     (folder / "assets" / "index-abc.js").write_text("export {};", encoding="utf-8")
     stamp = {"name": "@martian/evals", "version": "0.1.0", "commit": commit, "dirty": dirty}
+    if apps is not None:
+        stamp["apps"] = apps
     (folder / "ui-version.json").write_text(json.dumps(stamp), encoding="utf-8")
     return folder
 
@@ -103,6 +108,26 @@ def test_a_build_from_a_dirty_tree_is_refused(tmp_path, repo):
     assert pyproject.read_text(encoding="utf-8") == PYPROJECT
 
 
+@pytest.mark.parametrize("apps", [None, {"@martian/evals": "0.1.0"}], ids=["no apps", "evals only"])
+def test_a_build_without_the_red_team_app_is_refused(tmp_path, repo, apps):
+    """The local edition serves the red team routes, so the UI it ships holds the Red Team pages
+    (MartianSecurity/martian-notes#290)."""
+    ui, pyproject = repo
+    build = write_build(tmp_path / "dist-evals", apps=apps)
+    with pytest.raises(ValueError, match="does not hold (@martian/evals, )?@martian/redteam"):
+        vendor_ui.vendor(build, ui, pyproject)
+    assert files_in(ui) == {"stale.js": b"old"}
+    files = files_in(build)
+    pin = {"version": "0.1.0", "commit": COMMIT, "digest": check_release.ui_digest(files)}
+    with pytest.raises(ValueError, match="does not hold (@martian/evals, )?@martian/redteam"):
+        check_release.check_ui(files, pin, "the wheel")
+
+
+def test_the_packaged_ui_holds_the_evals_and_the_red_team_apps():
+    stamp = json.loads((ROOT / "src" / "martian" / "ui" / "ui-version.json").read_text(encoding="utf-8"))
+    assert set(stamp["apps"]) == {"@martian/evals", "@martian/redteam"}
+
+
 def test_a_folder_that_is_not_a_build_is_refused(tmp_path, repo):
     ui, pyproject = repo
     build = write_build(tmp_path / "dist-evals", commit="main")
@@ -143,7 +168,11 @@ def pinned(tmp_path) -> tuple[dict[str, bytes], dict[str, str]]:
         ),
         (
             lambda files: files.update(
-                {"ui-version.json": json.dumps({"version": "0.1.0", "commit": "f" * 40, "dirty": False}).encode()}
+                {
+                    "ui-version.json": json.dumps(
+                        {"version": "0.1.0", "commit": "f" * 40, "dirty": False, "apps": APPS}
+                    ).encode()
+                }
             ),
             f"is 0.1.0 at {'f' * 40}, but pyproject.toml pins 0.1.0 at {COMMIT}",
         ),
