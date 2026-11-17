@@ -44,12 +44,14 @@ VerificationOutcome = Literal["verified", "consistent", "not_reproducible", "unv
 
 ReproductionStatus = Literal["reproduced_clean", "state_dependent", "not_reproduced", "untested"]
 
-AttemptOutcome = Literal["hit", "resisted", "undetermined", "error"]
+AttemptOutcome = Literal["hit", "resisted", "undetermined", "error", "stopped"]
 """Three outcomes decide an attempt, and errors stay outside them. ``hit`` (the target was
 vulnerable): a check found the attack succeeded. ``resisted`` (the target held): every check ran and
 none did. ``undetermined``: a check could not decide (an unreadable judgment, a missing observation).
-``error``: the attempt did not complete, and ``Attempt.error_kind`` says whose failure it was. Rates are
-computed over decided attempts (hits and resisted), with the undetermined count beside them."""
+``error``: the attempt did not complete, and ``Attempt.error_kind`` says whose failure it was.
+``stopped``: the run's budget ran out before the attempt was decided; ``Attempt.stopped_by`` names the
+limit. A stopped attempt is never resisted. Rates are computed over decided attempts (hits and
+resisted), with the undetermined count beside them."""
 
 CheckKind = Literal["judge", "text", "canary", "tool_call", "receipt", "state"]
 ErrorKind = Literal["infrastructure", "target", "attacker", "judge"]
@@ -91,6 +93,40 @@ class ToolCall(_Object):
     call_id: str | None = None
     executed: bool | None = None
     result: str | None = None
+
+
+class Spend(_Object):
+    """What an attempt, a probe or a run spent: calls of the target, of the attacker model and of the
+    judge model, the tokens those model calls reported and their cost when it is known."""
+
+    target_queries: int = Field(default=0, ge=0)
+    attacker_calls: int = Field(default=0, ge=0)
+    judge_calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
+
+    @property
+    def model_calls(self) -> int:
+        return self.attacker_calls + self.judge_calls
+
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def __add__(self, other: Spend) -> Spend:
+        return Spend(
+            target_queries=self.target_queries + other.target_queries,
+            attacker_calls=self.attacker_calls + other.attacker_calls,
+            judge_calls=self.judge_calls + other.judge_calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+        )
+
+
+BudgetLimit = Literal["target_queries", "model_calls", "tokens", "cost_usd", "max_seconds"]
+"""A limit of the run file's ``budget`` that stopped a run."""
 
 
 class Turn(_Object):
@@ -179,6 +215,10 @@ class Attempt(_Object):
     """``repetition``: a fresh run of a hit, to reproduce it. ``control``: the same probe without the
     attack, which must not show the signal."""
     target_calls: int = Field(default=0, ge=0)
+    spend: Spend | None = None
+    """What the attempt spent. ``None`` when the source did not record it."""
+    stopped_by: BudgetLimit | None = None
+    """The budget limit that stopped the attempt, when its outcome is ``stopped``."""
     started_at: datetime | None = None
     finished_at: datetime | None = None
     trace_id: str | None = None
@@ -195,6 +235,8 @@ class Attempt(_Object):
             raise ValueError("only a hit has an evidence level")
         if self.outcome == "error" and not (self.error or self.error_code or self.error_kind):
             raise ValueError("an attempt that errored says why")
+        if (self.outcome == "stopped") != (self.stopped_by is not None):
+            raise ValueError("a stopped attempt, and only a stopped one, names the budget limit that stopped it")
         return self
 
 
@@ -256,6 +298,8 @@ class Counts(_Object):
     target_errors: int = Field(default=0, ge=0)
     attacker_errors: int = Field(default=0, ge=0)
     judge_errors: int = Field(default=0, ge=0)
+    stopped: int = Field(default=0, ge=0)
+    """Attempts the budget stopped before they were decided."""
     confirmed: int = Field(default=0, ge=0)
     suspected: int = Field(default=0, ge=0)
 
@@ -342,6 +386,7 @@ __all__ = [
     "Annotation",
     "Attempt",
     "AttemptOutcome",
+    "BudgetLimit",
     "Check",
     "CheckKind",
     "CheckResult",
@@ -357,6 +402,7 @@ __all__ = [
     "ReproductionStatus",
     "RunSource",
     "RunState",
+    "Spend",
     "TargetRef",
     "ToolCall",
     "Turn",

@@ -26,7 +26,7 @@ The contract has two parts:
 | `GET /v1/redteam/operations/{operation_id}` | Hosted: read an operation |
 | `POST /v1/redteam/operations/{operation_id}/cancel` | Hosted: cancel an operation |
 
-Starting and stopping a run needs a launcher bound by the edition (`app.state.martian_redteam_launcher`). An installation without one answers `501`. A run file that is not valid is answered `422`, naming each problem.
+Starting and stopping a run needs a launcher bound by the edition (`app.state.martian_redteam_launcher`). An installation without one answers `501`. `martian.redteam.engine.launcher.LocalLauncher` runs the engine in the server's process: `start` saves the run as `running` and answers at once, the run is kept after each attempt, and `stop` cancels it and keeps it as `cancelled`. A run file it cannot run (a target kind this release cannot call, no service, a judge check without a judge model) is answered `422`, and a `request_id` a run already has `409`. A run file that is not valid is answered `422`, naming each problem.
 
 ## Changing the contract
 

@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-This release validates version 2 files. `martian redteam run` refuses one and says so, because the local engine that runs it is not in this release yet.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). This release runs a `file` and `function` target; a `url` or `mcp` target, `tools.proxy` and `environment` stop the run before anything is called, with a message that says so.
 
 ```yaml
 version: 2
@@ -158,12 +158,22 @@ The proxy is not an environment. It simulates no application and holds no data.
 | Field | Meaning |
 | --- | --- |
 | `target_queries` | The most calls of the target the run makes |
-| `model_calls` | The most attacker and judge calls |
+| `model_calls` | The most attacker and judge calls, together |
+| `tokens` | The most tokens the attacker and judge calls report, input and output together |
+| `cost_usd` | The most the model calls may cost, when their prices are known (`MLFLOW_MODEL_CATALOG_URI`, see [security and data](security-and-data.md#judges-and-the-model-catalogue)) |
 | `max_seconds` | The longest the run may take |
 | `attempts_per_probe` | Attacks per vulnerability type and attack method. Default 1 |
 | `max_concurrent` | Probes at the same time. Default 2 |
 
-A run stops at the first limit it reaches and its report says which.
+A run stops at the first limit it reaches and its report says which. Every call is counted before it is made, so a run never makes more target or model calls than `target_queries` and `model_calls` allow. Tokens and cost are known only after a call returns, so the last model call may cross `tokens` or `cost_usd`, and none is made after it. An attempt the budget stopped before it was decided is reported `stopped`, never as held, and the run's state is `stopped`. Each attempt records what it spent, and `redteam-run.json` gives the run's and each probe's totals.
+
+## How a run works
+
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
+2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt.
+3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last. A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
+
+The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`. The command exits 0 when the gate passes, 1 when it fails and 2 when the run could not start.
 
 ## Gate
 

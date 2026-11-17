@@ -234,6 +234,11 @@ class Budget(_Model):
 
     target_queries: int | None = Field(default=None, ge=1, le=100_000)
     model_calls: int | None = Field(default=None, ge=1, le=100_000)
+    """Calls of the attacker and the judge models together."""
+    tokens: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    """Tokens the attacker and judge calls reported, input and output together."""
+    cost_usd: float | None = Field(default=None, gt=0, le=1_000_000)
+    """What the model calls cost, when their provider's prices are known."""
     max_seconds: float | None = Field(default=None, gt=0, le=86_400)
     attempts_per_probe: int = Field(default=1, ge=1, le=100)
     max_concurrent: int = Field(default=2, ge=1, le=64)

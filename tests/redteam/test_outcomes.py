@@ -91,7 +91,7 @@ def test_errors_are_counted_by_whose_failure_they_were_and_rates_use_decided_att
 def test_the_gate_fails_on_undetermined_by_default_and_ignores_it_only_when_told():
     run = run_of(attempt(1, "resisted"), attempt(2, "undetermined"))
     assert Gate().undetermined == "fail"
-    with pytest.raises(GateFailure, match="1 undetermined attempt"):
+    with pytest.raises(GateFailure, match="1 undetermined or stopped attempt"):
         evaluate_run_gate(run, Gate())
     evaluate_run_gate(run, Gate(undetermined="ignore"))
 

@@ -164,11 +164,11 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/model/` | The shared red team data model, and the maps from the version 0.2 report, CI session rows and the engine's campaign summary ([red team model](redteam-model.md)) | Exists |
 | `src/martian/redteam/verify/` | The verdict rules and their published test vectors ([verdicts](redteam-verdicts.md)); later the verifiers | The rules exist |
 | `src/martian/redteam/store/` | Red team runs in the evals core's record store, as eval runs of kind `redteam` | Exists |
-| `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; not yet mounted in `martian ui` |
-| `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Validated; not yet run |
+| `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; not yet mounted in `martian ui`, which will bind the engine's `LocalLauncher` |
+| `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Exists; `martian redteam run` runs it |
 | `src/martian/redteam/catalog/` | The catalogue's home in the core: the version 0.2 catalogue of `martian_redteam`, and the generator and judge prompts (`prompts.py`) that the local and hosted engines share | Exists |
-| `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls | The interface exists; the function, HTTP and MCP targets are to come |
-| `src/martian/redteam/engine/` | The engine: the version 0.2 probe loop, the local service that generates and judges attacks with the user's own models (`local.py`), and the choice between it and the hosted client (`service.py`) | Exists |
+| `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls; the version 0.2 callback and a function in a file as targets (`callback.py`) | The interface, the callback and the function target exist; the HTTP and MCP targets are to come |
+| `src/martian/redteam/engine/` | The engine: the plan, attack, verify loop of a version 2 run (`run.py`, `plan.py`) with its budget ledger (`budget.py`), gate and reports; the local service that generates and judges attacks with the user's own models (`local.py`) and the choice between it and the hosted client (`service.py`); `LocalLauncher` for the run routes; and the version 0.2 probe loop | Exists |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
 
 ## CI and scoring

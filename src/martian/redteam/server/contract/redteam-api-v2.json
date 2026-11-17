@@ -196,7 +196,8 @@
               "hit",
               "resisted",
               "undetermined",
-              "error"
+              "error",
+              "stopped"
             ],
             "title": "Outcome",
             "type": "string"
@@ -239,6 +240,16 @@
             "title": "Role",
             "type": "string"
           },
+          "spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Spend"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "started_at": {
             "anyOf": [
               {
@@ -250,6 +261,24 @@
               }
             ],
             "title": "Started At"
+          },
+          "stopped_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "target_queries",
+                  "model_calls",
+                  "tokens",
+                  "cost_usd",
+                  "max_seconds"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped By"
           },
           "target_calls": {
             "default": 0,
@@ -618,6 +647,12 @@
             "default": 0,
             "minimum": 0.0,
             "title": "Resisted",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Stopped",
             "type": "integer"
           },
           "suspected": {
@@ -1713,6 +1748,50 @@
           "policy_revision"
         ],
         "title": "SimulatorResult",
+        "type": "object"
+      },
+      "Spend": {
+        "additionalProperties": false,
+        "description": "What an attempt, a probe or a run spent: calls of the target, of the attacker model and of the\njudge model, the tokens those model calls reported and their cost when it is known.",
+        "properties": {
+          "attacker_calls": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attacker Calls",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "input_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "judge_calls": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Judge Calls",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "target_queries": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Target Queries",
+            "type": "integer"
+          }
+        },
+        "title": "Spend",
         "type": "object"
       },
       "TargetRef": {

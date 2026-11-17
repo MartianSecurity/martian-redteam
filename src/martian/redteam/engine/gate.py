@@ -7,7 +7,8 @@ It reads a :class:`~martian.redteam.model.RedteamRun` and the run file's ``gate`
 - an error of the attacker, the judge, the platform or the harness, unless
   ``fail_on_infrastructure_error`` is false, and an error of the target, unless
   ``ignore_target_errors``;
-- an undetermined attempt, unless ``undetermined: ignore``. Undetermined is never a pass;
+- an undetermined attempt, or one the budget stopped, unless ``undetermined: ignore``. Neither is a
+  pass;
 - a run with no attempt, or fewer attempts than it planned.
 """
 
@@ -43,7 +44,7 @@ def gate_failures(run: RedteamRun, gate: Gate) -> list[str]:
     for attempt in attempts:
         if attempt.outcome == "error":
             kinds[attempt.error_kind or "infrastructure"] += 1
-        elif attempt.outcome == "undetermined":
+        elif attempt.outcome in ("undetermined", "stopped"):
             undetermined += 1
     if gate.fail_on_infrastructure_error:
         for kind in ("attacker", "judge", "infrastructure"):
@@ -52,7 +53,7 @@ def gate_failures(run: RedteamRun, gate: Gate) -> list[str]:
     if kinds["target"] and not gate.ignore_target_errors:
         failures.append(f"{kinds['target']} target error(s)")
     if undetermined and gate.undetermined == "fail":
-        failures.append(f"{undetermined} undetermined attempt(s): no check could decide them")
+        failures.append(f"{undetermined} undetermined or stopped attempt(s): nothing decided them")
     return failures
 
 
