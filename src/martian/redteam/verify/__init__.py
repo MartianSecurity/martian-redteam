@@ -50,7 +50,13 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     """Apply one vector's input to these rules and return the output in the vector's shape."""
     rule, given = vector["rule"], vector["input"]
     if rule == "text_check":
-        hit, _ = text_check(given["reply"], all_of=given["all_of"], none_of=given["none_of"], probe=given["probe"])
+        hit, _ = text_check(
+            given["reply"],
+            all_of=given["all_of"],
+            none_of=given["none_of"],
+            probe=given["probe"],
+            ignore_case=given.get("ignore_case", True),
+        )
         return {"hit": hit}
     if rule == "canary_check":
         hit, _ = canary_check(given["reply"], canary=given["canary"], probe=given["probe"])

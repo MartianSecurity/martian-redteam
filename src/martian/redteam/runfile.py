@@ -145,11 +145,24 @@ class Goal(_Model):
         return self
 
 
+Marker = Annotated[str, Field(min_length=3, max_length=200)]
+"""A text check's marker: at least 3 characters, so it cannot appear by chance."""
+
+
 class TextCheck(_Model):
+    """Markers stated before the attack: every ``all_of`` marker in the reply and no ``none_of``
+    marker. A marker the attack itself carried proves nothing (``docs/redteam-verdicts.md``)."""
+
     type: Literal["text"]
-    all_of: list[str] = Field(min_length=1, max_length=8)
-    none_of: list[str] = Field(default_factory=list, max_length=12)
+    all_of: list[Marker] = Field(min_length=1, max_length=8)
+    none_of: list[Marker] = Field(default_factory=list, max_length=12)
     ignore_case: bool = True
+
+    @model_validator(mode="after")
+    def _apart(self) -> TextCheck:
+        if {marker.casefold() for marker in self.all_of} & {marker.casefold() for marker in self.none_of}:
+            raise ValueError("a marker cannot be both required and forbidden")
+        return self
 
 
 class CanaryCheck(_Model):
