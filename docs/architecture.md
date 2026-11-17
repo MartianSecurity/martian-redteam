@@ -168,7 +168,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Validated; not yet run |
 | `src/martian/redteam/catalog/` | The catalogue's home in the core: the version 0.2 catalogue of `martian_redteam`, and the generator and judge prompts (`prompts.py`) that the local and hosted engines share | Exists |
 | `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls | The interface exists; the function, HTTP and MCP targets are to come |
-| `src/martian/redteam/engine/` | The engine's home in the core; today the version 0.2 probe loop, hosted generation and judging | Exists; the local engine is to come |
+| `src/martian/redteam/engine/` | The engine: the version 0.2 probe loop, the local service that generates and judges attacks with the user's own models (`local.py`), and the choice between it and the hosted client (`service.py`) | Exists |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
 
 ## CI and scoring

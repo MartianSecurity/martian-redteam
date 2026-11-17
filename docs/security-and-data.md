@@ -23,6 +23,13 @@ proxies are off unless proxies are explicitly opted in. Constructor connections
 must supply a complete URL/token pair. No `.env` is loaded and unused legacy
 variables are ignored; legacy auth is never selected after a failed public call.
 
+A version 2 red team run file that names `models` runs locally instead
+(`martian.redteam.engine.LocalService`): the attacker and judge prompts, the
+purpose, the attacks and the target's replies go only to the models it names,
+with the user's own key, through the judges' model routing. Nothing is sent to a
+Martian server, and a run with both `models` and a Martian connection configured
+stops rather than choose one.
+
 Reports default to content digests. Content opt-in does not disable credential
 redaction, including constructor secrets after client close and report copies.
 Explicit input/output redaction flags take precedence. Raw in-memory assessment

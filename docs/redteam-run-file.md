@@ -98,6 +98,17 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 
 A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set.
 
+Which service generates and judges the attacks:
+
+| `models.attacker` | Martian connection (`MARTIAN_API_URL`, `MARTIAN_API_TOKEN`) | Service |
+| --- | --- | --- |
+| set | not set | Local: your models, called with your key. Nothing is sent to Martian |
+| not set | set | The Martian platform, as in version 0.2 |
+| set | set | None: the run stops. Unset the variables or remove `models` |
+| not set | not set | None: the run stops and says how to set either |
+
+A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.
+
 ## Vulnerabilities
 
 Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criteria` and `gated`, and these:
