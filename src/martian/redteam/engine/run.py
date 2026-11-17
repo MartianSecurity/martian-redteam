@@ -36,6 +36,7 @@ from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
 from martian.redteam.methods import GenerationMode
+from martian.redteam.methods.delivery import Deliverer, PageServer
 from martian.redteam.methods.library import METHODS_REVISION
 from martian.redteam.model import (
     Attempt,
@@ -140,6 +141,7 @@ class Engine:
         self.evidence: dict[str, Evidence] = {}
         self._saving = asyncio.Lock()
         self.reused: set[str] = set()
+        self.deliverer = Deliverer(proxy=getattr(target, "proxy", None))
         if resume is not None:
             self._resume(resume)
 
@@ -173,6 +175,19 @@ class Engine:
     # --- the run --------------------------------------------------------------------------------
 
     async def run(self) -> RedteamRun:
+        """Run every attempt not reused. A page server for the ``web_page`` route serves only while
+        the run does."""
+        routes = {planned.attack_method.delivery.route for planned in self.planned if planned.attack_method.delivery}
+        if "web_page" in routes:
+            self.deliverer.pages = PageServer()
+            await self.deliverer.pages.start()
+        try:
+            return await self._run()
+        finally:
+            if self.deliverer.pages is not None:
+                await self.deliverer.pages.stop()
+
+    async def _run(self) -> RedteamRun:
         semaphore = asyncio.Semaphore(self.run_file.budget.max_concurrent)
 
         async def one(planned: PlannedProbe, number: int) -> None:
@@ -239,7 +254,9 @@ class Engine:
             fields.update(input=context.last_message, policy_revision=context.policy_revision)
             if context.queries > 1 or (context.exchanges and not method.legacy):
                 observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
-                fields.update(target_calls=context.queries, turns=context.turns, evidence_ids=observed)
+                fields.update(
+                    target_calls=context.queries, turns=context.turns, evidence_ids=[*observed, *context.delivery_ids]
+                )
 
         try:
             self.ledger.check()
@@ -256,7 +273,7 @@ class Engine:
         fields.update(
             output=final.reply.text,
             target_calls=context.queries,
-            evidence_ids=[evidence.id, *observed],
+            evidence_ids=[evidence.id, *observed, *context.delivery_ids],
             turns=context.turns,
         )
         if final.verified is not None:

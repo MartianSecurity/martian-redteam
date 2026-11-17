@@ -18,12 +18,14 @@ The method's record (queries, queries to first success, what ended it) becomes t
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from martian.redteam.engine.hostile import scrub_secrets, secret_values
 from martian.redteam.engine.refusal import classify
 from martian.redteam.methods.base import AttackMethod, Exchange, Feedback, GenerationMode, Rung
-from martian.redteam.model import CheckResult, ToolCall, Turn
+from martian.redteam.model import CheckResult, Evidence, ToolCall, Turn
+from martian.redteam.targets.conversations import conversation_id
 
 if TYPE_CHECKING:
     from martian.redteam.engine.plan import PlannedProbe
@@ -72,6 +74,8 @@ class AttemptRun:
         self.first_success: int | None = None
         self.policy_revision: str | None = None
         self.last_message: str | None = None
+        self.delivery_ids: list[str] = []
+        self.deliveries: list[bool] = []
         self.values: dict[str, Any] = {}
         self._conversations = 0
         self._last_session: str | None = None
@@ -122,16 +126,28 @@ class AttemptRun:
         if self.queries >= self.method.query_cap:
             raise RuntimeError(f"{self.method.id} sent more than its {self.method.query_cap} target queries")
         session = session or self.conversation()
-        message = payload
+        attack = payload
         for layer in self.method.layers:
-            message = layer(message)
+            attack = layer(attack)
         if self._last_session is not None and session != self._last_session:
             self.note(f"A new conversation, query {self.queries + 1}.")
         self._last_session = session
+        prepared = None
+        message = attack
+        if self.method.delivery is not None:
+            prepared = self.engine.deliverer.prepare(self.method.delivery, attack, action_id=conversation_id(session))
+            message = prepared.message
         self.last_message = message
-        reply = await self.engine._send(session, message, self.spending)
+        try:
+            reply = await self.engine._send(session, message, self.spending)
+        except BaseException:
+            if prepared is not None:
+                self.engine.deliverer.release(prepared)
+            raise
         exchange = Exchange(number=self.queries + 1, payload=payload, message=message, reply=reply, session=session)
         self.exchanges.append(exchange)
+        if prepared is not None:
+            self._keep_delivery(exchange, attack, self.engine.deliverer.confirm(prepared, attack))
         self.turns += [
             Turn(role="attacker", content=message),
             Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
@@ -184,6 +200,22 @@ class AttemptRun:
         summary = SUMMARIES[best] + (" The target refused." if refused and not hit else "")
         return Feedback(hit=hit, rung=best, refused=refused, conclusive=hit, summary=summary, source="code")
 
+    def _keep_delivery(self, exchange: Exchange, attack: str, details: dict[str, Any]) -> None:
+        """The delivery of one query's attack, as ``payload`` evidence (level 0 when delivered)."""
+        route = details.get("route") or self.method.delivery.route
+        evidence = Evidence(
+            id=f"{self.attempt_id}/delivery-{exchange.number}",
+            kind="payload",
+            source=f"route:{route}",
+            sha256=hashlib.sha256(attack.encode()).hexdigest(),
+            content=attack,
+            captured_at=datetime.now(UTC),
+            metadata={"route": route, "query": exchange.number, **details},
+        )
+        self.engine.evidence[evidence.id] = evidence
+        self.delivery_ids.append(evidence.id)
+        self.deliveries.append(bool(details.get("delivered")))
+
     def note(self, text: str) -> None:
         self.turns.append(Turn(role="system", content=text))
 
@@ -204,6 +236,7 @@ class AttemptRun:
             "queries_to_first_success": first,
             "conversations": len({exchange.session for exchange in self.exchanges}),
             "signals": [exchange.feedback.rung for exchange in self.exchanges if exchange.feedback is not None],
+            **({"delivered": self.deliveries} if self.method.delivery is not None else {}),
             **self.values,
         }
 

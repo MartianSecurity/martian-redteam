@@ -191,6 +191,8 @@ class AttackMethod(ABC):
         self.label = label
         self.layers = tuple(layers)
         self.values = {**self.settings, **(values or {})}
+        self.delivery: Any = None
+        """The run file's ``delivery`` when the attacks take another route than the user message."""
 
     def setting(self, name: str) -> Any:
         return self.values[name]
@@ -211,6 +213,8 @@ class AttackMethod(ABC):
             "layers": [layer.id for layer in self.layers],
             "settings": dict(self.values),
         }
+        if self.delivery is not None:
+            described["delivery"] = self.delivery.model_dump(exclude_none=True)
         return described
 
     @abstractmethod

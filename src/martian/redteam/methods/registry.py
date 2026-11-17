@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 MethodFactory = Callable[["AttackSpec", tuple[Transform, ...], dict[str, Any]], AttackMethod]
 """Builds a method from its ``attacks`` entry, its resolved layers and the settings the entry sets."""
 
-SPEC_FIELDS = frozenset({"name", "types", "weight", "id", "criteria", "gated", "layers"})
+SPEC_FIELDS = frozenset({"name", "types", "weight", "id", "criteria", "gated", "layers", "delivery"})
 """The fields of an ``attacks`` entry that are not a method's own settings."""
 
 LEGACY = ("prompt_injection", "roleplay", "prompt_probing", "rot13", "base64", "leetspeak")
@@ -114,9 +114,12 @@ def resolve(spec: AttackSpec) -> AttackMethod:
         raise MethodError(f"{extra[0]} does not apply to {entry.name}, which takes {takes}")
     if layers:
         method.id = "+".join([method.id, *(layer.id for layer in layers)])
+    if spec.delivery is not None and spec.delivery.route != "message":
+        method.delivery = spec.delivery
+        method.id = f"{method.id}@{spec.delivery.route}"
     if spec.id:
         method.id = spec.id
-    method.legacy = method.id in LEGACY and not layers and type(method) is Rewrite
+    method.legacy = method.id in LEGACY and not layers and method.delivery is None and type(method) is Rewrite
     return method
 
 

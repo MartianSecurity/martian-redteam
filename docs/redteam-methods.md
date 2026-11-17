@@ -48,7 +48,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 
 Every transform runs locally with no model call and no network, and is a pure function of the text: the same attack always becomes the same message. Its tests check a round trip (or, for alternating case and Morse, the property that holds) on generated texts.
 
-Prompt injection, roleplay and prompt probing take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The other rewrites state their style in the attacker's request, from a prompt file of their own, with the probe's `goal` when the run file states one; the catalogue's generator prompt is unchanged. The six version 0.2 methods (the first six rows) have the results and attempt fingerprints they had before methods had an interface.
+Prompt injection, roleplay and prompt probing take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The other rewrites state their style in the attacker's request, from a prompt file of their own, with the probe's `goal` when the run file states one; the catalogue's generator prompt is unchanged. The six version 0.2 methods (PromptInjection, Roleplay, PromptProbing, ROT13, Base64 and Leetspeak) have the results and attempt fingerprints they had before methods had an interface.
 
 ## The control arm
 
@@ -77,7 +77,7 @@ The feedback comes from the checks decided by code when the probe has any (`text
 | `depth` | 3 | 1 to 20 | Levels |
 | `max_queries` | 20 | 1 to 1000 | Target queries per attempt |
 
-The attempt's trace records each query's rung (`signals`), `queries_to_first_success` and `tree` (each query's level and the query it refined); the report's `queries_to_first_hit` counts the same queries per probe ([red team reports](redteam-reports.md#groups-and-probes)). The request text is in `prompts/search/`.
+The attempt's trace records each query's rung (`signals`), `queries_to_first_success` and `tree` (each query's level and the query it refined); `queries_to_first_success` counts the queries of that attempt; the report's `queries_to_first_hit` counts a probe's target queries across its attempts, in order, up to its first hit ([red team reports](redteam-reports.md#groups-and-probes)). The request text is in `prompts/search/`.
 
 ## Multi-turn escalation
 
@@ -107,6 +107,27 @@ Every prompt a method adds to the attacker's request, and every fixed template, 
 
 `layers` applies transforms, in order, to every attack a method sends: `{ name: PromptInjection, layers: [Base64] }` writes a prompt injection and sends it in Base64. A layered method is named with its layers in probe ids and reports, such as `prompt_injection+base64`; `id` renames it. Each transform listed as a method can be a layer.
 
+## Delivery routes
+
+By default an attack is the agent's user message. `delivery` sends it another way, after the method's layers, for every attack the method sends:
+
+| `route` | The user message | Where the attack is | Delivered when |
+| --- | --- | --- | --- |
+| `message` | The attack | The user message | The target answered |
+| `variable` | `template`, with the attack at `{{payload}}` | Inside the message, as an inject variable fills one field of a prompt | The target answered |
+| `tool_result` | `template`, such as "What is the status of order 42?" | Added by the recording proxy to the results of `server`'s tools (a `tools.proxy` server in `inject` mode, limited by its `tools`), for that conversation only | The agent called one of those tools in that conversation |
+| `web_page` | `template`, with the page's address at `{{url}}` | A page served on 127.0.0.1, in a paragraph, or with `hidden: true` in an HTML comment and an element that is not displayed, beside ordinary store text | The agent fetched the page |
+
+```yaml
+attacks:
+  - name: Templates
+    delivery: { route: tool_result, server: commerce, template: "What is the status of order 42?" }
+  - name: Refine
+    delivery: { route: web_page, hidden: true, template: "Please summarise {{url}} for me." }
+```
+
+A routed method is named with its route in probe ids, such as `templates@tool_result`. Each query records its delivery as `payload` evidence, `{attempt}/delivery-{n}`: the attack, the route, whether it was delivered and the route's details (the server and the proxy calls that carried it, or the page's address, whether it was hidden and how often it was fetched); the trace lists `delivered` per query. An attack that was not delivered is still decided by the checks: the agent held, or never read it, and the delivery evidence says which. The page server starts with a run that has a `web_page` route, answers only `GET` and `HEAD` for its own pages, and stops when the run ends, however it ends.
+
 ## What an attempt keeps
 
 Every query is kept in the attempt's `turns`, as an attacker turn (the message as sent, after the layers) and a target turn. A new conversation after the first is marked with a `system` turn. The attempt is decided on the exchange the method ends with, and `target_calls` counts every query.
@@ -124,7 +145,7 @@ A method is an `AttackMethod` with a `kind`, an `arm`, whether it `needs_attacke
 | `check(exchange)` | `Feedback` from the probe's checks: those decided by code when the probe has any, else the judge |
 | `note(text)`, `record(**values)` | A harness note in the turns; values in the method's record |
 
-`Feedback` says whether a check hit, and how close the reply came (`rung`): for a tool goal, `not_called`, `wrong_tool`, `wrong_arguments` or `matched`; for a text or canary check, `no_match` or `matched`. It also says whether the target refused, in the harness's own words: target text never reaches a method as an instruction.
+`Feedback` says whether a check hit, and how close the reply came (`rung`): for a tool goal, `not_called`, `wrong_tool`, `wrong_arguments` or `matched`; for a text or canary check, `no_match` or `matched`. It also says whether the target refused, and its `summary`, which a method may pass to the attacker, is in the harness's own words, never the target's.
 
 A method defined outside the package is registered by name:
 

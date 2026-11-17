@@ -257,8 +257,6 @@ class ProxiedServer(_Model):
 
     @model_validator(mode="after")
     def _mode_settings(self) -> ProxiedServer:
-        if self.mode == "inject" and not self.inject:
-            raise ValueError("inject mode needs the text to inject")
         if self.mode != "inject" and self.inject is not None:
             raise ValueError("inject applies to inject mode")
         if self.mode != "block" and self.block_reply is not None:
@@ -316,6 +314,34 @@ class Budget(_Model):
     max_concurrent: int = Field(default=2, ge=1, le=64)
 
 
+class Delivery(_Model):
+    """How an attack reaches the agent. ``message`` (the default): it is the user message.
+    ``variable``: it fills ``{{payload}}`` in ``template``, the user message. ``tool_result``: the
+    recording proxy adds it to the results of ``server``'s tools, and the user message is
+    ``template``. ``web_page``: a page on a loopback server holds it, shown or ``hidden``, and the user
+    message is ``template`` with the page's address at ``{{url}}``."""
+
+    route: Literal["message", "variable", "tool_result", "web_page"] = "message"
+    template: str | None = Field(default=None, min_length=1, max_length=4096)
+    server: str | None = Field(default=None, min_length=1)
+    hidden: bool = False
+
+    @model_validator(mode="after")
+    def _route(self) -> Delivery:
+        needs = {"variable": "{{payload}}", "web_page": "{{url}}"}
+        if self.route == "message" and (self.template or self.server or self.hidden):
+            raise ValueError("the message route takes no template, server or hidden")
+        if self.route != "message" and not self.template:
+            raise ValueError(f"the {self.route} route needs a template, the user message")
+        if self.route in needs and needs[self.route] not in (self.template or ""):
+            raise ValueError(f"the {self.route} route's template holds {needs[self.route]}")
+        if (self.route == "tool_result") != (self.server is not None):
+            raise ValueError("server names the tools.proxy server of the tool_result route, and only of it")
+        if self.hidden and self.route != "web_page":
+            raise ValueError("hidden applies to the web_page route")
+        return self
+
+
 class AttackSpec(NamedSpec):
     """An attack method of a version 2 run: by ``name``, as in version 0.2, with the transforms to
     apply on top of what it sends (``layers``) and its own settings. ``id`` renames the method in
@@ -338,6 +364,8 @@ class AttackSpec(NamedSpec):
     """Escalation: the most times it goes back a turn after a refusal."""
     variants: int | None = Field(default=None, ge=1, le=1000)
     """Mutation: the most changed copies of the seed it sends."""
+    delivery: Delivery | None = None
+    """How the method's attacks reach the agent. Without it, as the user message."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -440,6 +468,20 @@ class RunFile(_Model):
                 resolve(attack)
             except MethodError as error:
                 raise ValueError(f"attacks[{index}]: {error}") from None
+            route = attack.delivery
+            if route is not None and route.route == "tool_result":
+                server = next((item for item in self.tools.proxy if item.name == route.server), None)
+                if server is None or server.mode != "inject":
+                    raise ValueError(
+                        f"attacks[{index}]: the tool_result route needs {route.server!r} in tools.proxy, in inject mode"
+                    )
+        delivered = {attack.delivery.server for attack in self.attacks if attack.delivery is not None}
+        for server in self.tools.proxy:
+            if server.mode == "inject" and not server.inject and server.name not in delivered:
+                raise ValueError(
+                    f"tools.proxy {server.name!r}: inject mode needs the text to inject, or an attack whose "
+                    "tool_result route names it"
+                )
         for index, vulnerability in enumerate(self.vulnerabilities):
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
@@ -518,6 +560,7 @@ __all__ = [
     "VERSION",
     "AttackSpec",
     "Budget",
+    "Delivery",
     "CanaryCheck",
     "ErrorHandling",
     "Gate",

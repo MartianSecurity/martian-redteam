@@ -169,6 +169,7 @@ Each entry names an attack method by `name`, as in version 0.2 (PascalCase or th
 | `layers` | Up to 4 transforms applied, in order, to every attack the method sends, such as `[Base64]` |
 | `max_queries` | The most target queries one attempt of the method makes, for a method that sends more than one. Each method's default is in [attack methods](redteam-methods.md) |
 | `width`, `branching`, `depth` | `TreeSearch` only: the attacks kept at each level, the attacks written from each, and the levels |
+| `delivery` | How the method's attacks reach the agent: `route` (`message`, the default; `variable`; `tool_result`; `web_page`), `template` (the user message; it holds `{{payload}}` for `variable` and `{{url}}` for `web_page`), `server` (for `tool_result`, a `tools.proxy` server in `inject` mode) and `hidden` (for `web_page`). See [delivery routes](redteam-methods.md#delivery-routes) |
 | `max_turns`, `max_backtracks` | `Escalation` only: the turns in one conversation, and the times it goes back a turn after a refusal |
 | `id` | The method's name in probe ids and reports. Without it, the method's id with its layers, such as `prompt_injection+base64` |
 | `weight` | As in version 0.2 |
@@ -191,7 +192,7 @@ Each entry of `proxy` takes these fields:
 | `name` | A short name: a lower-case letter, then up to 23 lower-case letters, digits or `_`. It names the server's connection in the agent's session, so it follows the rule of an `MCPConnection` name |
 | `upstream` | The server's Streamable HTTP address, `http` or `https` |
 | `mode` | `record` (the default) records each call. `inject` adds text to tool results. `block` stops calls and answers with a set reply |
-| `inject` | The text `inject` mode adds |
+| `inject` | The text `inject` mode adds. It can be left out when an attack's `tool_result` route names the server, which then adds each attack instead |
 | `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
 | `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
