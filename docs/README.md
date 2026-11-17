@@ -22,7 +22,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team data model](redteam-model.md) — the objects SDK runs, the local edition and hosted campaigns have in common, how each format maps onto them, and how a run is stored as an eval run
    - [Red team verdicts](redteam-verdicts.md) — evidence levels 0 to 5, the rules that turn checks into a verdict, and their test vectors
    - [Red team run file](redteam-run-file.md) — version 2: targets shared with suite files, models and the local or hosted service, goals and checks, the tool proxy, budget and gate, and how `martian redteam run` runs it
-   - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined
+   - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports

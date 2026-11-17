@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -99,12 +100,16 @@ def write_reports(
     include_content: bool = False,
     policy: RedactionPolicy | None = None,
     gate: GateOutcome | None = None,
+    formats: Sequence[str] = (),
+    run_file: str | None = None,
 ) -> tuple[Path, Path, RedteamRun]:
     """Write ``redteam-run.json``, ``redteam-report.json`` (the report standard, with ``gate`` when
-    given) and ``redteam-report.md`` to ``folder``; return the paths of the run and the Markdown and
-    the copy they hold."""
+    given), ``redteam-report.md`` and each of ``formats`` (:data:`martian.redteam.report.outputs.FORMATS`)
+    to ``folder``; return the paths of the run and the Markdown and the copy they all hold.
+    ``run_file`` is the run file's path, which SARIF results point at."""
     from martian.redteam.report import build_report
     from martian.redteam.report import render_markdown as render
+    from martian.redteam.report.outputs import write_formats
 
     directory = Path(folder)
     directory.mkdir(parents=True, exist_ok=True)
@@ -116,6 +121,7 @@ def write_reports(
     text = render(report, standard)
     markdown = directory / MARKDOWN_NAME
     markdown.write_text(text, encoding="utf-8")
+    write_formats(report, standard, directory, formats, run_file=run_file)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         try:
             with Path(summary).open("a", encoding="utf-8") as handle:

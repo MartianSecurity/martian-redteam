@@ -153,8 +153,29 @@ its `name`, `probes`, `attempts`, `decided`, `undetermined`, `stopped` and `erro
 (or `null`), the `target_queries` it made, and `queries_to_first_hit`, the target queries up to its
 first hit of any level (or `null`).
 
+## Output formats
+
+Every version 2 run writes `redteam-run.json`, `redteam-report.json` and `redteam-report.md`.
+`martian redteam run FILE -f FORMAT` also writes the formats it names; `-f` can be repeated, takes
+names separated by commas, and `all` names every one. An unknown name stops the run before anything
+is called.
+
+| Format | File | What it holds |
+| --- | --- | --- |
+| `html` | `redteam-report.html` | The report on one page: the gate, what attacked, success, outcomes, findings, verification and controls, refusals, groups, each attempt with its checks, and the limitations. Its styles are inline, it has no script and links to nothing, and its content security policy (`default-src 'none'`) stops a browser loading anything, so it opens with no network |
+| `csv` | `redteam-attempts.csv` | One row per attempt: its probe, role, outcome, level, label, check results, error, spend, attack and reply. A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet never runs it as a formula |
+| `sarif` | `redteam.sarif` | SARIF 2.1.0: one rule per vulnerability and type, one result per finding, `error` when confirmed and `warning` when suspected, with the run file severity as GitHub's `security-severity`. Each result points at the run file, which GitHub code scanning needs, and keeps the same fingerprint from run to run |
+| `junit` | `redteam-junit.xml` | One test suite per vulnerability and one test case per probe. A finding is a `failure` of type `confirmed` or `suspected`; a probe with an undetermined, stopped or errored attempt, or with no attempt, is an `error`, since none of these is a pass |
+
+`martian redteam report RUN` writes the reports of a saved run again: `RUN` is a `redteam-run.json`
+or the id of a run in the local store. It writes `redteam-report.json`, `redteam-report.md` and
+every format, or those `-f` names, to `-o` (default: the folder of the `redteam-run.json`, else
+`results`). `--run-file` gives the run file that SARIF results point at.
+
 ## What a report holds of the target's content
 
-Reports hold digests of the attacks, replies, judge reasons and tool arguments, not the content,
-unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. Credentials are always redacted. The report standard
-holds no content at all: only counts, rates, ids and labels.
+Every format follows the same rule. Reports hold digests of the attacks, replies, judge reasons and
+tool arguments, not the content, unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. Credentials are always
+redacted. `martian redteam report` applies the rule again, so a saved run that holds content is
+written with digests unless the variable is set. The report standard, SARIF and JUnit hold no
+content at all: only counts, rates, ids and labels.

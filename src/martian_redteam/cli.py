@@ -170,6 +170,14 @@ def run_command(
             help="Version 2 files: continue this run from the local store, reusing its finished attempts.",
         ),
     ] = None,
+    formats: Annotated[
+        list[str] | None,
+        typer.Option(
+            "-f",
+            "--format",
+            help="Version 2 files: also write html, csv, sarif, junit or all. Repeat it or separate with commas.",
+        ),
+    ] = None,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
     destination = output or Path("results")
@@ -181,10 +189,13 @@ def run_command(
             max_concurrent=max_concurrent,
             attempts_per_probe=attacks_per_vuln,
             resume=resume,
+            formats=_formats(formats or []),
         )
         return
     if resume is not None:
         _stop("--resume continues a version 2 run; this is a version 0.2 file.")
+    if formats:
+        _stop("--format writes the reports of a version 2 run; this is a version 0.2 file.")
     try:
         config = _apply_run_overrides(
             RunConfig.from_yaml(config_path),
@@ -266,6 +277,24 @@ def _stop(message: str) -> NoReturn:
     raise typer.Exit(code=2)
 
 
+def _formats(values: list[str]) -> list[str]:
+    from martian.redteam.report.outputs import parse_formats
+
+    try:
+        return parse_formats(values)
+    except ValueError as error:
+        _stop(str(error))
+
+
+def _shown_path(path: Path) -> str:
+    """``path`` as SARIF results point at it: relative to the working folder when it is inside it."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def _run_version_2(
     config_path: Path,
     *,
@@ -274,6 +303,7 @@ def _run_version_2(
     max_concurrent: int | None,
     attempts_per_probe: int | None,
     resume: str | None = None,
+    formats: list[str] | None = None,
 ) -> None:
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
@@ -340,7 +370,13 @@ def _run_version_2(
     finally:
         if keeper is not None:
             keeper.close()
-    written, markdown, report = write_reports(run, destination, policy=service.redaction_policy)
+    written, markdown, report = write_reports(
+        run,
+        destination,
+        policy=service.redaction_policy,
+        formats=formats or [],
+        run_file=_shown_path(config_path),
+    )
     _print_run(report)
     console.print(f"Wrote {written} and {markdown}")
     if keeper is not None:
@@ -381,6 +417,65 @@ def _print_run(run: Any) -> None:
         )
     if run.budget.get("stopped_by"):
         console.print(f"Stopped by the budget: {run.budget['stopped_by']} ran out.")
+
+
+@app.command("report")
+def report_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+    formats: Annotated[
+        list[str] | None,
+        typer.Option("-f", "--format", help="html, csv, sarif, junit or all (the default). Repeat or use commas."),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Folder to write to. Default: the run file's folder, else results."),
+    ] = None,
+    run_file: Annotated[
+        Path | None, typer.Option("--run-file", help="The run file, which SARIF results point at.")
+    ] = None,
+) -> None:
+    """Write a version 2 run's reports again, in other formats: redteam-report.json and .md, and each format."""
+    from martian.redteam.engine.report import MARKDOWN_NAME, REPORT_NAME, for_report
+    from martian.redteam.model import RedteamRun
+    from martian.redteam.report import build_report, render_markdown
+    from martian.redteam.report.outputs import write_formats
+
+    chosen = _formats(formats or ["all"])
+    path = Path(run)
+    if path.is_file():
+        try:
+            found = RedteamRun.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _stop(f"{safe_text(path)} is not a red team run (redteam-run.json).")
+        destination = output or path.parent
+    else:
+        found = _stored_run(run)
+        destination = output or Path("results")
+    copy = for_report(found)
+    standard = build_report(copy)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / REPORT_NAME).write_text(standard.model_dump_json(indent=2), encoding="utf-8")
+    (destination / MARKDOWN_NAME).write_text(render_markdown(copy, standard), encoding="utf-8")
+    shown = _shown_path(run_file) if run_file is not None else None
+    written = write_formats(copy, standard, destination, chosen, run_file=shown)
+    names = [REPORT_NAME, MARKDOWN_NAME, *(item.name for item in written)]
+    console.print(f"Wrote {', '.join(names)} to {destination}", markup=False)
+
+
+def _stored_run(run_id: str) -> Any:
+    """The run ``run_id`` from the local store; stops when it is not there."""
+    try:
+        from martian.redteam.store import RedteamStore
+    except ImportError:
+        _stop("Reading a run from the local store needs martian-sdk[evals]; or give a redteam-run.json.")
+    keeper = RedteamStore.local()
+    try:
+        found = asyncio.run(keeper.get("default", run_id))
+    finally:
+        keeper.close()
+    if found is None:
+        _stop(f"{safe_text(run_id)} is neither a file nor a red team run in the local store.")
+    return found
 
 
 def _keep_locally(assessment: RiskAssessment) -> None:
