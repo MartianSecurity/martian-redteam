@@ -44,13 +44,19 @@ VerificationOutcome = Literal["verified", "consistent", "not_reproducible", "unv
 
 ReproductionStatus = Literal["reproduced_clean", "state_dependent", "not_reproduced", "untested"]
 
-AttemptOutcome = Literal["hit", "resisted", "undetermined", "error"]
-"""``hit``: a check found the attack succeeded. ``resisted``: every check ran and none did.
-``undetermined``: a check could not decide (an unreadable judgment, a missing observation).
-``error``: the attempt did not complete: the attacker, the judge or the target failed."""
+AttemptOutcome = Literal["hit", "resisted", "undetermined", "error", "stopped"]
+"""Three outcomes decide an attempt, and errors stay outside them. ``hit`` (the target was
+vulnerable): a check found the attack succeeded. ``resisted`` (the target held): every check ran and
+none did. ``undetermined``: a check could not decide (an unreadable judgment, a missing observation).
+``error``: the attempt did not complete, and ``Attempt.error_kind`` says whose failure it was.
+``stopped``: the run's budget ran out before the attempt was decided; ``Attempt.stopped_by`` names the
+limit. A stopped attempt is never resisted. Rates are computed over decided attempts (hits and
+resisted), with the undetermined count beside them."""
 
 CheckKind = Literal["judge", "text", "canary", "tool_call", "receipt", "state"]
-ErrorKind = Literal["infrastructure", "target"]
+ErrorKind = Literal["infrastructure", "target", "attacker", "judge"]
+"""Whose failure stopped an attempt: the platform or the harness (``infrastructure``), the target, the
+model that writes the attacks, or the model that judges the replies."""
 RunSource = Literal["local", "console", "ci", "campaign"]
 RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled", "stopped"]
 FindingStatus = Literal["open", "accepted", "fixed", "false_positive"]
@@ -87,6 +93,40 @@ class ToolCall(_Object):
     call_id: str | None = None
     executed: bool | None = None
     result: str | None = None
+
+
+class Spend(_Object):
+    """What an attempt, a probe or a run spent: calls of the target, of the attacker model and of the
+    judge model, the tokens those model calls reported and their cost when it is known."""
+
+    target_queries: int = Field(default=0, ge=0)
+    attacker_calls: int = Field(default=0, ge=0)
+    judge_calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
+
+    @property
+    def model_calls(self) -> int:
+        return self.attacker_calls + self.judge_calls
+
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def __add__(self, other: Spend) -> Spend:
+        return Spend(
+            target_queries=self.target_queries + other.target_queries,
+            attacker_calls=self.attacker_calls + other.attacker_calls,
+            judge_calls=self.judge_calls + other.judge_calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+        )
+
+
+BudgetLimit = Literal["target_queries", "model_calls", "tokens", "cost_usd", "max_seconds"]
+"""A limit of the run file's ``budget`` that stopped a run."""
 
 
 class Turn(_Object):
@@ -175,6 +215,15 @@ class Attempt(_Object):
     """``repetition``: a fresh run of a hit, to reproduce it. ``control``: the same probe without the
     attack, which must not show the signal."""
     target_calls: int = Field(default=0, ge=0)
+    spend: Spend | None = None
+    """What the attempt spent. ``None`` when the source did not record it."""
+    stopped_by: BudgetLimit | None = None
+    """The budget limit that stopped the attempt, when its outcome is ``stopped``."""
+    attacker_refusals: int = Field(default=0, ge=0)
+    """Generations of this attempt that the attacker refused to write or left empty."""
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    """A digest of what produced the attempt. A resumed run reuses a finished attempt whose
+    fingerprint is unchanged."""
     started_at: datetime | None = None
     finished_at: datetime | None = None
     trace_id: str | None = None
@@ -191,6 +240,8 @@ class Attempt(_Object):
             raise ValueError("only a hit has an evidence level")
         if self.outcome == "error" and not (self.error or self.error_code or self.error_kind):
             raise ValueError("an attempt that errored says why")
+        if (self.outcome == "stopped") != (self.stopped_by is not None):
+            raise ValueError("a stopped attempt, and only a stopped one, names the budget limit that stopped it")
         return self
 
 
@@ -250,8 +301,33 @@ class Counts(_Object):
     errors: int = Field(default=0, ge=0)
     infrastructure_errors: int = Field(default=0, ge=0)
     target_errors: int = Field(default=0, ge=0)
+    attacker_errors: int = Field(default=0, ge=0)
+    judge_errors: int = Field(default=0, ge=0)
+    stopped: int = Field(default=0, ge=0)
+    """Attempts the budget stopped before they were decided."""
+    generations: int = Field(default=0, ge=0)
+    """Attacks the attacker was asked to write."""
+    refusals: int = Field(default=0, ge=0)
+    """Of those, the ones it refused to write or left empty. A refused generation is never an attack
+    the target resisted."""
     confirmed: int = Field(default=0, ge=0)
     suspected: int = Field(default=0, ge=0)
+
+    @property
+    def decided(self) -> int:
+        """Attempts a check decided: hits and resisted. Rates are computed over these."""
+        return self.hits + self.resisted
+
+    @property
+    def refusal_rate(self) -> float | None:
+        """Refused or empty generations over all generations; ``None`` when none was asked for."""
+        return self.refusals / self.generations if self.generations else None
+
+    @property
+    def hit_rate(self) -> float | None:
+        """Hits over decided attempts; ``None`` when no attempt was decided. Read it beside
+        ``undetermined`` and ``errors``, which it leaves out."""
+        return self.hits / self.decided if self.decided else None
 
 
 class TargetRef(_Object):
@@ -325,6 +401,7 @@ __all__ = [
     "Annotation",
     "Attempt",
     "AttemptOutcome",
+    "BudgetLimit",
     "Check",
     "CheckKind",
     "CheckResult",
@@ -340,6 +417,7 @@ __all__ = [
     "ReproductionStatus",
     "RunSource",
     "RunState",
+    "Spend",
     "TargetRef",
     "ToolCall",
     "Turn",

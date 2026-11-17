@@ -82,6 +82,12 @@
         "additionalProperties": false,
         "description": "One execution of a probe against the target.",
         "properties": {
+          "attacker_refusals": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attacker Refusals",
+            "type": "integer"
+          },
           "check_results": {
             "items": {
               "$ref": "#/components/schemas/CheckResult"
@@ -110,7 +116,9 @@
               {
                 "enum": [
                   "infrastructure",
-                  "target"
+                  "target",
+                  "attacker",
+                  "judge"
                 ],
                 "type": "string"
               },
@@ -126,6 +134,18 @@
             },
             "title": "Evidence Ids",
             "type": "array"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
           },
           "finished_at": {
             "anyOf": [
@@ -194,7 +214,8 @@
               "hit",
               "resisted",
               "undetermined",
-              "error"
+              "error",
+              "stopped"
             ],
             "title": "Outcome",
             "type": "string"
@@ -237,6 +258,16 @@
             "title": "Role",
             "type": "string"
           },
+          "spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Spend"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "started_at": {
             "anyOf": [
               {
@@ -248,6 +279,24 @@
               }
             ],
             "title": "Started At"
+          },
+          "stopped_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "target_queries",
+                  "model_calls",
+                  "tokens",
+                  "cost_usd",
+                  "max_seconds"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped By"
           },
           "target_calls": {
             "default": 0,
@@ -570,6 +619,12 @@
         "additionalProperties": false,
         "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above; ``suspected`` those a model judged only. They are never added together.",
         "properties": {
+          "attacker_errors": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attacker Errors",
+            "type": "integer"
+          },
           "attempts": {
             "default": 0,
             "minimum": 0.0,
@@ -588,6 +643,12 @@
             "title": "Errors",
             "type": "integer"
           },
+          "generations": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generations",
+            "type": "integer"
+          },
           "hits": {
             "default": 0,
             "minimum": 0.0,
@@ -600,10 +661,28 @@
             "title": "Infrastructure Errors",
             "type": "integer"
           },
+          "judge_errors": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Judge Errors",
+            "type": "integer"
+          },
+          "refusals": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Refusals",
+            "type": "integer"
+          },
           "resisted": {
             "default": 0,
             "minimum": 0.0,
             "title": "Resisted",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Stopped",
             "type": "integer"
           },
           "suspected": {
@@ -1701,6 +1780,50 @@
         "title": "SimulatorResult",
         "type": "object"
       },
+      "Spend": {
+        "additionalProperties": false,
+        "description": "What an attempt, a probe or a run spent: calls of the target, of the attacker model and of the\njudge model, the tokens those model calls reported and their cost when it is known.",
+        "properties": {
+          "attacker_calls": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attacker Calls",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "input_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "judge_calls": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Judge Calls",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "target_queries": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Target Queries",
+            "type": "integer"
+          }
+        },
+        "title": "Spend",
+        "type": "object"
+      },
       "TargetRef": {
         "additionalProperties": false,
         "description": "What was attacked, as the run describes it. No credential is ever kept here.",
@@ -1983,7 +2106,7 @@
   "info": {
     "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 1). Generated by scripts/redteam_contract.py; do not edit by hand.",
     "title": "Martian red team API",
-    "version": "1"
+    "version": "2"
   },
   "openapi": "3.1.0",
   "paths": {

@@ -101,8 +101,9 @@ def test_a_red_team_run_kept_in_the_data_folder_is_served_with_its_findings(tmp_
     note = {"comment": "Accepted for the beta", "status": "accepted"}
     assert client.post(f"/v1/redteam/runs/rt-local/findings/{finding}/annotations", json=note).status_code == 200
     assert client.get("/v1/redteam/catalog").status_code == 200
-    # Starting a run needs the local launcher, which this edition does not bind yet.
-    assert client.post("/v1/redteam/runs/rt-local/stop").status_code == 501
+    # The edition binds the engine's launcher: stopping a run it is not running answers the run as kept.
+    stopped = client.post("/v1/redteam/runs/rt-local/stop")
+    assert stopped.status_code == 200 and stopped.json()["id"] == "rt-local"
     again = TestClient(create_local_app(home, ui), base_url=LOCAL)
     kept = again.get("/v1/redteam/runs/rt-local/findings").json()["items"][0]
     assert (kept["status"], kept["annotations"][0]["comment"]) == ("accepted", "Accepted for the beta")

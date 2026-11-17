@@ -9,15 +9,15 @@
 | `RedteamRun` | One run: an SDK probe run, a local run or a hosted campaign. It holds the rest |
 | `Probe` | One planned test: vulnerability, type, attack method, objective class, goal and the checks fixed before the attack |
 | `Check` | A rule stated before the attack: `judge`, `text`, `canary`, `tool_call`, `receipt` or `state` |
-| `Attempt` | One execution of a probe: its conversation, tool calls, check results, outcome and evidence level. Its `role` is `attack`, `repetition` or `control` |
+| `Attempt` | One execution of a probe: its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control` |
 | `Turn`, `ToolCall` | A message of the conversation, and a tool call in it with its arguments and whether it ran |
 | `CheckResult` | One check's result on one attempt: a hit, no hit, or undetermined |
 | `Evidence` | Raw evidence captured at a trusted boundary: a reply, a tool call, a receipt, a state diff |
 | `Verification` | What a probe's repetitions and negative control established |
 | `Finding` | What a run reports for a probe that hit, with its level, label, status and annotations |
-| `Counts` | Attempts by outcome, and findings confirmed (level 2 and above) and suspected (level 1), never summed |
+| `Counts` | Attempts by outcome and errors by class, and findings confirmed (level 2 and above) and suspected (level 1), never summed. `decided` is hits plus resisted, and `hit_rate` is hits over decided attempts. `generations` and `refusals` give the attacker's `refusal_rate` |
 
-An attempt's `outcome` is `hit`, `resisted`, `undetermined` or `error`. A hit carries its evidence level; no other outcome does.
+An attempt's `outcome` is one of three verdicts: `hit` (the target was vulnerable), `resisted` (it held) or `undetermined` (no check could decide). An attempt that did not complete is `error`, outside the verdicts, and `error_kind` says whose failure it was: `target`, `attacker` (the model that writes attacks), `judge` (the model that judges replies) or `infrastructure` (the platform or the harness). An attempt the run's budget stopped before it was decided is `stopped`, naming the limit in `stopped_by`; it is never resisted. A hit carries its evidence level; no other outcome does. Rates are computed over decided attempts, with the undetermined and error counts shown beside them.
 
 ## Maps from today's formats
 
@@ -37,7 +37,7 @@ An attempt's `outcome` is `hit`, `resisted`, `undetermined` or `error`. A hit ca
 | `test_cases[].reason` | That check result's `rationale` |
 | `test_cases[].input`, `actual_output` | `Attempt.input`, `Attempt.output` |
 | `test_cases[].turns` | `Attempt.turns`; roles `human`, `ai`, `tool` become `attacker`, `target`, `tool`; each tool name a `ToolCall` |
-| `test_cases[].error`, `error_kind`, error code | `Attempt.error`, `error_kind`, `error_code`, with outcome `error` |
+| `test_cases[].error`, `error_kind`, error code | `Attempt.error`, `error_kind`, `error_code`, with outcome `error`. Back in this format, an `attacker` or `judge` error is an `infrastructure` error, the only other kind it has |
 | `test_cases[].simulation_operation_id`, `evaluation_operation_id` | `Attempt.operations["simulate"]`, `["evaluate"]` |
 | `vulnerability_type_results[].gated` | `Probe.gated` |
 | `vulnerability_type_results`, `errored`, `infrastructure_errors`, `target_errors` | Computed from the test cases. A report whose own values differ keeps them in `extra` |
@@ -68,7 +68,7 @@ Each vulnerability's objective class comes from `maps.OBJECTIVES`. A custom vuln
 
 A red team run is an eval run of kind `redteam` in the evals core's record store (`martian.redteam.store`):
 
-- each attempt is a case result, keyed by the attempt's id: `passed` when the target resisted, `failed` on a hit, and `error` when the attempt failed or no check could decide it;
+- each attempt is a case result, keyed by the attempt's id: `passed` when the target resisted, `failed` on a hit, and `error` when the attempt failed, was stopped by the budget or no check could decide it;
 - each check result is a score of that case: `value` is whether it hit, `passed` the opposite, and its kind, level and evidence are in `metadata`;
 - probes, evidence, verifications and findings are in the red team tables of the record store (migration 0015);
 - the run's own red team fields are in its `provenance`.
