@@ -165,6 +165,7 @@ def test_the_guide_documents_every_field():
         runfile.ProxiedServer,
         runfile.Budget,
         runfile.Gate,
+        runfile.VerificationSettings,
     ]
     for model in models:
         for name in model.model_fields:

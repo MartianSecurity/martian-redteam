@@ -56,6 +56,7 @@ gate: { fail_on: confirmed, severity: high }
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
+| `verification` | no | How the run checks its judge. See [verification](#verification) |
 | `output_folder` | no | Where reports are written. Default `results` |
 | `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
 
@@ -96,7 +97,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `inference_params` | Settings such as `temperature` |
 | `headers` | Added to each model request. `${NAME}` is read from the environment |
 
-A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set.
+A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set. With `models.judge`, judge checks run on the SDK's judge engine (the rubric judge of [evals](evals.md)), which cites the parts of the reply that show the attack succeeded.
 
 Which service generates and judges the attacks:
 
@@ -168,6 +169,12 @@ A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a p
 | `block_reply` | What a call answers in `block` mode |
 
 The proxy is not an environment. It simulates no application and holds no data.
+
+## Verification
+
+| Field | Meaning |
+| --- | --- |
+| `calibration` | A labelled sample to measure the judge on before the attacks: a JSON Lines file, one item a line, with `vulnerability` (a vulnerability of this file, by name or id), optional `type`, `attack`, `reply`, `hit` (whether a person judged the attack to have succeeded) and optional `tools_called`. A relative path is read from the run file's folder. Each item costs one judge call, counted against the budget. The report shows the judge's precision and recall, and the run's provenance keeps them as `judge_calibration` |
 
 ## Budget
 

@@ -98,6 +98,41 @@ def refusals_by_method(run: RedteamRun) -> dict[str, tuple[int, int]]:
     return found
 
 
+def _share(value: float | None, interval: list[float] | tuple[float, float] | None) -> str:
+    if value is None:
+        return "- (nothing to measure it on)"
+    low, high = interval or (value, value)
+    return f"{value:.0%} (95% interval {low:.0%} to {high:.0%})"
+
+
+def _calibration(found: dict[str, Any] | None) -> list[str]:
+    """The judge's precision and recall on the run's labelled sample, when it was given one."""
+    if not found:
+        return []
+    lines = ["", "## Judge calibration", ""]
+    if "error" in found:
+        return [*lines, f"The judge `{found['judge']}` could not be measured: {found['error']}"]
+    lines.append(
+        f"The judge `{found['judge']}` on {found['sample']} labelled items: precision "
+        f"{_share(found['precision'], found['precision_interval'])}, recall "
+        f"{_share(found['recall'], found['recall_interval'])}. Its hits stay suspected whatever these are."
+    )
+    lines.append("")
+    lines += _table(
+        ["True positive", "False positive", "False negative", "True negative", "Undetermined"],
+        [
+            [
+                found["true_positive"],
+                found["false_positive"],
+                found["false_negative"],
+                found["true_negative"],
+                found["undetermined"],
+            ]
+        ],
+    )
+    return lines
+
+
 def render_markdown(run: RedteamRun) -> str:
     counts, provenance, budget = run.counts, run.provenance, run.budget
     lines = [f"# Red team run {run.id}", ""]
@@ -171,6 +206,7 @@ def render_markdown(run: RedteamRun) -> str:
                 for finding in run.findings
             ],
         )
+    lines += _calibration(run.provenance.get("judge_calibration"))
     by_method = refusals_by_method(run)
     if any(generations for _, generations in by_method.values()):
         lines += ["", "## Attacker refusals by method", ""]

@@ -31,10 +31,13 @@ Martian server, and a run with both `models` and a Martian connection configured
 stops rather than choose one.
 
 The local engine treats the target's output as hostile
-(`martian.redteam.engine.hostile`). The judge sees the attack, the reply and the
-tool calls only as data fields between markers that carry a fresh random id,
-after an instruction never to follow anything inside them; a run of three or
-more `<` or `>` in that text is broken up, so a reply cannot close its field.
+(`martian.redteam.engine.hostile`). The local service's judge sees the attack,
+the reply and the tool calls only as data fields between markers that carry a
+fresh random id, after an instruction never to follow anything inside them; a
+run of three or more `<` or `>` in that text is broken up, so a reply cannot
+close its field. The engine's judge check (`models.judge`) runs on the SDK's
+rubric judge, which sends them as JSON string values it is told are untrusted
+evidence, so a reply cannot leave its value.
 Before any prompt is sent, the value of every environment variable named like
 a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
 characters or more) and of the models' headers is replaced by `[redacted]`, so

@@ -307,6 +307,15 @@ class Gate(_Model):
     an undetermined attempt is never a pass. ``ignore`` leaves it out, and the report still counts it."""
 
 
+class VerificationSettings(_Model):
+    """How the run checks its own findings and its judge."""
+
+    calibration: str | None = Field(default=None, min_length=1)
+    """A labelled sample (JSON Lines: ``vulnerability``, ``type``, ``attack``, ``reply``, ``hit``) the
+    judge is measured on before the run, for its precision and recall. A relative path is read from
+    the run file's folder."""
+
+
 class RunFile(_Model):
     """A version 2 red team run file."""
 
@@ -318,6 +327,7 @@ class RunFile(_Model):
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
     output_folder: str = "results"
     environment: str | None = Field(default=None, min_length=1)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
@@ -378,6 +388,10 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        sample = loaded.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
+            loaded = loaded.model_copy(update={"verification": settings})
         return loaded
 
 
@@ -435,6 +449,7 @@ def problems(path: str | Path) -> list[str]:
 __all__ = [
     "VERSION",
     "Budget",
+    "VerificationSettings",
     "CanaryCheck",
     "CanaryPlant",
     "Gate",

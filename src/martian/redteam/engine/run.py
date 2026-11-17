@@ -49,10 +49,10 @@ from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
 from martian.redteam.targets import Target, TargetReply
 from martian.redteam.verify.canary import context_of, new_canary, uses_canary
-from martian.redteam.verify.judge import ServiceJudge, failure_code, failure_kind
+from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, judge_for, read_sample
 from martian.redteam.verify.listener import ReceiptListener
 from martian.redteam.verify.rules import RULES_VERSION, attempt_outcome
-from martian.redteam.verify.verifiers import Decided, Observation, Verifiers, decide
+from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.encoding import apply_encoding
@@ -114,7 +114,8 @@ class Engine:
     ) -> None:
         self.run_file = run_file
         self.service = service
-        self.verifiers = verifiers or Verifiers(ServiceJudge(service))
+        self.verifiers = verifiers or Verifiers(judge_for(run_file, service))
+        self.calibration: dict[str, Any] | None = None
         self.target = target
         self.run_id = run_id or f"redteam-{uuid.uuid4().hex[:12]}"
         self.project_id = project_id
@@ -143,6 +144,8 @@ class Engine:
         """Take over ``earlier``'s id and start, and keep each finished attempt whose fingerprint is
         unchanged. An attempt that errored or was stopped runs again."""
         self.run_id, self.project_id, self.started_at = earlier.id, earlier.project_id, earlier.started_at
+        kept = earlier.provenance.get("judge_calibration")
+        self.calibration = kept if isinstance(kept, dict) and "error" not in kept else None
         before = {attempt.id: attempt for attempt in earlier.attempts}
         evidence = {item.id: item for item in earlier.evidence}
         for planned in self.planned:
@@ -170,6 +173,7 @@ class Engine:
         try:
             if listens:
                 self.listener = await ReceiptListener().start()
+            await self._calibrate()
             await self._attacks()
         except BaseException as error:
             await self._close_listener()
@@ -179,6 +183,23 @@ class Engine:
         final = self.snapshot("stopped" if self.ledger.stopped_by else "completed")
         await self._save(final)
         return final
+
+    async def _calibrate(self) -> None:
+        """Measure the judge on the run file's labelled sample before the attacks, once a run. Its
+        calls count against the budget. A judge that fails leaves the error in the record."""
+        path = self.run_file.verification.calibration
+        judge = self.verifiers.get("judge")
+        if path is None or judge is None or self.calibration is not None:
+            return
+        spending = _Spending(self.ledger, "calibration")
+        try:
+            self.calibration = await calibrate(
+                judge, [planned.probe for planned in self.planned], read_sample(path), meter=spending
+            )
+        except VerifierFailed as error:
+            self.calibration = {"judge": judge.version, "error": str(error)}
+        except BudgetExhausted as error:
+            self.calibration = {"judge": judge.version, "error": str(error)}
 
     async def _close_listener(self) -> None:
         if self.listener is not None:
@@ -476,6 +497,7 @@ class Engine:
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **({"receipts": self._receipts()} if self.listener is not None else {}),
+                **({"judge_calibration": self.calibration} if self.calibration is not None else {}),
                 **self.provenance,
             },
         )
