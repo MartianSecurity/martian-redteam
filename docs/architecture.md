@@ -80,7 +80,8 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian/evals/server/`, `src/martian/evals/store/` | The evals core and its store interface; see [evals core](evals-core.md) |
 | `src/martian/evals/records/` | The evals core's own records on SQLite or Postgres, their migrations and change events, and the worker's queue |
 | `src/martian/_privacy.py`, `result.py` | Scoped redaction and safe atomic receipts |
-| `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP |
+| `src/martian/redteam/` | The red team core: see [the red team core](#the-red-team-core) |
+| `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP; its names stay importable from `martian.redteam` |
 | `src/martian_evals_kit/` | Evals import compatibility |
 
 Taxonomy IDs/types live in the catalog; hosted redteam rubrics/model selection live in Agents.
@@ -153,6 +154,21 @@ next to each one creates it.
 | `Dockerfile` | The local edition as an image for one user on a small server, with no login ([evals core](evals-core.md#the-local-edition-in-a-container)) | Exists; a release builds it from the wheel it publishes and pushes it to GitHub Container Registry ([releasing](releasing.md#the-local-editions-image)) |
 | `src/martian/evals/worker/` | The worker interface the write routes hand runs and scoring jobs to, and the work itself ([the worker](evals-core.md#the-worker)) | Exists: one process per run (`ProcessWorker`) and a one-organisation in-process worker; HTTP targets called by the worker itself, with credentials from its own process, and registered agents through a martian-agents executor interface; per-case setup and teardown hooks and checks installed by name, one of which can be required so that it decides its case's status, which an edition adds and the open edition does not; and a durable queue in the record store's database (`QueueWorker`), whose worker serves beside the app or in a process of its own, so that a restart loses no queued or running run. The Martian server's worker process is MartianSecurity/martian-notes#139's backend part |
 | `src/martian/ui/` | The built Evals UI, shipped in the wheel; `martian ui` serves it by default. A build of the Evals app, whose source is in MartianSecurity/MartianFrontend (`packages/`), pinned in `pyproject.toml` ([releasing](releasing.md#the-evals-ui-in-the-wheel)) | Exists |
+
+## The red team core
+
+The red team core sits beside the evals core and builds on it: a red team run is an eval run, in the same record store, served beside the evals routes. Everything here is Apache-2.0 and runs without a Martian backend; environments are not part of it.
+
+| Path | Holds | Status |
+| --- | --- | --- |
+| `src/martian/redteam/model/` | The shared red team data model, and the maps from the version 0.2 report, CI session rows and the engine's campaign summary ([red team model](redteam-model.md)) | Exists |
+| `src/martian/redteam/verify/` | The verdict rules and their published test vectors ([verdicts](redteam-verdicts.md)); later the verifiers | The rules exist |
+| `src/martian/redteam/store/` | Red team runs in the evals core's record store, as eval runs of kind `redteam` | Exists |
+| `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; not yet mounted in `martian ui` |
+| `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Validated; not yet run |
+| `src/martian/redteam/catalog/` | The catalogue's home in the core; today the version 0.2 catalogue of `martian_redteam` | Exists |
+| `src/martian/redteam/engine/` | The engine's home in the core; today the version 0.2 probe loop, hosted generation and judging | Exists; the local engine is to come |
+| `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
 
 ## CI and scoring
 
