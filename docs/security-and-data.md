@@ -268,8 +268,8 @@ no time limit, and a suite or a record names an installed check by name only.
 
 ## Telemetry
 
-The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
-`martian evals run`, the eval gate, a server that serves the [evals core](evals-core.md) and
+The evals and red team processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
+`martian evals run`, `martian redteam`, the eval gate, a server that serves the [evals core](evals-core.md) and
 each of its worker processes. Importing `martian.evals` sets `MLFLOW_DISABLE_TELEMETRY=true`
 before it imports MLflow, unless the environment already sets the variable, and each worker
 process inherits it. MLflow decides when it is first imported whether to start its telemetry
@@ -304,6 +304,37 @@ MLflow's telemetry client starting in any of those processes, and checks that th
 loads nothing from another host. It also grades one request with the SDK judge at a loopback
 endpoint, with and without an address policy, with every other address refused, and fails if the
 judge looks up or connects to anything but that endpoint.
+
+## What a local red team run connects to
+
+A local red team run (`martian redteam run` with `models` in its run file and no Martian connection)
+connects to the model it names and to its target, and to nothing else. It sends no telemetry, checks
+for no update and needs no account. Every connection it can open:
+
+| Connection | When | What is sent |
+| --- | --- | --- |
+| The attacker and judge model's endpoint | Always: `models.attacker` and `models.judge`, through the judges' model routing ([evals](evals.md)). For an `openai:/` model, `OPENAI_API_BASE`, else `OPENAI_BASE_URL`, else OpenAI | The catalogue's prompts, the purpose, the attacks, and the target's replies and tool calls, with credentials redacted ([trust boundary](#trust-boundary)); the model's key and `headers` |
+| The target | Always: a `url` target, an `mcp` target's `url`, or none for a `file` function or an `mcp` `command`, which run on this machine | The attacks |
+| The recording proxy | When the run file lists `tools.proxy`: it listens on loopback, and connects to each `upstream` | The agent's tool calls, as the agent sent them |
+| The agent's session API | When the run file names `tools.session_api`: one request to `{session_api}/sessions` | The proxy's session |
+| A model price catalogue | Only when `MLFLOW_MODEL_CATALOG_URI` names one, to price `budget.cost_usd` ([below](#judges-and-the-model-catalogue)) | Nothing of the run |
+
+A run with no `models` uses the Martian platform instead, with `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
+and says so; a run never chooses one when both are configured ([run file models](redteam-run-file.md#models)).
+
+The other red team commands connect to nothing: `validate`, `catalog`, `report`, `compare`,
+`pin add`, `convert promptfoo`, `import promptfoo` and `import garak`. `pin run` connects only to
+the target, and the proxy's upstreams when the run file lists them. `martian ui` listens on loopback
+and serves the runs from the local store. `martian redteam garak` runs garak, a separate program
+installed by you; what garak itself connects to is garak's ([red team interop](redteam-interop.md#garak-probes)).
+
+`tests/redteam/test_no_outbound.py` proves it in CI. It runs the local workflow, each command in its
+own process with only a model key and the model's address in a clean environment (no Martian, CI,
+pytest or telemetry variable): validate, a run writing every report format, a second run, reports
+written again, the two runs compared, a confirmed finding pinned and re-run, a promptfoo config
+converted and its results imported, and `martian ui` serving the runs. Every connection and name
+lookup for an address other than loopback is refused and fails the test, as MLflow's telemetry
+client starting does, and the loopback connections must be exactly the model and the target.
 
 ## Judges and the model catalogue
 
