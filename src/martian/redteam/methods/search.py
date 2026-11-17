@@ -11,6 +11,7 @@ the attack whose reply came closest.
 
 - :class:`Refine` is the search with one line of attack (width 1, branching 1): PAIR-style
   refinement, about ten target queries.
+- :class:`TreeSearch` branches and prunes (TAP-style), with width, branching and depth capped.
 
 A refinement's request carries the last attack, the target's reply and its tool calls as data fields
 the attacker is told never to follow (:data:`~martian.redteam.engine.hostile.ATTACKER_DATA_RULE`),
@@ -93,8 +94,14 @@ class Search(AttackMethod):
 
     @property
     def query_cap(self) -> int:
+        """``max_queries``, or fewer when the tree is smaller: ``branching`` attacks at the first
+        level, then ``branching`` for each of at most ``width`` kept from the level before."""
         width, branching, depth = self.shape
-        return min(int(self.values["max_queries"]), branching + (depth - 1) * width * branching)
+        level, total = branching, branching
+        for _ in range(depth - 1):
+            level = branching * min(width, level)
+            total += level
+        return min(int(self.values["max_queries"]), total)
 
     async def run(self, context: AttackContext) -> Exchange:
         width, branching, depth = self.shape
@@ -155,4 +162,10 @@ class Refine(Search):
         return 1, 1, int(self.values["max_queries"])
 
 
-__all__ = ["BASE_STYLE", "Refine", "Search", "refine_request", "start_request"]
+class TreeSearch(Search):
+    """TAP-style tree search: branching and pruning on the refinement engine."""
+
+    settings = {"width": 3, "branching": 2, "depth": 3, "max_queries": 20}
+
+
+__all__ = ["BASE_STYLE", "Refine", "Search", "TreeSearch", "refine_request", "start_request"]

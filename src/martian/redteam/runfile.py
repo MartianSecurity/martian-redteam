@@ -326,6 +326,12 @@ class AttackSpec(NamedSpec):
     """Transforms applied, in order, to every attack the method sends, such as ``[Base64]``."""
     max_queries: int | None = Field(default=None, ge=1, le=1000)
     """The most target queries one attempt of the method makes."""
+    width: int | None = Field(default=None, ge=1, le=10)
+    """Tree search: the attacks kept at each level."""
+    branching: int | None = Field(default=None, ge=1, le=10)
+    """Tree search: the attacks written from each one kept."""
+    depth: int | None = Field(default=None, ge=1, le=20)
+    """Tree search: the levels."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]

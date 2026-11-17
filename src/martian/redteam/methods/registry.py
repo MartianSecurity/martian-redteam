@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
-from martian.redteam.methods.search import Refine
+from martian.redteam.methods.search import Refine, TreeSearch
 from martian.redteam.methods.templates import Templates
 from martian.redteam.methods.transforms import TRANSFORMS
 from martian_redteam.catalog.attacks import ATTACKS
@@ -184,6 +184,11 @@ register_method(
     "Refine",
     lambda spec, layers, values: Refine(id="refine", label="Iterative refinement", layers=layers, values=values),
     aliases=["refine"],
+)
+register_method(
+    "TreeSearch",
+    lambda spec, layers, values: TreeSearch(id="tree_search", label="Tree search", layers=layers, values=values),
+    aliases=["tree_search", "tap"],
 )
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])
