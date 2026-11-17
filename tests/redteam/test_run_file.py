@@ -56,11 +56,11 @@ def test_a_complete_version_2_file_loads(tmp_path):
 
 
 @pytest.mark.parametrize("example", sorted(EXAMPLES.rglob("*.yaml")), ids=lambda path: path.name)
-def test_every_existing_red_team_example_still_loads_as_version_0_2(example):
+def test_every_red_team_example_loads_as_its_version(example):
     raw = yaml.safe_load(example.read_text("utf-8"))
     if not isinstance(raw, dict) or "vulnerabilities" not in raw or "target" not in raw:
         pytest.skip("not a red team run file")
-    assert isinstance(load(example), RunConfig)
+    assert isinstance(load(example), RunFile if "version" in raw else RunConfig)
     assert problems(example) == []
 
 
