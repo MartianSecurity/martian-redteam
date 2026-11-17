@@ -147,3 +147,24 @@ An agent that already traces itself records its tool calls as tool spans. A tool
 | `calls_in_trace(trace)`, `calls_in_mlflow(trace)` | A trace the caller already has |
 
 The OpenTelemetry GenAI conventions make a tool call's arguments opt-in (`gen_ai.tool.call.arguments`). A span that names its tool and nothing else is name-only evidence: its evidence says `arguments_captured: false`. When the target also reported that call, the call is kept once, marked as executed, with the arguments the target reported. Every call from a trace has evidence of kind `tool_call` whose source is `trace:otel_genai`, `trace:openinference` or `trace:mlflow`, with its trace and span ids.
+
+## Worked examples
+
+`examples/redteam/` holds one agent per framework, each a red team target with its tools bound through the recording proxy. Each uses a stub model that falls for the attack, so it runs with no key and reaches no other machine:
+
+| Example | Framework | How its tools are bound |
+| --- | --- | --- |
+| `openai_agents_agent.py` | OpenAI Agents SDK | `bind_tools`, each tool a `FunctionTool`; a stub `Model` |
+| `langgraph_agent.py` | LangGraph | `bind_tools`, each tool a LangChain `StructuredTool` in a `ToolNode` graph; a stub model node |
+| `pydantic_ai_agent.py` | Pydantic AI | `bind_tools`, each tool `Tool.from_schema`; Pydantic AI's `FunctionModel` |
+| `claude_agent_sdk_agent.py` | Claude Agent SDK | The session's connections as the SDK's `mcp_servers`, with the action id header; the bundled CLI calls a stub of the Messages API on loopback |
+
+Each one shows the three pieces: a target (`AgentTarget` in `shared.py`, wrapped in `ProxiedTarget`), structured tool calls in the [reply contract](#reply-contract), and the proxy, which blocks `issue_refund` so the attacker's refund never reaches the tool server. The reply says `lookup_order` ran and `issue_refund` did not.
+
+```bash
+uv sync --extra evals --extra mcp --group examples
+uv run python -m examples.redteam.langgraph_agent
+uv run --extra evals --extra mcp --group examples pytest -q examples/redteam
+```
+
+The `examples` dependency group pins each framework; none is a dependency of `martian-sdk`. CI runs the four in the `redteam-examples` job.
