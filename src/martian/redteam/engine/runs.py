@@ -95,9 +95,11 @@ async def execute(
     project_id: str = "default",
     principal: Any = None,
     include_content: bool = False,
+    resume: RedteamRun | None = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
-    kept after each attempt and at the end, as the reports hold it."""
+    kept after each attempt and at the end, as the reports hold it. With ``resume``, an earlier
+    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run."""
 
     async def keep(run: RedteamRun) -> None:
         copy = for_report(run, include_content=include_content, policy=service.redaction_policy)
@@ -114,6 +116,7 @@ async def execute(
         project_id=project_id,
         checkpoint=keep if store is not None else None,
         provenance=provenance,
+        resume=resume,
     )
     return await engine.run()
 

@@ -163,6 +163,13 @@ def run_command(
             help="Keep the run in the local store that martian ui reads (needs martian-sdk[evals]).",
         ),
     ] = True,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help="Version 2 files: continue this run from the local store, reusing its finished attempts.",
+        ),
+    ] = None,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
     destination = output or Path("results")
@@ -173,8 +180,11 @@ def run_command(
             store=store,
             max_concurrent=max_concurrent,
             attempts_per_probe=attacks_per_vuln,
+            resume=resume,
         )
         return
+    if resume is not None:
+        _stop("--resume continues a version 2 run; this is a version 0.2 file.")
     try:
         config = _apply_run_overrides(
             RunConfig.from_yaml(config_path),
@@ -263,6 +273,7 @@ def _run_version_2(
     store: bool,
     max_concurrent: int | None,
     attempts_per_probe: int | None,
+    resume: str | None = None,
 ) -> None:
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
@@ -301,13 +312,24 @@ def _run_version_2(
             keeper = RedteamStore.local()
         except ImportError:
             console.print("Not kept in the local store: install martian-sdk[evals] for that.")
+    earlier = None
+    if resume is not None:
+        if keeper is None:
+            _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
+        earlier = asyncio.run(keeper.get("default", resume))
+        if earlier is None:
+            keeper.close()
+            _stop(f"No red team run {resume} is in the local store.")
 
     async def go() -> Any:
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
             target = build_target(run_file.target)
             stack.push_async_callback(target.close)
-            return await execute(run_file, service=service, target=target, provenance=provenance, store=keeper), service
+            run = await execute(
+                run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
+            )
+            return run, service
 
     try:
         run, service = asyncio.run(go())
@@ -323,6 +345,8 @@ def _run_version_2(
     console.print(f"Wrote {written} and {markdown}")
     if keeper is not None:
         console.print(f"Kept in the local store as {run.id}")
+    if reused := run.provenance.get("resumed_attempts"):
+        console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
     failures = gate_failures(run, run_file.gate)
     if failures:
         errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)

@@ -135,6 +135,18 @@
             "title": "Evidence Ids",
             "type": "array"
           },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
           "finished_at": {
             "anyOf": [
               {

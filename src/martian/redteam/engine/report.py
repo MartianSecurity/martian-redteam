@@ -13,6 +13,7 @@ level, and each probe's attempts.
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,14 @@ MARKDOWN_NAME = "redteam-report.md"
 _INPUTS, _OUTPUTS = "MARTIAN_EVALS_REDACT_INPUTS", "MARTIAN_EVALS_REDACT_OUTPUTS"
 
 
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{16}$")
+
+
 def _text(value: str | None, flag: str, include: bool, policy: RedactionPolicy) -> str | None:
-    return None if value is None else report_text(value, include_content=include, redact_env=flag, policy=policy)
+    if value is None or _DIGEST.match(value):
+        # A digest already: an attempt kept by an earlier session of a resumed run.
+        return value
+    return report_text(value, include_content=include, redact_env=flag, policy=policy)
 
 
 def _arguments(value: Any, include: bool, policy: RedactionPolicy) -> Any:

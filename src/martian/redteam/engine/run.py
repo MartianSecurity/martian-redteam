@@ -28,6 +28,7 @@ from typing import Any
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
+from martian.redteam.engine.fingerprint import attempt_fingerprint
 from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
@@ -118,6 +119,7 @@ class Engine:
         project_id: str = "default",
         checkpoint: Checkpoint | None = None,
         provenance: dict[str, Any] | None = None,
+        resume: RedteamRun | None = None,
     ) -> None:
         self.run_file = run_file
         self.service = service
@@ -133,6 +135,36 @@ class Engine:
         self.attempts: dict[str, Attempt] = {}
         self.evidence: dict[str, Evidence] = {}
         self._saving = asyncio.Lock()
+        self.reused: set[str] = set()
+        if resume is not None:
+            self._resume(resume)
+
+    def fingerprint(self, planned: PlannedProbe, number: int) -> str:
+        return attempt_fingerprint(
+            planned, number, run_file=self.run_file, service=self.provenance, engine_version=ENGINE_VERSION
+        )
+
+    def _resume(self, earlier: RedteamRun) -> None:
+        """Take over ``earlier``'s id and start, and keep each finished attempt whose fingerprint is
+        unchanged. An attempt that errored or was stopped runs again."""
+        self.run_id, self.project_id, self.started_at = earlier.id, earlier.project_id, earlier.started_at
+        before = {attempt.id: attempt for attempt in earlier.attempts}
+        evidence = {item.id: item for item in earlier.evidence}
+        for planned in self.planned:
+            for number in range(1, planned.probe.planned_attempts + 1):
+                found = before.get(f"{planned.probe.id}#{number}")
+                if (
+                    found is None
+                    or found.outcome not in ("hit", "resisted", "undetermined")
+                    or found.fingerprint != self.fingerprint(planned, number)
+                ):
+                    continue
+                self.attempts[found.id] = found
+                self.reused.add(found.id)
+                self.ledger.credit(planned.probe.id, found.spend or Spend())
+                for item in found.evidence_ids:
+                    if item in evidence:
+                        self.evidence[item] = evidence[item]
 
     # --- the run --------------------------------------------------------------------------------
 
@@ -149,6 +181,7 @@ class Engine:
             asyncio.create_task(one(planned, number))
             for planned in self.planned
             for number in range(1, planned.probe.planned_attempts + 1)
+            if f"{planned.probe.id}#{number}" not in self.reused
         ]
         try:
             await asyncio.gather(*jobs)
@@ -179,6 +212,7 @@ class Engine:
             "number": number,
             "started_at": datetime.now(UTC),
             "graph_revision": PROMPTS_REVISION,
+            "fingerprint": self.fingerprint(planned, number),
         }
 
         def done(**update: Any) -> Attempt:
@@ -438,6 +472,7 @@ class Engine:
             budget=self.ledger.summary(),
             limitations=self._limitations(),
             provenance={
+                "resumed_attempts": len(self.reused),
                 "engine_version": ENGINE_VERSION,
                 "rules_version": RULES_VERSION,
                 "prompts_revision": PROMPTS_REVISION,
