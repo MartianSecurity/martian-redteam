@@ -50,6 +50,15 @@ class McpTarget(_Model):
         return self
 
 
+class TargetSession(_Model):
+    """How an HTTP target's conversation id travels besides the body's ``{{session_id}}``. ``header``:
+    also send it in this request header. ``response_path``: the server issues the id; the first turn
+    of a conversation sends an empty id, and each reply has the id at this path."""
+
+    header: str | None = Field(default=None, min_length=1, max_length=200, pattern=r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+    response_path: str | None = Field(default=None, min_length=1)
+
+
 class Target(_Model):
     """The thing under test. ``file`` and ``function``, or ``url`` with ``body`` and the rest, are a
     suite file's target block and are checked by the same rules; ``mcp`` is an MCP server."""
@@ -62,6 +71,8 @@ class Target(_Model):
     body: dict[str, Any] | None = None
     response_path: str | None = None
     timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    session: TargetSession | None = None
+    """An HTTP target's conversation id in a header, or issued by the server."""
     mcp: McpTarget | None = None
 
     @field_validator("purpose")
@@ -74,6 +85,8 @@ class Target(_Model):
     @model_validator(mode="after")
     def _one_kind(self) -> Target:
         suite_fields = self.suite_target_fields()
+        if self.session is not None and self.url is None:
+            raise ValueError("session applies to a url target")
         if self.mcp is not None:
             if suite_fields:
                 raise ValueError(f"an mcp target takes none of {', '.join(sorted(suite_fields))}")
@@ -357,6 +370,7 @@ __all__ = [
     "RunFile",
     "StateCheck",
     "Target",
+    "TargetSession",
     "TextCheck",
     "ToolCallCheck",
     "Tools",

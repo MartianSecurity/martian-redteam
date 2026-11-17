@@ -5,11 +5,18 @@ target answered and the tool calls it made or asked for. A target keeps one conv
 ``session``: the same session continues a conversation, a new one starts another. The function,
 HTTP and MCP targets of the run file, the version 0.2 callback, and later a registered agent, each
 implement it; the engine knows none of them.
+
+- :func:`target_from_run_file` builds the target a run file's ``target`` block names
+  (:mod:`martian.redteam.targets.factory`): :class:`~martian.redteam.targets.function.FunctionTarget`
+  or :class:`~martian.redteam.targets.http.HttpTarget`, from the suite file's own target block.
+- :mod:`martian.redteam.targets.conversations` keeps each target's conversations.
+
+``docs/redteam-targets.md`` describes each target and the session contract.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,4 +54,13 @@ class Target(Protocol):
         ...
 
 
-__all__ = ["Target", "TargetReply"]
+def __getattr__(name: str) -> Any:
+    # The factory imports the evals core's target code; it loads only when it is asked for.
+    if name == "target_from_run_file":
+        from martian.redteam.targets.factory import target_from_run_file
+
+        return target_from_run_file
+    raise AttributeError(name)
+
+
+__all__ = ["Target", "TargetReply", "target_from_run_file"]

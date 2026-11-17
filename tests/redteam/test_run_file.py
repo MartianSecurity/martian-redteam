@@ -153,6 +153,7 @@ def test_the_guide_documents_every_field():
     models = [
         runfile.RunFile,
         runfile.Target,
+        runfile.TargetSession,
         runfile.McpTarget,
         runfile.ModelConfig,
         runfile.Goal,
