@@ -308,11 +308,11 @@ def _run_version_2(
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
 
-    from martian.redteam.engine.gate import gate_failures
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import write_reports
     from martian.redteam.engine.runs import TargetUnavailable, build_service, build_target, execute, unsupported
     from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
 
     found = problems(config_path)
@@ -370,10 +370,12 @@ def _run_version_2(
     finally:
         if keeper is not None:
             keeper.close()
+    decided = evaluate(run, run_file.gate)
     written, markdown, report = write_reports(
         run,
         destination,
         policy=service.redaction_policy,
+        gate=decided.outcome(run_file.gate),
         formats=formats or [],
         run_file=_shown_path(config_path),
     )
@@ -383,9 +385,12 @@ def _run_version_2(
         console.print(f"Kept in the local store as {run.id}")
     if reused := run.provenance.get("resumed_attempts"):
         console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
-    failures = gate_failures(run, run_file.gate)
-    if failures:
-        errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)
+    for warning in decided.warnings:
+        errors.print("Gate warning: " + safe_text(warning), style="yellow", markup=False, soft_wrap=True)
+    if decided.failures:
+        errors.print(
+            "Gate failed: " + safe_text("; ".join(decided.failures)), style="red", markup=False, soft_wrap=True
+        )
         raise typer.Exit(code=1)
 
 

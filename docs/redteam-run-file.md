@@ -181,12 +181,24 @@ The command exits 0 when the gate passes, 1 when it fails and 2 when the run cou
 
 ## Gate
 
+The gate decides the exit code: 0 when nothing fails it, 1 when something does, 2 when the run could not start. A warning is printed and kept in `redteam-report.json` under `gate.warnings` ([reports](redteam-reports.md)), and never changes the exit code.
+
 | Field | Meaning |
 | --- | --- |
-| `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above. `suspected` also fails on a finding a model judged only |
-| `severity` | Only findings of vulnerabilities at this severity or above fail the gate |
-| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true |
-| `ignore_target_errors` | Do not fail on calls of the target that failed. Default false |
-| `undetermined` | `fail` (the default) fails the run when no check could decide an attempt. `ignore` leaves those out; the report still counts them |
+| `fail_on` | The evidence level a finding must reach to fail the gate: `confirmed` (the default, level 2 and above), `suspected` (level 1 too, a finding a model judged only) or a level from 1 to 5 ([levels](redteam-verdicts.md#evidence-levels)), such as `3` for a tool call and above |
+| `severity` | Only findings of vulnerabilities at this severity or above fail the gate. A finding of a vulnerability with no `severity` counts |
+| `warn_on` | Warn about a finding at this level or above that does not fail the gate: one below `fail_on`, or below `severity`. Takes the same values as `fail_on`, at or below it. Default: no warning |
+| `undetermined` | What an attempt no check could decide, or one the budget stopped, does: `fail` (the default), `warn` or `ignore`. The report counts them whatever this says |
+| `errors` | What an attempt that did not complete does, by whose failure it was: `target`, `attacker`, `judge` and `infrastructure`, each `fail`, `warn` or `ignore` |
+| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true. The same as `errors` `attacker`, `judge` and `infrastructure` at `fail` (true) or `ignore` (false); give one or the other |
+| `ignore_target_errors` | Do not fail on calls of the target that failed. Default false. The same as `errors.target: ignore`; give one or the other |
 
-The gate also fails a finding of a vulnerability with no `severity` when `severity` is set, a run with no attempt, and a run that made fewer attempts than it planned.
+The gate always fails a run with no attempt, and a run that made fewer attempts than it planned.
+
+A run whose results are only suspected passes with a warning under:
+
+```yaml
+gate: { fail_on: confirmed, warn_on: suspected }
+```
+
+A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) gives the same result as before.
