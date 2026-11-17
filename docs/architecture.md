@@ -167,7 +167,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; not yet mounted in `martian ui` |
 | `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Validated; not yet run |
 | `src/martian/redteam/catalog/` | The catalogue's home in the core; today the version 0.2 catalogue of `martian_redteam` | Exists |
-| `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls. The function and HTTP targets of suite files, with conversations ([red team targets](redteam-targets.md)) | Exists; the MCP target is to come |
+| `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls. The function and HTTP targets of suite files and an MCP server target, with conversations and structured tool calls ([red team targets](redteam-targets.md)) | Exists |
 | `src/martian/redteam/engine/` | The engine's home in the core; today the version 0.2 probe loop, hosted generation and judging | Exists; the local engine is to come |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
 

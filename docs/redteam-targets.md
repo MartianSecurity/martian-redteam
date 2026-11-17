@@ -9,7 +9,7 @@ async def close() -> None
 
 `TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, the `session` the message was sent in, and `latency_ms`.
 
-`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
+`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
 
 ## Function and HTTP targets
 
@@ -19,6 +19,17 @@ The `file` and `url` blocks are a suite file's target block, read by the suite f
 - **HTTP** (`url`, `headers`, `body`, `response_path`, `timeout_seconds`). One JSON `POST` per message: no retry, no redirect, no proxy from the environment. `${NAME}` in `url` and header values is read from the environment. The reply is the response's text, or the value at `response_path`; a value that is not text is kept as its JSON. `tool_calls_path` names where the answer lists its tool calls. A failed call names the setting to check and never repeats the address, a header or the response.
 
 `HttpTarget(reference, address_policy=...)` pins every connection to an address the policy allows, as the judges' connections are pinned. An edition that calls endpoints other people name passes one. A local run calls the endpoint its user named and passes none.
+
+## MCP server target
+
+An agent exposed as an MCP server is attacked through one entry tool, used as the chat. The run file's `mcp` block names the server (a Streamable HTTP `url`, or a stdio `command`), the `tool` and the `message_argument` the attack goes in. It needs the `mcp` extra (`pip install "martian-sdk[mcp]"`).
+
+- Each message is one call of the tool, with `arguments` beside it. `session_argument` carries the conversation's id and `reset_argument` is `true` on its first turn.
+- The reply is the text of the result. `response_path` and `tool_calls_path` read the result's structured content instead, or its text as JSON.
+- A result marked as an error, or a server that cannot be reached, is a target error that never repeats the address or what the server sent.
+- One connection serves every message of the run. A stdio server starts with the first message and ends when the target closes; it gets only the environment variables MCP's stdio client passes on.
+
+The tool's input schema is pinned for the run, as the hosted engine pins it: its SHA-256 over canonical JSON is `schema_sha256` when the block gives one, else the digest the first message sees. Every message checks it again. A tool that is gone or whose schema changed raises `TargetChanged`, and the engine stops the run rather than attack a different tool.
 
 ## Conversations
 
@@ -35,6 +46,7 @@ What the target sends:
 | --- | --- | --- |
 | Function | The `session_id` parameter, when the function takes one | The `history` parameter: earlier turns as `user` and `assistant` messages |
 | HTTP | `{{session_id}}` in `body`. `session.header` also sends it in a header | `{{history}}` is the earlier turns; `{{messages}}` is those and the new message. A body with only `{{input}}` sends the newest turn |
+| MCP | `session_argument`, and `reset_argument` is `true` on the first turn | Not sent: the server keeps it |
 
 A server that issues its own ids sets `session.response_path`. The first turn of a conversation sends an empty id, and each reply's id at that path is sent with the next turn.
 

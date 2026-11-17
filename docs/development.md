@@ -54,7 +54,7 @@ uv sync --locked
 uv run ruff format src tests examples scripts
 uv run ruff check src tests examples scripts
 uv run --extra mcp mypy src
-uv run --extra evals pytest -q -n auto
+uv run --extra evals --extra mcp pytest -q -n auto
 uv run python -m compileall -q src
 ```
 
@@ -63,7 +63,7 @@ uv run python -m compileall -q src
 Optional local coverage (CI always produces XML + JUnit; pytest-cov combines the workers' data):
 
 ```bash
-uv run --extra evals pytest -q -n auto --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+uv run --extra evals --extra mcp pytest -q -n auto --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 ```
 
 Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK namespaces.

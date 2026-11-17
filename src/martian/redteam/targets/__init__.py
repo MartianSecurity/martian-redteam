@@ -8,7 +8,10 @@ implement it; the engine knows none of them.
 
 - :func:`target_from_run_file` builds the target a run file's ``target`` block names
   (:mod:`martian.redteam.targets.factory`): :class:`~martian.redteam.targets.function.FunctionTarget`
-  or :class:`~martian.redteam.targets.http.HttpTarget`, from the suite file's own target block.
+  or :class:`~martian.redteam.targets.http.HttpTarget`, from the suite file's own target block, or
+  :class:`~martian.redteam.targets.mcp.McpServerTarget` for an MCP server.
+- :mod:`martian.redteam.targets.reply` is the reply contract: the text and the tool calls a target
+  reports.
 - :mod:`martian.redteam.targets.conversations` keeps each target's conversations.
 
 ``docs/redteam-targets.md`` describes each target and the session contract.
@@ -33,6 +36,11 @@ class TargetReply(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     session: str | None = None
     latency_ms: float | None = Field(default=None, ge=0)
+
+
+class TargetChanged(RuntimeError):
+    """The target is not the one the run started with, such as an MCP tool whose input schema
+    changed. The engine stops the run: it never attacks a target other than the one it pinned."""
 
 
 @runtime_checkable
@@ -63,4 +71,4 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-__all__ = ["Target", "TargetReply", "target_from_run_file"]
+__all__ = ["Target", "TargetChanged", "TargetReply", "target_from_run_file"]

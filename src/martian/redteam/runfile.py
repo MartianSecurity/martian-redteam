@@ -32,14 +32,22 @@ class _Model(BaseModel):
 
 
 class McpTarget(_Model):
-    """An MCP server under test: the tool that takes a message, and the argument the message goes in."""
+    """An MCP server under test: the tool that takes a message, and the argument the message goes in.
+    ``session_argument`` and ``reset_argument`` carry the conversation: its id, and ``true`` on its
+    first turn. ``response_path`` and ``tool_calls_path`` read the reply in the tool's structured
+    result, or in its text as JSON. ``schema_sha256`` pins the tool's input schema."""
 
     url: str | None = None
     command: list[str] | None = None
     tool: str = Field(min_length=1)
     message_argument: str = Field(default="message", min_length=1)
+    session_argument: str | None = Field(default=None, min_length=1)
+    reset_argument: str | None = Field(default=None, min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
+    response_path: str | None = Field(default=None, min_length=1)
+    tool_calls_path: str | None = Field(default=None, min_length=1)
+    schema_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _one_transport(self) -> McpTarget:
@@ -47,6 +55,14 @@ class McpTarget(_Model):
             raise ValueError("an mcp target needs a url or a command, not both")
         if self.command is not None and not self.command:
             raise ValueError("an mcp target's command names a program")
+        if self.command is not None and self.headers:
+            raise ValueError("headers apply to an mcp target's url")
+        names = [self.message_argument, self.session_argument, self.reset_argument]
+        given = [name for name in names if name is not None]
+        if len(set(given)) != len(given):
+            raise ValueError("message_argument, session_argument and reset_argument name different arguments")
+        if clash := sorted(set(given) & set(self.arguments)):
+            raise ValueError(f"arguments must not set {', '.join(clash)}, which each message sets")
         return self
 
 
@@ -92,8 +108,8 @@ class Target(_Model):
         if self.tool_calls_path is not None and self.url is None:
             raise ValueError("tool_calls_path applies to a url target; an mcp target has its own")
         if self.mcp is not None:
-            if suite_fields:
-                raise ValueError(f"an mcp target takes none of {', '.join(sorted(suite_fields))}")
+            if other := sorted(set(suite_fields) - {"timeout_seconds"}):
+                raise ValueError(f"an mcp target takes none of {', '.join(other)}")
             return self
         if not suite_fields:
             raise ValueError("a target needs a file, a url or an mcp server")

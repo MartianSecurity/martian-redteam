@@ -25,8 +25,9 @@ def target_from_run_file(
 ) -> Target:
     """The target of ``block``. ``base`` is the run file's folder, for a relative ``file``;
     ``private`` what a function target's process must not reach; ``address_policy`` pins the
-    connections of an HTTP target (:mod:`martian.redteam.targets.http`)."""
-    from martian.evals.runner import TargetRef
+    connections of an HTTP target (:mod:`martian.redteam.targets.http`). An MCP target needs the
+    ``mcp`` extra; its stdio server starts in ``base``."""
+    from martian.evals.runner import DEFAULT_TARGET_TIMEOUT_SECONDS, TargetRef
 
     if block.kind == "function":
         from martian.redteam.targets.function import FunctionTarget
@@ -41,7 +42,14 @@ def target_from_run_file(
             tool_calls_path=block.tool_calls_path,
             address_policy=address_policy,
         )
-    raise ValueError(f"no {block.kind} target in this release")
+    from martian.redteam.targets.mcp import McpServerTarget
+
+    assert block.mcp is not None
+    return McpServerTarget(
+        block.mcp,
+        timeout_seconds=block.timeout_seconds or DEFAULT_TARGET_TIMEOUT_SECONDS,
+        base=base,
+    )
 
 
 __all__ = ["target_from_run_file"]

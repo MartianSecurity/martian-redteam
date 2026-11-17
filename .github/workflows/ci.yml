@@ -91,11 +91,12 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked --extra evals
+        run: uv sync --locked --extra evals --extra mcp
 
+      # The mcp extra is installed so the red team MCP target, proxy and session tests run.
       - name: Run Python tests
         run: >
-          uv run --extra evals pytest -q -n auto
+          uv run --extra evals --extra mcp pytest -q -n auto
           --cov=martian_redteam --cov=martian
           --cov-report=term-missing
           --cov-report=xml:coverage.xml

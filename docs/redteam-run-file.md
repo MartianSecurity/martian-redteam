@@ -72,7 +72,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `headers` | Headers of each request to `url`. `${NAME}` is read from the environment |
 | `body` | The JSON body sent to `url`, with `{{input}}` where the attack goes |
 | `response_path` | Where the reply is in the JSON answer, such as `reply` or `choices.0.message.content` |
-| `timeout_seconds` | The longest one call of the target may take, 1 to 600 |
+| `timeout_seconds` | The longest one call of the target may take, 1 to 600. Default 120 |
 | `session` | For a `url` target: how the conversation's id travels besides `{{session_id}}` in `body`. See below |
 | `tool_calls_path` | For a `url` target: where the JSON answer lists the tool calls the target made or asked for, such as `choices.0.message.tool_calls`. Read by the [reply contract](redteam-targets.md#reply-contract) |
 | `mcp` | An MCP server as the target. See below |
@@ -90,12 +90,19 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 
 | Field | Meaning |
 | --- | --- |
-| `url` | The server's Streamable HTTP address. Give `url` or `command` |
-| `command` | The program and arguments that start a stdio server |
+| `url` | The server's Streamable HTTP address. Give `url` or `command`. `${NAME}` is read from the environment |
+| `command` | The program and arguments that start a stdio server, in the run file's folder |
 | `tool` | The tool that takes a message |
 | `message_argument` | The tool argument the attack goes in. Default `message` |
-| `arguments` | Other arguments sent with every call |
-| `headers` | Headers of each request to `url` |
+| `session_argument` | The tool argument that carries the conversation's id |
+| `reset_argument` | The tool argument that is `true` on a conversation's first turn and `false` after |
+| `arguments` | Other arguments sent with every call. They must not set the three above |
+| `headers` | Headers of each request to `url`. `${NAME}` is read from the environment |
+| `response_path` | Where the reply is in the tool's structured result, or in its text read as JSON. Without it, the reply is the result's text |
+| `tool_calls_path` | Where the tool calls are, read the same way and by the [reply contract](redteam-targets.md#reply-contract) |
+| `schema_sha256` | The SHA-256 of the tool's input schema as canonical JSON. Without it, the run pins the schema its first message sees. A different schema stops the run |
+
+`timeout_seconds` applies to an `mcp` target too.
 
 ## Models
 
