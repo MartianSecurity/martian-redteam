@@ -21,7 +21,7 @@ from typing import Annotated, Any, Protocol
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep
+from martian.evals.server.dependencies import EntitlementsDep, PrincipalDep, RecordsDep
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT
 from martian.redteam.model import (
@@ -43,6 +43,8 @@ from martian.redteam.store import RedteamStore
 
 PREFIX = "/v1/redteam"
 MAX_PAGE = 200
+ENVIRONMENTS = "redteam_environments"
+"""The feature key a run in an environment needs (:mod:`martian.evals.server.entitlements`)."""
 
 router = APIRouter(prefix=PREFIX, tags=["redteam"])
 
@@ -307,19 +309,24 @@ async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
 
 
 @router.post("/runs", response_model=RunSummary, status_code=202)
-async def start_redteam_run(body: RunStart, request: Request, principal: PrincipalDep) -> RunSummary:
+async def start_redteam_run(
+    body: RunStart, request: Request, principal: PrincipalDep, entitlements: EntitlementsDep
+) -> RunSummary:
     from pydantic import ValidationError
 
+    from martian.evals.server.dependencies import ensure_entitled
     from martian.redteam.runfile import RunFile
 
     try:
-        RunFile.model_validate(body.run_file)
+        run_file = RunFile.model_validate(body.run_file)
     except ValidationError as error:
         reasons = [
             ".".join(str(part) for part in item["loc"]) + ": " + str(item["msg"]).removeprefix("Value error, ")
             for item in error.errors(include_input=False, include_context=False, include_url=False)
         ]
         raise HTTPException(422, "; ".join(reasons)) from None
+    if run_file.environment is not None:
+        ensure_entitled(entitlements, ENVIRONMENTS)
     run = await _launcher(request).start(principal, body)
     return _summary(run)
 
@@ -333,6 +340,7 @@ async def stop_redteam_run(
 
 
 __all__ = [
+    "ENVIRONMENTS",
     "MAX_PAGE",
     "PREFIX",
     "AnnotationIn",
