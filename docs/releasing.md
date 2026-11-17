@@ -179,6 +179,10 @@ file (`concluded`, with the declared text in the `martian:declared-licence` prop
 `License:` names of its machine-readable copyright file, which are Debian's names, not SPDX. The
 lists cover the `evals` extra only; the `mcp` and `postgres` extras are not in either.
 
+The licences of the red team content inside the SDK (prompts, catalogue, attack methods, datasets) are
+not package metadata: `scripts/content_licences.py` checks them against their own register in CI
+([red team content licences](security-and-data.md#red-team-content-licences)).
+
 **The check.** Both commands hold every third-party component to `scripts/licence-policy.json` and
 exit with code 1 after writing the file when one fails. In the release workflow the wheel's check
 runs before the image is built and the image's before anything is kept, so either stops the release.

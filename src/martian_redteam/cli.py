@@ -1076,5 +1076,13 @@ def _form_checks(form: Any) -> str:
     return " + ".join(kinds)
 
 
+def _register_interop() -> None:
+    from martian.redteam.interop.cli import register
+
+    register(app)
+
+
+_register_interop()
+
 if __name__ == "__main__":
     app()

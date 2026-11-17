@@ -277,8 +277,8 @@ no time limit, and a suite or a record names an installed check by name only.
 
 ## Telemetry
 
-The evals processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
-`martian evals run`, the eval gate, a server that serves the [evals core](evals-core.md) and
+The evals and red team processes send no telemetry, and neither do the libraries they bundle: `martian ui`,
+`martian evals run`, `martian redteam`, the eval gate, a server that serves the [evals core](evals-core.md) and
 each of its worker processes. Importing `martian.evals` sets `MLFLOW_DISABLE_TELEMETRY=true`
 before it imports MLflow, unless the environment already sets the variable, and each worker
 process inherits it. MLflow decides when it is first imported whether to start its telemetry
@@ -313,6 +313,44 @@ MLflow's telemetry client starting in any of those processes, and checks that th
 loads nothing from another host. It also grades one request with the SDK judge at a loopback
 endpoint, with and without an address policy, with every other address refused, and fails if the
 judge looks up or connects to anything but that endpoint.
+
+## What a local red team run connects to
+
+A local red team run (`martian redteam run` with `models` in its run file and no Martian connection)
+connects to the model it names and to its target, and to nothing else. It sends no telemetry, checks
+for no update and needs no account. Every connection it can open:
+
+| Connection | When | What is sent |
+| --- | --- | --- |
+| The attacker and judge model's endpoint | Always: `models.attacker` and `models.judge`, through the judges' model routing ([evals](evals.md)). For an `openai:/` model, `OPENAI_API_BASE`, else `OPENAI_BASE_URL`, else OpenAI | The catalogue's prompts, the purpose, the attacks, and the target's replies and tool calls, with credentials redacted ([trust boundary](#trust-boundary)); the model's key and `headers` |
+| The target | Always: a `url` target, an `mcp` target's `url`, or none for a `file` function or an `mcp` `command`, which run on this machine | The attacks |
+| The recording proxy | When the run file lists `tools.proxy`: it listens on loopback, and connects to each `upstream` | The agent's tool calls, as the agent sent them |
+| The agent's session API | When the run file names `tools.session_api`: one request to `{session_api}/sessions` | The proxy's session |
+| The receipt listener | When a vulnerability has a `receipt` check: the run listens on `127.0.0.1` and the target is asked to send the canary there ([trust boundary](#trust-boundary)) | Nothing: it only receives |
+| A model price catalogue | Only when `MLFLOW_MODEL_CATALOG_URI` names one, to price `budget.cost_usd` ([below](#judges-and-the-model-catalogue)) | Nothing of the run |
+
+Three things connect to a Martian server, each only when you ask for it with `MARTIAN_API_URL` and
+`MARTIAN_API_TOKEN`: a run file with no `models`, whose attacks the Martian platform generates and judges
+(a run never chooses one when both are configured, [run file models](redteam-run-file.md#models)); a
+run file that names an `environment`, which the server provides ([environments](redteam-run-file.md#environments));
+and `martian redteam push` and `martian redteam campaign`, which send a run to a server or start a
+campaign on one ([red team reports](redteam-reports.md#pushing-a-run-to-a-martian-server)).
+
+The other red team commands connect to nothing: `validate`, `catalog`, `report`, `compare`,
+`pin add`, `convert promptfoo`, `import promptfoo` and `import garak`. `selftest` calls no model and
+only its own loopback listener. `rejudge` calls only the judge model. `pin run` connects only to
+the target, and the proxy's upstreams when the run file lists them. `martian ui` listens on loopback
+and serves the runs from the local store. `martian redteam garak` runs garak, a separate program
+installed by you; what garak itself connects to is garak's ([red team interop](redteam-interop.md#garak-probes)).
+
+`tests/redteam/test_no_outbound.py` proves it in CI. It runs the local workflow, each command in its
+own process with only a model key and the model's address in a clean environment (no Martian, CI,
+pytest or telemetry variable): validate, a run writing every report format, a second run, reports
+written again, the two runs compared, a run re-judged, a confirmed finding pinned and re-run, a
+promptfoo config converted and its results imported, and `martian ui` serving the runs; and the
+self-test on its own. Every connection and name
+lookup for an address other than loopback is refused and fails the test, as MLflow's telemetry
+client starting does, and the loopback connections must be exactly the model and the target.
 
 ## Judges and the model catalogue
 
@@ -573,6 +611,34 @@ Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
 `NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. The simulation and evaluation prompts (`martian.redteam.catalog.prompts`, which martian-agents imports) are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+
+### Red team content licences
+
+`src/martian/redteam/catalog/licences.json`, which ships in the package, is the register of red team
+content: each prompt set, catalogue file, dataset, attack algorithm and interop map, with its source,
+licence and whether it allows commercial use. Content may ship under Apache-2.0, MIT, BSD-2-Clause,
+BSD-3-Clause, CC0-1.0, CC-BY-4.0 or the Unlicense, and only when commercial use is allowed.
+
+A content file is a file Git tracks that matches the register's `content.globs`: the catalogue
+(`martian.redteam.catalog`, `martian_redteam.catalog`), attack methods (`martian.redteam.methods`),
+the interop maps, the verdict test vectors, the self-test, the canary note, the attacker refusal
+phrases, the encodings, the planted content of poisoning probes (`martian.redteam.poisoning`), and any data
+file (`.json`, `.jsonl`, `.csv`, `.txt`, `.yaml`, `.parquet`) under `martian/redteam` or
+`martian_redteam`, less the API contract. `scripts/content_licences.py` fails when a content file has
+no entry, an entry names a file that is gone, or an entry's licence is not permitted or does not allow
+commercial use; `tests/redteam/test_content_licences.py` runs it in CI. New content needs its entry
+in the same change. The attack methods' prompt files keep their own register
+(`martian/redteam/methods/prompts/register.json`, with each file's references), which the content
+register delegates to (`content.delegated`): a file listed there is covered on the same terms.
+
+The register also lists sources that do not ship. The harmful-content datasets (AdvBench and HarmBench,
+MIT; XSTest, CC BY 4.0) are downloaded on use from the addresses `catalog/datasets/register.json`
+pins, and no row ships ([catalog](catalog.md#harmful-content)). BeaverTails and ToxicChat (CC BY-NC
+4.0) and Do-Not-Answer (non-commercial) may not enter the package and are not registered datasets, and neither may text derived from the OWASP Machine
+Learning Security Top 10 (CC BY-SA 4.0). `MartianSecurity/martian-agents`, `martian-skills` and
+`martian-wiki` have no licence file, and some guidance skills are built from those restrictive
+sources; they are recorded as not opened, and nothing from them enters this package until they have a
+licence and their content is registered.
 
 ## Resource runtime metadata
 
