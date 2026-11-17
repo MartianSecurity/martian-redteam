@@ -542,6 +542,52 @@ def rejudge_command(
         raise typer.Exit(code=1)
 
 
+@app.command("selftest")
+def selftest_command(
+    disable: Annotated[
+        list[str] | None,
+        typer.Option("--disable", help="Run without this check kind's verifier, to see its level fail."),
+    ] = None,
+) -> None:
+    """Run each evidence level against a planted vulnerable target; exit 1 when one misses its hit."""
+    from martian.redteam.verify.judge import ServiceJudge
+    from martian.redteam.verify.selftest import ScriptedService, selftest
+    from martian.redteam.verify.verifiers import Verifiers
+
+    verifiers = Verifiers(ServiceJudge(ScriptedService()))
+    for kind in disable or []:
+        if kind not in ("judge", "text", "canary", "tool_call", "receipt"):
+            _stop(f"--disable takes judge, text, canary, tool_call or receipt, not {safe_text(kind)}.")
+        verifiers = verifiers.without(kind)  # type: ignore[arg-type]
+    outcomes, _ = asyncio.run(selftest(verifiers))
+    table = Table(title="Martian red team self-test: a planted vulnerable target")
+    for column in ("Case", "Shows", "Expected", "Found", "Result"):
+        table.add_column(column)
+
+    def shown(level: Any, counted: Any) -> str:
+        return "no finding" if level is None else f"level {int(level)}, {counted}"
+
+    for outcome in outcomes:
+        table.add_row(
+            outcome.case.name,
+            outcome.case.what,
+            shown(outcome.case.level, outcome.case.counted_as),
+            shown(outcome.level, outcome.counted_as),
+            "pass" if outcome.passed else "FAIL",
+        )
+    console.print(table)
+    failed = [outcome.case.name for outcome in outcomes if not outcome.passed]
+    if failed:
+        errors.print(
+            "Self-test failed: " + ", ".join(failed) + " did not detect the planted hit as expected.",
+            style="red",
+            markup=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1)
+    console.print("Every evidence level detected its planted hit.")
+
+
 @app.command("validate")
 def validate_command(
     ctx: typer.Context,

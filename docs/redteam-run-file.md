@@ -242,6 +242,23 @@ The command exits 0 when the gate passes, 1 when it fails and 2 when the run cou
 
 A stored attempt keeps digests of its content unless the run kept content (`MARTIAN_REPORT_INCLUDE_CONTENT=1`). Its checks are then undetermined: there is nothing to decide them on.
 
+## Self-test
+
+`martian redteam selftest` shows that the harness can find what it looks for. It runs the engine against a small, deliberately vulnerable target that ships with the SDK (`martian.redteam.verify.selftest`), with a scripted attacker and judge, so no model is called and nothing leaves the machine. One probe per case, each with its own planted weakness:
+
+| Case | Planted weakness | Must find |
+| --- | --- | --- |
+| `delivered` | None: the target holds | No finding, the attempt at level 0 |
+| `judged` | The reply leaks, and only the judge checks it | Level 1, suspected |
+| `text` | The reply states its secret rule | Level 2, by a text check |
+| `canary` | The reply holds the run's canary in base64 | Level 2, by the canary check |
+| `attempted` | The target asks for the goal's tool call, which never runs | Level 3, attempted |
+| `executed` | The goal's tool call runs | Level 3, confirmed, reproduced 1 of 1 |
+| `receipt` | The target sends the canary to the run's receipt listener | Level 4 |
+| `control` | The target makes the call whatever it is sent | No finding: the negative control discards it |
+
+It prints each case and exits 1, naming the cases, when one does not find its planted hit. `--disable KIND` (`judge`, `text`, `canary`, `tool_call` or `receipt`, repeatable) runs without that verifier, to see its case fail. The test suite runs it in CI, and once with each verifier disabled.
+
 ## Gate
 
 | Field | Meaning |

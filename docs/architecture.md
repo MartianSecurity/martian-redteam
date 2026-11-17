@@ -163,7 +163,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | Path | Holds | Status |
 | --- | --- | --- |
 | `src/martian/redteam/model/` | The shared red team data model, and the maps from the version 0.2 report, CI session rows and the engine's campaign summary ([red team model](redteam-model.md)) | Exists |
-| `src/martian/redteam/verify/` | The verdict rules and their published test vectors ([verdicts](redteam-verdicts.md)), and the verifiers that decide each check (`verifiers.py`, the judge in `judge.py`) | Exists; the state verifier is a slot a Martian server fills |
+| `src/martian/redteam/verify/` | The verdict rules and their published test vectors ([verdicts](redteam-verdicts.md)), and the verifiers that decide each check (`verifiers.py`, the judge and its calibration in `judge.py`), canaries (`canary.py`), the receipt listener (`listener.py`) and the self-test (`selftest.py`) | Exists; the state verifier is a slot a Martian server fills |
 | `src/martian/redteam/store/` | Red team runs in the evals core's record store, as eval runs of kind `redteam` | Exists |
 | `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; `create_app` mounts them and `martian ui` binds the engine's `LocalLauncher`, so the local edition serves them and starts runs. The hosted backend does not mount them yet (MartianSecurity/martian-notes#299) |
 | `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Exists; `martian redteam run` runs it |
