@@ -172,6 +172,49 @@ or the id of a run in the local store. It writes `redteam-report.json`, `redteam
 every format, or those `-f` names, to `-o` (default: the folder of the `redteam-run.json`, else
 `results`). `--run-file` gives the run file that SARIF results point at.
 
+## Pinned findings
+
+A confirmed finding can be kept as a regression test, so that after a fix CI checks it stays fixed.
+
+```bash
+MARTIAN_REPORT_INCLUDE_CONTENT=1 martian redteam run redteam.yaml   # a run that keeps the attack text
+martian redteam pin add results/redteam-run.json -o pins            # every confirmed finding, or --finding ID
+martian redteam pin run redteam.yaml --pins pins                    # in CI: no attacker or judge model
+```
+
+`pin add` reads a `redteam-run.json`, or a run id in the local store, and writes one pin file per
+finding to `-o` (default `pins`). A pin holds:
+
+- the finding: its probe, vulnerability, type, attack method, objective, severity, level and label,
+  and the run it came from;
+- the exact attack that hit;
+- its checks: the text, canary and tool-call checks that hit that attempt. This is the evidence
+  predicate. A judge, receipt or state check needs a model, a listener or an environment, so it is
+  not pinned, and a finding with no other evidence cannot be pinned. A suspected finding cannot be
+  pinned;
+- the recorded vulnerable reply: its text, tool calls and whether the target reported its tool
+  calls.
+
+A pin is written only when its checks still hit its recorded reply. A run that holds digests cannot
+be pinned, since a pin needs the attack's text: run it with `MARTIAN_REPORT_INCLUDE_CONTENT=1`. A
+pin holds the attack and the reply in clear text, so review it before committing it.
+
+`pin run` builds the run file's target, and for each pin first checks that its checks still hit its
+recorded reply, then sends its attack once, in a session of its own, and applies its checks. It
+calls no attacker or judge model and needs no model key or Martian connection. Each pin is:
+
+| Status | Meaning |
+| --- | --- |
+| `still_reproduces` | A pinned check hit: the finding is back |
+| `not_reproduced` | Every pinned check decided and none hit |
+| `undetermined` | A pinned check could not decide, such as a tool-call check on a target that does not report its calls |
+| `error` | The target failed or timed out |
+| `invalid` | The pin's checks no longer hit its own recorded reply, so it proves nothing |
+
+It writes `redteam-pins.json` (each pin's status, its check results and the counts by status, with
+`passed`) and `redteam-pins.md` to `-o` or the run file's `output_folder`, and exits 0 when every pin
+is `not_reproduced`, 1 otherwise, and 2 when it could not start.
+
 ## What a report holds of the target's content
 
 Every format follows the same rule. Reports hold digests of the attacks, replies, judge reasons and

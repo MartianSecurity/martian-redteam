@@ -441,21 +441,12 @@ def report_command(
 ) -> None:
     """Write a version 2 run's reports again, in other formats: redteam-report.json and .md, and each format."""
     from martian.redteam.engine.report import MARKDOWN_NAME, REPORT_NAME, for_report
-    from martian.redteam.model import RedteamRun
     from martian.redteam.report import build_report, render_markdown
     from martian.redteam.report.outputs import write_formats
 
     chosen = _formats(formats or ["all"])
-    path = Path(run)
-    if path.is_file():
-        try:
-            found = RedteamRun.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            _stop(f"{safe_text(path)} is not a red team run (redteam-run.json).")
-        destination = output or path.parent
-    else:
-        found = _stored_run(run)
-        destination = output or Path("results")
+    found, folder = _load_run(run)
+    destination = output or folder
     copy = for_report(found)
     standard = build_report(copy)
     destination.mkdir(parents=True, exist_ok=True)
@@ -465,6 +456,20 @@ def report_command(
     written = write_formats(copy, standard, destination, chosen, run_file=shown)
     names = [REPORT_NAME, MARKDOWN_NAME, *(item.name for item in written)]
     console.print(f"Wrote {', '.join(names)} to {destination}", markup=False)
+
+
+def _load_run(run: str) -> tuple[Any, Path]:
+    """The run ``run`` names, a ``redteam-run.json`` or a run id in the local store, and the folder
+    its reports go to by default: the file's folder, else ``results``."""
+    from martian.redteam.model import RedteamRun
+
+    path = Path(run)
+    if path.is_file():
+        try:
+            return RedteamRun.model_validate_json(path.read_text(encoding="utf-8")), path.parent
+        except (OSError, ValueError):
+            _stop(f"{safe_text(path)} is not a red team run (redteam-run.json).")
+    return _stored_run(run), Path("results")
 
 
 def _stored_run(run_id: str) -> Any:
@@ -481,6 +486,82 @@ def _stored_run(run_id: str) -> Any:
     if found is None:
         _stop(f"{safe_text(run_id)} is neither a file nor a red team run in the local store.")
     return found
+
+
+pin_app = typer.Typer(no_args_is_help=True, add_completion=False)
+app.add_typer(pin_app, name="pin", help="Keep confirmed findings as regression tests, and re-run them with no model.")
+
+
+@pin_app.command("add")
+def pin_add_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+    finding: Annotated[
+        list[str] | None, typer.Option("--finding", help="A finding id to pin. Default: every confirmed finding.")
+    ] = None,
+    output: Annotated[Path, typer.Option("-o", "--output", help="Folder of pin files.")] = Path("pins"),
+) -> None:
+    """Pin confirmed findings: save each one's attack, its checks and the reply they hit as a pin file."""
+    from martian.redteam.pins import PinError, pin_findings, save
+
+    found, _ = _load_run(run)
+    try:
+        pins = pin_findings(found, finding)
+    except PinError as error:
+        _stop(f"Cannot pin: {error}")
+    for path in save(pins, output):
+        console.print(f"Pinned {path}", markup=False)
+    console.print("A pin holds the attack and the reply it hit in clear text: review it before you commit it.")
+
+
+@pin_app.command("run")
+def pin_run_command(
+    config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True, help="The run file.")],
+    pins: Annotated[Path, typer.Option("--pins", help="Folder of pin files.")] = Path("pins"),
+    output: Annotated[Path | None, typer.Option("-o", "--output", help="Overrides output_folder.")] = None,
+) -> None:
+    """Re-run pinned findings against the run file's target, with no attacker or judge model."""
+    from contextlib import AsyncExitStack
+
+    from martian.redteam.engine.runs import TargetUnavailable, build_target
+    from martian.redteam.pins import STATUS_WORDS, load, render_markdown, replay
+    from martian.redteam.runfile import RunFile, problems
+
+    if found := problems(config_path):
+        _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
+    run_file = RunFile.from_yaml(config_path)
+    try:
+        loaded = load(pins)
+    except (OSError, ValueError) as error:
+        _stop(safe_text(error))
+    if not loaded:
+        _stop(f"No pin file in {safe_text(pins)}: pin a finding with martian redteam pin add.")
+
+    async def go() -> Any:
+        async with AsyncExitStack() as stack:
+            target = build_target(run_file.target)
+            stack.push_async_callback(target.close)
+            return await replay(loaded, target, timeout=run_file.target.timeout_seconds or 120.0)
+
+    try:
+        report = asyncio.run(go())
+    except TargetUnavailable as error:
+        _stop(safe_text(error))
+    except (FileNotFoundError, ImportError, AttributeError):
+        _stop("Could not load the target. Check its file, dependencies and function name.")
+    destination = output or Path(run_file.output_folder)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "redteam-pins.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    (destination / "redteam-pins.md").write_text(render_markdown(report), encoding="utf-8")
+    table = Table(title="Pinned red team findings (no model called)")
+    for column in ("Pin", "Label", "Status"):
+        table.add_column(column)
+    for item in report.results:
+        table.add_row(item.pin_id, item.label, STATUS_WORDS[item.status])
+    console.print(table)
+    console.print(f"Wrote {destination / 'redteam-pins.json'}", markup=False)
+    if not report.passed:
+        errors.print("Pins failed: a pinned finding did not show as not reproduced.", style="red", markup=False)
+        raise typer.Exit(code=1)
 
 
 def _keep_locally(assessment: RiskAssessment) -> None:

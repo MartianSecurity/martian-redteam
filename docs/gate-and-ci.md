@@ -18,7 +18,9 @@ version 2 file gates on its `gate` block: the evidence level and severity a
 finding must reach to fail, what only warns (such as a run whose results are
 all suspected), and whether undetermined attempts and each kind of error fail,
 warn or are ignored ([run file gate](redteam-run-file.md#gate)). A warning
-never changes the exit code. `martian ci` requires a complete Backend acknowledgment as well as complete
+never changes the exit code. `martian redteam pin run` re-runs
+[pinned findings](redteam-reports.md#pinned-findings) with no model, and exits 1
+when one still reproduces or is not decided. `martian ci` requires a complete Backend acknowledgment as well as complete
 passing local results. Keep its typed receipt, report and probe checkpoints with
 `if: always()`; a running/incomplete receipt never passes.
 
