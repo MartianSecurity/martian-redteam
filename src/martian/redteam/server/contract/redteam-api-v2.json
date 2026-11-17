@@ -82,6 +82,12 @@
         "additionalProperties": false,
         "description": "One execution of a probe against the target.",
         "properties": {
+          "attacker_refusals": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attacker Refusals",
+            "type": "integer"
+          },
           "check_results": {
             "items": {
               "$ref": "#/components/schemas/CheckResult"
@@ -625,6 +631,12 @@
             "title": "Errors",
             "type": "integer"
           },
+          "generations": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generations",
+            "type": "integer"
+          },
           "hits": {
             "default": 0,
             "minimum": 0.0,
@@ -641,6 +653,12 @@
             "default": 0,
             "minimum": 0.0,
             "title": "Judge Errors",
+            "type": "integer"
+          },
+          "refusals": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Refusals",
             "type": "integer"
           },
           "resisted": {

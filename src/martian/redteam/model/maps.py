@@ -86,6 +86,8 @@ def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> C
         attacker_errors=kinds["attacker"],
         judge_errors=kinds["judge"],
         stopped=outcomes["stopped"],
+        generations=sum(attempt.spend.attacker_calls for attempt in run_attempts if attempt.spend is not None),
+        refusals=sum(attempt.attacker_refusals for attempt in run_attempts),
         confirmed=sum(confirmed(finding.evidence_level) for finding in findings),
         suspected=sum(finding.evidence_level == EvidenceLevel.JUDGED for finding in findings),
     )

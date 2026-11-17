@@ -28,7 +28,9 @@ from typing import Any
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
+from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
+from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
 from martian.redteam.model import (
     Attempt,
     Check,
@@ -88,12 +90,13 @@ def _code_of(error: Exception, default: str) -> str:
 
 
 class _Spending:
-    """What one attempt spent, kept beside the run's ledger."""
+    """What one attempt spent, kept beside the run's ledger, and the generations the attacker refused."""
 
     def __init__(self, ledger: Ledger, probe_id: str) -> None:
         self.ledger = ledger
         self.probe_id = probe_id
         self.spend = Spend()
+        self.refusals = 0
 
     def reserve(self, kind: CallKind) -> None:
         self.spend = self.spend + self.ledger.reserve(kind, self.probe_id)
@@ -179,7 +182,13 @@ class Engine:
         }
 
         def done(**update: Any) -> Attempt:
-            return Attempt(**{**fields, **update, "spend": spending.spend, "finished_at": datetime.now(UTC)})
+            return Attempt(
+                **fields,
+                **update,
+                spend=spending.spend,
+                attacker_refusals=spending.refusals,
+                finished_at=datetime.now(UTC),
+            )
 
         try:
             self.ledger.check()
@@ -222,14 +231,30 @@ class Engine:
             purpose=self.run_file.target.purpose,
             attack_method=attack.id if attack.kind == "llm" else "prompt_injection",
         )
-        spending.reserve("attacker")
-        try:
-            output = await self.service.simulate(context)
-        except ClientError as error:
-            raise AttemptFailed(_kind_of(error), _code_of(error, "attacker_failed"), str(error)) from None
-        spending.record(output.usage)
-        payload = apply_encoding(output.attack, attack.id) if attack.kind == "encoding" else output.attack
-        return payload, {"policy_revision": output.policy_revision}
+        found: str | None = None
+        # A refusal or an empty generation is asked once more, with the defensive framing.
+        for request in (None, DEFENSIVE_FRAMING):
+            spending.reserve("attacker")
+            try:
+                output = await self.service.simulate(context, prompt=request)
+            except EmptyGeneration:
+                found = "empty"
+            except ClientError as error:
+                raise AttemptFailed(_kind_of(error), _code_of(error, "attacker_failed"), str(error)) from None
+            else:
+                spending.record(output.usage)
+                found = classify(output.attack)
+                if found is None:
+                    payload = apply_encoding(output.attack, attack.id) if attack.kind == "encoding" else output.attack
+                    return payload, {"policy_revision": output.policy_revision}
+            spending.refusals += 1
+        raise AttemptFailed(
+            "attacker",
+            "attacker_refused" if found == "refused" else "attacker_empty",
+            "the attacker refused to write the attack, also when asked again"
+            if found == "refused"
+            else "the attacker wrote no attack, also when asked again",
+        )
 
     async def _send(self, session: str, payload: str, spending: _Spending) -> TargetReply:
         spending.reserve("target")

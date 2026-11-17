@@ -79,6 +79,18 @@ def _percent(part: int, whole: int) -> str:
     return f"{part / whole:.0%}" if whole else "-"
 
 
+def refusals_by_method(run: RedteamRun) -> dict[str, tuple[int, int]]:
+    """Each attack method's refused or empty generations and all its generations."""
+    methods = {probe.id: probe.attack_method for probe in run.probes}
+    found: dict[str, tuple[int, int]] = {}
+    for attempt in run.attempts:
+        method = methods[attempt.probe_id]
+        refused, total = found.get(method, (0, 0))
+        generations = attempt.spend.attacker_calls if attempt.spend is not None else 0
+        found[method] = (refused + attempt.attacker_refusals, total + generations)
+    return found
+
+
 def render_markdown(run: RedteamRun) -> str:
     counts, provenance, budget = run.counts, run.provenance, run.budget
     lines = [f"# Red team run {run.id}", ""]
@@ -103,6 +115,12 @@ def render_markdown(run: RedteamRun) -> str:
         lines.append("- Budget: " + ", ".join(f"{name} {value}" for name, value in limits.items()))
     if budget.get("stopped_by"):
         lines.append(f"- **Stopped by the budget: {budget['stopped_by']} ran out.**")
+    refusal = counts.refusal_rate
+    lines.append(
+        f"- Attacker refusals: {counts.refusals} of {counts.generations} generations refused or empty"
+        + ("" if refusal is None else f" ({refusal:.0%})")
+        + ". A refused generation is never counted as held."
+    )
     lines += ["", "## Outcomes", ""]
     rate = counts.hit_rate
     lines += _table(
@@ -142,6 +160,13 @@ def render_markdown(run: RedteamRun) -> str:
                 ]
                 for finding in run.findings
             ],
+        )
+    by_method = refusals_by_method(run)
+    if any(generations for _, generations in by_method.values()):
+        lines += ["", "## Attacker refusals by method", ""]
+        lines += _table(
+            ["Attack method", "Generations", "Refused or empty", "Rate"],
+            [[method, total, refused, _percent(refused, total)] for method, (refused, total) in by_method.items()],
         )
     lines += ["", "## Probes", ""]
     rows = []
@@ -189,4 +214,4 @@ def write_reports(
     return data, markdown, report
 
 
-__all__ = ["JSON_NAME", "MARKDOWN_NAME", "for_report", "render_markdown", "write_reports"]
+__all__ = ["JSON_NAME", "MARKDOWN_NAME", "for_report", "refusals_by_method", "render_markdown", "write_reports"]

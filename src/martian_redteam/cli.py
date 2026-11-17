@@ -350,6 +350,11 @@ def _print_run(run: Any) -> None:
         )
     )
     console.print(table)
+    if counts.generations:
+        console.print(
+            f"Attacker refused or left empty {counts.refusals} of {counts.generations} generations "
+            f"({counts.refusals / counts.generations:.0%})."
+        )
     if run.budget.get("stopped_by"):
         console.print(f"Stopped by the budget: {run.budget['stopped_by']} ran out.")
 

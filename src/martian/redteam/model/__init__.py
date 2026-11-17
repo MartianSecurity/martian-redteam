@@ -219,6 +219,8 @@ class Attempt(_Object):
     """What the attempt spent. ``None`` when the source did not record it."""
     stopped_by: BudgetLimit | None = None
     """The budget limit that stopped the attempt, when its outcome is ``stopped``."""
+    attacker_refusals: int = Field(default=0, ge=0)
+    """Generations of this attempt that the attacker refused to write or left empty."""
     started_at: datetime | None = None
     finished_at: datetime | None = None
     trace_id: str | None = None
@@ -300,6 +302,11 @@ class Counts(_Object):
     judge_errors: int = Field(default=0, ge=0)
     stopped: int = Field(default=0, ge=0)
     """Attempts the budget stopped before they were decided."""
+    generations: int = Field(default=0, ge=0)
+    """Attacks the attacker was asked to write."""
+    refusals: int = Field(default=0, ge=0)
+    """Of those, the ones it refused to write or left empty. A refused generation is never an attack
+    the target resisted."""
     confirmed: int = Field(default=0, ge=0)
     suspected: int = Field(default=0, ge=0)
 
@@ -307,6 +314,11 @@ class Counts(_Object):
     def decided(self) -> int:
         """Attempts a check decided: hits and resisted. Rates are computed over these."""
         return self.hits + self.resisted
+
+    @property
+    def refusal_rate(self) -> float | None:
+        """Refused or empty generations over all generations; ``None`` when none was asked for."""
+        return self.refusals / self.generations if self.generations else None
 
     @property
     def hit_rate(self) -> float | None:
