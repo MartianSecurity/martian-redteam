@@ -175,6 +175,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/proxy/` | The recording MCP proxy between an agent and its own tool servers: record, inject and block, with a call ledger and local sessions ([red team targets](redteam-targets.md#recording-proxy)). Not an environment | Exists |
 | `src/martian/redteam/engine/` | The engine: the plan, attack, verify loop of a version 2 run (`run.py`, `plan.py`) with its budget ledger (`budget.py`), gate and reports; the local service that generates and judges attacks with the user's own models (`local.py`) and the choice between it and the hosted client (`service.py`); `LocalLauncher` for the run routes; and the version 0.2 probe loop | Exists |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |
+| `src/martian/redteam/interop/` | Other tools' red team work: a promptfoo red team config converted to a run file and its results imported as runs ([red team interop](redteam-interop.md)) | Exists |
 
 ## CI and scoring
 
