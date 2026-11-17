@@ -319,7 +319,11 @@ def _run_version_2(
         tool_boundary,
         unsupported,
     )
-    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.engine.service import (
+        EnvironmentNeedsServer,
+        ServiceSelectionError,
+        require_environment_connection,
+    )
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
     from martian.redteam.targets import TargetChanged
@@ -328,6 +332,11 @@ def _run_version_2(
     if found:
         _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
     run_file = RunFile.from_yaml(config_path)
+    try:
+        # An environment is a Martian server's: stop here, before anything is built or called.
+        require_environment_connection(run_file)
+    except EnvironmentNeedsServer as error:
+        _stop(safe_text(error))
     budget = run_file.budget.model_copy(
         update={
             key: value

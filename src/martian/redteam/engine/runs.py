@@ -115,7 +115,10 @@ async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
 
 def unsupported(run_file: RunFile) -> list[str]:
     """What the run file asks for that this release cannot do. A run stops on any of it, rather than
-    run without it. Every target kind and the tool proxy run, so nothing is listed today."""
+    run without it. Every target kind and the tool proxy run. A run in an environment does not run
+    yet, with or without a connection to a Martian server."""
+    if run_file.environment is not None:
+        return ["environment: this release cannot start a run in a Martian environment yet"]
     return []
 
 

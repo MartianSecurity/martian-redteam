@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. `environment` stops the run before anything is called, with a message that says so.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. A file that names an `environment` needs a connection to a Martian server ([environments](#environments)).
 
 ```yaml
 version: 2
@@ -57,7 +57,7 @@ gate: { fail_on: confirmed, severity: high }
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
 | `output_folder` | no | Where reports are written. Default `results` |
-| `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
+| `environment` | no | A Martian environment to run in, by name. It needs a connection to a Martian server ([environments](#environments)) |
 
 ## Target
 
@@ -124,6 +124,8 @@ Which service generates and judges the attacks:
 | not set | set | The Martian platform, as in version 0.2 |
 | set | set | None: the run stops. Unset the variables or remove `models` |
 | not set | not set | None: the run stops and says how to set either |
+
+A file that names an `environment` needs the connection whatever writes the attacks, so the third row does not apply to it: `models.attacker` set runs the attacks on your models and the environment on the server, and without it the platform writes them.
 
 A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.
 
@@ -230,3 +232,9 @@ gate: { fail_on: confirmed, warn_on: suspected }
 ```
 
 A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) gives the same result as before.
+
+## Environments
+
+An environment is a Martian Simulation world on a Martian server: applications with seeded records, reset before each attempt, whose records a state check reads. This package holds no environment and runs none itself. A run file only names one with `environment`.
+
+`martian redteam validate` checks such a file offline, like any other. `martian redteam run` needs `MARTIAN_API_URL` and `MARTIAN_API_TOKEN` for it. Without them the run stops with exit code 2 before it builds the target or calls a model, and says what to set. This release cannot yet start the run when the connection is set either: it stops with exit code 2 and says so.
