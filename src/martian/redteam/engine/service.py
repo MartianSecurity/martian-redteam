@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from martian.redteam.methods import needs_attacker
+from martian.redteam.methods.registry import hosted_only
 from martian.redteam.runfile import RunFile
 
 ServiceKind = Literal["local", "hosted"]
@@ -70,6 +71,11 @@ def select_service(run_file: RunFile, environ: Mapping[str, str] | None = None) 
         if models.judge is not None:
             raise ServiceSelectionError("models.judge needs models.attacker: name both to run the attacks locally.")
         return "hosted"
+    if (served := hosted_only(run_file)) and not connected:
+        raise ServiceSelectionError(
+            f"{', '.join(served)} is written by a Martian server from its reviewed cases: set MARTIAN_API_URL and "
+            "MARTIAN_API_TOKEN (an API key with redteam:run, on an edition with reviewed cases)."
+        )
     if models.attacker is not None and connected:
         raise ServiceSelectionError(
             "The run file names models, so attacks run locally with your own key, and a Martian connection "

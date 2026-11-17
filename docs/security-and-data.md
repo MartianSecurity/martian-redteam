@@ -17,6 +17,11 @@ sensitive target data; they cross the customer boundary and enter the service's
 controlled operation/recovery lifecycle. SDK digests do not remove data from
 actual model requests. Backend needs raw dataset outputs for canonical scoring.
 
+The `ReviewedCases` attack method sends the same simulate request with
+`source: reviewed_cases`. The server writes the attack from its reviewed cases
+and attack skills and answers the attack alone; their content never reaches
+the SDK.
+
 Requests cannot choose model/service/target endpoints. YAML cannot override the
 platform origin. HTTPS is required except loopback; redirects and environment
 proxies are off unless proxies are explicitly opted in. Constructor connections
@@ -50,6 +55,14 @@ are still sent to the model endpoint. A listener the harness opens binds to
 loopback only: the receipt listener of a run with a `receipt` check takes
 requests on `127.0.0.1`, keeps what they hold as bounded evidence, answers
 `200 ok`, follows nothing in them and stops when the run ends.
+
+A run file with `memory.strategies` keeps the attacks that reached a confirmed
+success as plain files in the local strategy library
+([memory](redteam-run-file.md#memory)), with the run's canary and receipt
+address replaced by placeholders and secret values scrubbed, and never the
+target's replies. A strategy is sent to the target only, never to a model, and
+the library is updated only from successes decided by code, so neither a judge's
+error nor a reply's text trains it.
 
 Reports default to content digests. Content opt-in does not disable credential
 redaction, including constructor secrets after client close and report copies.

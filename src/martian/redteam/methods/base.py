@@ -124,12 +124,18 @@ class AttackContext(Protocol):
         ...
 
     async def generate(
-        self, *, request: str | None = None, method: str | None = None, mode: GenerationMode = "baseline"
+        self,
+        *,
+        request: str | None = None,
+        method: str | None = None,
+        mode: GenerationMode = "baseline",
+        source: str | None = None,
     ) -> str:
         """One attack from the attacker model, in the style of attack method ``method`` (the method's
         own id by default). ``request`` is the attacker's instruction; target text in it must be a
         data field (:func:`martian.redteam.engine.hostile.data_field`). A refused or empty generation
-        is asked for once more; a second refusal fails the attempt as the attacker's."""
+        is asked for once more; a second refusal fails the attempt as the attacker's. ``source``
+        (``reviewed_cases``) asks a Martian server to write it from a reviewed case."""
         ...
 
     async def send(self, payload: str, *, session: str | None = None) -> Exchange:
@@ -187,6 +193,8 @@ class AttackMethod(ABC):
     """The run-file settings this method takes, with their defaults."""
     max_queries: ClassVar[int] = 1
     """Target queries per attempt when the method has no ``max_queries`` setting."""
+    hosted_only: bool = False
+    """The attacks come from a Martian server only, such as ``ReviewedCases``."""
     legacy: bool = False
     """One of the six version 0.2 methods with no layers and the default route: its attempts and
     their fingerprints are what they were before methods had this interface."""

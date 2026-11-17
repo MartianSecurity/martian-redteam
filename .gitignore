@@ -47,3 +47,8 @@ results/
 
 # Local uv caches
 .uv-cache/
+
+# Red team benchmark downloads and generated inputs (benchmarks/injecagent/reproduce.py)
+benchmarks/*/data/
+benchmarks/*/cases.json
+benchmarks/*/run.yaml

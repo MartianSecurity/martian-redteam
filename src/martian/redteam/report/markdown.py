@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from martian.redteam.model import RedteamRun
-from martian.redteam.report.standard import RedteamReport, build_report, rate_of
+from martian.redteam.report.standard import Rate, RedteamReport, build_report, rate_of
 
 
 def cell(value: object) -> str:
@@ -25,9 +25,9 @@ def table(headers: list[str], rows: Sequence[Sequence[object]]) -> list[str]:
 
 
 def models_line(report: RedteamReport) -> str:
-    models = [
-        f"{role} `{info.model}`" for role, info in (("attacker", report.attacker), ("judge", report.judge)) if info
-    ]
+    attackers = report.attackers or ([report.attacker] if report.attacker else [])
+    models = [f"attacker `{info.model}`" for info in attackers]
+    models += [f"judge `{report.judge.model}`"] if report.judge else []
     return f"- Service: {report.service}" + (f" ({', '.join(models)})" if models else "")
 
 
@@ -103,11 +103,29 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
 
     success = report.success
     lines += ["", "## Success", ""]
+    attempted = report.outcomes.attempted_hits > 0
+
+    def extra(rate: Rate | None) -> list[str]:
+        return [rate.display if rate is not None else ""] if attempted else []
+
     lines += table(
-        ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"],
-        [["Per attempt", success.per_attempt_confirmed.display, success.per_attempt_suspected.display]]
+        ["Measure", "Confirmed (level 2 and above)", "Suspected (judge only)"]
+        + (["Attempted action (level 3, not known to run)"] if attempted else []),
+        [
+            [
+                "Per attempt",
+                success.per_attempt_confirmed.display,
+                success.per_attempt_suspected.display,
+                *extra(success.per_attempt_attempted),
+            ]
+        ]
         + [
-            [f"Within {point.k} target queries per probe", point.confirmed.display, point.suspected.display]
+            [
+                f"Within {point.k} target queries per probe",
+                point.confirmed.display,
+                point.suspected.display,
+                *extra(point.attempted),
+            ]
             for point in success.within_k
         ],
     )
@@ -147,6 +165,7 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
                 "Verification",
                 "Reproduced",
                 "Control",
+                *(["Attackers"] if report.by_attacker else []),
             ],
             [
                 [
@@ -160,6 +179,7 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
                     item.verification,
                     item.reproductions,
                     item.negative_control,
+                    *([", ".join(item.attackers)] if report.by_attacker else []),
                 ]
                 for item in findings.items
             ],
@@ -258,6 +278,33 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
             "",
             "The control arm sends the same fixed templates every run; read each adaptive method beside it.",
         ]
+    if report.by_attacker:
+        lines += ["", "## By attacker", ""]
+        lines += table(
+            [
+                "Attacker",
+                "Attempts",
+                "Decided",
+                "Confirmed",
+                "Suspected",
+                "Attacker calls",
+                "Refused",
+                "Target queries",
+            ],
+            [
+                [
+                    group.name,
+                    group.attempts,
+                    group.decided,
+                    group.confirmed.display,
+                    group.suspected.display,
+                    group.attacker_calls,
+                    group.refusals,
+                    group.target_queries,
+                ]
+                for group in report.by_attacker
+            ],
+        )
     lines += ["", "## Probes", ""]
     lines += table(
         ["Vulnerability", "Type", "Attack", "Checks", "Vulnerable", "Held", "Undetermined", "Stopped", "Errors"],
