@@ -37,8 +37,12 @@ runs = Table(
     Column("source", String(16), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("record", JSON, nullable=False),
+    # What the run is (migration 0015): an eval run, or a red team run, whose attempts are its case
+    # results and whose checks are its scores. Listings show one kind at a time.
+    Column("kind", String(16), nullable=False, server_default="eval"),
     Index("ix_martian_runs_created", "space", "project_id", "created_at"),
     Index("ix_martian_runs_state", "space", "state"),
+    Index("ix_martian_runs_kind", "space", "project_id", "kind", "created_at"),
 )
 
 case_results = Table(
@@ -342,6 +346,59 @@ blind_queues = Table(
     Index("ix_martian_blind_queues_run", "space", "project_id", "run_id"),
 )
 
+# What only a red team run has (migration 0015), beside its run, case results and scores: the
+# probes it planned, the evidence its checks rest on, what each probe's repetitions verified, and
+# its findings. One row per object, keyed to the run; ``record`` is the object of
+# ``martian.redteam.model``.
+redteam_probes = Table(
+    "martian_redteam_probes",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("run_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("position", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
+redteam_evidence = Table(
+    "martian_redteam_evidence",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("run_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("position", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
+redteam_verifications = Table(
+    "martian_redteam_verifications",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("run_id", String(ID), primary_key=True),
+    Column("probe_id", String(ID), primary_key=True),
+    Column("position", Integer, nullable=False),
+    Column("record", JSON, nullable=False),
+)
+
+redteam_findings = Table(
+    "martian_redteam_findings",
+    metadata,
+    Column("space", String(SPACE), primary_key=True),
+    Column("project_id", String(ID), primary_key=True),
+    Column("run_id", String(ID), primary_key=True),
+    Column("id", String(ID), primary_key=True),
+    Column("position", Integer, nullable=False),
+    Column("level", Integer, nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("record", JSON, nullable=False),
+    Index("ix_martian_redteam_findings_status", "space", "project_id", "status"),
+)
+
+REDTEAM_TABLES = (redteam_probes, redteam_evidence, redteam_verifications, redteam_findings)
+
 TABLES = (
     runs,
     case_results,
@@ -365,4 +422,5 @@ TABLES = (
     schedule_runs,
     dataset_manifests,
     deliveries,
+    *REDTEAM_TABLES,
 )

@@ -39,6 +39,7 @@ from martian.evals.model import (
     Policy,
     Review,
     Run,
+    RunKind,
     RunLimits,
     RunState,
     Score,
@@ -648,6 +649,19 @@ class Alert(_Record):
     delivered_at: datetime | None = None
 
 
+class RedteamRecords(BaseModel):
+    """What only a red team run has, as JSON objects of :mod:`martian.redteam.model`: its probes,
+    evidence, verifications and findings. The core keeps them beside the run's case results and
+    scores and does not interpret them; :mod:`martian.redteam.store` reads and writes them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    probes: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    verifications: list[dict[str, Any]] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @runtime_checkable
 class RecordStore(Protocol):
     events: EventBus
@@ -668,8 +682,9 @@ class RecordStore(Protocol):
         states: list[RunState] | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        kind: RunKind | None = "eval",
     ) -> Page[Run]:
-        """Newest first."""
+        """Newest first. Runs of one ``kind`` only, eval runs unless asked; ``None`` lists both."""
         ...
 
     async def count_active_runs(self, principal: Principal, *, up_to: int | None = None) -> int:
@@ -735,6 +750,19 @@ class RecordStore(Protocol):
     async def list_scores(
         self, principal: Principal, project_id: str, run_id: str, *, case_id: str | None = None
     ) -> list[Score]: ...
+
+    # Red team runs: what only they have, beside their case results and scores.
+    async def put_redteam_records(
+        self, principal: Principal, project_id: str, run_id: str, records: RedteamRecords
+    ) -> None:
+        """Store a red team run's probes, evidence, verifications and findings, replacing what the run
+        had, in one transaction. The run must exist and be a red team run."""
+        ...
+
+    async def get_redteam_records(self, principal: Principal, project_id: str, run_id: str) -> RedteamRecords:
+        """A red team run's probes, evidence, verifications and findings, each in the order stored;
+        empty for a run without them. A run that does not exist is ``not_found``."""
+        ...
 
     # Scoring jobs.
     async def create_scoring_job(self, principal: Principal, project_id: str, job: ScoringJob) -> ScoringJob: ...
@@ -1196,6 +1224,7 @@ __all__ = [
     "Observation",
     "RecheckState",
     "RecordStore",
+    "RedteamRecords",
     "RunAdmission",
     "SavedView",
     "Schedule",

@@ -50,6 +50,7 @@ from martian.evals.model import (
     Page,
     Review,
     Run,
+    RunKind,
     RunState,
     Score,
     ScoringJob,
@@ -67,6 +68,7 @@ from martian.evals.records import (
     MonitoredTrace,
     MonitorProgress,
     RecheckState,
+    RedteamRecords,
     SavedView,
     Schedule,
     ScheduledRun,
@@ -78,6 +80,7 @@ from martian.evals.records import (
 from martian.evals.records.admission import LAUNCHED, RunAdmission
 from martian.evals.records.events import Event, EventBus, InProcessEvents, space_of
 from martian.evals.records.tables import (
+    REDTEAM_TABLES,
     blind_queues,
     calibration_rechecks,
     case_results,
@@ -88,6 +91,10 @@ from martian.evals.records.tables import (
     judge_calibrations,
     monitored_traces,
     monitors,
+    redteam_evidence,
+    redteam_findings,
+    redteam_probes,
+    redteam_verifications,
     reviews,
     runs,
     saved_views,
@@ -252,6 +259,7 @@ class SqlRecordStore:
                     id=run.id,
                     state=run.state,
                     source=run.source,
+                    kind=run.kind,
                     created_at=saved.created_at,
                     record=_json(saved),
                 )
@@ -278,6 +286,7 @@ class SqlRecordStore:
         states: list[RunState] | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        kind: RunKind | None = "eval",
     ) -> Page[Run]:
         offset = cursor_offset(cursor)
         _bounds(offset, limit, 500)
@@ -286,6 +295,8 @@ class SqlRecordStore:
             where = [runs.c.space == space, runs.c.project_id == project_id]
             if states:
                 where.append(runs.c.state.in_(states))
+            if kind is not None:
+                where.append(runs.c.kind == kind)
             total = connection.execute(select(func.count()).select_from(runs).where(*where)).scalar_one()
             rows: Sequence[Any] = (
                 connection.execute(
@@ -370,7 +381,8 @@ class SqlRecordStore:
             stored = self._one(connection, runs, space, project_id, id=run_id)
             if stored is None:
                 raise StoreError("not_found", "run not found")
-            if Run.model_validate(stored).state in _ACTIVE:
+            stored_run = Run.model_validate(stored)
+            if stored_run.state in _ACTIVE:
                 raise StoreError("conflict", "the run is queued or running; cancel it, or let it end, first")
             jobs = (
                 scoring_jobs.c.space == space,
@@ -404,6 +416,8 @@ class SqlRecordStore:
                 (reviews, reviews.c.run_id),
                 (blind_queues, blind_queues.c.run_id),
                 (schedule_runs, schedule_runs.c.run_id),
+                # Only a red team run has rows in the red team tables.
+                *((table, table.c.run_id) for table in REDTEAM_TABLES if stored_run.kind == "redteam"),
             ):
                 removed[table.name] = connection.execute(
                     delete(table).where(table.c.space == space, table.c.project_id == project_id, key == run_id)
@@ -436,6 +450,67 @@ class SqlRecordStore:
         for schedule_id in schedule_ids:
             self._emit(principal, "schedule", project_id, schedule_id)
         return removed
+
+    # --- red team records --------------------------------------------------------------------
+
+    _REDTEAM_PARTS = (
+        ("probes", redteam_probes, "id"),
+        ("evidence", redteam_evidence, "id"),
+        ("verifications", redteam_verifications, "probe_id"),
+        ("findings", redteam_findings, "id"),
+    )
+
+    async def put_redteam_records(
+        self, principal: Principal, project_id: str, run_id: str, records: RedteamRecords
+    ) -> None:
+        def work(connection: Connection, space: str) -> None:
+            stored = self._one(connection, runs, space, project_id, id=run_id)
+            if stored is None:
+                raise StoreError("not_found", "run not found")
+            if Run.model_validate(stored).kind != "redteam":
+                raise StoreError("invalid", "only a red team run has red team records")
+            for part, table, key in self._REDTEAM_PARTS:
+                where = (table.c.space == space, table.c.project_id == project_id, table.c.run_id == run_id)
+                connection.execute(delete(table).where(*where))
+                items: list[dict[str, Any]] = getattr(records, part)
+                if len({item[key] for item in items}) != len(items):
+                    raise StoreError("invalid", f"two red team {part} of the run share one {key}")
+                rows = []
+                for position, item in enumerate(items):
+                    row = {
+                        "space": space,
+                        "project_id": project_id,
+                        "run_id": run_id,
+                        key: item[key],
+                        "position": position,
+                        "record": item,
+                    }
+                    if table is redteam_findings:
+                        row["level"] = int(item["evidence_level"])
+                        row["status"] = item.get("status", "open")
+                    rows.append(row)
+                if rows:
+                    connection.execute(insert(table), rows)
+
+        await self._run(principal, work)
+        self._emit(principal, "run", project_id, run_id)
+
+    async def get_redteam_records(self, principal: Principal, project_id: str, run_id: str) -> RedteamRecords:
+        def work(connection: Connection, space: str) -> RedteamRecords:
+            if self._one(connection, runs, space, project_id, id=run_id) is None:
+                raise StoreError("not_found", "run not found")
+            found: dict[str, list[dict[str, Any]]] = {}
+            for part, table, _ in self._REDTEAM_PARTS:
+                found[part] = list(
+                    connection.execute(
+                        select(table.c.record)
+                        .where(table.c.space == space, table.c.project_id == project_id, table.c.run_id == run_id)
+                        .order_by(table.c.position)
+                    ).scalars()
+                )
+            return RedteamRecords(**found)
+
+        return await self._run(principal, work)
 
     # --- case results and scores ------------------------------------------------------------
 

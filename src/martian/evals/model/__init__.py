@@ -28,6 +28,9 @@ TargetKind = Literal["function", "http", "agent", "stored"]
 ScorerKind = Literal["llm_judge", "check", "code", "human"]
 DatasetSource = Literal["file", "draft", "global", "upload", "traces"]
 RunSource = Literal["local", "console", "ci"]
+RunKind = Literal["eval", "redteam"]
+"""An eval run, or a red team run: an attempt of a red team run is a case result and each of its
+checks a score (:mod:`martian.redteam.store`). Listings show one kind at a time."""
 RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled", "stopped"]
 """``stopped``: a run or scoring job that ended before its last case at one of its limits
 (:class:`RunLimits`). It keeps its finished cases and can be resumed."""
@@ -559,11 +562,14 @@ class Counts(_Object):
 
 
 class Run(_Object):
-    """One execution of a suite, or of a dataset, target and scorers, over its cases."""
+    """One execution of a suite, or of a dataset, target and scorers, over its cases. ``kind`` is
+    ``eval`` unless it is a red team run; it is left out when ``eval``, so an eval run is written as
+    it was before the field existed."""
 
     id: Identifier
     project_id: Identifier
     code: str = ""
+    kind: RunKind = "eval"
     source: RunSource
     state: RunState
     suite_id: str | None = None
@@ -585,6 +591,13 @@ class Run(_Object):
     cancel_requested_at: datetime | None = None
     """When someone asked to stop the run. Whoever executes it stops before its next case."""
     store: StoreRef = StoreRef()
+
+    @model_serializer(mode="wrap")
+    def _without_eval_kind(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and self.kind == "eval":
+            written.pop("kind", None)
+        return written
 
 
 class CheckVerdict(_Object):
