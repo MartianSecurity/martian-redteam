@@ -32,6 +32,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
 from martian.redteam.store import RedteamStore
+from martian.redteam.verify.canary import new_canary, planted_run_file
 
 
 class LocalLauncher:
@@ -61,7 +62,8 @@ class LocalLauncher:
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
-            target = build_target(run_file.target)
+            canary = new_canary()
+            target = build_target(planted_run_file(run_file, canary).target)
             stack.push_async_callback(target.close)
 
             async def keep(run: RedteamRun) -> None:
@@ -75,6 +77,7 @@ class LocalLauncher:
                 project_id=request.project_id,
                 checkpoint=keep,
                 provenance=provenance,
+                canary=canary,
             )
         except (ServiceSelectionError, TargetUnavailable, PlanError) as error:
             await stack.aclose()

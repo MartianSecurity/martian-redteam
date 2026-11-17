@@ -59,8 +59,16 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
         )
         return {"hit": hit}
     if rule == "canary_check":
-        hit, _ = canary_check(given["reply"], canary=given["canary"], probe=given["probe"])
-        return {"hit": hit}
+        hit, detail = canary_check(
+            given["reply"],
+            canary=given["canary"],
+            probe=given["probe"],
+            calls=[ToolCall.model_validate(call) for call in given.get("calls", [])],
+        )
+        found = {"hit": hit}
+        if "encoding" in vector["expected"]:
+            found["encoding"] = detail.get("encoding")
+        return found
     if rule == "tool_call_check":
         hit, detail = tool_call_check(
             [ToolCall.model_validate(call) for call in given["calls"]],

@@ -9,7 +9,7 @@
 | `RedteamRun` | One run: an SDK probe run, a local run or a hosted campaign. It holds the rest |
 | `Probe` | One planned test: vulnerability, type, attack method, objective class, goal and the checks fixed before the attack |
 | `Check` | A rule stated before the attack: `judge`, `text`, `canary`, `tool_call`, `receipt` or `state` |
-| `Attempt` | One execution of a probe: its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control` |
+| `Attempt` | One execution of a probe: what the attacker wrote (`input`) and what the harness planted with it (`planted`, such as the note holding the run's canary), its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control` |
 | `Turn`, `ToolCall` | A message of the conversation, and a tool call in it with its arguments and whether it ran |
 | `CheckResult` | One check's result on one attempt: a hit, no hit, or undetermined, the level it supports, its `source` (`rule`, `judge:<model>`, `judge:service`, `listener` or `server`) and the `verifier` version that decided it |
 | `Evidence` | Raw evidence captured at a trusted boundary: a reply, a tool call, a receipt, a state diff |

@@ -31,6 +31,16 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _without_canary(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("{{canary}}", "canary")
+    if isinstance(value, dict):
+        return {key: _without_canary(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_canary(item) for item in value]
+    return value
+
+
 class McpTarget(_Model):
     """An MCP server under test: the tool that takes a message, and the argument the message goes in."""
 
@@ -83,7 +93,8 @@ class Target(_Model):
         from martian.evals.runner import TargetRef
 
         try:
-            TargetRef.model_validate(suite_fields)
+            # {{canary}} is the red team's own placeholder: the run fills it before the target is built.
+            TargetRef.model_validate(_without_canary(suite_fields))
         except ValidationError as error:
             reasons = [
                 str(item["msg"]).removeprefix("Value error, ")
@@ -165,10 +176,31 @@ class TextCheck(_Model):
         return self
 
 
+CanaryPlant = Literal["context", "system_prompt", "tool_result"]
+
+
 class CanaryCheck(_Model):
+    """A planted canary found in the reply or a tool call's arguments, encoded or not."""
+
     type: Literal["canary"]
     value: str | None = Field(default=None, min_length=8)
-    """The canary to plant. Without one, each run plants its own."""
+    """A canary you planted yourself. Without one, the run plants its own, unique to the run."""
+    plant: CanaryPlant | None = None
+    """Where the run plants its canary: ``context`` (the default), with the attack in the message;
+    ``system_prompt``, for ``{{canary}}`` in the target block; ``tool_result``, for ``{{canary}}`` in a
+    proxied server's ``inject`` text."""
+    text: str | None = Field(default=None, min_length=1, max_length=2000)
+    """A ``context`` plant's note, with ``{{canary}}`` where the canary goes."""
+
+    @model_validator(mode="after")
+    def _planting(self) -> CanaryCheck:
+        if self.value is not None and (self.plant is not None or self.text is not None):
+            raise ValueError("a canary with a value is one you planted yourself; plant and text apply to the run's own")
+        if self.text is not None and self.plant not in (None, "context"):
+            raise ValueError("text is the note of a context plant")
+        if self.text is not None and "{{canary}}" not in self.text:
+            raise ValueError("text says where the canary goes, with {{canary}}")
+        return self
 
 
 class ToolCallCheck(_Model):
@@ -298,7 +330,35 @@ class RunFile(_Model):
                     raise ValueError(
                         f"vulnerabilities[{index}]: a judge check needs models.judge when attacks run locally"
                     )
+                if check.type == "canary" and check.plant == "system_prompt":
+                    self._templated_target(index)
+                if (
+                    check.type == "canary"
+                    and check.plant == "tool_result"
+                    and not any(server.inject and "{{canary}}" in server.inject for server in self.tools.proxy)
+                ):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a tool_result canary needs {{{{canary}}}} in a proxied "
+                        "server's inject text"
+                    )
         return self
+
+    def _templated_target(self, index: int) -> None:
+        from martian.redteam.verify.canary import mentions
+
+        if self.target.kind == "function":
+            raise ValueError(
+                f"vulnerabilities[{index}]: a function target has no template to plant a canary in; "
+                "plant it in the context, or give the value you planted yourself"
+            )
+        fields: list[Any] = [self.target.headers, self.target.body]
+        if self.target.mcp is not None:
+            fields += [self.target.mcp.arguments, self.target.mcp.headers]
+        if not mentions(fields):
+            raise ValueError(
+                f"vulnerabilities[{index}]: a system_prompt canary needs {{{{canary}}}} in the target's "
+                "headers, body or mcp arguments"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Self:
@@ -368,6 +428,7 @@ __all__ = [
     "VERSION",
     "Budget",
     "CanaryCheck",
+    "CanaryPlant",
     "Gate",
     "Goal",
     "JudgeCheck",

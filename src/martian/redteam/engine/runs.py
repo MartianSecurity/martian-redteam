@@ -23,6 +23,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.runfile import Target as TargetBlock
 from martian.redteam.targets import Target
+from martian.redteam.verify.canary import new_canary
 from martian_redteam.types import RedteamService
 
 
@@ -40,6 +41,14 @@ def build_target(block: TargetBlock) -> Target:
 
     assert block.file is not None
     return function_target(block.file, block.function or "target")
+
+
+def run_canary(earlier: RedteamRun | None = None) -> str:
+    """The canary a run plants: the earlier session's when it is resumed, else a new one. The target
+    is built from :func:`~martian.redteam.verify.canary.planted_run_file` with it, and the engine is
+    given it."""
+    kept = earlier.provenance.get("canary") if earlier is not None else None
+    return kept if isinstance(kept, str) and kept else new_canary()
 
 
 def unsupported(run_file: RunFile) -> list[str]:
@@ -96,6 +105,7 @@ async def execute(
     principal: Any = None,
     include_content: bool = False,
     resume: RedteamRun | None = None,
+    canary: str | None = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
     kept after each attempt and at the end, as the reports hold it. With ``resume``, an earlier
@@ -117,8 +127,17 @@ async def execute(
         checkpoint=keep if store is not None else None,
         provenance=provenance,
         resume=resume,
+        canary=canary,
     )
     return await engine.run()
 
 
-__all__ = ["TargetUnavailable", "build_service", "build_target", "execute", "redaction_for", "unsupported"]
+__all__ = [
+    "TargetUnavailable",
+    "build_service",
+    "build_target",
+    "execute",
+    "redaction_for",
+    "run_canary",
+    "unsupported",
+]

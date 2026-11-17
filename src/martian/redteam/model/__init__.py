@@ -211,6 +211,10 @@ class Attempt(_Object):
     """The highest level a hit reached. An attempt whose attack reached the target and did not hit is
     at level 0, delivered; one that never reached the target has none."""
     input: str | None = None
+    """What the attacker wrote."""
+    planted: str | None = None
+    """What the harness sent with the attack in the same message, such as a note holding the run's
+    canary. The first turn holds the message the target received."""
     output: str | None = None
     turns: list[Turn] = Field(default_factory=list)
     check_results: list[CheckResult] = Field(default_factory=list)

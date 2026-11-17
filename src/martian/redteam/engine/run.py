@@ -47,9 +47,10 @@ from martian.redteam.model import (
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
 from martian.redteam.targets import Target, TargetReply
+from martian.redteam.verify.canary import context_of, new_canary, uses_canary
 from martian.redteam.verify.judge import ServiceJudge, failure_code, failure_kind
 from martian.redteam.verify.rules import RULES_VERSION, attempt_outcome
-from martian.redteam.verify.verifiers import NO_CANARY, NO_RECEIPT, Decided, Observation, Verifiers, decide
+from martian.redteam.verify.verifiers import NO_RECEIPT, Decided, Observation, Verifiers, decide
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.encoding import apply_encoding
@@ -101,6 +102,7 @@ class Engine:
         provenance: dict[str, Any] | None = None,
         resume: RedteamRun | None = None,
         verifiers: Verifiers | None = None,
+        canary: str | None = None,
     ) -> None:
         self.run_file = run_file
         self.service = service
@@ -118,6 +120,8 @@ class Engine:
         self.evidence: dict[str, Evidence] = {}
         self._saving = asyncio.Lock()
         self.reused: set[str] = set()
+        earlier = resume.provenance.get("canary") if resume is not None else None
+        self.canary: str = canary or earlier or new_canary()
         if resume is not None:
             self._resume(resume)
 
@@ -209,8 +213,10 @@ class Engine:
         try:
             self.ledger.check()
             payload, generated = await self._generate(planned, spending)
-            fields.update(input=payload, policy_revision=generated.get("policy_revision"))
-            reply = await self._send(fields["id"], payload, spending)
+            planted = context_of(probe, self.canary)
+            sent = payload if planted is None else f"{planted}\n\n{payload}"
+            fields.update(input=payload, planted=planted, policy_revision=generated.get("policy_revision"))
+            reply = await self._send(fields["id"], sent, spending)
         except BudgetExhausted as exhausted:
             return done(outcome="stopped", stopped_by=exhausted.limit)
         except AttemptFailed as failed:
@@ -221,11 +227,11 @@ class Engine:
             target_calls=1,
             evidence_ids=[evidence.id],
             turns=[
-                Turn(role="attacker", content=payload),
+                Turn(role="attacker", content=sent),
                 Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             ],
         )
-        decided = await self._verify(planned, payload, reply, spending, evidence.id, fields["id"])
+        decided = await self._verify(planned, payload, sent, reply, spending, evidence.id, fields["id"])
         results, failure, stop = decided.results, decided.failure, decided.stop
         outcome, level = attempt_outcome(results)
         if outcome != "hit" and isinstance(stop, BudgetExhausted):
@@ -311,6 +317,7 @@ class Engine:
         self,
         planned: PlannedProbe,
         payload: str,
+        sent: str,
         reply: TargetReply,
         spending: _Spending,
         evidence_id: str,
@@ -322,11 +329,12 @@ class Engine:
             attempt_id=attempt_id,
             probe=planned.probe,
             attack=payload,
-            sent=payload,
+            sent=sent,
             reply=reply.text,
             tool_calls=tuple(reply.tool_calls),
             tool_calls_observed=reply.tool_calls_observed,
             evidence_ids=(evidence_id,),
+            extra={"canary": self.canary} if uses_canary(planned.probe) else {},
         )
         return await decide(planned.probe.checks, seen, self.verifiers, meter=spending, stops=(BudgetExhausted,))
 
@@ -382,6 +390,7 @@ class Engine:
                 "rules_version": RULES_VERSION,
                 "prompts_revision": PROMPTS_REVISION,
                 "verifiers": self.verifiers.versions(),
+                **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **self.provenance,
             },
         )
@@ -408,10 +417,8 @@ class Engine:
         objectives = {planned.probe.objective_class for planned in self.planned}
         if objectives & {"action", "persistence"}:
             found.append("Without an environment, an action or persistence objective stops at a confirmed tool call.")
-        kinds = {(check.kind, bool(check.spec.get("value"))) for p in self.planned for check in p.probe.checks}
-        if ("canary", False) in kinds:
-            found.append("A canary check without a value is undetermined: " + NO_CANARY + ".")
-        if any(kind == "receipt" for kind, _ in kinds):
+        kinds = {check.kind for p in self.planned for check in p.probe.checks}
+        if "receipt" in kinds:
             found.append("A receipt check is undetermined: " + NO_RECEIPT + ".")
         return found
 

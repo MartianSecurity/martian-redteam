@@ -231,6 +231,17 @@
             ],
             "title": "Output"
           },
+          "planted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planted"
+          },
           "policy_revision": {
             "anyOf": [
               {

@@ -143,13 +143,12 @@ async def test_a_tool_call_check_on_a_target_that_reports_no_calls_is_undetermin
     assert observed.attempts[0].outcome == "resisted"
 
 
-async def test_a_canary_without_a_value_is_undetermined_and_the_run_says_why():
+async def test_a_canary_without_a_value_is_the_run_s_own_and_one_with_a_value_is_yours():
     file = run_file(
         vulnerabilities=[{"name": "PromptLeakage", "types": ["system_prompt"], "checks": [{"type": "canary"}]}]
     )
     result = await run(file, CountingTarget("No."))
-    assert result.attempts[0].outcome == "undetermined"
-    assert any("plants no canary" in item for item in result.limitations)
+    assert result.attempts[0].outcome == "resisted" and result.provenance["canary"].startswith("MRTC-")
     planted = run_file(
         vulnerabilities=[
             {

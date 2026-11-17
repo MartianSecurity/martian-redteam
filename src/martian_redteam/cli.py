@@ -281,9 +281,17 @@ def _run_version_2(
     from martian.redteam.engine.gate import gate_failures
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import write_reports
-    from martian.redteam.engine.runs import TargetUnavailable, build_service, build_target, execute, unsupported
+    from martian.redteam.engine.runs import (
+        TargetUnavailable,
+        build_service,
+        build_target,
+        execute,
+        run_canary,
+        unsupported,
+    )
     from martian.redteam.engine.service import ServiceSelectionError
     from martian.redteam.runfile import RunFile, problems
+    from martian.redteam.verify.canary import planted_run_file
 
     found = problems(config_path)
     if found:
@@ -321,13 +329,21 @@ def _run_version_2(
             keeper.close()
             _stop(f"No red team run {resume} is in the local store.")
 
+    canary = run_canary(earlier)
+
     async def go() -> Any:
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
-            target = build_target(run_file.target)
+            target = build_target(planted_run_file(run_file, canary).target)
             stack.push_async_callback(target.close)
             run = await execute(
-                run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
+                run_file,
+                service=service,
+                target=target,
+                provenance=provenance,
+                store=keeper,
+                resume=earlier,
+                canary=canary,
             )
             return run, service
 
