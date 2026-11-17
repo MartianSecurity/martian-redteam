@@ -24,6 +24,7 @@ from fastapi import HTTPException
 
 from martian.config import ConfigError
 from martian.evals.server.principal import Principal
+from martian.redteam.engine.memory import StrategyLibraryError
 from martian.redteam.engine.plan import PlanError
 from martian.redteam.engine.report import for_report
 from martian.redteam.engine.run import Engine
@@ -63,6 +64,10 @@ class LocalLauncher:
         if sample is not None and not Path(sample).is_absolute():
             settings = run_file.verification.model_copy(update={"calibration": str((self.base_dir / sample).resolve())})
             run_file = run_file.model_copy(update={"verification": settings})
+        folder = run_file.memory.folder
+        if folder is not None and not Path(folder).expanduser().is_absolute():
+            memory = run_file.memory.model_copy(update={"folder": str((self.base_dir / folder).resolve())})
+            run_file = run_file.model_copy(update={"memory": memory})
         return run_file
 
     async def start(self, principal: Principal, request: RunStart) -> RedteamRun:
@@ -103,6 +108,7 @@ class LocalLauncher:
             ConfigError,
             SessionHandoverError,
             ConnectionError,
+            StrategyLibraryError,
         ) as error:
             await stack.aclose()
             raise HTTPException(422, str(error)) from None

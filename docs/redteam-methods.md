@@ -77,6 +77,8 @@ The feedback comes from the checks decided by code when the probe has any (`text
 | `depth` | 3 | 1 to 20 | Levels |
 | `max_queries` | 20 | 1 to 1000 | Target queries per attempt |
 
+With the strategy library on ([memory](redteam-run-file.md#memory)), the first attacks of a search are the strategies picked for its probe, sent without an attacker call, and the search refines from them as from its own; the trace lists them as `strategies`.
+
 The attempt's trace records each query's rung (`signals`), `queries_to_first_success` and `tree` (each query's level and the query it refined); `queries_to_first_success` counts the queries of that attempt; the report's `queries_to_first_hit` counts a probe's target queries across its attempts, in order, up to its first hit ([red team reports](redteam-reports.md#groups-and-probes)). The request text is in `prompts/search/`.
 
 ## Multi-turn escalation

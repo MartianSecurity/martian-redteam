@@ -4,7 +4,9 @@
 
 - **generate**: one attack from the attacker, through the engine's refusal handling. Anything the
   method passes in its request has secrets scrubbed first; the target's words in it travel as data
-  fields (:mod:`martian.redteam.engine.hostile`).
+  fields (:mod:`martian.redteam.engine.hostile`). With the strategy library on, a search method's
+  first attacks are the strategies picked for the probe (:mod:`martian.redteam.engine.memory`),
+  sent with no attacker call.
 - **send**: the method's layers, then the target call, reserved on the budget ledger. Every query is
   kept as an attacker and a target turn; a new conversation after the first is marked with a
   harness note.
@@ -80,6 +82,9 @@ class AttemptRun:
         self._conversations = 0
         self._last_session: str | None = None
         self._hidden = secret_values(policy=engine.service.redaction_policy)
+        self._strategies = engine.strategies_for(planned, attempt_id)
+        self.used: list[tuple[str, int]] = []
+        """The strategies this attempt sent, each with the query that sent it."""
 
     # --- what a method reads ----------------------------------------------------------------------
 
@@ -111,6 +116,12 @@ class AttemptRun:
     async def generate(
         self, *, request: str | None = None, method: str | None = None, mode: GenerationMode = "baseline"
     ) -> str:
+        if mode == "baseline" and self._strategies:
+            # A picked strategy is the next fresh attack: no attacker call.
+            strategy = self._strategies.pop(0)
+            self.used.append((strategy.id, self.queries + 1))
+            self.record(strategies=[{"id": item, "query": query} for item, query in self.used])
+            return self.engine.strategy_text(strategy, self.attempt_id)
         if request is not None:
             request = scrub_secrets(request, self._hidden)
         payload, generated = await self.engine._generate(

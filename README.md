@@ -123,7 +123,8 @@ What runs where:
   ([run file](docs/redteam-run-file.md)), with fixed templates as a control arm beside
   adaptive attack methods that refine attacks from the target's replies within a
   stated budget ([attack methods](docs/redteam-methods.md)); templates and mutation
-  need no attacker model. Without `models`, the Martian platform
+  need no attacker model. With `memory`, it keeps the attacks that worked as a local
+  strategy library and tries them first on the next run ([memory](docs/redteam-run-file.md#memory)). Without `models`, the Martian platform
   generates and judges them, which needs a platform connection and a token with
   `redteam:run`.
 - Hosted features also need the SDK APIs enabled for your organisation.

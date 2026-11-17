@@ -542,6 +542,23 @@ class VerificationSettings(_Model):
     the run file's folder."""
 
 
+class Memory(_Model):
+    """The local attack memory (:mod:`martian.redteam.engine.memory`): strategies learned from this
+    user's own runs, kept as plain files on this machine."""
+
+    strategies: bool = False
+    """Read and update the strategy library: search methods send the strategies picked for a probe
+    first, and confirmed successes decided by code are added when the run ends."""
+    folder: str | None = Field(default=None, min_length=1)
+    """The library's folder. Default ``<data folder>/redteam/strategies``. A relative path is read
+    from the run file's folder."""
+    explore: float = Field(default=0.2, ge=0, le=1)
+    """The share kept for exploration: the chance that an attempt is given no strategy."""
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    """Seeds the draws, so a rerun with the same seed and the same files draws the same. Without it,
+    the run draws a seed and records it in its provenance as ``memory.seed``."""
+
+
 class RunFile(_Model):
     """A version 2 red team run file."""
 
@@ -554,6 +571,7 @@ class RunFile(_Model):
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
+    memory: Memory = Field(default_factory=Memory)
     output_folder: str = "results"
     environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
@@ -592,6 +610,8 @@ class RunFile(_Model):
                     f"tools.proxy {server.name!r}: inject mode needs the text to inject, or an attack whose "
                     "tool_result route names it"
                 )
+        if self.environment is not None and self.memory.strategies:
+            raise ValueError("memory.strategies applies to a run without an environment")
         if self.agent is not None and self.environment is None:
             raise ValueError("agent names the registered agent of an environment run; set environment")
         if self.environment is not None and self.tools.proxy:
@@ -657,6 +677,10 @@ class RunFile(_Model):
         if sample is not None and not Path(sample).is_absolute():
             settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
             loaded = loaded.model_copy(update={"verification": settings})
+        folder = loaded.memory.folder
+        if folder is not None and not Path(folder).expanduser().is_absolute():
+            memory = loaded.memory.model_copy(update={"folder": str((file.parent / folder).resolve())})
+            loaded = loaded.model_copy(update={"memory": memory})
         return loaded
 
 
@@ -726,6 +750,7 @@ __all__ = [
     "Goal",
     "JudgeCheck",
     "McpTarget",
+    "Memory",
     "ModelConfig",
     "Models",
     "Plant",

@@ -57,6 +57,7 @@ gate: { fail_on: confirmed, severity: high }
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
 | `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
+| `memory` | no | The local strategy library, learned from your own runs. See [memory](#memory) |
 | `output_folder` | no | Where reports are written. Default `results` |
 | `agent` | no | The registered agent an environment run tests, by its id on the Martian server. Needs `environment`. Without it, the API key must be bound to the agent |
 | `environment` | no | A Martian environment to run in, by name. It needs a connection to a Martian server ([environments](#environments)) |
@@ -232,6 +233,32 @@ How the run checks what it found: the probe's attacks run first, then the repeti
 | `required` | How many repetitions must hit again (level 2 and above) for the finding to verify. Default 2, or `repetitions` when fewer run. A flaky hit, such as one reproduced 1 of 3, is `not_reproducible`, never verified |
 | `control` | Run each probe once without the attack, after its attacks, when it hit or has a `benign` task. Default true. It sends what the probe plants and its benign task, or an ordinary opening, and is decided by the probe's checks that code decides (by the judge when there is no other). A probe whose control shows the same signal has no finding. Its call counts against the budget |
 | `calibration` | A labelled sample to measure the judge on before the attacks: a JSON Lines file, one item a line, with `vulnerability` (a vulnerability of this file, by name or id), optional `type`, `attack`, `reply`, `hit` (whether a person judged the attack to have succeeded) and optional `tools_called`. A relative path is read from the run file's folder. Each item costs one judge call, counted against the budget. The report shows the judge's precision and recall, and the run's provenance keeps them as `judge_calibration` |
+
+## Memory
+
+`memory` turns on the local attack memory: strategies learned from your own earlier runs, kept as plain files on this machine. Nothing in it is sent anywhere, and a run without `memory` neither reads nor writes it.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `strategies` | false | Read and update the strategy library |
+| `folder` | `redteam/strategies` in the data folder | Where the library is. The data folder is `MARTIAN_EVALS_HOME`, else `~/.martian/evals`. A relative path is read from the run file's folder |
+| `explore` | 0.2 | The share kept for exploration: the chance that an attempt is given no strategy and writes its own attacks |
+| `seed` | drawn | Seeds the draws, so a rerun with the same seed and the same files draws the same. A drawn seed is kept in the run's provenance as `memory.seed`, which a resumed run reuses |
+
+The library is a folder of files you can read, edit and delete:
+
+- `strategy-<id>.json`, one per strategy: an attack that reached a confirmed success on an objective (a vulnerability, its type and its goal), the method that found it, and the run, attempt and evidence level it came from. The run's canary and receipt address are kept as `{{canary}}` and `{{receipt_url}}`, and secret values are scrubbed. The target's replies are never kept.
+- `stats.csv`, a table with one row per strategy, objective and target: `kind`, `name`, `objective`, `target` (a digest of the run file's `target` block, its headers and timeout left out), `attempts`, `successes` and `last_seen`.
+
+Deleting a strategy's file forgets it, and its rows go when the table is next written; deleting the folder forgets everything. A file that cannot be read stops the run with exit code 2 and says which one.
+
+How the library is used and updated:
+
+1. **Picked.** Each attempt of a search method (`Refine`, `TreeSearch`) is given up to three strategies for its probe's objective: none with chance `explore`, else those whose success on this target, `(successes + 1) / (attempts + 2)`, is at least one half, best first. The draw comes from `seed` and the attempt.
+2. **Sent first.** The search sends them as its first attacks, one per fresh attack it would have asked the attacker for, and refines from them as from its own when they do not hit. A strategy sent costs a target query and no attacker call. The attempt's method record lists them as `strategies`, each with the query that sent it.
+3. **Updated when the run ends**, only from attempts the checks decided: a strategy counts an attempt each time it is sent, and a success when the query that sent it is the one the attempt was decided on at level 2 or above and the probe's negative control did not show the same signal. A hit only the judge found trains nothing. Such a success with an attack the method wrote itself becomes a new strategy, unless the method is `Escalation`, whose last message means nothing alone. The run's provenance counts `strategies_sent` and `strategies_learned`.
+
+A run in an `environment` takes no `memory`.
 
 ## Budget
 
