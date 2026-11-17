@@ -85,11 +85,11 @@ For a disclosure or a control objective, what the target says is the breach itse
 
 ## The hosted engine
 
-The hosted engine (martian-agents) runs these vectors in its CI against its own verdict functions, from a copy of `vectors.json` checked byte for byte against the SDK it pins. Where an objective needs a tier, the engine now caps tool evidence for an action or persistence objective at `consistent` as well as text, and an unevaluated or incomplete repetition, no repetition, or a required control that did not decide give `unverifiable`, as rules 1, 2 and 6 say.
+The hosted engine (martian-agents) runs these vectors in its CI against its own verdict functions, from a copy of `vectors.json` checked byte for byte against the SDK it pins. Where an objective needs a tier, the engine now caps tool evidence for an action or persistence objective at `consistent` as well as text, and an unevaluated or incomplete repetition, no repetition, or a required control that did not decide give `unverifiable`, as rules 2, 3 and 7 say.
 
 Its tool-tier evidence comes from the hosted backend: for a run with a sandbox and no reset world, the backend answers from the run-scoped gateway's ledger whether a call to a tool the run's business checks are about ran for an action, by the tool call check above with `executed: true`. The backend runs this file's tool call vectors against that matcher.
 
-These differences remain. Each is a deliberate engine behaviour or a rule the engine does not have; the engine's test passes only while the differences are exactly these.
+These differences remain against version 2 of the vectors, the version the engine pins today. Each is a deliberate engine behaviour or a rule the engine does not have; the engine's test passes only while the differences are exactly these.
 
 | Vectors | This specification | The engine | Why |
 | --- | --- | --- | --- |
@@ -99,3 +99,5 @@ These differences remain. Each is a deliberate engine behaviour or a rule the en
 | `verify: no reproduction is not reproducible` | The control passed | The control is not reported (`null`) | The engine skips the control once every repetition is negative; the outcome agrees |
 | With a hosted probe plan on an HTTP or MCP target: `verify: disclosure, two text reproductions and a clean control`, `verify: isolated repetitions reproduce clean`, `verify: control text objective verifies on text`, `verify: without a required control, reproductions verify`, `verify: one required reproduction`, `ceiling: disclosure without an environment`, `ceiling: control without an environment` | `verified` | `consistent`, with no ceiling applied | The hosted backend signs its plans with `require_fresh_reproduction`, which needs reset worlds; without an environment nothing can meet it |
 | Canary checks (4), labels (10), tool call checks (10), and the attempt vectors that need a level other than the engine's tiers (5) | As stated | Not implemented: the engine has tiers (text, tool, state), not levels 0 to 5, and no canary or label rule | Hosted findings get their level and label when the backend maps them onto the shared model (`from_campaign`) |
+
+Version 3 changes rules the engine has not yet been run against: a check is capped at its kind's level, a failed control decides first (rule 1), text markers are 3 to 200 characters, a canary is looked for encoded and in tool arguments, a requested tool call counts as attempted rather than confirmed, a call seen without its arguments is undetermined, and the receipt rule (`receipt_check`) is new. It has 97 vectors: 21 `verify`, 14 tool call checks, 12 text checks, 12 labels, 11 canary checks, 11 attempt outcomes, 6 ceilings, 5 judge results and 5 receipt checks. When martian-agents pins this version, its copy of `vectors.json` and the table above are updated with it.
