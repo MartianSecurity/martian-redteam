@@ -36,8 +36,18 @@ def records(tmp_path):
 
 
 def test_the_key_list_and_the_edition_sets():
-    assert dict(FEATURES) == {"review_queues": "review queues", "monitoring": "monitoring"}
-    assert dict(LIMITS) == {"concurrent_runs": "eval runs", "concurrent_scoring_jobs": "scoring jobs"}
+    assert dict(FEATURES) == {
+        "review_queues": "review queues",
+        "monitoring": "monitoring",
+        "redteam_environments": "red team environments",
+        "redteam_campaigns": "red team campaigns",
+        "redteam_hosted_generation": "hosted red team generation",
+    }
+    assert dict(LIMITS) == {
+        "concurrent_runs": "eval runs",
+        "concurrent_scoring_jobs": "scoring jobs",
+        "concurrent_redteam_operations": "hosted red team operations",
+    }
     assert COMMUNITY.features == frozenset()
     assert ENTERPRISE.features == ON_PREMISES.features == frozenset(FEATURES)
     assert {edition: e.edition for edition, e in EDITIONS.items()} == {
@@ -48,7 +58,7 @@ def test_the_key_list_and_the_edition_sets():
     # How many runs and scoring jobs an organisation may have in progress at once; none is no limit.
     assert {edition: dict(e.limits) for edition, e in EDITIONS.items()} == {
         "community": {"concurrent_runs": 1, "concurrent_scoring_jobs": 1},
-        "enterprise": {"concurrent_runs": 5, "concurrent_scoring_jobs": 5},
+        "enterprise": {"concurrent_runs": 5, "concurrent_scoring_jobs": 5, "concurrent_redteam_operations": 2},
         "on_premises": {},
     }
     assert ON_PREMISES.limit("concurrent_runs") is None and COMMUNITY.limit("concurrent_runs") == 1

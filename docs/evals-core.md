@@ -76,8 +76,13 @@ out, and a free feature never becomes paid. A paid feature gets its key when it 
 | --- | --- | --- | --- | --- |
 | `review_queues` | Review queues with an assignee, answering their items, and the library of review questions they ask | No | Yes | Yes |
 | `monitoring` | The Monitoring page: scoring jobs and their scorecards across runs, [monitors](#monitors), which score a project's live traces, with their [score trends](#score-trends), [thresholds](#thresholds-and-alerts) on their scores and on schedules' gate results, which send alerts, and [schedules](#schedules), which run a saved suite against a target unattended, and again [when the model behind it changes](#when-the-model-changes) | No | Yes | Yes |
+| `redteam_environments` | A red team run in a Martian environment, whose verdicts can rest on the world's state. `POST /v1/redteam/runs` refuses a run file that names an `environment` without it ([red team API](redteam-api.md)) | No | Yes | Yes |
+| `redteam_campaigns` | Planned red team campaigns, started from the hosted console. Only the hosted server runs them and checks the key | No | Yes | Yes |
+| `redteam_hosted_generation` | Attack generation and judging by Martian's engine for SDK red team runs (the hosted `simulate` and `evaluate` operations). Only the hosted server serves them and checks the key; a local run uses the user's own model and needs none | No | Yes | Yes |
 
-Annotating a single item or trace, and scoring one run, stay in every edition.
+Annotating a single item or trace, and scoring one run, stay in every edition. The three red team
+keys name what only the hosted product has: an environment, a planned campaign and Martian's
+engine. Their code is not in this repository; the keys are here so that every edition reads one map.
 
 `LIMITS` holds the limit keys, each added with the code that enforces it.
 `Entitlements.limit(key)` returns `None` for a limit an edition does not set, which is no limit;
@@ -87,6 +92,7 @@ a limit is a whole number of at least 1.
 | --- | --- | --- | --- | --- |
 | `concurrent_runs` | The organisation's runs `queued` or `running` at once, in every project | 1 | 5 | No limit |
 | `concurrent_scoring_jobs` | The `queued` or `running` scoring jobs of the organisation's completed runs | 1 | 5 | No limit |
+| `concurrent_redteam_operations` | The organisation's hosted red team generation and judging operations in flight at once. Checked by the hosted server when it admits one (`429`); its per-minute and per-day windows stay that server's settings | None | 2 | No limit |
 
 They are checked where the work is admitted (`martian.evals.server.admission`), each with one indexed count in the record store (`count_active_runs`, `count_active_scoring_jobs`, on the organisation's space, read up to the limit and no further), so admission costs the same whatever the number of runs: a launch, a run
 again or a resume of a run beyond `concurrent_runs`, and a scoring request or a resume of a scoring
@@ -128,7 +134,8 @@ the reviewers' agreement (`GET /v1/evals/reviewer-agreement`) need `review_queue
 How each edition enforces the keys and the limits:
 
 - **Community, open source.** The local edition supplies Community, so it serves neither
-  `review_queues` nor `monitoring`; its limits are the ones its user sets.
+  `review_queues` nor `monitoring`, and refuses a red team run file that names an environment;
+  its limits are the ones its user sets.
 - **Martian Cloud.** It supplies the entitlements of each organisation's plan, so the core's
   routes refuse a paid feature to an organisation on the `community` plan. Its server imports this
   map and the capability table below and gates the routes it serves itself the same way.
