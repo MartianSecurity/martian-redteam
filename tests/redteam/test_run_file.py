@@ -168,6 +168,8 @@ def test_the_guide_documents_every_field():
         runfile.Tools,
         runfile.Budget,
         runfile.Gate,
+        runfile.VerificationSettings,
+        runfile.Benign,
     ]
     for model in models:
         for name in model.model_fields:

@@ -59,6 +59,7 @@ def for_report(run: RedteamRun, *, include_content: bool = False, policy: Redact
         data["target"]["purpose"] = _text(run.target.purpose if run.target else "", _INPUTS, include, policy) or ""
     for attempt in data["attempts"]:
         attempt["input"] = _text(attempt["input"], _INPUTS, include, policy)
+        attempt["planted"] = _text(attempt["planted"], _INPUTS, include, policy)
         attempt["output"] = _text(attempt["output"], _OUTPUTS, include, policy)
         for turn in attempt["turns"]:
             flag = _INPUTS if turn["role"] == "attacker" else _OUTPUTS

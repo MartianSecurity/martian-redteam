@@ -40,6 +40,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
 from martian.redteam.store import RedteamStore
+from martian.redteam.verify.canary import new_canary, planted_run_file
 
 
 class LocalLauncher:
@@ -58,6 +59,10 @@ class LocalLauncher:
         if run_file.target.file is not None and not Path(run_file.target.file).is_absolute():
             target = run_file.target.model_copy(update={"file": str((self.base_dir / run_file.target.file).resolve())})
             run_file = run_file.model_copy(update={"target": target})
+        sample = run_file.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = run_file.verification.model_copy(update={"calibration": str((self.base_dir / sample).resolve())})
+            run_file = run_file.model_copy(update={"verification": settings})
         return run_file
 
     async def start(self, principal: Principal, request: RunStart) -> RedteamRun:
@@ -69,11 +74,13 @@ class LocalLauncher:
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
-            target = build_target(run_file.target, base=self.base_dir)
+            canary = new_canary()
+            planted = planted_run_file(run_file, canary)
+            target = build_target(planted.target, base=self.base_dir)
             stack.push_async_callback(target.close)
             folder = Path(run_file.output_folder)
             target = await tool_boundary(
-                run_file, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
+                planted, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
             )
 
             async def keep(run: RedteamRun) -> None:
@@ -87,6 +94,7 @@ class LocalLauncher:
                 project_id=request.project_id,
                 checkpoint=keep,
                 provenance=provenance,
+                canary=canary,
             )
         except (
             ServiceSelectionError,

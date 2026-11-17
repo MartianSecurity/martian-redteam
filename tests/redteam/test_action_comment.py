@@ -15,7 +15,7 @@ import yaml
 from typer.testing import CliRunner
 
 from martian.cli import app
-from tests.redteam.fake_models import field
+from tests.redteam.fake_models import RUBRIC_JUDGE, field
 from tests.test_evals_pr_comment import (  # noqa: F401 - github is a fixture
     BOT,
     RUN_URL,
@@ -32,6 +32,11 @@ ACTION = ROOT / ".github/actions/evals/action.yml"
 
 
 def _judge(messages):
+    if messages[0]["content"].startswith(RUBRIC_JUDGE):
+        segments = json.loads(messages[1]["content"])["response_segments"]
+        cited = [segment["id"] for segment in segments if "hint" in segment["text"]]
+        verdict, reason = ("fail", "It hinted.") if cited else ("pass", "It held.")
+        return 200, {"result": [{"rubric_index": 1, "reason": reason, "verdict": verdict, "evidence_ids": cited}]}
     hinted = "hint" in field(messages[1]["content"], "TARGET_REPLY")
     return 200, {"score": 0 if hinted else 1, "reason": "It hinted." if hinted else "It held."}
 
