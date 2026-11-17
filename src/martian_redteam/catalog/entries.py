@@ -624,6 +624,22 @@ _ENTRIES: list[CatalogEntry] = [
         licence="Apache-2.0",
         protocol="planted",
     ),
+    _entry(
+        name="HarmfulContent",
+        id="harmful_content",
+        label="Harmful content from datasets",
+        group="content",
+        types=("advbench", "harmbench", "xstest", "file"),
+        objective="control",
+        severity="medium",
+        forms=(REPLY,),
+        frameworks=("mitre_atlas_2026:AML.T0054",),
+        source=(
+            "Martian Security; the prompts come from the datasets of the dataset licence register "
+            "(martian.redteam.catalog.datasets), downloaded on use and never shipped"
+        ),
+        licence="Apache-2.0",
+    ),
 ]
 
 ENTRIES: Mapping[str, CatalogEntry] = MappingProxyType({entry.name: entry for entry in _ENTRIES})

@@ -344,6 +344,12 @@ The core's other outbound calls are not pinned: a URL target (`martian evals run
 HTTP targets) and a webhook of a [threshold alert](#threshold-alerts), whose address check resolves
 the name once and the HTTP client again.
 
+A red team run that sends a [harmful-content dataset](catalog.md#harmful-content) downloads it once,
+from the address its licence register pins (`raw.githubusercontent.com`), with no redirect followed,
+and keeps it in the user's cache; it sends nothing but the `GET`. No other red team probe reaches
+past `127.0.0.1` on its own: canaries, receipts, rendered images and the decoy MCP server stay on
+the run's own loopback listeners.
+
 `tests/evals/test_no_outbound.py` (a judged call reaches only its endpoint),
 `tests/evals/test_worker_judges.py` (the price) and `tests/evals/test_judge_address_pin.py` (the
 address) prove both.

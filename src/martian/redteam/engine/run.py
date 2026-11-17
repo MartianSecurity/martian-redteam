@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -189,6 +190,11 @@ class Engine:
         self._memory = asyncio.Lock()
         """One memory probe at a time: its writing conversation and the later one are not interleaved."""
         self._memory_written: dict[str, bool | None] = {}
+        self.dataset_rows: dict[str, list[str] | str] = {}
+        """The prompts of each dataset the run sends, or why it did not load."""
+        self.datasets_used: list[dict[str, Any]] = []
+        self.download: Any = None
+        """Replaces the datasets' download (the tests)."""
         self._planting = asyncio.Lock()
         """One poisoning attempt at a time: an agent never reads another attempt's planted content."""
         self.ledger = Ledger(run_file.budget)
@@ -245,6 +251,7 @@ class Engine:
             if listens:
                 self.listener = await ReceiptListener().start()
             await self._calibrate()
+            await self._load_datasets()
             await self._attacks()
             await self._repetitions()
             await self._controls()
@@ -256,6 +263,63 @@ class Engine:
         final = self.snapshot("stopped" if self.ledger.stopped_by else "completed")
         await self._save(final)
         return final
+
+    async def _load_datasets(self) -> None:
+        """Load each dataset the harmful-content probes send, once a run: a registered one from the
+        cache or downloaded, a file of the user's own from disk. A dataset that does not load leaves
+        its probes' attempts as errors that name it."""
+        from martian.redteam.catalog.datasets import DATASETS, DatasetError, load, load_file
+
+        wanted = {
+            json.dumps(planned.probe.metadata["dataset"], sort_keys=True): planned.probe.metadata["dataset"]
+            for planned in self.planned
+            if "dataset" in planned.probe.metadata
+        }
+        commercial = self.run_file.datasets.commercial_use
+        cache = Path(self.run_file.datasets.cache) if self.run_file.datasets.cache else None
+        for key, spec in wanted.items():
+            if key in self.dataset_rows:
+                continue
+            try:
+                if spec["id"] == "file":
+                    rows = load_file(
+                        spec["file"],
+                        column=spec["column"],
+                        licence=spec["licence"],
+                        where=spec["where"],
+                        commercial_use=commercial,
+                    )
+                else:
+                    rows = await load(spec["id"], commercial_use=commercial, cache=cache, download=self.download)
+            except DatasetError as error:
+                self.dataset_rows[key] = str(error)
+                continue
+            self.dataset_rows[key] = rows
+            registered = DATASETS.get(spec["id"])
+            self.datasets_used.append(
+                {
+                    "id": spec["id"],
+                    "licence": spec["licence"],
+                    "rows": len(rows),
+                    **(
+                        {"name": registered.name, "source": registered.source, "citation": registered.citation}
+                        if registered is not None
+                        else {"file": Path(spec["file"]).name}
+                    ),
+                }
+            )
+
+    def _dataset_row(self, probe: Probe, number: int) -> str:
+        """The dataset prompt attempt ``number`` of a harmful-content probe sends: the dataset's
+        row ``number``, in the dataset's order."""
+        rows = self.dataset_rows.get(json.dumps(probe.metadata["dataset"], sort_keys=True))
+        if isinstance(rows, str) or rows is None:
+            raise AttemptFailed("infrastructure", "dataset_unavailable", rows or "the dataset did not load")
+        if number > len(rows):
+            raise AttemptFailed(
+                "infrastructure", "dataset_short", f"the dataset has {len(rows)} prompts; attempt {number} has none"
+            )
+        return rows[number - 1]
 
     async def _calibrate(self) -> None:
         """Measure the judge on the run file's labelled sample before the attacks, once a run. Its
@@ -410,7 +474,11 @@ class Engine:
         try:
             self.ledger.check()
             payload = attack
-            if role == "attack":
+            if role == "attack" and "dataset" in probe.metadata:
+                # A dataset prompt is the attack: the attacker writes nothing, an encoding still applies.
+                row = self._dataset_row(probe, number)
+                payload = apply_encoding(row, planned.attack.id) if planned.attack.kind == "encoding" else row
+            elif role == "attack":
                 payload, generated = await self._generate(planned, spending, attempt_id)
                 fields["policy_revision"] = generated.get("policy_revision")
             planted = context_of(probe, self.canary)
@@ -823,6 +891,7 @@ class Engine:
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **({"skipped": self.skipped} if self.skipped else {}),
+                **({"datasets": self.datasets_used} if self.datasets_used else {}),
                 **({"receipts": self._receipts()} if self.listener is not None else {}),
                 **({"judge_calibration": self.calibration} if self.calibration is not None else {}),
                 **self.provenance,

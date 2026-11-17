@@ -311,6 +311,28 @@ class Benign(_Model):
     checks: list[BenignCheck] = Field(min_length=1, max_length=5)
 
 
+class DatasetFile(_Model):
+    """A dataset file of the user's own, for ``HarmfulContent`` of type ``file``: CSV, or JSON Lines
+    by its ``.jsonl`` suffix, and its licence."""
+
+    file: str = Field(min_length=1)
+    column: str = Field(default="prompt", min_length=1)
+    licence: str = Field(min_length=1)
+    """Its licence as an SPDX id, such as ``MIT`` or ``CC-BY-4.0``. The commercial-use switch reads it."""
+    where: dict[str, str] = Field(default_factory=dict)
+    """Only rows whose columns hold these values."""
+
+
+class Datasets(_Model):
+    """How the harmful-content set's datasets load."""
+
+    commercial_use: bool = True
+    """Load only datasets under MIT, Apache-2.0 or CC BY. Off, a dataset under any licence loads."""
+    cache: str | None = Field(default=None, min_length=1)
+    """Where downloaded datasets are kept. Default ``MARTIAN_DATASET_CACHE``, else
+    ``~/.cache/martian/redteam-datasets``. A relative path is read from the run file's folder."""
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
@@ -324,6 +346,8 @@ class Vulnerability(NamedSpec):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     benign: Benign | None = None
     """A benign task whose completion is reported with and without the attack."""
+    dataset: DatasetFile | None = None
+    """For ``HarmfulContent`` of type ``file``: the user's own dataset file."""
 
     @model_validator(mode="after")
     def _form_or_checks(self) -> Vulnerability:
@@ -568,6 +592,7 @@ class RunFile(_Model):
     gate: Gate = Field(default_factory=Gate)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     output_folder: str = "results"
+    datasets: Datasets = Field(default_factory=Datasets)
     environment: str | None = Field(default=None, min_length=1)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
@@ -631,6 +656,7 @@ class RunFile(_Model):
         if skills is not None and not Path(skills).is_absolute():
             tools = loaded.tools.model_copy(update={"skills_dir": str((file.parent / skills).resolve())})
             loaded = loaded.model_copy(update={"tools": tools})
+        loaded = loaded.model_copy(update=_relative_datasets(loaded, file.parent))
         memory = loaded.target.memory
         if memory is not None and memory.store is not None and not Path(memory.store).is_absolute():
             stored = memory.model_copy(update={"store": str((file.parent / memory.store).resolve())})
@@ -640,6 +666,23 @@ class RunFile(_Model):
             settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
             loaded = loaded.model_copy(update={"verification": settings})
         return loaded
+
+
+def _relative_datasets(loaded: RunFile, folder: Path) -> dict[str, Any]:
+    """The run file's vulnerabilities and datasets with dataset files and the cache read from
+    ``folder`` when relative."""
+    entries = []
+    for vulnerability in loaded.vulnerabilities:
+        given = vulnerability.dataset
+        if given is not None and not Path(given.file).is_absolute():
+            given = given.model_copy(update={"file": str((folder / given.file).resolve())})
+            vulnerability = vulnerability.model_copy(update={"dataset": given})
+        entries.append(vulnerability)
+    cache = loaded.datasets.cache
+    datasets = loaded.datasets
+    if cache is not None and not Path(cache).is_absolute():
+        datasets = datasets.model_copy(update={"cache": str((folder / cache).resolve())})
+    return {"vulnerabilities": entries, "datasets": datasets}
 
 
 def read_yaml(path: str | Path) -> dict[str, Any]:
@@ -700,6 +743,8 @@ __all__ = [
     "VerificationSettings",
     "CanaryCheck",
     "CanaryPlant",
+    "DatasetFile",
+    "Datasets",
     "Decoy",
     "ErrorHandling",
     "Gate",

@@ -58,6 +58,7 @@ gate: { fail_on: confirmed, severity: high }
 | `gate` | no | When the run fails |
 | `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
 | `output_folder` | no | Where reports are written. Default `results` |
+| `datasets` | no | How the [harmful-content](catalog.md#harmful-content) datasets load: `commercial_use` (default true) loads only datasets under MIT, Apache-2.0 or CC BY; `cache`, where downloads are kept |
 | `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
 
 ## Target
@@ -150,6 +151,7 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 | `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by its catalogue entry's default form (the judge, for the entries of catalogue 0.2), and a custom one by the judge |
 | `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it. Without it, the catalogue entry's default severity applies; a custom vulnerability has none |
 | `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
+| `dataset` | For `HarmfulContent` of type `file`: your own dataset file, `file` (CSV, or JSON Lines by its `.jsonl` suffix, read from the run file's folder when relative), `column` (default `prompt`), `licence` (an SPDX id, read by `datasets.commercial_use`) and `where` (only rows whose columns hold these values) |
 
 A `goal` takes these fields:
 

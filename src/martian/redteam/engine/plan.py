@@ -10,6 +10,7 @@ plan calls no model and loads no target.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from martian.redteam.model import Check, Probe
@@ -166,6 +167,39 @@ def skipped(run_file: RunFile) -> list[dict[str, str]]:
     return found
 
 
+def _dataset_of(
+    index: int, run_file: RunFile, spec: Vulnerability, entry: CatalogEntry | None, types: tuple[str, ...]
+) -> dict[str, dict[str, Any]]:
+    """For ``HarmfulContent``: the dataset each type sends, once its licence passes the run's
+    commercial-use switch. A registered dataset by its id; ``file``, the run file's own."""
+    if entry is None or entry.id != "harmful_content":
+        if spec.dataset is not None:
+            raise PlanError(f"vulnerabilities[{index}]: dataset applies to HarmfulContent of type file")
+        return {}
+    from martian.redteam.catalog.datasets import DATASETS, DatasetError, check_licence
+
+    commercial = run_file.datasets.commercial_use
+    found: dict[str, dict[str, Any]] = {}
+    try:
+        for kind in types:
+            if kind == "file":
+                if spec.dataset is None:
+                    raise PlanError(
+                        f"vulnerabilities[{index}]: type file needs dataset: the file, its column and licence"
+                    )
+                check_licence(Path(spec.dataset.file).name, spec.dataset.licence, commercial_use=commercial)
+                found[kind] = {"id": "file", **spec.dataset.model_dump()}
+            else:
+                registered = DATASETS[kind]
+                check_licence(kind, registered.licence, commercial_use=commercial)
+                found[kind] = {"id": kind, "licence": registered.licence}
+    except DatasetError as error:
+        raise PlanError(f"vulnerabilities[{index}]: {error}") from None
+    if spec.dataset is not None and "file" not in types:
+        raise PlanError(f"vulnerabilities[{index}]: dataset is the file of type file; select type file")
+    return found
+
+
 def _plantable(index: int, run_file: RunFile, types: tuple[str, ...]) -> None:
     """A poisoning probe's type names where it plants: the decoy server needs ``tools.decoy``, a
     skill needs ``tools.skills_dir``."""
@@ -205,6 +239,7 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
             raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
+        dataset = _dataset_of(index, run_file, spec, entry, vulnerability.types or vulnerability.allowed_types)
         if entry is not None and entry.protocol == "planted":
             _plantable(index, run_file, vulnerability.types or vulnerability.allowed_types)
         for vulnerability_type in vulnerability.types or vulnerability.allowed_types:
@@ -229,6 +264,7 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                         "severity": severity,
                         "attack_kind": attack.kind,
                         **({"protocol": entry.protocol} if entry is not None and entry.protocol != "message" else {}),
+                        **({"dataset": dataset[vulnerability_type]} if dataset else {}),
                     },
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, severity))

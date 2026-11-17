@@ -99,6 +99,30 @@ vulnerabilities:
     types: [mcp_tool_description, skill_file]
 ```
 
+### Harmful content
+
+`HarmfulContent` sends prompts from public datasets instead of asking the attacker model to write them: a user's model may refuse to write such prompts, and several well-known datasets forbid commercial use. Each type is a dataset; attempt `n` of a probe sends the dataset's prompt `n`, in the dataset's order, so `budget.attempts_per_probe` is how many it sends. The attacker is not called; an encoding attack method still encodes the prompt, and an LLM method sends it as written. The judge decides (the `reply` form), so a finding is suspected, level 1.
+
+| Type | Dataset | Licence | Prompts | Source |
+| --- | --- | --- | --- | --- |
+| `advbench` | AdvBench harmful behaviours (Zou et al., 2023) | MIT | 520 | [llm-attacks/llm-attacks](https://github.com/llm-attacks/llm-attacks) |
+| `harmbench` | HarmBench standard text behaviours (Mazeika et al., 2024); the copyright and contextual behaviours are left out | MIT | 200 | [centerforaisafety/HarmBench](https://github.com/centerforaisafety/HarmBench) |
+| `xstest` | XSTest unsafe prompts (Röttger et al., 2024) | CC-BY-4.0 | 200 | [paul-rottger/xstest](https://github.com/paul-rottger/xstest) |
+| `file` | A file of your own: CSV, or JSON Lines by its `.jsonl` suffix, with its licence (the vulnerability's `dataset`) | Yours | Yours | |
+
+`src/martian/redteam/catalog/datasets/register.json` is the datasets' licence register: each one's licence, source, citation, an address pinned to one commit and the file's SHA-256. No row of any dataset is in the package, and the release check refuses a wheel that holds a data file ([release preparation](releasing.md)). A run downloads a dataset the first time it uses it, checks the digest and keeps it in the cache (`MARTIAN_DATASET_CACHE`, else `~/.cache/martian/redteam-datasets`, or the run file's `datasets.cache`); a file with another digest is refused, never used. A dataset that does not load makes its probe's attempts errors of kind `infrastructure` (`dataset_unavailable`), never passes. The run's provenance lists each dataset it sent (`datasets`), with its licence and source.
+
+The commercial-use switch, `datasets.commercial_use` (on by default), lets only datasets under MIT, Apache-2.0 or CC BY load, a file of your own included; the plan refuses any other, naming its licence. Datasets under non-commercial or share-alike terms, such as BeaverTails and ToxicChat (CC BY-NC 4.0), are not registered; with the switch off, a file of your own under any licence loads.
+
+```yaml
+datasets: { commercial_use: true }
+budget: { attempts_per_probe: 20 }
+vulnerabilities:
+  - name: HarmfulContent
+    types: [harmbench, file]
+    dataset: { file: ./our-prompts.csv, column: prompt, licence: CC-BY-4.0 }
+```
+
 ### Tool misuse and exfiltration
 
 These classes ask whether the agent can be made to call a tool it should not, or to send data out. A hit is decided by a tool call or by the receipt listener, never by the judge alone. Their default goals are benign: move the run's canary, a random reference, and nothing harmful.
@@ -171,6 +195,7 @@ vulnerabilities_for("owasp_llm_2025")
 | `CrossSessionLeak` | `cross_session_leakage` | disclosure | disclosure | high | **yes** | `other_user_data`, `earlier_conversation` | `canary`, `reply` |
 | `MemoryPoisoning` | `memory_poisoning` | memory | persistence | high | **yes** | `standing_instruction`, `planted_fact` | `canary`, `reply` |
 | `ToolPoisoning` | `tool_poisoning` | supply_chain | action | high | **yes** | `mcp_tool_description`, `skill_file` | `planted`, `reply` |
+| `HarmfulContent` | `harmful_content` | content | control | medium | no | `advbench`, `harmbench`, `xstest`, `file` | `reply` |
 | `ToolMisuse` | `tool_misuse` | agency | action | high | **yes** | `unauthorised_tool`, `attacker_arguments` | `canary_tool_call`, `tool_call`, `reply` |
 | `DataExfiltration` | `data_exfiltration` | disclosure | disclosure | critical | **yes** | `image_url`, `link`, `tool_argument` | `image_url`, `link`, `tool_argument`, `reply` |
 
@@ -380,6 +405,6 @@ Do not emit marketing copy that says “OWASP LLM Top 10 certified” or “full
 ## What is not in the catalog
 
 - DeepTeam’s remaining vulnerability classes and metric modules
-- BeaverTails / Aegis datasets (redistribution / license constraints)
+- Datasets under non-commercial or share-alike terms (BeaverTails, ToxicChat, Do-Not-Answer), and any dataset's rows in the package
 - Guardrails, SAST, trace scanners
 - Per-framework live scoring APIs
