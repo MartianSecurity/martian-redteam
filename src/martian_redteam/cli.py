@@ -488,6 +488,31 @@ def _stored_run(run_id: str) -> Any:
     return found
 
 
+@app.command("compare")
+def compare_command(
+    baseline: Annotated[str, typer.Argument(help="The baseline run: a redteam-run.json or a run id.")],
+    candidate: Annotated[str, typer.Argument(help="The candidate run: a redteam-run.json or a run id.")],
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Also write redteam-comparison.json and .md to this folder."),
+    ] = None,
+) -> None:
+    """Compare two red team runs on the same probes: new, fixed and unchanged findings, and a paired test."""
+    from martian.redteam.report.compare import compare_runs, render_markdown
+
+    before, _ = _load_run(baseline)
+    after, _ = _load_run(candidate)
+    comparison = compare_runs(before, after)
+    text = render_markdown(comparison)
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "redteam-comparison.json").write_text(comparison.model_dump_json(indent=2), encoding="utf-8")
+        (output / "redteam-comparison.md").write_text(text, encoding="utf-8")
+    console.print(text, markup=False, highlight=False)
+    for warning in comparison.warnings:
+        errors.print("Not comparable: " + safe_text(warning), style="yellow", markup=False, soft_wrap=True)
+
+
 pin_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(pin_app, name="pin", help="Keep confirmed findings as regression tests, and re-run them with no model.")
 

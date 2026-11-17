@@ -172,6 +172,33 @@ or the id of a run in the local store. It writes `redteam-report.json`, `redteam
 every format, or those `-f` names, to `-o` (default: the folder of the `redteam-run.json`, else
 `results`). `--run-file` gives the run file that SARIF results point at.
 
+## Comparing two runs
+
+`martian redteam compare BASELINE CANDIDATE` compares two runs, each a `redteam-run.json` or a run
+id in the local store, on the probes both ran. It prints the comparison, and with `-o` also writes
+`redteam-comparison.json` and `redteam-comparison.md` there. It exits 0 whatever it finds, and 2
+when a run cannot be read. The comparison has:
+
+| Field | Meaning |
+| --- | --- |
+| `baseline_run`, `candidate_run` | The two runs |
+| `comparable` | False when anything that produced the numbers differs; `warnings` then says what |
+| `warnings` | Each difference: the attackers or judges (model and settings), the services, the budgets (`limits`), the attempts per probe, the catalogue versions, the verdict rules, the attacker and judge prompts, or a probe's checks |
+| `compared_probes` | Probes both runs ran. Probes only one ran are in `only_in_baseline` and `only_in_candidate`, and their findings are not compared |
+| `new` | Findings of the candidate on a probe that had none in the baseline |
+| `fixed` | Findings of the baseline on a probe that has none in the candidate, where the candidate decided at least one attack attempt of the probe |
+| `unchanged` | Findings in both runs. `baseline_level` and `candidate_level` show when the level moved |
+| `undecided` | Findings of the baseline on a probe the candidate decided no attempt of, so it cannot be called fixed |
+| `paired` | The exact McNemar test on confirmed success of the attack attempts both runs decided, paired by probe and attempt number (`martian.evals.stats.compare_outcomes`): `compared` pairs, `improved` (a confirmed hit became held), `regressed`, the two rates, `effect`, `p_value`, `minimum_detectable_effect` and `label`: `better`, `worse` or `within_noise`. With fewer than six changed pairs it is always `within_noise` |
+| `changed` | False when nothing differs: no new, fixed or undecided finding, no level moved and no pair changed. A run compared with itself shows no change |
+
+Each entry of `new`, `fixed`, `unchanged` and `undecided` names the `probe_id`, `vulnerability`,
+`vulnerability_type` and `attack_method`, the `status`, the two levels and labels
+(`baseline_label`, `candidate_label`), and whether it is `counted_as` confirmed or suspected.
+
+Runs that are not comparable are still compared, with the warning at the top. A change in success
+between them may be the change of attacker or budget, not of the target.
+
 ## Pinned findings
 
 A confirmed finding can be kept as a regression test, so that after a fix CI checks it stays fixed.
