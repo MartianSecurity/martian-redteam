@@ -132,7 +132,10 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     planned_attempts=run_file.budget.attempts_per_probe,
                     task=spec.benign.task if spec.benign else "",
                     task_checks=_task_checks(spec),
-                    metadata=_metadata(spec.severity, attack, method),
+                    metadata={
+                        **_metadata(spec.severity, attack, method),
+                        **({"plant": spec.plant.model_dump()} if spec.plant is not None else {}),
+                    },
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity, method))
     return planned

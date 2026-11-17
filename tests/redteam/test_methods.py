@@ -208,3 +208,11 @@ def test_an_attack_that_names_nothing_known_is_a_problem_of_the_run_file(tmp_pat
                 update={"attacks": [AttackSpec(**attack)]}
             )
         )
+
+
+def test_an_environment_run_takes_only_the_six_version_0_2_methods():
+    with pytest.raises(ValueError, match="only the six version 0.2 attack methods"):
+        run_file(attacks=[{"name": "Refine"}], environment="refund-desk")
+    with pytest.raises(ValueError, match="only the six version 0.2 attack methods"):
+        run_file(attacks=[{"name": "PromptInjection", "layers": ["Hex"]}], environment="refund-desk")
+    assert run_file(attacks=[{"name": "ROT13"}], environment="refund-desk").environment == "refund-desk"

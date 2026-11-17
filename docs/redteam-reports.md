@@ -261,6 +261,23 @@ It writes `redteam-pins.json` (each pin's status, its check results and the coun
 `passed`) and `redteam-pins.md` to `-o` or the run file's `output_folder`, and exits 0 when every pin
 is `not_reproduced`, 1 otherwise, and 2 when it could not start.
 
+## Pushing a run to a Martian server
+
+`martian redteam push RUN` sends a finished version 2 run (a `redteam-run.json`, or the id of a run in the local store) to the Martian server `MARTIAN_API_URL` names, with `MARTIAN_API_TOKEN`: an API key with `redteam:run`, bound to no agent. The console then lists it with the runs the server ran. It goes to `PUT /v1/push/redteam/runs/{run_id}` ([red team API](redteam-api.md#pushed-runs)) as the run the local store keeps, so content the report leaves out stays out. The server labels it as executed by the client (`provenance.execution` is `client_executed`). Pushing it again changes nothing and says it is already there; a run with the same id and other content is refused. A run that has not finished is not pushed, and a refusal stops with exit code 2. A run in an environment is pushed this way when it ends ([environments](redteam-run-file.md#environments)); a failed push there is a warning.
+
+## A planned campaign on a Martian server
+
+`martian redteam campaign` starts the console's planned campaign on the Martian server `MARTIAN_API_URL` names, with `MARTIAN_API_TOKEN` (an API key with `redteam:run`, acting as the member who created it). The server's engine plans and runs it against a registered agent the organisation approved; nothing runs here. `--agent` names the agent (default: the one the key is bound to), `--depth` is `quick`, `standard` (the default) or `deep`, and `--objective`, `--outcome` and `--environment` narrow it as the console's wizard does. The console lists the campaign as soon as it starts, and the command prints where.
+
+The command reads the campaign every `--poll` seconds (15) until it finishes, for at most `--timeout` seconds (7200); `--no-wait` only starts it. When it finished it writes the campaign as a run of the shared model to `redteam-run.json`, with `redteam-report.json` and `.md`, in `--output` (`results`). The exit code follows the backend's release decision:
+
+| Release decision | Exit code |
+| --- | --- |
+| `APPROVED` | 0 |
+| `CONDITIONAL` | 1, or 0 with a warning under `--allow-conditional` |
+| `BLOCKED` | 1 |
+| none: `PENDING`, a campaign that failed or did not finish in time, or a refused start | 2 |
+
 ## What a report holds of the target's content
 
 Every format follows the same rule. Reports hold digests of the attacks, replies, judge reasons and

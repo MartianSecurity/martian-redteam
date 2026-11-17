@@ -279,6 +279,15 @@ class Benign(_Model):
     checks: list[BenignCheck] = Field(min_length=1, max_length=5)
 
 
+class Plant(_Model):
+    """An indirect attack in an environment: the attack is planted in the world with an implant
+    profile of the agent's connection on the Martian server, and the agent is sent ``trigger``, an
+    ordinary request that leads it to read what was planted."""
+
+    profile: str = Field(min_length=1, max_length=128)
+    trigger: str = Field(min_length=1, max_length=2000)
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
@@ -289,6 +298,8 @@ class Vulnerability(NamedSpec):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     benign: Benign | None = None
     """A benign task whose completion is reported with and without the attack."""
+    plant: Plant | None = None
+    """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
 
 
 class ProxiedServer(_Model):
@@ -336,7 +347,8 @@ class Tools(_Model):
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
-    ``{session_api}/sessions`` before the first attack."""
+    ``{session_api}/sessions`` before the first attack: the proxy's, or in an environment the
+    Martian server's."""
 
     @field_validator("session_api")
     @classmethod
@@ -355,8 +367,6 @@ class Tools(_Model):
         names = [server.name for server in self.proxy]
         if len(set(names)) != len(names):
             raise ValueError("each proxied server has its own name")
-        if self.session_api is not None and not self.proxy:
-            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
 
@@ -545,9 +555,14 @@ class RunFile(_Model):
     gate: Gate = Field(default_factory=Gate)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     output_folder: str = "results"
-    environment: str | None = Field(default=None, min_length=1)
+    environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
+    agent: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    """The registered agent an environment run tests, by its id on the Martian server: its approval,
+    sandbox bindings and checks. Without it, the API key must be bound to the agent."""
 
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
@@ -558,6 +573,11 @@ class RunFile(_Model):
                 resolve(attack)
             except MethodError as error:
                 raise ValueError(f"attacks[{index}]: {error}") from None
+            if self.environment is not None and not resolve(attack).legacy:
+                raise ValueError(
+                    f"attacks[{index}]: in an environment run only the six version 0.2 attack methods run "
+                    "(PromptInjection, Roleplay, PromptProbing, ROT13, Base64, Leetspeak), with no layers or route"
+                )
             route = attack.delivery
             if route is not None and route.route == "tool_result":
                 server = next((item for item in self.tools.proxy if item.name == route.server), None)
@@ -572,7 +592,15 @@ class RunFile(_Model):
                     f"tools.proxy {server.name!r}: inject mode needs the text to inject, or an attack whose "
                     "tool_result route names it"
                 )
+        if self.agent is not None and self.environment is None:
+            raise ValueError("agent names the registered agent of an environment run; set environment")
+        if self.environment is not None and self.tools.proxy:
+            raise ValueError("an environment's gateway is the tool boundary; tools.proxy applies to a run without one")
+        if self.tools.session_api is not None and not self.tools.proxy and self.environment is None:
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
+            if vulnerability.plant is not None and self.environment is None:
+                raise ValueError(f"vulnerabilities[{index}]: plant puts the attack in an environment; set environment")
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
                     raise ValueError(f"vulnerabilities[{index}]: a state check reads an environment; set environment")
@@ -700,6 +728,7 @@ __all__ = [
     "McpTarget",
     "ModelConfig",
     "Models",
+    "Plant",
     "ProxiedServer",
     "ReceiptCheck",
     "RunFile",
