@@ -372,11 +372,25 @@ class ProxiedServer(_Model):
         return self
 
 
+class Decoy(_Model):
+    """The inert test MCP server of tool-description poisoning probes, served by the run and handed
+    to the agent through the recording proxy as one of its tool servers."""
+
+    name: str = Field(default="utilities", min_length=1, max_length=24, pattern=r"^[a-z][a-z0-9_]{0,23}$")
+
+
 class Tools(_Model):
     """The local recording proxy: the agent's own tool servers it fronts, and where the agent is
-    handed the session that binds them."""
+    handed the session that binds them; the inert test server of tool-description poisoning probes,
+    and the folder the agent loads skills from."""
 
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
+    decoy: Decoy | None = None
+    """Serve the inert test MCP server through the proxy, for ``ToolPoisoning`` probes of type
+    ``mcp_tool_description``."""
+    skills_dir: str | None = Field(default=None, min_length=1)
+    """The folder the agent loads skills from, for ``ToolPoisoning`` probes of type ``skill_file``. A
+    relative path is read from the run file's folder."""
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
     ``{session_api}/sessions`` before the first attack."""
@@ -395,10 +409,10 @@ class Tools(_Model):
 
     @model_validator(mode="after")
     def _unique(self) -> Tools:
-        names = [server.name for server in self.proxy]
+        names = [server.name for server in self.proxy] + ([self.decoy.name] if self.decoy else [])
         if len(set(names)) != len(names):
-            raise ValueError("each proxied server has its own name")
-        if self.session_api is not None and not self.proxy:
+            raise ValueError("each proxied server, and the decoy, has its own name")
+        if self.session_api is not None and not self.proxy and self.decoy is None:
             raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
@@ -593,6 +607,10 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        skills = loaded.tools.skills_dir
+        if skills is not None and not Path(skills).is_absolute():
+            tools = loaded.tools.model_copy(update={"skills_dir": str((file.parent / skills).resolve())})
+            loaded = loaded.model_copy(update={"tools": tools})
         memory = loaded.target.memory
         if memory is not None and memory.store is not None and not Path(memory.store).is_absolute():
             stored = memory.model_copy(update={"store": str((file.parent / memory.store).resolve())})
@@ -662,6 +680,7 @@ __all__ = [
     "VerificationSettings",
     "CanaryCheck",
     "CanaryPlant",
+    "Decoy",
     "ErrorHandling",
     "Gate",
     "GateAction",

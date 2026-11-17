@@ -436,6 +436,8 @@ class ProxiedTarget:
         self._target = target
         self._proxy = proxy
         self._seen: dict[str, int] = {}
+        self.decoy: Any = None
+        """The inert test MCP server behind the proxy, when the run serves one (``tools.decoy``)."""
 
     @property
     def kind(self) -> str:

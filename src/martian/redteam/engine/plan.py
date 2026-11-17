@@ -154,6 +154,21 @@ def skipped(run_file: RunFile) -> list[dict[str, str]]:
     return found
 
 
+def _plantable(index: int, run_file: RunFile, types: tuple[str, ...]) -> None:
+    """A poisoning probe's type names where it plants: the decoy server needs ``tools.decoy``, a
+    skill needs ``tools.skills_dir``."""
+    if "mcp_tool_description" in types and run_file.tools.decoy is None:
+        raise PlanError(
+            f"vulnerabilities[{index}]: mcp_tool_description plants in the inert test server's tool description: "
+            "set tools.decoy, and bind the agent's tools from the proxy's session"
+        )
+    if "skill_file" in types and run_file.tools.skills_dir is None:
+        raise PlanError(
+            f"vulnerabilities[{index}]: skill_file plants a skill: set tools.skills_dir to the folder the agent loads "
+            "skills from"
+        )
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
     """Every probe of the run, in the run file's order. A vulnerability :func:`skipped` names has none."""
     local = run_file.models.attacker is not None
@@ -178,6 +193,8 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
             raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
+        if entry is not None and entry.protocol == "planted":
+            _plantable(index, run_file, vulnerability.types or vulnerability.allowed_types)
         for vulnerability_type in vulnerability.types or vulnerability.allowed_types:
             for attack in attacks:
                 identifier = probe_id(vulnerability.id, vulnerability_type, attack.id)

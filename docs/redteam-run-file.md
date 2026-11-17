@@ -190,12 +190,14 @@ With `render`, the run also reads each reply as a chat client shows it: `images`
 
 ## Tools
 
-`tools` takes two fields:
+`tools` takes these fields:
 
 | Field | Meaning |
 | --- | --- |
 | `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
-| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` or `decoy` |
+| `decoy` | Serve the inert test MCP server of [tool-description poisoning](catalog.md#tool-description-and-skill-poisoning) behind the proxy, as one of the agent's tool servers: `{ name: utilities }` (the default name). Its tools are `get_forecast` and `send_note`; neither reads, writes or calls anything |
+| `skills_dir` | The folder the agent loads skills from, for skill poisoning. A relative path is read from the run file's folder. The run plants one skill in a new subfolder for each attempt and removes it after |
 
 Each entry of `proxy` takes these fields:
 
