@@ -559,6 +559,29 @@ Paid Martian features are not in this repository. Report a vulnerability as
 
 `NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. The simulation and evaluation prompts (`martian.redteam.catalog.prompts`, which martian-agents imports) are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
+### Red team content licences
+
+`src/martian/redteam/catalog/licences.json`, which ships in the package, is the register of red team
+content: each prompt set, catalogue file, dataset, attack algorithm and interop map, with its source,
+licence and whether it allows commercial use. Content may ship under Apache-2.0, MIT, BSD-2-Clause,
+BSD-3-Clause, CC0-1.0, CC-BY-4.0 or the Unlicense, and only when commercial use is allowed.
+
+A content file is a file Git tracks that matches the register's `content.globs`: the catalogue
+(`martian.redteam.catalog`, `martian_redteam.catalog`), attack methods (`martian.redteam.methods`),
+the interop maps, the verdict test vectors, the attacker refusal phrases, the encodings, and any data
+file (`.json`, `.jsonl`, `.csv`, `.txt`, `.yaml`, `.parquet`) under `martian/redteam` or
+`martian_redteam`, less the API contract. `scripts/content_licences.py` fails when a content file has
+no entry, an entry names a file that is gone, or an entry's licence is not permitted or does not allow
+commercial use; `tests/redteam/test_content_licences.py` runs it in CI. New content needs its entry
+in the same change.
+
+The register also lists sources that do not ship. BeaverTails (CC BY-NC 4.0) and Do-Not-Answer
+(non-commercial) may not enter the package, and neither may text derived from the OWASP Machine
+Learning Security Top 10 (CC BY-SA 4.0). `MartianSecurity/martian-agents`, `martian-skills` and
+`martian-wiki` have no licence file, and some guidance skills are built from those restrictive
+sources; they are recorded as not opened, and nothing from them enters this package until they have a
+licence and their content is registered.
+
 ## Resource runtime metadata
 
 The optional runtime reporter can export explicitly configured response-ID mappings under the v3 contract. A successful MCP structured response contributes at most ten opaque resource references with configured service/type/action, completion time and reported outcome. It does not export native IDs, arguments or response bodies. References are keyed, binding-scoped HMAC values; they are pseudonymous correlation data, not anonymous data or authorization proof. Missing/error/unmapped calls have unknown resource coverage. Credentials and references change with a new deployment binding. See [configuration and boundaries](customer-integration.md#explicit-resource-response-mappings).
