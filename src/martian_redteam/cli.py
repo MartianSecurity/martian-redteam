@@ -309,7 +309,7 @@ def _run_version_2(
     from contextlib import AsyncExitStack
 
     from martian.redteam.engine.plan import PlanError, plan
-    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.report import for_report, write_reports
     from martian.redteam.engine.runs import (
         SESSION_FILE,
         SessionHandoverError,
@@ -455,6 +455,9 @@ def _run_version_2(
             markup=False,
             soft_wrap=True,
         )
+    if admitted is not None:
+        # A run in an environment is the server's too: its records go there, as martian redteam push sends them.
+        _push(for_report(run, policy=service.redaction_policy), warn=True)
     if reused := run.provenance.get("resumed_attempts"):
         console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
     for warning in decided.warnings:
@@ -558,6 +561,34 @@ def _stored_run(run_id: str) -> Any:
     if found is None:
         _stop(f"{safe_text(run_id)} is neither a file nor a red team run in the local store.")
     return found
+
+
+def _push(run: Any, *, warn: bool = False) -> None:
+    """Push ``run`` to the Martian server of ``MARTIAN_API_URL`` and say what the server did. A
+    failure stops with exit code 2, or with ``warn`` is only reported."""
+    from martian.redteam.push import PushError, push_run
+
+    try:
+        pushed = asyncio.run(push_run(run, MartianConfig.from_env()))
+    except (PushError, ConfigError) as error:
+        if not warn:
+            _stop("Not pushed: " + safe_text(error))
+        errors.print("Warning: not pushed: " + safe_text(error), style="yellow", markup=False, soft_wrap=True)
+        return
+    state = "pushed to" if pushed.created else "already on"
+    console.print(f"Red team run {pushed.run_id} {state} the Martian server.", markup=False)
+
+
+@app.command("push")
+def push_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+) -> None:
+    """Push a finished version 2 run to the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), where
+    the console lists it. Pushing it again changes nothing."""
+    found, _ = _load_run(run)
+    if found.state in ("queued", "running"):
+        _stop(f"{safe_text(found.id)} has not finished: only a finished red team run is pushed.")
+    _push(found)
 
 
 @app.command("compare")

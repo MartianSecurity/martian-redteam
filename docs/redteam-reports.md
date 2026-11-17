@@ -254,6 +254,10 @@ It writes `redteam-pins.json` (each pin's status, its check results and the coun
 `passed`) and `redteam-pins.md` to `-o` or the run file's `output_folder`, and exits 0 when every pin
 is `not_reproduced`, 1 otherwise, and 2 when it could not start.
 
+## Pushing a run to a Martian server
+
+`martian redteam push RUN` sends a finished version 2 run (a `redteam-run.json`, or the id of a run in the local store) to the Martian server `MARTIAN_API_URL` names, with `MARTIAN_API_TOKEN`: an API key with `redteam:run`, bound to no agent. The console then lists it with the runs the server ran. It goes to `PUT /v1/push/redteam/runs/{run_id}` ([red team API](redteam-api.md#pushed-runs)) as the run the local store keeps, so content the report leaves out stays out. The server labels it as executed by the client (`provenance.execution` is `client_executed`). Pushing it again changes nothing and says it is already there; a run with the same id and other content is refused. A run that has not finished is not pushed, and a refusal stops with exit code 2. A run in an environment is pushed this way when it ends ([environments](redteam-run-file.md#environments)); a failed push there is a warning.
+
 ## What a report holds of the target's content
 
 Every format follows the same rule. Reports hold digests of the attacks, replies, judge reasons and

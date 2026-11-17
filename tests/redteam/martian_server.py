@@ -33,6 +33,7 @@ class FakeMartianServer:
         self.planted: dict[str, str] = {}
         self.reads: set[str] = set()
         self.refusal: tuple[int, str] | None = None
+        self.pushed: list[dict[str, Any]] = []
         self.run_id = str(uuid.uuid4())
 
     def __call__(self, body: dict[str, Any], headers: dict[str, str]) -> tuple[int, Any]:
@@ -44,6 +45,11 @@ class FakeMartianServer:
             if self.refusal is not None:
                 return self.refusal[0], {"detail": self.refusal[1]}
             return 201, self.run(body)
+        if path.startswith("/v1/push/redteam/runs/"):
+            if headers.get("authorization") != f"Bearer {TOKEN}":
+                return 401, {"detail": "API key is not active"}
+            self.pushed.append(body["run"])
+            return 200, {"run_id": body["run"]["id"], "project_id": "default", "created": len(self.pushed) == 1}
         if path == f"/v1/redteam/environment-runs/{self.run_id}/world":
             if headers.get("authorization") != f"Bearer {RUN_KEY}":
                 return 401, {"detail": "Invalid environment run key"}

@@ -52,3 +52,7 @@ uv run --extra evals python -m martian.redteam.engine.conformance my_package.mod
 ```
 
 It prints each check and exits 1 when one fails. `tests/redteam/test_conformance.py` runs it in CI on the local service, against a loopback model server, and on the hosted client, replaying operation receipts in the shapes of `contract/redteam-operations.json`.
+
+## Pushed runs
+
+`martian.redteam.server.push` serves `PUT /v1/push/redteam/runs/{run_id}`, beside the evals push routes and outside the contract, as they are. The body is `{"run": ...}`, a finished run of the shared model. The answer is `{"run_id", "project_id", "created"}`. The route needs the `run` capability and writes as the edition's push principal: `martian ui` serves it to its single user, and the hosted backend binds organisation API keys with `redteam:run` to it. The run is kept with `provenance.execution` set to `client_executed`. The same run again answers `created: false` and writes nothing; other content under the same id is `409`; a run that has not finished, or that names another id than the path, is `422`. `martian redteam push` sends runs here ([pushing a run](redteam-reports.md#pushing-a-run-to-a-martian-server)).

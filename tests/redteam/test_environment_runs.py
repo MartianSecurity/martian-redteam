@@ -156,6 +156,10 @@ def test_the_server_admits_the_run_and_the_agent_binds_its_tools_to_the_gateway(
         "run_code": "MR-1001",
     }
     assert "Admitted in environment refund-desk as MR-1001" in " ".join(result.output.split())
+    # The run's records went to the server too, as martian redteam push sends them.
+    [pushed] = server.pushed
+    assert pushed["id"] == report["id"] and pushed["state"] == "completed"
+    assert f"Red team run {report['id']} pushed to the Martian server" in " ".join(result.output.split())
 
 
 def test_an_admission_the_server_refuses_exits_2_before_any_model_call(tmp_path, connected, models):
