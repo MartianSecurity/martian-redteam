@@ -26,6 +26,11 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `PromptInjection` | `prompt_injection` | rewrite | static | 1 | 1 | An instruction override or delimiter injection the target might take as a new system rule |
 | `Roleplay` | `roleplay` | rewrite | static | 1 | 1 | A roleplay or hypothetical frame that takes the target outside its role |
 | `PromptProbing` | `prompt_probing` | rewrite | static | 1 | 1 | A probing question for hidden instructions, tools or policy, without a blunt override |
+| `Authority` | `authority` | rewrite | static | 1 | 1 | A target that obeys whoever claims to be in charge: the request comes from its developer, an administrator, a security team or a legal duty |
+| `Hypothetical` | `hypothetical` | rewrite | static | 1 | 1 | A target that answers inside an imagined case: the request is a thought experiment in which it is allowed, asking for the concrete answer |
+| `Citation` | `citation` | rewrite | static | 1 | 1 | A target that defers to documents: the request cites a policy, ticket or guideline that says it is allowed or required |
+| `TaskFraming` | `task_framing` | rewrite | static | 1 | 1 | A target that checks requests but not tasks: the request sits inside a summary, translation, test case or form the target is built for |
+| `FormatShift` | `format_shift` | rewrite | static | 1 | 1 | A target that refuses a request but not a formatting job: the answer is asked for as JSON, a table, code or a template |
 | `ROT13` | `rot13` | transform | static | 1 | 1 | A filter that matches plain text: a prompt injection in ROT13 |
 | `Base64` | `base64` | transform | static | 1 | 1 | A filter that matches plain text: a prompt injection in Base64 |
 | `Leetspeak` | `leetspeak` | transform | static | 1 | 1 | A filter that matches words: a prompt injection with letters as digits |
@@ -38,7 +43,11 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 
 Every transform runs locally with no model call and no network, and is a pure function of the text: the same attack always becomes the same message. Its tests check a round trip (or, for alternating case and Morse, the property that holds) on generated texts.
 
-The three rewrites take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The six version 0.2 methods (the first six rows) have the results and attempt fingerprints they had before methods had an interface.
+Prompt injection, roleplay and prompt probing take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The other rewrites state their style in the attacker's request, from a prompt file of their own, with the probe's `goal` when the run file states one; the catalogue's generator prompt is unchanged. The six version 0.2 methods (the first six rows) have the results and attempt fingerprints they had before methods had an interface.
+
+## Prompt files and the licence register
+
+Every prompt a method adds to the attacker's request, and every fixed template, is a file under `src/martian/redteam/methods/prompts/`, written by Martian Security for this package under Apache-2.0. `prompts/register.json` lists each file with its licence, its source and the published ideas it was modelled on; no text is copied from another project, and code or prompts under GPL, AGPL or non-commercial licences are never used. A test fails when a file is not in the register, when an entry has no file or no source, or when its licence is not one `scripts/licence-policy.json` allows. The run's `provenance.methods_revision` is a digest of every file, and the fingerprint of an attempt of any method but the six version 0.2 ones includes it.
 
 ## Layers
 

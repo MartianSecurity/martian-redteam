@@ -42,7 +42,10 @@ def attempt_fingerprint(
     }
     method = planned.attack_method
     if not method.legacy:
+        from martian.redteam.methods.library import METHODS_REVISION
+
         material["method"] = method.describe()
+        material["methods_revision"] = METHODS_REVISION
     text = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(text.encode()).hexdigest()
 

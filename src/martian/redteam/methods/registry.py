@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
-from martian.redteam.methods.rewrites import Rewrite
+from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
 from martian.redteam.methods.transforms import TRANSFORMS
 from martian_redteam.catalog.attacks import ATTACKS
 
@@ -155,6 +155,19 @@ for _item in TRANSFORMS.values():
 _CATALOGUE = (("PromptInjection", "prompt_injection"), ("Roleplay", "roleplay"), ("PromptProbing", "prompt_probing"))
 for _name, _style in _CATALOGUE:
     register_method(_name, _catalogue_rewrite(_style), aliases=[_style])
+
+
+def _pack_rewrite(style: str, label: str, file: str) -> MethodFactory:
+    def make(spec: AttackSpec, layers: tuple[Transform, ...], values: dict[str, Any]) -> AttackMethod:
+        return Rewrite(
+            id=style, label=label, style=style, request=rewrite_request(label, file), layers=layers, values=values
+        )
+
+    return make
+
+
+for _style, (_name, _label, _file) in REWRITES.items():
+    register_method(_name, _pack_rewrite(_style, _label, _file), aliases=[_style])
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])
 

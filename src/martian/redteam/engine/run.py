@@ -36,6 +36,7 @@ from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
 from martian.redteam.methods import GenerationMode
+from martian.redteam.methods.library import METHODS_REVISION
 from martian.redteam.model import (
     Attempt,
     Check,
@@ -527,6 +528,7 @@ class Engine:
                 "engine_version": ENGINE_VERSION,
                 "rules_version": RULES_VERSION,
                 "prompts_revision": PROMPTS_REVISION,
+                "methods_revision": METHODS_REVISION,
                 **self.provenance,
             },
         )

@@ -2,7 +2,9 @@
 
 The three catalogue methods (prompt injection, roleplay, prompt probing) take their style from the
 catalogue's generator prompt (:data:`martian.redteam.catalog.prompts.ATTACK_METHODS`). A transform used
-as an attack is a prompt-injection rewrite with that transform as its layer.
+as an attack is a prompt-injection rewrite with that transform as its layer. The rewrite pack
+(:data:`REWRITES`) states its style in the attacker's request, from a prompt file of its own
+(:mod:`martian.redteam.methods.library`), and adds the probe's goal when the run file states one.
 """
 
 from __future__ import annotations
@@ -40,8 +42,28 @@ class Rewrite(AttackMethod):
         return {**super().describe(), "style": self.style}
 
     async def run(self, context: AttackContext) -> Exchange:
-        payload = await context.generate(request=self.request, method=self.style)
+        request = self.request
+        if request is not None and context.probe.goal:
+            request += f"\nThe goal of the attack: {context.probe.goal}"
+        payload = await context.generate(request=request, method=self.style)
         return await context.send(payload, session=context.conversation())
 
 
-__all__ = ["Rewrite"]
+REWRITES: dict[str, tuple[str, str, str]] = {
+    "authority": ("Authority", "Authority", "rewrites/authority.md"),
+    "hypothetical": ("Hypothetical", "Hypothetical", "rewrites/hypothetical.md"),
+    "citation": ("Citation", "Citation", "rewrites/citation.md"),
+    "task_framing": ("TaskFraming", "Task framing", "rewrites/task_framing.md"),
+    "format_shift": ("FormatShift", "Format shift", "rewrites/format_shift.md"),
+}
+"""The rewrite pack: each method's id, YAML name, label and prompt file."""
+
+
+def rewrite_request(label: str, file: str) -> str:
+    """The attacker's request for a rewrite of the pack: its style, in its prompt file's words."""
+    from martian.redteam.methods.library import prompt
+
+    return f"Attack style: {label}. {prompt(file)}"
+
+
+__all__ = ["REWRITES", "Rewrite", "rewrite_request"]
