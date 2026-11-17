@@ -153,12 +153,13 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | Field | Meaning |
 | --- | --- |
 | `name` | A short name, lower case, with digits, `_` and `-` |
-| `upstream` | The server's address |
+| `upstream` | The server's Streamable HTTP address, `http` or `https` |
 | `mode` | `record` (the default) records each call. `inject` adds text to tool results. `block` stops calls and answers with a set reply |
 | `inject` | The text `inject` mode adds |
-| `block_reply` | What a call answers in `block` mode |
+| `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
+| `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
-The proxy is not an environment. It simulates no application and holds no data.
+The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
 ## Budget
 

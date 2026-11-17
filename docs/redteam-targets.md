@@ -81,3 +81,32 @@ A call the reply contract cannot read is the target's error, never an empty list
 ```
 
 A version 0.2 report keeps the calls on each turn. Their arguments and results are target content: the report hides them unless it includes target content, and the run's redaction applies either way.
+
+## Recording proxy
+
+With no environment the harness controls nothing the agent reads and sees nothing the agent does at its tools, and the agent's real tools would carry out an attacker's goal. The recording proxy is the open edition's tool boundary, the local equivalent of the cloud's run-scoped gateway. The agent reaches each of its own MCP tool servers (the run file's `tools.proxy`) through it.
+
+```python
+from martian.redteam.proxy import ToolProxy
+
+async with ToolProxy(run_file.tools.proxy) as proxy:
+    proxy.url("commerce")   # http://127.0.0.1:PORT/mcp, used in place of the upstream address
+    ...
+    proxy.calls()           # the ledger: every call, in order
+```
+
+Each proxied server has a mode:
+
+| Mode | What the proxy does | `executed` in the ledger |
+| --- | --- | --- |
+| `record` | Forwards the call | `true` |
+| `inject` | Forwards the call and adds the `inject` text to the result the agent reads. The ledger records the delivery | `true` |
+| `block` | Answers with `block_reply` and does not forward: the tool server never sees the call. A blocked tool is listed without its output schema, so the text is a valid answer | `false` |
+
+`tools` limits `inject` and `block` to the tools it names. A call that fails on its way to the tool server is recorded with `executed` unknown, and the agent gets an error result that never repeats what the server sent.
+
+Each ledger entry (`ProxyCall`) holds the server, the tool, its arguments, the action id, the mode, whether it ran, the injected text, the start of the result, and when. `call.tool_call()` is the call as an attempt keeps it; `call.evidence()` is its evidence: the call at the tool boundary, and a payload's delivery (level 0) in inject mode.
+
+The proxy records each call with the `X-Martian-Action-Id` header that `bind_tools(..., action_id=...)` sends. An agent that passes its conversation's id (the HTTP body's `{{session_id}}`, a function's `session_id`) as the action id lets `ProxiedTarget(target, proxy)` add that conversation's calls to each reply. A call the target reported itself and the proxy saw, by its id or by its name and arguments, is kept once, as the proxy saw it.
+
+The proxy is not an environment. It simulates no application and holds no data: the ledger, in memory, is all it keeps. It listens on 127.0.0.1 only, one port per server. It records at most 10,000 calls a run, and refuses a call past that rather than leave it out. It needs the `mcp` extra. The upstream must be a Streamable HTTP server.

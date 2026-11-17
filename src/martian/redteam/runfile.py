@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -239,6 +240,18 @@ class ProxiedServer(_Model):
     """``inject`` mode: the text added to the tool results."""
     block_reply: str | None = None
     """``block`` mode: what a blocked call answers."""
+    tools: list[str] = Field(default_factory=list, max_length=128)
+    """The tools ``inject`` or ``block`` applies to. Without them, every tool of the server."""
+
+    @field_validator("upstream")
+    @classmethod
+    def _http(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("upstream is the http or https address of a Streamable HTTP MCP server")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("upstream must not contain credentials")
+        return value
 
     @model_validator(mode="after")
     def _mode_settings(self) -> ProxiedServer:
@@ -248,6 +261,10 @@ class ProxiedServer(_Model):
             raise ValueError("inject applies to inject mode")
         if self.mode != "block" and self.block_reply is not None:
             raise ValueError("block_reply applies to block mode")
+        if self.mode == "record" and self.tools:
+            raise ValueError("tools applies to inject and block modes")
+        if len(set(self.tools)) != len(self.tools):
+            raise ValueError("tools names each tool once")
         return self
 
 

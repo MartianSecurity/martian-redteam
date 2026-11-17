@@ -72,5 +72,28 @@ async def served(server: MCPServer | Server[Any]) -> AsyncIterator[str]:
         await loopback.stop()
 
 
+class CommerceTools:
+    """The agent's own tool server: what the recording proxy sits in front of. ``executed`` lists the
+    calls that reached it."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, dict[str, Any]]] = []
+        server = MCPServer("commerce")
+
+        @server.tool()
+        def lookup_order(order: int) -> str:
+            """Look up an order."""
+            self.executed.append(("lookup_order", {"order": order}))
+            return f"order {order}: 2 items, paid 80 USD"
+
+        @server.tool()
+        def issue_refund(order: int, amount: float) -> str:
+            """Refund an order."""
+            self.executed.append(("issue_refund", {"order": order, "amount": amount}))
+            return f"refunded {amount} on order {order}"
+
+        self.server = server
+
+
 if __name__ == "__main__":
     chat_server().run("stdio")

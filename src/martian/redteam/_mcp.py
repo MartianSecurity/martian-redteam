@@ -114,6 +114,7 @@ class LoopbackServer:
         self._server: _QuietServer | None = None
         self._task: asyncio.Task[None] | None = None
         self.port = 0
+        self._bound: tuple[str, int] = ("", 0)
 
     async def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -121,7 +122,8 @@ class LoopbackServer:
         sock.bind(("127.0.0.1", 0))
         sock.listen()
         sock.setblocking(False)
-        self.port = sock.getsockname()[1]
+        self._bound = sock.getsockname()[:2]
+        self.port = self._bound[1]
         config = uvicorn.Config(self._app, log_level="warning", lifespan="on", access_log=False)
         server = _QuietServer(config)
         self._server = server
@@ -134,7 +136,8 @@ class LoopbackServer:
 
     @property
     def address(self) -> tuple[str, int]:
-        return ("127.0.0.1", self.port)
+        """The host and port the socket is bound to."""
+        return self._bound
 
     async def stop(self) -> None:
         if self._server is not None and self._task is not None:
