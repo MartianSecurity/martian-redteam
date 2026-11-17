@@ -36,3 +36,15 @@ Starting and stopping a run needs a launcher bound by the edition (`app.state.ma
 2. Run `uv run --extra evals python scripts/redteam_contract.py`. It refuses to rewrite the file while the version is unchanged.
 
 When the backend changes an operation route, it raises its own version and regenerates `contracts/redteam-operations.json`. Copy that file unchanged into `contract/redteam-operations.json` and regenerate the contract.
+
+## Checking a red team service
+
+The engine reaches attack generation and judging only through `RedteamService` (`simulate` and `evaluate`), which the local service and the hosted client both implement. `martian.redteam.engine.conformance` is the suite every implementation must pass: it calls `simulate` for every catalogue vulnerability and type, each LLM attack method, both modes, a 4096-character purpose and a request of the caller's own, and `evaluate` with every attack method, custom criteria, an empty reply and the tools called. It checks that each output has an attack and a method, or a score that is exactly the integer 0 or 1 and a reason, and, given a service whose model calls fail, that every failure is a `ClientError` naming `attacker` or `judge` when it names a model.
+
+Check an implementation with one command, naming a callable that returns it (and, optionally, one that returns a failing one):
+
+```bash
+uv run --extra evals python -m martian.redteam.engine.conformance my_package.module:make_service --failing my_package.module:make_failing_service
+```
+
+It prints each check and exits 1 when one fails. `tests/redteam/test_conformance.py` runs it in CI on the local service, against a loopback model server, and on the hosted client, replaying operation receipts in the shapes of `contract/redteam-operations.json`.
