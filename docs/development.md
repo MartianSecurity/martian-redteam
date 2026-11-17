@@ -224,7 +224,7 @@ Review action bumps by comparing SHAs. Do not merge a bump that reverts a pin to
   verdicts in `results.jsonl`, the summary, the pull-request comment and the core's routes. It also
   checks the shape of their labelled set, `tests/evals/benchmarks/conversation_judges.jsonl`, which
   `scripts/benchmark_conversation_judges.py --model openai:/<model> --out results.jsonl` scores with
-  a real model, one call per case, 30 in all, outside CI, for
+  a real model, one call per case, 36 in all (16 retention and 10 each for the other judges), outside CI, for
   [the evals guide](evals.md#conversation-judges).
 - CLI tests use Typer’s `CliRunner` for `--version`, `catalog`, and `validate` (`tests/test_cli.py`). `tests/test_cli_run.py` drives `run` end to end with `respx` in place of the hosted API and asserts the reports are written and the exit code is `0` on a pass and `1` on a gated failure or an infrastructure error. They never need a real key or OpenAI.
 - `tests/test_cla_workflow.py` reads `.github/workflows/cla.yml`: its two events and the comments

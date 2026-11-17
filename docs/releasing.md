@@ -215,8 +215,42 @@ change both together.
 
 ## Trusted Publishing setup
 
+### Fix-only maintenance releases
+
+The `maintenance/0.1` branch starts at `v0.1.5`. A `release/0.1.x` candidate
+branches from that line and contains only reviewed fixes, its version and lock
+metadata, and the matching Evals UI. It does not take newer Red Team features
+from `main`. The frontend maintenance build likewise starts at the UI commit
+pinned by the previous release.
+
+Keep the existing publishing workflow and protections. It still requires the
+tagged source to be an ancestor of `origin/main`, and publication is dispatched
+from `main`. Prepare the history in this order:
+
+1. Merge the frontend fixes with a **merge commit**, retaining the clean frontend
+   maintenance commit in `main`'s history. Build and vendor that maintenance
+   commit, not the newer frontend tree. Check its ancestry in the frontend with
+   `git merge-base --is-ancestor <ui-commit> origin/main` before publication.
+2. Review the SDK candidate against `maintenance/0.1`. Merge it with a **merge
+   commit**, retaining the reviewed candidate commit and its exact release tree.
+3. Merge that candidate's history back into SDK `main` through a separate PR.
+   Resolve packaging differences by retaining `main`'s newer UI, UI pin,
+   development version and lockfile there. The maintenance candidate keeps its
+   own version, UI and lockfile. Do not remove newer application code from `main`.
+4. Merge the integration PR with a **merge commit**. Check that the exact
+   reviewed maintenance candidate is now an ancestor of `origin/main`. Tag that
+   candidate, not the integration commit, which also contains newer features.
+
+Squashing or rebasing these integration PRs loses the candidate ancestry that
+the release workflow requires. Keep both source identities in the release
+receipt, run the unchanged release checks, and use the existing `main` dispatch
+and environment approvals. No maintenance branch receives a separate publisher
+or a relaxed publication gate.
+
+### Publisher configuration
+
 Prepare each version on `release/<version>` and open
-a PR into `main`. PyPI consumes package metadata and does not require a branch
+a PR into `main`, or the documented maintenance line. PyPI consumes package metadata and does not require a branch
 name. After review and required CI, merge the release PR and tag the reviewed
 commit `v<version>`. Tags use the canonical PEP 440 version without a local
 version label; do not move a published tag or reuse a published version.
