@@ -51,7 +51,7 @@ from martian.redteam.model import (
 )
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
-from martian.redteam.targets import Target, TargetReply
+from martian.redteam.targets import Target, TargetChanged, TargetReply
 from martian.redteam.verify.canary import context_of, new_canary, uses_canary
 from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, judge_for, read_sample
 from martian.redteam.verify.listener import ReceiptListener
@@ -331,17 +331,18 @@ class Engine:
         except AttemptFailed as failed:
             return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
         evidence = self._keep_reply(attempt_id, reply)
+        observed = self._keep_observed(reply)
         receipts = self._keep_receipts(attempt_id)
         fields.update(
             output=reply.text,
             target_calls=1,
-            evidence_ids=[evidence.id, *(item.id for item in receipts)],
+            evidence_ids=[evidence.id, *observed, *(item.id for item in receipts)],
             turns=[
                 Turn(role="attacker", content=sent),
                 Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             ],
         )
-        kept = [evidence, *receipts]
+        kept = [evidence, *reply.evidence, *receipts]
         if probe.task_checks:
             task = await self._verify(planned, probe.task_checks, probe.task, sent, reply, spending, kept, attempt_id)
             fields.update(task_results=task.results, task_completed=completed(task.results))
@@ -427,6 +428,8 @@ class Engine:
         try:
             async with asyncio.timeout(self.timeout) as deadline:
                 return await self.target.send(payload, session=session)
+        except TargetChanged:
+            raise  # the target is not the one the run started with: the run stops
         except TimeoutError as error:
             if deadline.expired():
                 raise AttemptFailed(
@@ -492,6 +495,13 @@ class Engine:
         )
         self.evidence[evidence.id] = evidence
         return evidence
+
+    def _keep_observed(self, reply: TargetReply) -> list[str]:
+        """The evidence a boundary the harness trusts captured about the reply's tool calls (the
+        recording proxy, a trace), kept with the run, by id."""
+        for item in reply.evidence:
+            self.evidence[item.id] = item
+        return [item.id for item in reply.evidence]
 
     # --- verify ---------------------------------------------------------------------------------
 

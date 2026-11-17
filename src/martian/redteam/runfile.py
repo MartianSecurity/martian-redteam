@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -42,14 +43,22 @@ def _without_canary(value: Any) -> Any:
 
 
 class McpTarget(_Model):
-    """An MCP server under test: the tool that takes a message, and the argument the message goes in."""
+    """An MCP server under test: the tool that takes a message, and the argument the message goes in.
+    ``session_argument`` and ``reset_argument`` carry the conversation: its id, and ``true`` on its
+    first turn. ``response_path`` and ``tool_calls_path`` read the reply in the tool's structured
+    result, or in its text as JSON. ``schema_sha256`` pins the tool's input schema."""
 
     url: str | None = None
     command: list[str] | None = None
     tool: str = Field(min_length=1)
     message_argument: str = Field(default="message", min_length=1)
+    session_argument: str | None = Field(default=None, min_length=1)
+    reset_argument: str | None = Field(default=None, min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
+    response_path: str | None = Field(default=None, min_length=1)
+    tool_calls_path: str | None = Field(default=None, min_length=1)
+    schema_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _one_transport(self) -> McpTarget:
@@ -57,7 +66,24 @@ class McpTarget(_Model):
             raise ValueError("an mcp target needs a url or a command, not both")
         if self.command is not None and not self.command:
             raise ValueError("an mcp target's command names a program")
+        if self.command is not None and self.headers:
+            raise ValueError("headers apply to an mcp target's url")
+        names = [self.message_argument, self.session_argument, self.reset_argument]
+        given = [name for name in names if name is not None]
+        if len(set(given)) != len(given):
+            raise ValueError("message_argument, session_argument and reset_argument name different arguments")
+        if clash := sorted(set(given) & set(self.arguments)):
+            raise ValueError(f"arguments must not set {', '.join(clash)}, which each message sets")
         return self
+
+
+class TargetSession(_Model):
+    """How an HTTP target's conversation id travels besides the body's ``{{session_id}}``. ``header``:
+    also send it in this request header. ``response_path``: the server issues the id; the first turn
+    of a conversation sends an empty id, and each reply has the id at this path."""
+
+    header: str | None = Field(default=None, min_length=1, max_length=200, pattern=r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+    response_path: str | None = Field(default=None, min_length=1)
 
 
 class Target(_Model):
@@ -72,6 +98,10 @@ class Target(_Model):
     body: dict[str, Any] | None = None
     response_path: str | None = None
     timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    session: TargetSession | None = None
+    """An HTTP target's conversation id in a header, or issued by the server."""
+    tool_calls_path: str | None = Field(default=None, min_length=1)
+    """Where an HTTP target's JSON answer lists the tool calls it made or asked for."""
     mcp: McpTarget | None = None
 
     @field_validator("purpose")
@@ -84,9 +114,13 @@ class Target(_Model):
     @model_validator(mode="after")
     def _one_kind(self) -> Target:
         suite_fields = self.suite_target_fields()
+        if self.session is not None and self.url is None:
+            raise ValueError("session applies to a url target")
+        if self.tool_calls_path is not None and self.url is None:
+            raise ValueError("tool_calls_path applies to a url target; an mcp target has its own")
         if self.mcp is not None:
-            if suite_fields:
-                raise ValueError(f"an mcp target takes none of {', '.join(sorted(suite_fields))}")
+            if other := sorted(set(suite_fields) - {"timeout_seconds"}):
+                raise ValueError(f"an mcp target takes none of {', '.join(other)}")
             return self
         if not suite_fields:
             raise ValueError("a target needs a file, a url or an mcp server")
@@ -260,13 +294,27 @@ class Vulnerability(NamedSpec):
 class ProxiedServer(_Model):
     """One of the agent's own MCP tool servers, reached through the local recording proxy."""
 
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    name: str = Field(min_length=1, max_length=24, pattern=r"^[a-z][a-z0-9_]{0,23}$")
+    """The name the agent's session gives the server's MCP connection, so it follows the rule of
+    :class:`martian_redteam.MCPConnection` names."""
     upstream: str = Field(min_length=1)
     mode: Literal["record", "inject", "block"] = "record"
     inject: str | None = None
     """``inject`` mode: the text added to the tool results."""
     block_reply: str | None = None
     """``block`` mode: what a blocked call answers."""
+    tools: list[str] = Field(default_factory=list, max_length=128)
+    """The tools ``inject`` or ``block`` applies to. Without them, every tool of the server."""
+
+    @field_validator("upstream")
+    @classmethod
+    def _http(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("upstream is the http or https address of a Streamable HTTP MCP server")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("upstream must not contain credentials")
+        return value
 
     @model_validator(mode="after")
     def _mode_settings(self) -> ProxiedServer:
@@ -276,17 +324,41 @@ class ProxiedServer(_Model):
             raise ValueError("inject applies to inject mode")
         if self.mode != "block" and self.block_reply is not None:
             raise ValueError("block_reply applies to block mode")
+        if self.mode == "record" and self.tools:
+            raise ValueError("tools applies to inject and block modes")
+        if len(set(self.tools)) != len(self.tools):
+            raise ValueError("tools names each tool once")
         return self
 
 
 class Tools(_Model):
+    """The local recording proxy: the agent's own tool servers it fronts, and where the agent is
+    handed the session that binds them."""
+
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
+    session_api: str | None = None
+    """The agent's session API, as the cloud hands a session over: the run posts the session to
+    ``{session_api}/sessions`` before the first attack."""
+
+    @field_validator("session_api")
+    @classmethod
+    def _session_api(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("session_api is the http or https address of the agent's session API")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("session_api must not contain credentials")
+        return value
 
     @model_validator(mode="after")
     def _unique(self) -> Tools:
         names = [server.name for server in self.proxy]
         if len(set(names)) != len(names):
             raise ValueError("each proxied server has its own name")
+        if self.session_api is not None and not self.proxy:
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
 
@@ -480,6 +552,7 @@ __all__ = [
     "RunFile",
     "StateCheck",
     "Target",
+    "TargetSession",
     "TextCheck",
     "ToolCallCheck",
     "Tools",

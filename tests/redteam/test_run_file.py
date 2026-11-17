@@ -140,10 +140,11 @@ def test_validate_explains_a_version_2_file_without_calling_a_model(tmp_path, mo
     assert "attacks: List should have at least 1 item" in bad.output
 
 
-def test_run_stops_before_anything_runs_on_what_this_release_cannot_do(tmp_path):
-    result = CliRunner().invoke(app, ["redteam", "run", str(write(tmp_path, VALID)), "--no-store"])
+def test_run_stops_before_any_attack_when_a_proxied_tool_server_cannot_be_reached(tmp_path):
+    unreachable = {**VALID, "tools": {"proxy": [{"name": "commerce", "upstream": "http://127.0.0.1:9/mcp"}]}}
+    result = CliRunner().invoke(app, ["redteam", "run", str(write(tmp_path, unreachable)), "--no-store"])
     assert result.exit_code == 2
-    assert "this release has no tool proxy" in result.output
+    assert "could not reach tools.proxy 'commerce'" in result.output
 
 
 def test_the_guide_documents_every_field():
@@ -153,6 +154,7 @@ def test_the_guide_documents_every_field():
     models = [
         runfile.RunFile,
         runfile.Target,
+        runfile.TargetSession,
         runfile.McpTarget,
         runfile.ModelConfig,
         runfile.Goal,
@@ -163,6 +165,7 @@ def test_the_guide_documents_every_field():
         runfile.JudgeCheck,
         runfile.StateCheck,
         runfile.ProxiedServer,
+        runfile.Tools,
         runfile.Budget,
         runfile.Gate,
         runfile.VerificationSettings,

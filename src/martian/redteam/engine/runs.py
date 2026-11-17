@@ -1,7 +1,10 @@
 """Run a version 2 run file: build its target and its service, run the engine, keep the run.
 
-:func:`build_target` makes the run file's target. This release runs the ``file`` and ``function``
-target; an ``url`` or ``mcp`` target stops with :class:`TargetUnavailable`. :func:`build_service` picks
+:func:`build_target` makes the run file's target: a function in a file
+(:func:`~martian.redteam.targets.callback.function_target`), or an HTTP or MCP target
+(:func:`~martian.redteam.targets.target_from_run_file`). :func:`tool_boundary` puts it behind the
+recording proxy when the run file lists ``tools.proxy``, and hands the agent the proxy's session.
+:func:`build_service` picks
 the service (:func:`~martian.redteam.engine.service.select_service`). :func:`execute` runs the engine
 and, given a store, keeps the run there after every attempt, as the reports hold it
 (:func:`~martian.redteam.engine.report.for_report`).
@@ -9,9 +12,11 @@ and, given a store, keeps the run there after every attempt, as the reports hold
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 
 from martian._privacy import RedactionPolicy
@@ -31,16 +36,82 @@ class TargetUnavailable(ValueError):
     """The run file's target is of a kind this release cannot call."""
 
 
-def build_target(block: TargetBlock) -> Target:
-    """The target a run file's ``target`` block names."""
-    if block.kind != "function":
-        raise TargetUnavailable(
-            f"This release runs a function target (file and function); an {block.kind} target is not in it yet."
-        )
-    from martian.redteam.targets.callback import function_target
+class SessionHandoverError(ValueError):
+    """The agent's session API did not take the tool session. The message names the setting."""
 
-    assert block.file is not None
-    return function_target(block.file, block.function or "target")
+
+SESSION_FILE = "tool-session.json"
+"""Where a run with ``tools.proxy`` writes the session that binds the agent's tools, in its output
+folder, readable by its user only, for as long as the run lasts."""
+
+
+def build_target(block: TargetBlock, *, base: str | Path | None = None) -> Target:
+    """The target a run file's ``target`` block names. ``base`` is where an MCP target's stdio server
+    starts: the run file's folder."""
+    if block.kind == "function":
+        from martian.redteam.targets.callback import function_target
+
+        assert block.file is not None
+        return function_target(block.file, block.function or "target")
+    from martian.redteam.targets.factory import target_from_run_file
+
+    return target_from_run_file(block, base=base if base is not None else ".")
+
+
+async def tool_boundary(
+    run_file: RunFile, target: Target, stack: AsyncExitStack, *, folder: Path, run_id: str | None = None
+) -> Target:
+    """``target`` behind the run's recording proxy, or ``target`` itself when the run file lists no
+    ``tools.proxy``. The proxy starts here and stops with ``stack``, which ends its session. The
+    session is written to ``folder``/:data:`SESSION_FILE`, mode ``0600``, removed when the run ends,
+    and posted to ``tools.session_api``'s ``/sessions`` when the run file names one, as the cloud
+    hands a session to the agent's session API. The reply of each attempt then carries the calls the
+    proxy saw, attributed by the conversation id the agent passes as ``bind_tools``' action id."""
+    if not run_file.tools.proxy:
+        return target
+    from martian.redteam.proxy import ProxiedTarget, ToolProxy, session_payload
+
+    proxy = ToolProxy(run_file.tools.proxy)
+    await proxy.start()
+    stack.push_async_callback(proxy.stop)
+    session = await proxy.issue_session(target_id="local", campaign_id=run_id)
+    payload = session_payload(session)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / SESSION_FILE
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    stack.callback(path.unlink, missing_ok=True)
+    if run_file.tools.session_api is not None:
+        await hand_over(run_file.tools.session_api, payload)
+    return ProxiedTarget(target, proxy)
+
+
+async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
+    """Post the session to the agent's session API, as the cloud does: ``POST {session_api}/sessions``
+    with the session, answered with its ``session_id``."""
+    import httpx
+
+    url = session_api.rstrip("/") + "/sessions"
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
+            response = await client.post(url, json=payload)
+    except httpx.HTTPError as error:
+        raise SessionHandoverError(
+            f"the agent's session API could not be reached: {type(error).__name__}; check tools.session_api"
+        ) from None
+    if not response.is_success:
+        raise SessionHandoverError(
+            f"the agent's session API answered HTTP {response.status_code}; check tools.session_api"
+        )
+    try:
+        echoed = response.json().get("session_id")
+    except (ValueError, AttributeError):
+        echoed = None
+    if echoed != payload["session_id"]:
+        raise SessionHandoverError(
+            "the agent's session API did not answer with the session's id; check tools.session_api"
+        )
 
 
 def run_canary(earlier: RedteamRun | None = None) -> str:
@@ -53,11 +124,8 @@ def run_canary(earlier: RedteamRun | None = None) -> str:
 
 def unsupported(run_file: RunFile) -> list[str]:
     """What the run file asks for that this release cannot do. A run stops on any of it, rather than
-    run without it."""
-    found = []
-    if run_file.tools.proxy:
-        found.append("tools.proxy: this release has no tool proxy")
-    return found
+    run without it. Every target kind and the tool proxy run, so nothing is listed today."""
+    return []
 
 
 def redaction_for(run_file: RunFile, environ: Mapping[str, str] | None = None) -> RedactionPolicy:
@@ -133,11 +201,15 @@ async def execute(
 
 
 __all__ = [
+    "SESSION_FILE",
+    "SessionHandoverError",
     "TargetUnavailable",
     "build_service",
     "build_target",
     "execute",
+    "hand_over",
     "redaction_for",
     "run_canary",
+    "tool_boundary",
     "unsupported",
 ]

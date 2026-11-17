@@ -63,7 +63,8 @@ def planted_run_file(run_file: RunFile, canary: str) -> RunFile:
     """The run file with the canary in its target block and its proxied servers' texts: what a
     ``system_prompt`` or ``tool_result`` plant needs before the target and the proxy are built."""
     target = run_file.target.model_dump(exclude_none=True)
-    servers = [server.model_dump(exclude_none=True) for server in run_file.tools.proxy]
+    tools = run_file.tools.model_dump(exclude_none=True)
+    servers = tools.get("proxy", [])
     for name in ("headers", "body"):
         if name in target:
             target[name] = plant(target[name], canary)
@@ -76,7 +77,7 @@ def planted_run_file(run_file: RunFile, canary: str) -> RunFile:
     return run_file.model_copy(
         update={
             "target": type(run_file.target).model_validate(target),
-            "tools": type(run_file.tools).model_validate({"proxy": servers}),
+            "tools": type(run_file.tools).model_validate({**tools, "proxy": servers}),
         }
     )
 

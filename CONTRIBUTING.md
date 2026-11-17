@@ -37,7 +37,7 @@ uv sync --locked --extra evals
 uv run --extra evals ruff format --check src tests examples scripts
 uv run --extra evals ruff check src tests examples scripts
 uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q -n auto
+uv run --extra evals --extra mcp pytest -q -n auto
 uv run --extra evals python -m compileall -q src
 ```
 

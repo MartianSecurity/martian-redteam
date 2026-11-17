@@ -282,15 +282,18 @@ def _run_version_2(
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import write_reports
     from martian.redteam.engine.runs import (
+        SessionHandoverError,
         TargetUnavailable,
         build_service,
         build_target,
         execute,
         run_canary,
+        tool_boundary,
         unsupported,
     )
     from martian.redteam.engine.service import ServiceSelectionError
     from martian.redteam.runfile import RunFile, problems
+    from martian.redteam.targets import TargetChanged
     from martian.redteam.verify.canary import planted_run_file
 
     found = problems(config_path)
@@ -334,8 +337,10 @@ def _run_version_2(
     async def go() -> Any:
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
-            target = build_target(planted_run_file(run_file, canary).target)
+            planted = planted_run_file(run_file, canary)
+            target = build_target(planted.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
+            target = await tool_boundary(planted, target, stack, folder=destination)
             run = await execute(
                 run_file,
                 service=service,
@@ -349,7 +354,14 @@ def _run_version_2(
 
     try:
         run, service = asyncio.run(go())
-    except (ServiceSelectionError, TargetUnavailable, ConfigError) as error:
+    except (
+        ServiceSelectionError,
+        TargetUnavailable,
+        ConfigError,
+        SessionHandoverError,
+        ConnectionError,
+        TargetChanged,
+    ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
         _stop("Could not load the target. Check its file, dependencies and function name.")
