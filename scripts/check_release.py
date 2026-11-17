@@ -24,6 +24,16 @@ UI = "martian/ui/"
 STAMP = "ui-version.json"
 """The build's identity, written by the frontend's ``npm run build:evals``."""
 
+APPS = ("@martian/evals", "@martian/redteam")
+"""The apps the build must hold, which its stamp names under ``apps``: the local edition serves the
+evals and the red team routes, and the UI shows both."""
+
+
+def missing_apps(stamp: Mapping[str, object]) -> list[str]:
+    """The apps of :data:`APPS` a build's stamp does not name."""
+    apps = stamp.get("apps")
+    return [name for name in APPS if not isinstance(apps, dict) or not isinstance(apps.get(name), str)]
+
 
 def ui_digest(files: Mapping[str, bytes]) -> str:
     """The digest of a built UI: SHA-256 over one ``<sha256>  <path>`` line per file, sorted by path."""
@@ -47,6 +57,8 @@ def check_ui(files: Mapping[str, bytes], pin: Mapping[str, str], where: str) -> 
     stamp = json.loads(files[STAMP])
     if stamp.get("dirty") is not False:
         raise ValueError(f"the Evals UI in {where} was built from a frontend tree with uncommitted changes")
+    if missing_apps(stamp):
+        raise ValueError(f"the Evals UI in {where} does not hold {', '.join(missing_apps(stamp))}")
     if (stamp.get("version"), stamp.get("commit")) != (pin["version"], pin["commit"]):
         raise ValueError(
             f"the Evals UI in {where} is {stamp.get('version')} at {stamp.get('commit')}, "
@@ -184,6 +196,9 @@ def serve_ui(environment: Path, work: Path, pin: Mapping[str, str]) -> None:
             bootstrap = json.loads(opener.open(base + "/v1/evals/bootstrap", timeout=5).read())
             if session["session"]["kind"] != "single_user" or bootstrap["principal"]["kind"] != "single_user":
                 raise ValueError("martian ui did not answer the session call and the bootstrap for the local user")
+            runs = json.loads(opener.open(base + "/v1/redteam/runs", timeout=5).read())
+            if runs != {"items": [], "next_cursor": None}:
+                raise ValueError("martian ui did not answer the red team runs of an empty data folder")
         finally:
             server.terminate()
             server.wait(10)

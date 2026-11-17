@@ -70,8 +70,8 @@ include = [
 # scripts/check_release.py refuses distributions whose UI is not this build. See docs/releasing.md.
 [tool.martian.ui]
 version = "0.1.0"
-commit = "c56f4a4bb40688b7ecb9d31e1475dc4a3de6093d"
-digest = "sha256:975e37640800cbae7df7ac8a1d49702deafaddcc754cd66325134414f051cbc0"
+commit = "17b5405906f9829d34c07ae91c93ebda5da72118"
+digest = "sha256:d8b9711a28d764ec502c758830968956245209cba03c683e56d323ed994d502c"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -115,4 +115,11 @@ dev = [
     "pytest-xdist>=3.8.0",
     "twine>=7.0.0",
     "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+]
+# The agent frameworks of the red team examples (examples/redteam/), pinned; not part of the package.
+examples = [
+    "claude-agent-sdk==0.2.183",
+    "langgraph==1.2.22",
+    "openai-agents==0.22.3",
+    "pydantic-ai-slim==2.67.0",
 ]

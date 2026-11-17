@@ -30,8 +30,10 @@ default judge model in ``settings.json`` or the judge's own. A run whose server 
 again when the next one starts. When it starts, the server finishes as interrupted each queued or
 running run that is not in the queue at all (:func:`~martian.evals.local_runs.finish_interrupted`).
 
-The API is under ``/v1``: the core's ``/v1/evals`` routes, its OpenTelemetry ``POST /v1/traces``,
-which takes the fixed principal's traces without credentials, the client's session call,
+The API is under ``/v1``: the core's ``/v1/evals`` routes, the red team core's ``/v1/redteam`` routes,
+which read the red team runs ``martian redteam run`` keeps in the same folder and start and stop
+runs in this process (:class:`~martian.redteam.engine.launcher.LocalLauncher`), its OpenTelemetry
+``POST /v1/traces``, which takes the fixed principal's traces without credentials, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
 ``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``
 (:mod:`martian.evals.local_runs`). Every other path is a file of the built Evals UI, by default
@@ -247,6 +249,11 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     targets = local_targets.LocalTargets(home)
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
     worker = local_runs.LocalWorker(home, records, targets, judge_settings, concurrency=concurrency)
+    from martian.redteam.engine.launcher import LocalLauncher
+
+    # Red team runs started from the UI run in this process; a run file's relative file is read
+    # from the folder the server was started in.
+    launcher = LocalLauncher(records, base_dir=Path.cwd())
 
     async def principals() -> list[Principal]:
         return [SINGLE_USER]
@@ -259,6 +266,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
             yield
         finally:
             task.cancel()
+            await launcher.close()
 
     app = create_app(
         store=store,
@@ -270,6 +278,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
         lifespan=deliveries,
     )
     app.state.martian_local_targets = targets
+    app.state.martian_redteam_launcher = launcher
     app.include_router(session_router)
     app.include_router(local_targets.router)
     app.include_router(local_runs.router)

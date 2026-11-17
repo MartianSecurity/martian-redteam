@@ -5,6 +5,11 @@ serves ([editions](#editions-and-entitlements)), and OpenTelemetry's `POST /v1/t
 ([OpenTelemetry traces](#opentelemetry-traces)). It runs on its own, with no Martian backend, and
 needs only `martian-sdk[evals]`.
 
+An app built with `create_app` also serves the red team core's `/v1/redteam` routes
+([red team API](redteam-api.md)). They read red team runs from the same record store, as the same
+principal. Their shapes are frozen in their own contract, so the app's OpenAPI document leaves them
+out.
+
 The core never signs anyone in, never chooses a store and never decides an edition. An edition
 supplies these plug points; the local edition builds the core with `create_app`, and Martian
 Cloud, the hosted platform, mounts the core's routers in its own server and binds the same
@@ -3343,12 +3348,19 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   route belongs to the local edition, not to the core: the Martian server answers the same call
   from its own sign-in.
 - The API is the core's `/v1/evals` routes, its `POST /v1/traces` for OpenTelemetry exporters,
-  the session call, and the local targets and runs under `/v1/local`. Every other path is a file
+  the red team routes under `/v1/redteam` ([red team API](redteam-api.md)), the session call, and
+  the local targets and runs under `/v1/local`. The red team routes read the runs that
+  `martian redteam run` keeps in the same data folder, and a finding's status and comments are kept
+  there. Starting or stopping a red team run runs the red team engine in the server's process
+  (`LocalLauncher`, [red team API](redteam-api.md)); a run file's relative `file` is read from the
+  folder `martian ui` was started in. Every other path is a file
   of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
   origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
   The page and the other unhashed files are sent with `Cache-Control: no-cache`, so a browser
   asks again on every load and never keeps a page that names a previous build's files after an
   SDK upgrade; the build's hashed files under `assets/` are kept for a year (`immutable`).
+- The UI has an Evals section and a Red Team section in one sidebar. The Red Team pages list runs
+  and show a run's report, an attempt, findings across runs, the catalogue and the framework maps.
 - Every page of the UI works against the local edition or is left out of it. The bootstrap's
   `hostedRoutes` is `false` ([bootstrap response](#bootstrap-response)), so the runs page has no CI
   sessions or API keys views and the Traces page no export: those read the Martian server's CI
@@ -3369,8 +3381,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
 `tests/evals/test_local.py` runs the local edition on SQLite: the session call, the bootstrap,
 the UI files, the `Host` check, the port, the browser and the command, which serves the packaged UI
 when no `--ui-dir` is given, `--concurrency` and its variable in the bootstrap's limits and the
-worker, the container settings below with their warning, and an application's traces recorded
-with MLflow tracing ([below](#traces-from-an-application)). It also requires the local edition to
+worker, the container settings below with their warning, an application's traces recorded
+with MLflow tracing ([below](#traces-from-an-application)), and a red team run in the data folder
+served with its findings, whose annotation is kept across a restart. It also requires the local edition to
 serve every `/v1` route the packaged UI names but those of the views left out above
 (`HOSTED_ROUTES` and `ADMIN_ROUTES`), with no known gaps (`UI_ROUTES_NOT_SERVED` is empty), and
 the packaged UI to read `hostedRoutes`.
@@ -4246,6 +4259,7 @@ which each get their own; and covers what a push and the server refuse, and the 
 | Changing a threshold, or the webhook secret it has, in place, rather than deleting it and creating another | Not filed yet |
 | Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |
 | `delete_traces` and `delete_traces_before` on the Martian server's MLflow REST binding (`ServerStore` in MartianSecurity/MartianBackend) | MartianSecurity/martian-notes#162 |
+| The Martian server mounting the red team router (`martian.redteam.server.router`) beside the evals routers | MartianSecurity/martian-notes#299 |
 
 ## The Martian server
 
@@ -4264,7 +4278,8 @@ each organisation's default judge model, and `current_agent_names` its agent reg
 answers `GET /v1/evals/status` and `/bootstrap` with the core's code under the contract's schema
 names (so its bootstrap has no `hostedRoutes`), keeps its CI gate and its own `GET /capabilities` and `POST /traces/export`, mounts the core's
 `explorer` router for `POST /overview` and `/quality-issues/*`, and leaves out the core's routes outside the
-contract (`GET /v1/evals/{run_id}/attempts` and `/turns`). It serves OpenTelemetry's
+contract (`GET /v1/evals/{run_id}/attempts` and `/turns`). It does not mount the red team router yet
+(MartianSecurity/martian-notes#299). It serves OpenTelemetry's
 `POST /v1/traces` on a route of its own that calls `otlp.export` ([an edition's own
 route](#opentelemetry-traces)): exporters sign in with an organisation's API key or a service
 account's key, never a console session, and each trace's id is derived from the organisation, the

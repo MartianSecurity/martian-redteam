@@ -18,6 +18,7 @@ import martian
 from martian.cli import app as cli
 from martian.evals import local
 from martian.evals.local import LocalEditionError, create_local_app, listen, serve
+from martian.redteam.server.contract import checked_in, operations
 
 LOCAL = "http://127.0.0.1:7600"
 
@@ -75,6 +76,37 @@ def test_the_bootstrap_answers_from_the_sqlite_store_in_the_data_folder(tmp_path
     assert (body["status"]["status"], body["status"]["provider"]) == ("ready", "mlflow")
     assert (home / "mlflow.db").is_file()
     assert (home / "artifacts").is_dir()
+
+
+def test_a_red_team_run_kept_in_the_data_folder_is_served_with_its_findings(tmp_path, ui):
+    """`martian ui` serves the red team routes over the data folder `martian redteam run` keeps its
+    runs in (MartianSecurity/martian-notes#289); a finding's annotation is kept there across restarts."""
+    import asyncio
+
+    from martian.redteam.model.maps import from_risk_assessment
+    from martian.redteam.store import RedteamStore
+    from martian_redteam.types import RiskAssessment
+
+    home = tmp_path / "home"
+    fixture = Path(__file__).parents[1] / "redteam" / "fixtures" / "risk-assessment-0.2.json"
+    report = RiskAssessment.model_validate_json(fixture.read_text("utf-8"))
+    store = RedteamStore.local(home)
+    asyncio.run(store.save(from_risk_assessment(report, run_id="rt-local")))
+    store.records.close()
+    client = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    assert [run["id"] for run in client.get("/v1/redteam/runs").json()["items"]] == ["rt-local"]
+    run = client.get("/v1/redteam/runs/rt-local").json()
+    assert (run["counts"]["confirmed"], run["counts"]["suspected"]) == (0, 2)
+    finding = run["findings"][0]["id"]
+    note = {"comment": "Accepted for the beta", "status": "accepted"}
+    assert client.post(f"/v1/redteam/runs/rt-local/findings/{finding}/annotations", json=note).status_code == 200
+    assert client.get("/v1/redteam/catalog").status_code == 200
+    # The edition binds the engine's launcher: stopping a run it is not running answers the run as kept.
+    stopped = client.post("/v1/redteam/runs/rt-local/stop")
+    assert stopped.status_code == 200 and stopped.json()["id"] == "rt-local"
+    again = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    kept = again.get("/v1/redteam/runs/rt-local/findings").json()["items"][0]
+    assert (kept["status"], kept["annotations"][0]["comment"]) == ("accepted", "Accepted for the beta")
 
 
 def test_the_built_ui_is_served_beside_the_api(tmp_path, ui):
@@ -378,6 +410,15 @@ def test_every_route_the_packaged_ui_names_is_served_or_in_a_view_the_local_edit
     app = create_local_app(tmp_path / "home", ui)
     paths = app.openapi()["paths"]
     served = {(method.upper(), re.sub(r"\{[^}]+\}", "{}", path)) for path, item in paths.items() for method in item}
+    # And the red team routes, which the app serves and leaves out of its OpenAPI document: their own
+    # contract's, but for the hosted backend's operation routes.
+    redteam, hosted = checked_in(), operations()["paths"]
+    served |= {
+        (method.upper(), re.sub(r"\{[^}]+\}", "{}", path))
+        for path, item in redteam["paths"].items()
+        if path not in hosted
+        for method in item
+    }
     served_paths = {path for _, path in served}
     assert ("GET", "/v1/evals/bootstrap") in named & served
     # A literal that is not a call's first argument names a path only: any method serves it.

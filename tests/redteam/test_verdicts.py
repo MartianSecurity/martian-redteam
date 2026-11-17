@@ -38,6 +38,7 @@ def test_vector_names_are_unique_and_every_rule_has_vectors():
         "verify",
         "ceiling",
         "label",
+        "tool_call_check",
     }
 
 

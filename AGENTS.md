@@ -12,9 +12,9 @@ The distribution is `martian-sdk`, with `martian.evals` and `martian.redteam`
 modules and a combined `martian ci` gate. See docs/sdk-and-ci.md. The relocated
 eval engine is canonical here; compatibility namespaces retain old imports.
 
-This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations; Agents owns attack generation and judging, and the customer's model stays behind a local `model_callback`. The package is published on PyPI; publishing a new version requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
+This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations, where Agents generates and judges attacks; a version 2 run file that names `models` generates and judges them locally instead (`martian.redteam.engine`), and the customer's model stays behind a local `model_callback`. The package is published on PyPI; publishing a new version requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
 
-- The catalog holds vulnerability and attack ids only. Rubric prose belongs in the martian-agents evaluator graph, not here. Bump `CATALOG_VERSION` when ids, types or gate flags change.
+- The catalog holds vulnerability and attack ids, and the one copy of the generator and judge prompts (`martian.redteam.catalog.prompts`), which martian-agents imports. Bump `CATALOG_VERSION` when ids, types or gate flags change; a change to the prompt text changes `PROMPTS_REVISION` and needs `tests/redteam/fixtures/hosted-prompt-digests.json` regenerated on purpose.
 - The gate fails closed on transport/schema errors and on gated pass rate. Retry only documented transient failures within the existing total deadline; reconcile uncertain run admission before resubmission. Never retry-to-pass or turn an error into a passing result.
 - Preserve the documented modern `martian`, `martian.evals` and `martian.redteam` exports alongside the legacy `martian_redteam.__all__` compatibility surface; see docs/sdk-and-ci.md. Keep legacy `protocol`, `config` and `catalog.get_*` internal.
 - Execution POSTs are sent once; reconcile uncertain admission/status with the documented reads instead of resubmitting work. Do not reinterpret a timeout or cancellation as permission to replay a target action.
@@ -31,7 +31,7 @@ uv sync --locked --extra evals
 uv run --extra evals ruff format --check src tests examples scripts
 uv run --extra evals ruff check src tests examples scripts
 uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q -n auto
+uv run --extra evals --extra mcp pytest -q -n auto
 uv run --extra evals python -m compileall -q src
 ```
 

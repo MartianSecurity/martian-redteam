@@ -1,7 +1,9 @@
 """Replace the Evals UI the wheel ships, src/martian/ui/, with a build of the frontend's Evals app, and pin it.
 
 The build is the ``dist-evals/`` folder that ``npm run build:evals`` writes in MartianSecurity/MartianFrontend,
-from a clean checkout of the commit to ship. Its ``ui-version.json`` names that commit. This script copies
+from a clean checkout of the commit to ship: the Evals app's shell with the Evals and the Red Team pages. Its
+``ui-version.json`` names that commit and, under ``apps``, the version of each app it holds; a build without
+the Red Team app is refused. This script copies
 the build into ``src/martian/ui/`` and writes its version, commit and digest into the ``[tool.martian.ui]``
 table of ``pyproject.toml``, which ``check_release.py`` checks the distributions against.
 
@@ -17,7 +19,7 @@ import re
 import shutil
 from pathlib import Path
 
-from check_release import STAMP, check_ui, ui_digest, ui_pin
+from check_release import STAMP, check_ui, missing_apps, ui_digest, ui_pin
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +39,11 @@ def read_build(folder: Path) -> tuple[dict[str, str], dict[str, bytes]]:
         raise ValueError(
             f"{folder} was built from a frontend tree with uncommitted changes; "
             "build it from a clean checkout of the commit to ship"
+        )
+    if missing_apps(stamp):
+        raise ValueError(
+            f"{folder} does not hold {', '.join(missing_apps(stamp))}; build a frontend commit whose "
+            "build:evals bundles the Evals and the Red Team apps"
         )
     return stamp, files
 

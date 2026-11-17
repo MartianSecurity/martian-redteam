@@ -54,7 +54,7 @@ uv sync --locked --extra evals
 uv run --extra evals ruff format --check src tests examples scripts
 uv run --extra evals ruff check src tests examples scripts
 uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q -n auto
+uv run --extra evals --extra mcp pytest -q -n auto
 uv run --extra evals python -m compileall -q src
 ```
 
@@ -63,7 +63,7 @@ This is the canonical local Python check block; keep it aligned with `.github/wo
 Optional local coverage (CI always produces XML + JUnit; pytest-cov combines the workers' data):
 
 ```bash
-uv run --extra evals pytest -q -n auto --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+uv run --extra evals --extra mcp pytest -q -n auto --cov=martian_redteam --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 ```
 
 Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK namespaces.
@@ -76,7 +76,8 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | --- | --- | --- |
 | `lint` | `uv sync --locked --extra evals`, Ruff format/check with Evals extras and `scripts` | 3.12 |
 | `types` | `uv sync --locked --extra evals`, `uv run --extra mcp --extra evals mypy src`, compileall | 3.12 |
-| `test` | `uv sync --locked --extra evals`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `test` | `uv sync --locked --extra evals --extra mcp`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `redteam-examples` | `uv sync --locked` with the `examples` group (the pinned agent frameworks), then `pytest examples/redteam`: each framework example against its stub model, through the recording proxy, with no key | 3.12 |
 | `evals-core` | The evals core's tests with `-n auto`, with the stores on Postgres too | 3.12 |
 | `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
 | `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), `scripts/sbom.py wheel` (the wheel's bill of materials and the licence check), throwaway venv install, `validate examples/config.yaml` | 3.12 |
@@ -338,7 +339,7 @@ artifact guard checks and clean-installs both wheel and sdist. Strict Mypy
 now covers both SDK modules; no eval typing exemption remains.
 
 
-- [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13, packaging, action-smoke)
+- [ ] `ci` aggregator green on `main` (lint, types, test 3.12 + 3.13, redteam-examples, packaging, action-smoke)
 - [ ] Docs match request/response shapes, CLI flags (`validate`, `-c`/`-a`/`-o`), and customer Actions
 - [ ] Coverage / JUnit artifacts still produced; Dependabot ecosystems still `uv` + `github-actions`
 - [ ] `NOTICE` still accurate if catalog IDs change

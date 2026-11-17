@@ -99,13 +99,15 @@ publish.** Before dispatching a release with `publish: true` for a version that 
 
 `martian ui` serves the Evals UI that the wheel ships in `martian/ui/`. It is a build of the
 stand-alone Evals app in MartianSecurity/MartianFrontend (`packages/evals/app`, `npm run build:evals`),
-copied into `src/martian/ui/` and committed here. A build from a checkout or from the sdist
+whose shell holds the Evals pages and the Red Team pages (`packages/redteam`), copied into
+`src/martian/ui/` and committed here. A build from a checkout or from the sdist
 therefore needs no Node.js, no network and no access to that private repository, and the release
 workflow builds exactly what the tag holds. The frontend build is reproducible: the same commit
 and lockfile give the same files.
 
-- **Identity.** The build writes `ui-version.json`: the Evals package's `version`, the frontend
-  `commit` it was built from, and `dirty`, true when that tree had uncommitted changes. The
+- **Identity.** The build writes `ui-version.json`: the Evals package's `version`, the version of
+  each app it holds under `apps` (`@martian/evals` and `@martian/redteam`), the frontend `commit` it
+  was built from, and `dirty`, true when that tree had uncommitted changes. The
   `[tool.martian.ui]` table in `pyproject.toml` pins the `version`, the `commit` and a `digest`,
   SHA-256 over every file of the build (`ui_digest` in `scripts/check_release.py`). The release
   workflow writes the pinned commit into its summary.
@@ -113,9 +115,10 @@ and lockfile give the same files.
   and the sdist once, in `src/martian/ui/`. `.gitattributes` keeps those files byte for byte (no
   line-ending conversion), out of diffs and merges, and marked as generated.
 - **The check.** `scripts/check_release.py` refuses a wheel or sdist that holds a file twice, holds
-  no UI or two, or whose UI is not the pinned build: a dirty stamp, another version or commit, or
-  a file added, removed or changed. With `--install` it starts each clean install's `martian ui`
-  without `--ui-dir` and reads `/`, `/ui-version.json`, the session call and the bootstrap.
+  no UI or two, or whose UI is not the pinned build: a dirty stamp, a stamp that does not name both
+  apps, another version or commit, or a file added, removed or changed. With `--install` it starts
+  each clean install's `martian ui` without `--ui-dir` and reads `/`, `/ui-version.json`, the
+  session call, the bootstrap and the red team runs (`GET /v1/redteam/runs`).
   `tests/test_packaged_ui.py` checks the committed copy against the pin on every pull request.
 - **Without it.** If an install has no `martian/ui/index.html`, `martian ui` stops with exit code
   `2` and says so; `--ui-dir` names another build.
@@ -133,7 +136,8 @@ uv run python scripts/vendor_ui.py <frontend>/dist-evals
 git add src/martian/ui pyproject.toml
 ```
 
-`vendor_ui.py` refuses a build from a dirty tree, replaces `src/martian/ui/` and rewrites the pin.
+`vendor_ui.py` refuses a build from a dirty tree and a build whose stamp does not name both apps (a
+frontend commit from before the Red Team app), replaces `src/martian/ui/` and rewrites the pin.
 A reviewer can rebuild the pinned commit the same way and run
 `uv run python scripts/vendor_ui.py --check <frontend>/dist-evals`, which writes nothing and names
 any file that differs.
@@ -144,14 +148,15 @@ one that is outside the views the local edition leaves out (`HOSTED_ROUTES`, `AD
 serves one of those; its list of known gaps, `UI_ROUTES_NOT_SERVED`, is empty ([the local
 edition](evals-core.md#the-local-edition-martian-ui)). It reads paths, not pages, so also
 open each page with `martian ui --data-dir <a scratch folder>` and look for failed `/v1` requests
-before committing the build.
+before committing the build; for the Red Team pages, keep a red team run in that folder first
+(`martian redteam run`, or `RedteamStore.local(folder).save(run)`).
 
-**Size.** Installed, the UI is about 1.1 MB in 47 files: JavaScript, CSS, the Inter font files
-(about 220 KB) and `third-party-licenses.md` (about 50 KB). Compressed, it adds about 500 KB to the
-wheel and about 480 KB to the sdist. `ls -l dist` after `uv build` shows the current figures.
+**Size.** Installed, the UI is about 1.25 MB in 59 files: JavaScript, CSS, the Inter font files
+(about 220 KB) and `third-party-licenses.md` (about 60 KB). Compressed, it adds about 540 KB to the
+wheel and about 520 KB to the sdist. `ls -l dist` after `uv build` shows the current figures.
 
-**Licences.** The build's own code is the `@martian/evals`, `@martian/design-system` and
-`@martian/client` packages of the frontend, which are Apache-2.0; `NOTICE` attributes them, with the
+**Licences.** The build's own code is the `@martian/evals`, `@martian/redteam`,
+`@martian/design-system` and `@martian/client` packages of the frontend, which are Apache-2.0; `NOTICE` attributes them, with the
 MIT notice of the shadcn/ui code in the design system. `third-party-licenses.md` in the build holds
 the licences of the third-party packages bundled in it: MIT, ISC and Apache-2.0, and OFL-1.1 for the
 Inter font. The wheel's bill of materials lists the UI under Apache-2.0 and those packages from
