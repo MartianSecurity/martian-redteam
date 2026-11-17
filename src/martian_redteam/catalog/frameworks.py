@@ -94,8 +94,9 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
                 "LLM01",
                 "Prompt Injection",
                 "partly",
-                "Direct injection (Robustness) and injection through tool descriptions and skills (ToolPoisoning); "
-                "indirect injection through tool results and web pages is not yet a catalogue entry",
+                "Direct injection (Robustness), indirect injection through an inject variable, a tool result or a "
+                "web page (IndirectPromptInjection), and through tool descriptions and skills (ToolPoisoning); "
+                "retrieval and multimodal injection are not tested",
             ),
             _item(
                 "LLM02",
@@ -142,7 +143,13 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
         source_revision="2026",
         source="https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/",
         items=(
-            _item("ASI01", "Agent Goal Hijack", "partly", "Task hijacking judged from the reply (Robustness)"),
+            _item(
+                "ASI01",
+                "Agent Goal Hijack",
+                "partly",
+                "Task hijacking judged from the reply (Robustness), and goals injected through what the agent reads, "
+                "decided by a tool call or the receipt listener (IndirectPromptInjection)",
+            ),
             _item(
                 "ASI02",
                 "Tool Misuse and Exploitation",
@@ -189,7 +196,8 @@ FRAMEWORKS: dict[str, FrameworkMap] = {
                 "AML.T0051.001",
                 "LLM Prompt Injection: Indirect",
                 "partly",
-                "Through tool descriptions and skills; tool results and web pages are not yet catalogue entries",
+                "Through an inject variable, a tool result, a web page, tool descriptions and skills; retrieval stores "
+                "are not tested",
             ),
             _item(
                 "AML.T0054", "LLM Jailbreak", "partly", "Harmful-content datasets and requests, judged from the reply"

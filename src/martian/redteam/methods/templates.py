@@ -34,9 +34,11 @@ def request_of(probe: Probe, version: str = TEMPLATES_VERSION) -> str:
     return probe.goal or found["requests"].get(probe.vulnerability, found["generic_request"])
 
 
-def filled(probe: Probe, version: str = TEMPLATES_VERSION) -> list[tuple[str, str]]:
-    """Every template of ``version`` filled for ``probe``, as ``(template id, attack)``, in order."""
-    request = request_of(probe, version)
+def filled(probe: Probe, version: str = TEMPLATES_VERSION, *, stated: str = "") -> list[tuple[str, str]]:
+    """Every template of ``version`` filled for ``probe``, as ``(template id, attack)``, in order.
+    ``stated`` is the goal the run states for the attempt, when it adds to the probe's own (the
+    address of a receipt listener)."""
+    request = stated or request_of(probe, version)
     return [(item["id"], item["text"].replace("{request}", request)) for item in template_set(version)["templates"]]
 
 
@@ -54,7 +56,7 @@ class Templates(AttackMethod):
     async def run(self, context: AttackContext) -> Exchange:
         exchange: Exchange | None = None
         sent: list[str] = []
-        for template, attack in filled(context.probe)[: self.query_cap]:
+        for template, attack in filled(context.probe, stated=context.stated_goal)[: self.query_cap]:
             sent.append(template)
             context.record(templates_sent=list(sent))
             exchange = await context.send(attack, session=context.conversation())

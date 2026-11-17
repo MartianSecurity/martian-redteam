@@ -87,6 +87,12 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
             ]
         ],
     )
+    if outcomes.not_delivered:
+        lines += [
+            "",
+            f"Not delivered: {outcomes.not_delivered} of the undetermined attempts never put their payload where the "
+            "agent read it, so they tested nothing; their probes' delivery route needs fixing.",
+        ]
     if outcomes.errors:
         kinds = outcomes.errors_by_kind
         lines += [

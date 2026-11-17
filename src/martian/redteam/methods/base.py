@@ -107,6 +107,13 @@ class AttackContext(Protocol):
         ...
 
     @property
+    def stated_goal(self) -> str:
+        """The goal the run states for this attempt, or ``""``: the run file's ``goal``, and for a
+        receipt check the address of the attempt's receipt listener the target should send to. A
+        method that writes no attack fills its templates with it."""
+        ...
+
+    @property
     def seed(self) -> int:
         """A number fixed for this attempt (its probe and number), for methods that draw at random."""
         ...

@@ -99,6 +99,10 @@ class AttemptRun:
         return stated or VULNERABILITY_GOALS.get(self.probe.vulnerability, GENERIC_GOAL)
 
     @property
+    def stated_goal(self) -> str:
+        return self.engine._goal(self.probe, self.attempt_id)
+
+    @property
     def seed(self) -> int:
         return int(hashlib.sha256(self.attempt_id.encode()).hexdigest()[:12], 16)
 

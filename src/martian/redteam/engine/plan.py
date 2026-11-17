@@ -181,6 +181,9 @@ NEEDS_SETTING: dict[str, str] = {
     "file": "it sends a dataset file of your own; list HarmfulContent with type file and its dataset",
     "mcp_tool_description": "it needs tools.decoy",
     "skill_file": "it needs tools.skills_dir",
+    "variable": "it needs an attack whose delivery route is variable",
+    "tool_result": "it needs an attack whose delivery route is tool_result",
+    "web_page": "it needs an attack whose delivery route is web_page",
 }
 """Why a type of an entry a framework selects is left out: it needs a setting the run file does not
 give."""
@@ -211,6 +214,9 @@ def framework_selection(run_file: RunFile) -> tuple[list[Vulnerability], list[di
                 "skill_file": run_file.tools.skills_dir is not None,
                 "file": False,
             }
+            if entry.id == INDIRECT:
+                routes = {attack.delivery.route for attack in run_file.attacks if attack.delivery is not None}
+                settings.update({kind: kind in routes for kind in entry.types})
             types = [kind for kind in entry.types if settings.get(kind, True)]
             if not types:
                 reasons = "; ".join(f"{kind}: {NEEDS_SETTING[kind]}" for kind in entry.types)
@@ -283,6 +289,24 @@ def _stand_in(method: AttackMethod, weight: float | None) -> Attack:
         return Attack(id=method.id, label=method.label, kind="llm", weight=weight or 1.0)
 
 
+INDIRECT = "indirect_prompt_injection"
+"""The entry whose types are delivery routes: each is attacked by the methods with that route."""
+
+
+def _route_of(method: AttackMethod) -> str:
+    return method.delivery.route if method.delivery is not None else "message"
+
+
+def _routes(where: str, types: tuple[str, ...], methods: list[AttackMethod]) -> None:
+    """Each type of an indirect injection needs an attack method whose delivery route it is."""
+    for kind in types:
+        if not any(_route_of(method) == kind for method in methods):
+            raise PlanError(
+                f"{where}: IndirectPromptInjection type {kind} needs an attack whose delivery route is {kind} "
+                f"(attacks[].delivery.route: {kind})"
+            )
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
     """Every probe of the run, in the run file's order. A vulnerability :func:`skipped` names has none."""
     try:
@@ -316,8 +340,13 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
         dataset = _dataset_of(where, run_file, spec, entry, vulnerability.types or vulnerability.allowed_types)
         if entry is not None and entry.protocol == "planted":
             _plantable(where, run_file, vulnerability.types or vulnerability.allowed_types)
+        routed = entry is not None and entry.id == INDIRECT
+        if routed:
+            _routes(where, vulnerability.types or vulnerability.allowed_types, [method for _, method in attacks])
         for vulnerability_type in vulnerability.types or vulnerability.allowed_types:
             for attack, method in attacks:
+                if routed and _route_of(method) != vulnerability_type:
+                    continue  # an indirect injection type is attacked by the methods of its own route
                 identifier = probe_id(vulnerability.id, vulnerability_type, method.id)
                 if any(item.probe.id == identifier for item in planned):
                     raise PlanError(f"{where}: probe {identifier} is planned twice")

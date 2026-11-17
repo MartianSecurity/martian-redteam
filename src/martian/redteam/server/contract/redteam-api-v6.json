@@ -2441,6 +2441,11 @@
             "title": "Hits",
             "type": "integer"
           },
+          "not_delivered": {
+            "default": 0,
+            "title": "Not Delivered",
+            "type": "integer"
+          },
           "resisted": {
             "default": 0,
             "title": "Resisted",
@@ -2632,6 +2637,11 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "not_delivered": {
+            "default": 0,
+            "title": "Not Delivered",
+            "type": "integer"
           },
           "objective_class": {
             "title": "Objective Class",
@@ -2920,6 +2930,7 @@
                 "target": 0
               },
               "hits": 0,
+              "not_delivered": 0,
               "resisted": 0,
               "stopped": 0,
               "suspected_hits": 0,
