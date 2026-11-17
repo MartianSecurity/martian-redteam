@@ -136,8 +136,9 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 | --- | --- |
 | `goal` | What the attacker tries to make the target do. The attacker is told it. A goal that names a `tool` is checked as a tool call (the check `goal`, a requested call counting), unless a `tool_call` check already names that tool |
 | `objective` | `disclosure`, `control`, `action` or `persistence`. Without it, the vulnerability's own objective class applies |
-| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
-| `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
+| `form` | The catalogue form that decides the probe, such as `tool_call` or `reply` ([forms](catalog.md#forms)). Not with `checks`, and not for a custom vulnerability |
+| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by its catalogue entry's default form (the judge, for the entries of catalogue 0.2), and a custom one by the judge |
+| `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it. Without it, the catalogue entry's default severity applies; a custom vulnerability has none |
 | `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
 
 A `goal` takes these fields:
@@ -226,7 +227,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 ## How a run works
 
-1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs: the declared checks, or the chosen `form`, with the goal's tool-call check when the goal names a tool; without either, the goal's tool call alone, or the catalogue entry's default form. The attacker is told the goal.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
 3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 

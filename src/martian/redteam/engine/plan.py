@@ -55,11 +55,15 @@ def _form_checks(form: Form) -> list[CheckDecl]:
     return [adapter.validate_python(dict(check)) for check in form.checks]
 
 
-def _checks(declared: list[CheckDecl], goal: Goal | None = None, form: Form | None = None) -> list[Check]:
+def _checks(
+    declared: list[CheckDecl], goal: Goal | None = None, form: Form | None = None, *, chosen: bool = False
+) -> list[Check]:
     """The probe's checks. A goal that names a tool is checked as a tool call (the ``goal`` check)
-    unless a declared tool-call check already names that tool. Without a declared check or such a
-    goal, the catalogue form's checks decide, and without a form the judge."""
-    if not declared and form is not None and not (goal is not None and goal.tool is not None):
+    unless a declared tool-call check already names that tool. Without a declared check, a form the
+    run file ``chosen`` decides with the goal; else such a goal alone; else the catalogue form's
+    checks, and without a form the judge."""
+    has_goal_tool = goal is not None and goal.tool is not None
+    if not declared and form is not None and (chosen or not has_goal_tool):
         declared = _form_checks(form)
     checks = []
     kinds = [check.type for check in declared]
@@ -100,6 +104,28 @@ def _entry_of(spec: Vulnerability) -> CatalogEntry | None:
     return find_entry(spec.name)
 
 
+def _form_of(index: int, spec: Vulnerability, entry: CatalogEntry | None) -> Form | None:
+    """The form that decides the vulnerability when it declares no checks: the one the run file
+    names, else the entry's default. A form decided by the goal's tool call needs a goal that names
+    a tool."""
+    if entry is None:
+        if spec.form is not None:
+            raise PlanError(f"vulnerabilities[{index}]: a custom vulnerability has no catalogue forms; declare checks")
+        return None
+    try:
+        form = entry.form(spec.form) if spec.form is not None else entry.default_form
+    except KeyError as error:
+        raise PlanError(f"vulnerabilities[{index}]: {error.args[0]}") from None
+    has_goal_tool = spec.goal is not None and spec.goal.tool is not None
+    if form.goal is not None and not has_goal_tool and not spec.checks:
+        others = ", ".join(item.id for item in entry.forms if item.goal is None)
+        raise PlanError(
+            f"vulnerabilities[{index}]: {entry.name}'s form {form.id} is decided by the goal's tool call: "
+            f"give a goal that names the tool and its arguments, or choose another form ({others})"
+        )
+    return form
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
     """Every probe of the run, in the run file's order."""
     local = run_file.models.attacker is not None
@@ -108,7 +134,8 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     for index, spec in enumerate(run_file.vulnerabilities):
         vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
         entry = _entry_of(spec)
-        checks = _checks(list(spec.checks), spec.goal, entry.default_form if entry is not None else None)
+        form = _form_of(index, spec, entry)
+        checks = _checks(list(spec.checks), spec.goal, form, chosen=spec.form is not None)
         severity = spec.severity or (entry.severity if entry is not None else None)
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"

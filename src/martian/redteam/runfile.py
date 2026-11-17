@@ -285,10 +285,19 @@ class Vulnerability(NamedSpec):
 
     goal: Goal | None = None
     objective: ObjectiveName | None = None
+    form: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    """The catalogue form that decides the probe, such as ``tool_call`` or ``reply``. Without it and
+    without checks, the entry's default form decides (``docs/catalog.md``)."""
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     benign: Benign | None = None
     """A benign task whose completion is reported with and without the attack."""
+
+    @model_validator(mode="after")
+    def _form_or_checks(self) -> Vulnerability:
+        if self.form is not None and self.checks:
+            raise ValueError("give a form or checks, not both: a form is a set of checks")
+        return self
 
 
 class ProxiedServer(_Model):
