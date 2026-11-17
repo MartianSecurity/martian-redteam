@@ -130,23 +130,23 @@ def _entry_of(spec: Vulnerability) -> CatalogEntry | None:
     return find_entry(spec.name)
 
 
-def _form_of(index: int, spec: Vulnerability, entry: CatalogEntry | None) -> Form | None:
+def _form_of(where: str, spec: Vulnerability, entry: CatalogEntry | None) -> Form | None:
     """The form that decides the vulnerability when it declares no checks: the one the run file
     names, else the entry's default. A form decided by the goal's tool call needs a goal that names
     a tool."""
     if entry is None:
         if spec.form is not None:
-            raise PlanError(f"vulnerabilities[{index}]: a custom vulnerability has no catalogue forms; declare checks")
+            raise PlanError(f"{where}: a custom vulnerability has no catalogue forms; declare checks")
         return None
     try:
         form = entry.form(spec.form) if spec.form is not None else entry.default_form
     except KeyError as error:
-        raise PlanError(f"vulnerabilities[{index}]: {error.args[0]}") from None
+        raise PlanError(f"{where}: {error.args[0]}") from None
     has_goal_tool = spec.goal is not None and spec.goal.tool is not None
     if form.goal is not None and not has_goal_tool and not spec.checks:
         others = ", ".join(item.id for item in entry.forms if item.goal is None)
         raise PlanError(
-            f"vulnerabilities[{index}]: {entry.name}'s form {form.id} is decided by the goal's tool call: "
+            f"{where}: {entry.name}'s form {form.id} is decided by the goal's tool call: "
             f"give a goal that names the tool and its arguments, or choose another form ({others})"
         )
     return form
@@ -159,22 +159,75 @@ NO_MEMORY = "the target keeps no memory across conversations; state target.memor
 def skipped(run_file: RunFile) -> list[dict[str, str]]:
     """The vulnerabilities the run skips, with why: a memory poisoning probe when the run file says
     the target keeps no memory (no ``target.memory``)."""
-    found = []
-    for spec in run_file.vulnerabilities:
+    chosen, left_out = framework_selection(run_file)
+    found = list(left_out)
+    for spec in [*run_file.vulnerabilities, *chosen]:
         entry = _entry_of(spec)
         if entry is not None and entry.protocol == "memory" and run_file.target.memory is None:
             found.append({"vulnerability": entry.id, "reason": NO_MEMORY})
     return found
 
 
+NEEDS_SETTING: dict[str, str] = {
+    "file": "it sends a dataset file of your own; list HarmfulContent with type file and its dataset",
+    "mcp_tool_description": "it needs tools.decoy",
+    "skill_file": "it needs tools.skills_dir",
+}
+"""Why a type of an entry a framework selects is left out: it needs a setting the run file does not
+give."""
+
+
+def framework_selection(run_file: RunFile) -> tuple[list[Vulnerability], list[dict[str, str]]]:
+    """The entries the run file's ``frameworks`` select that its ``vulnerabilities`` do not list, as
+    vulnerabilities: every type that needs no setting the run file lacks, decided by the entry's
+    default form, or by its first form that needs no goal tool call when the default needs one. And
+    the entries left out, with why."""
+    from martian_redteam.catalog.frameworks import FRAMEWORKS
+
+    listed = {entry.id for spec in run_file.vulnerabilities if (entry := _entry_of(spec)) is not None}
+    chosen: list[Vulnerability] = []
+    left_out: list[dict[str, str]] = []
+    for selection in run_file.frameworks:
+        framework_id, _, item_id = selection.partition(":")
+        framework = FRAMEWORKS[framework_id]
+        ids = framework.vulnerabilities_of(item_id) if item_id else framework.vulnerability_ids
+        for identifier in ids:
+            if identifier in listed:
+                continue
+            listed.add(identifier)
+            entry = find_entry(identifier)
+            assert entry is not None
+            settings = {
+                "mcp_tool_description": run_file.tools.decoy is not None,
+                "skill_file": run_file.tools.skills_dir is not None,
+                "file": False,
+            }
+            types = [kind for kind in entry.types if settings.get(kind, True)]
+            if not types:
+                reasons = "; ".join(f"{kind}: {NEEDS_SETTING[kind]}" for kind in entry.types)
+                left_out.append({"vulnerability": entry.id, "reason": f"selected by {selection}, but {reasons}"})
+                continue
+            form = entry.default_form
+            if form.goal is not None:
+                form = next(item for item in entry.forms if item.goal is None)
+            chosen.append(
+                Vulnerability(
+                    name=entry.name,
+                    types=types if len(types) < len(entry.types) else None,
+                    form=None if form is entry.default_form else form.id,
+                )
+            )
+    return chosen, left_out
+
+
 def _dataset_of(
-    index: int, run_file: RunFile, spec: Vulnerability, entry: CatalogEntry | None, types: tuple[str, ...]
+    where: str, run_file: RunFile, spec: Vulnerability, entry: CatalogEntry | None, types: tuple[str, ...]
 ) -> dict[str, dict[str, Any]]:
     """For ``HarmfulContent``: the dataset each type sends, once its licence passes the run's
     commercial-use switch. A registered dataset by its id; ``file``, the run file's own."""
     if entry is None or entry.id != "harmful_content":
         if spec.dataset is not None:
-            raise PlanError(f"vulnerabilities[{index}]: dataset applies to HarmfulContent of type file")
+            raise PlanError(f"{where}: dataset applies to HarmfulContent of type file")
         return {}
     from martian.redteam.catalog.datasets import DATASETS, DatasetError, check_licence
 
@@ -184,9 +237,7 @@ def _dataset_of(
         for kind in types:
             if kind == "file":
                 if spec.dataset is None:
-                    raise PlanError(
-                        f"vulnerabilities[{index}]: type file needs dataset: the file, its column and licence"
-                    )
+                    raise PlanError(f"{where}: type file needs dataset: the file, its column and licence")
                 check_licence(Path(spec.dataset.file).name, spec.dataset.licence, commercial_use=commercial)
                 found[kind] = {"id": "file", **spec.dataset.model_dump()}
             else:
@@ -194,24 +245,23 @@ def _dataset_of(
                 check_licence(kind, registered.licence, commercial_use=commercial)
                 found[kind] = {"id": kind, "licence": registered.licence}
     except DatasetError as error:
-        raise PlanError(f"vulnerabilities[{index}]: {error}") from None
+        raise PlanError(f"{where}: {error}") from None
     if spec.dataset is not None and "file" not in types:
-        raise PlanError(f"vulnerabilities[{index}]: dataset is the file of type file; select type file")
+        raise PlanError(f"{where}: dataset is the file of type file; select type file")
     return found
 
 
-def _plantable(index: int, run_file: RunFile, types: tuple[str, ...]) -> None:
+def _plantable(where: str, run_file: RunFile, types: tuple[str, ...]) -> None:
     """A poisoning probe's type names where it plants: the decoy server needs ``tools.decoy``, a
     skill needs ``tools.skills_dir``."""
     if "mcp_tool_description" in types and run_file.tools.decoy is None:
         raise PlanError(
-            f"vulnerabilities[{index}]: mcp_tool_description plants in the inert test server's tool description: "
+            f"{where}: mcp_tool_description plants in the inert test server's tool description: "
             "set tools.decoy, and bind the agent's tools from the proxy's session"
         )
     if "skill_file" in types and run_file.tools.skills_dir is None:
         raise PlanError(
-            f"vulnerabilities[{index}]: skill_file plants a skill: set tools.skills_dir to the folder the agent loads "
-            "skills from"
+            f"{where}: skill_file plants a skill: set tools.skills_dir to the folder the agent loads skills from"
         )
 
 
@@ -221,12 +271,14 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     attacks = [get_attack(item.name, weight=item.weight) for item in run_file.attacks]
     planned: list[PlannedProbe] = []
     left_out = {item["vulnerability"] for item in skipped(run_file)}
-    for index, spec in enumerate(run_file.vulnerabilities):
+    selected = [(f"vulnerabilities[{index}]", spec) for index, spec in enumerate(run_file.vulnerabilities)]
+    selected += [(f"frameworks ({spec.name})", spec) for spec in framework_selection(run_file)[0]]
+    for index, (where, spec) in enumerate(selected):
         if (found := _entry_of(spec)) is not None and found.id in left_out:
             continue
         vulnerability = _vulnerability_of(spec)
         entry = _entry_of(spec)
-        form = _form_of(index, spec, entry)
+        form = _form_of(where, spec, entry)
         checks = _checks(list(spec.checks), spec.goal, form, chosen=spec.form is not None)
         if not spec.checks and any(
             check.kind == "canary" and check.spec.get("plant") == "system_prompt" for check in checks
@@ -238,15 +290,15 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
         severity = spec.severity or (entry.severity if entry is not None else None)
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
-            raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
-        dataset = _dataset_of(index, run_file, spec, entry, vulnerability.types or vulnerability.allowed_types)
+            raise PlanError(f"{where} {reason}: set models.judge")
+        dataset = _dataset_of(where, run_file, spec, entry, vulnerability.types or vulnerability.allowed_types)
         if entry is not None and entry.protocol == "planted":
-            _plantable(index, run_file, vulnerability.types or vulnerability.allowed_types)
+            _plantable(where, run_file, vulnerability.types or vulnerability.allowed_types)
         for vulnerability_type in vulnerability.types or vulnerability.allowed_types:
             for attack in attacks:
                 identifier = probe_id(vulnerability.id, vulnerability_type, attack.id)
                 if any(item.probe.id == identifier for item in planned):
-                    raise PlanError(f"vulnerabilities[{index}]: probe {identifier} is planned twice")
+                    raise PlanError(f"{where}: probe {identifier} is planned twice")
                 probe = Probe(
                     id=identifier,
                     vulnerability=vulnerability.id,

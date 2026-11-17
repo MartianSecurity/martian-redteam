@@ -137,10 +137,26 @@ class CatalogAttack(_Out):
     kind: str
 
 
+class CatalogFrameworkItem(_Out):
+    id: str
+    title: str
+    coverage: str
+    """``covered``, ``partly`` or ``not_covered``: what the catalogue tests, never compliance."""
+    note: str
+    vulnerability_ids: list[str]
+
+
 class CatalogFramework(_Out):
     id: str
+    label: str
+    source_revision: str
+    source: str
     coverage: str
+    """``subset``, always: no framework is fully covered."""
     vulnerability_ids: list[str]
+    items: list[CatalogFrameworkItem]
+    notes: str
+    disclaimer: str
 
 
 class CatalogOut(_Out):
@@ -329,9 +345,30 @@ async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
         CatalogAttack(name=name, id=attack.id, label=attack.label, kind=attack.kind)
         for name, attack in ((name, make()) for name, make in ATTACKS.items())
     ]
+    from martian_redteam.catalog.frameworks import DISCLAIMER
+
     frameworks = [
-        CatalogFramework(id=item.id, coverage=item.coverage, vulnerability_ids=list(item.vulnerability_ids))
-        for item in FRAMEWORKS.values()
+        CatalogFramework(
+            id=framework.id,
+            label=framework.label,
+            source_revision=framework.source_revision,
+            source=framework.source,
+            coverage=framework.coverage,
+            vulnerability_ids=list(framework.vulnerability_ids),
+            items=[
+                CatalogFrameworkItem(
+                    id=item.id,
+                    title=item.title,
+                    coverage=item.coverage,
+                    note=item.note,
+                    vulnerability_ids=list(framework.vulnerabilities_of(item.id)),
+                )
+                for item in framework.items
+            ],
+            notes=framework.notes,
+            disclaimer=DISCLAIMER,
+        )
+        for framework in FRAMEWORKS.values()
     ]
     return CatalogOut(version=CATALOG_VERSION, vulnerabilities=vulnerabilities, attacks=attacks, frameworks=frameworks)
 
@@ -374,6 +411,8 @@ __all__ = [
     "AnnotationIn",
     "AttemptPage",
     "CatalogForm",
+    "CatalogFramework",
+    "CatalogFrameworkItem",
     "CatalogOut",
     "FindingList",
     "Launcher",

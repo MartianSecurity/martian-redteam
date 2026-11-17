@@ -1039,13 +1039,31 @@ def catalog_command() -> None:
         attacks.add_row(attack_name, attack.id, attack.kind)
     console.print(attacks)
 
-    frameworks = Table(title="Framework maps (subsets)")
-    frameworks.add_column("Id")
-    frameworks.add_column("Coverage")
-    frameworks.add_column("Vulnerability ids")
+    from martian_redteam.catalog.frameworks import DISCLAIMER
+
     for framework in FRAMEWORKS.values():
-        frameworks.add_row(framework.id, framework.coverage, ", ".join(framework.vulnerability_ids))
-    console.print(frameworks)
+        counts = framework.counts()
+        frameworks = Table(
+            title=(
+                f"{framework.label} ({framework.id}, {framework.source_revision}): {counts['covered']} covered, "
+                f"{counts['partly']} partly, {counts['not_covered']} not covered"
+            )
+        )
+        frameworks.add_column("Item")
+        frameworks.add_column("Title")
+        frameworks.add_column("Coverage")
+        frameworks.add_column("Vulnerability ids")
+        frameworks.add_column("Note")
+        for row in framework.items:
+            frameworks.add_row(
+                row.id,
+                row.title,
+                row.coverage.replace("_", " "),
+                ", ".join(framework.vulnerabilities_of(row.id)) or "none",
+                row.note,
+            )
+        console.print(frameworks)
+    console.print(DISCLAIMER)
 
 
 def _form_checks(form: Any) -> str:

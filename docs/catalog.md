@@ -390,17 +390,108 @@ GrayBox, MathProblem, and other DeepTeam attacks that need graph support or extr
 
 ## Framework maps
 
-`catalog/frameworks.py` holds **version-pinned compatibility tables**, labelled `coverage: subset`. They are not live OWASP/ATLAS feeds and not a claim of full coverage.
+`martian_redteam.catalog.frameworks` maps five frameworks item by item, each pinned to one revision; they are not live feeds. Each catalogue entry names the items it tests in its `frameworks` tags, and each map takes an item's vulnerability ids from those tags, so every entry is mapped. Each item is marked:
 
-`vulnerabilities_for(framework_id)` instantiates catalog vulnerabilities for each mapped id (default types). Unknown framework ids raise `KeyError`.
+- **covered**: the catalogue has entries whose deterministic forms test the item's main risk;
+- **partly**: it tests part of the item, or only with the judge;
+- **not covered**: it tests none of it.
 
-| Id | Source revision | Vulnerability ids | Honesty note |
-| --- | --- | --- | --- |
-| `owasp_llm_2025` | 2025 | `prompt_leakage`, `excessive_agency`, `pii_leakage`, `ssrf`, `sql_injection`, `shell_injection`, `rbac` | Maps toward sensitive-information disclosure, LLM06, improper output handling, and authorization/agency. Prompt injection is an **attack method**, not a vulnerability row. |
-| `owasp_agentic_2026` | 2026 | `excessive_agency`, `prompt_leakage` | Placeholder for agency and instruction leakage. Multi-turn tool-abuse is Phase 3. |
-| `mitre_atlas_2026` | 2026 | `ssrf`, `prompt_leakage`, `excessive_agency` | Placeholder subset. **Not** a full MITRE ATLAS mapping. |
+Coverage labels say what this catalogue tests. They are not a certification, an audit or a claim of compliance, and no framework is fully covered. A run that selects a framework's entries shows what was tested, not that the framework is met. Do not write "OWASP certified", "compliant" or "full coverage" from these maps.
 
-Do not emit marketing copy that says “OWASP LLM Top 10 certified” or “full MITRE ATLAS coverage” from these maps.
+`vulnerabilities_for(id)` instantiates the vulnerabilities a framework (`owasp_llm_2025`) or one item (`owasp_llm_2025:LLM06`) maps, with default types. Unknown ids raise `KeyError`. A run file selects entries the same way with `frameworks` ([run file](redteam-run-file.md#top-level)). `martian redteam catalog` prints every item, and `GET /v1/redteam/catalog` serves them.
+
+
+### OWASP Top 10 for LLM Applications 2025
+
+`owasp_llm_2025`, revision 2025 ([source](https://genai.owasp.org/llm-top-10/)): 2 covered, 6 partly, 2 not covered. Items are the 2025 list. Prompt injection is also an attack method of every probe.
+
+| Item | Title | Coverage | Vulnerability ids | Note |
+| --- | --- | --- | --- | --- |
+| `LLM01` | Prompt Injection | partly | `robustness`, `tool_poisoning` | Direct injection (Robustness) and injection through tool descriptions and skills (ToolPoisoning); indirect injection through tool results and web pages is not yet a catalogue entry |
+| `LLM02` | Sensitive Information Disclosure | partly | `prompt_leakage`, `pii_leakage`, `cross_session_leakage`, `data_exfiltration` | Canary-backed disclosure of prompts, credentials and personal data, across sessions and out through tools and links; training-data disclosure is not tested |
+| `LLM03` | Supply Chain | partly | `tool_poisoning` | Poisoned tool descriptions and skills only; models, packages and datasets are not tested |
+| `LLM04` | Data and Model Poisoning | partly | `memory_poisoning` | Poisoning of the agent's memory; training and fine-tuning data are not tested |
+| `LLM05` | Improper Output Handling | partly | `sql_injection`, `shell_injection`, `data_exfiltration` | Attack text reaching SQL and shell tools, and images and links that carry data out |
+| `LLM06` | Excessive Agency | covered | `excessive_agency`, `rbac`, `ssrf`, `bola`, `bfla`, `debug_access`, `tool_misuse` | Tool calls beyond the request, confirmed by the call itself: tool misuse, object- and function-level authorisation, roles, debug tools |
+| `LLM07` | System Prompt Leakage | covered | `prompt_leakage` | A canary planted in the system prompt or instructions |
+| `LLM08` | Vector and Embedding Weaknesses | not covered | none | No retrieval store is attacked |
+| `LLM09` | Misinformation | partly | `misinformation` | Judged from the reply only |
+| `LLM10` | Unbounded Consumption | not covered | none | No resource exhaustion is attempted |
+
+### OWASP Top 10 for Agentic Applications 2026
+
+`owasp_agentic_2026`, revision 2026 ([source](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)): 1 covered, 5 partly, 4 not covered. Items are the list of December 2025.
+
+| Item | Title | Coverage | Vulnerability ids | Note |
+| --- | --- | --- | --- | --- |
+| `ASI01` | Agent Goal Hijack | partly | `robustness` | Task hijacking judged from the reply (Robustness) |
+| `ASI02` | Tool Misuse and Exploitation | covered | `excessive_agency`, `ssrf`, `sql_injection`, `tool_misuse`, `data_exfiltration` | Unauthorised tool calls with attacker-chosen arguments, confirmed by the call; exfiltration through tool arguments |
+| `ASI03` | Identity and Privilege Abuse | partly | `rbac`, `bola`, `bfla`, `debug_access` | Role, object- and function-level authorisation and debug access through the agent's tools; credential and identity delegation are not tested |
+| `ASI04` | Agentic Supply Chain Vulnerabilities | partly | `tool_poisoning` | Poisoned MCP tool descriptions and skills; packages, registries and agent cards are not tested |
+| `ASI05` | Unexpected Code Execution (RCE) | partly | `shell_injection` | Attack text reaching a shell tool |
+| `ASI06` | Memory & Context Poisoning | partly | `cross_session_leakage`, `memory_poisoning` | Memory written in one session and triggered in another, and leakage between sessions; retrieval context is not tested |
+| `ASI07` | Insecure Inter-Agent Communication | not covered | none | One agent is attacked at a time |
+| `ASI08` | Cascading Failures | not covered | none | No multi-agent or multi-step failure is traced |
+| `ASI09` | Human-Agent Trust Exploitation | not covered | none | No human in the loop is simulated |
+| `ASI10` | Rogue Agents | not covered | none | An agent's own drift is not monitored |
+
+### MITRE ATLAS (LLM and agent techniques)
+
+`mitre_atlas_2026`, revision 2026.10 ([source](https://atlas.mitre.org/)): 4 covered, 10 partly, 6 not covered. ATLAS has many more techniques, most about models and infrastructure. The map lists those about LLM and agent behaviour; every technique not listed is not covered.
+
+| Item | Title | Coverage | Vulnerability ids | Note |
+| --- | --- | --- | --- | --- |
+| `AML.T0051.000` | LLM Prompt Injection: Direct | partly | `robustness` | Judged from the reply (Robustness) |
+| `AML.T0051.001` | LLM Prompt Injection: Indirect | partly | `tool_poisoning` | Through tool descriptions and skills; tool results and web pages are not yet catalogue entries |
+| `AML.T0054` | LLM Jailbreak | partly | `illegal_activity`, `harmful_content` | Harmful-content datasets and requests, judged from the reply |
+| `AML.T0048` | External Harms | partly | `illegal_activity`, `harmful_content` | Harmful content judged from the reply |
+| `AML.T0053` | AI Agent Tool Invocation | covered | `excessive_agency`, `rbac`, `ssrf`, `sql_injection`, `bola`, `bfla`, `tool_misuse` | Tool calls confirmed by the call itself |
+| `AML.T0050` | Command and Scripting Interpreter | partly | `shell_injection` | Attack text reaching a shell tool |
+| `AML.T0069.002` | Discover LLM System Information: System Prompt | covered | `prompt_leakage` | A planted canary |
+| `AML.T0084` | Discover AI Agent Configuration | partly | `debug_access` | Debug and internal tools |
+| `AML.T0085` | Data from AI Services | partly | `pii_leakage` | Personal data in a private record, by canary |
+| `AML.T0085.002` | Data from AI Services: Conversation Context and Memory | partly | `cross_session_leakage` | Another user's conversation, by canary |
+| `AML.T0086` | Exfiltration via AI Agent Tool Invocation | covered | `data_exfiltration` | The canary in a tool call's arguments |
+| `AML.T0077` | LLM Response Rendering | covered | `data_exfiltration` | An image or link in the reply, received by the listener |
+| `AML.T0080.000` | AI Agent Context Poisoning: Memory | partly | `memory_poisoning` | Memory written and triggered later |
+| `AML.T0110` | AI Agent Tool Poisoning | partly | `tool_poisoning` | A poisoned tool description of the test server |
+| `AML.T0070` | RAG Poisoning | not covered | none | No retrieval store is attacked |
+| `AML.T0061` | LLM Prompt Self-Replication | not covered | none |  |
+| `AML.T0034.002` | Agentic Resource Consumption | not covered | none |  |
+| `AML.T0118` | Autonomous AI Agent Communication | not covered | none |  |
+| `AML.T0020` | Training Data Poisoning | not covered | none |  |
+| `AML.T0024` | Exfiltration via AI Inference API | not covered | none |  |
+
+### NIST AI Risk Management Framework 1.0
+
+`nist_ai_rmf_1_0`, revision 1.0 (January 2023) ([source](https://www.nist.gov/itl/ai-risk-management-framework)): 0 covered, 5 partly, 3 not covered. Subcategories of MEASURE not listed are not covered.
+
+| Item | Title | Coverage | Vulnerability ids | Note |
+| --- | --- | --- | --- | --- |
+| `GOVERN` | Govern | not covered | none | Policies, roles and culture are an organisation's process |
+| `MAP` | Map | not covered | none | Context and risk identification are an organisation's process |
+| `MEASURE-2.5` | The AI system is demonstrated to be valid and reliable | partly | `misinformation`, `robustness` | Misinformation and robustness under attack, judged from the reply |
+| `MEASURE-2.6` | The AI system is evaluated regularly for safety risks | partly | `toxicity`, `illegal_activity`, `harmful_content` | Toxicity, illegal activity and harmful content, judged from the reply |
+| `MEASURE-2.7` | AI system security and resilience are evaluated and documented | partly | `prompt_leakage`, `excessive_agency`, `rbac`, `ssrf`, `sql_injection`, `shell_injection`, `bola`, `bfla`, `debug_access`, `tool_misuse`, `data_exfiltration`, `memory_poisoning`, `tool_poisoning` | The security entries, with evidence levels; the run is one evaluation, not a programme |
+| `MEASURE-2.10` | Privacy risk of the AI system is examined and documented | partly | `pii_leakage`, `cross_session_leakage`, `data_exfiltration` | Personal-data and cross-session leakage and exfiltration, by canary |
+| `MEASURE-2.11` | Fairness and bias are evaluated and results documented | partly | `bias` | Judged only |
+| `MANAGE` | Manage | not covered | none | Risk response and monitoring are an organisation's process |
+
+### EU AI Act (Regulation (EU) 2024/1689)
+
+`eu_ai_act_2024`, revision 2024/1689 ([source](https://eur-lex.europa.eu/eli/reg/2024/1689/oj)): 0 covered, 3 partly, 6 not covered. Articles not listed are not covered. Nothing here establishes conformity with the Act.
+
+| Item | Title | Coverage | Vulnerability ids | Note |
+| --- | --- | --- | --- | --- |
+| `Art5` | Prohibited AI practices | not covered | none |  |
+| `Art9` | Risk management system | partly | `toxicity`, `illegal_activity`, `bias`, `harmful_content` | Testing for some foreseeable risks to safety and fundamental rights; not the risk management system |
+| `Art10` | Data and data governance | not covered | none |  |
+| `Art13` | Transparency and provision of information to deployers | not covered | none |  |
+| `Art14` | Human oversight | not covered | none |  |
+| `Art15` | Accuracy, robustness and cybersecurity | partly | `prompt_leakage`, `excessive_agency`, `pii_leakage`, `misinformation`, `rbac`, `ssrf`, `sql_injection`, `shell_injection`, `robustness`, `bola`, `bfla`, `debug_access`, `cross_session_leakage`, `tool_misuse`, `data_exfiltration`, `memory_poisoning`, `tool_poisoning` | Adversarial tests of robustness and of attacks on the system; evidence for an assessment, not the assessment |
+| `Art50` | Transparency obligations for providers and deployers | not covered | none |  |
+| `Art55` | Obligations for providers of general-purpose AI models with systemic risk | partly | `illegal_activity`, `robustness`, `harmful_content` | Adversarial testing of model behaviour only |
+| `Art72` | Post-market monitoring | not covered | none |  |
 
 ## What is not in the catalog
 

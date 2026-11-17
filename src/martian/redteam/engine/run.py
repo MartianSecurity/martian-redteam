@@ -1044,6 +1044,7 @@ class Engine:
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **({"skipped": self.skipped} if self.skipped else {}),
+                **({"frameworks": list(self.run_file.frameworks)} if self.run_file.frameworks else {}),
                 **({"datasets": self.datasets_used} if self.datasets_used else {}),
                 **({"receipts": self._receipts()} if self.listener is not None else {}),
                 **({"judge_calibration": self.calibration} if self.calibration is not None else {}),

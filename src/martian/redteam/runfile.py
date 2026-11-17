@@ -595,7 +595,10 @@ class RunFile(_Model):
     version: Literal[2]
     target: Target
     models: Models = Field(default_factory=Models)
-    vulnerabilities: list[Vulnerability] = Field(min_length=1)
+    vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list, max_length=20)
+    """Also probe every catalogue entry these frameworks (``owasp_llm_2025``) or framework items
+    (``owasp_llm_2025:LLM06``) map, unless ``vulnerabilities`` lists it."""
     attacks: list[NamedSpec] = Field(min_length=1)
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
@@ -612,8 +615,28 @@ class RunFile(_Model):
     """The registered agent an environment run tests, by its id on the Martian server: its approval,
     sandbox bindings and checks. Without it, the API key must be bound to the agent."""
 
+    @field_validator("frameworks")
+    @classmethod
+    def _known_frameworks(cls, value: list[str]) -> list[str]:
+        from martian_redteam.catalog.frameworks import FRAMEWORKS
+
+        for selection in value:
+            framework_id, _, item_id = selection.partition(":")
+            if framework_id not in FRAMEWORKS:
+                raise ValueError(f"unknown framework {framework_id!r}; the frameworks are {', '.join(FRAMEWORKS)}")
+            if item_id:
+                try:
+                    FRAMEWORKS[framework_id].item(item_id)
+                except KeyError:
+                    raise ValueError(f"{framework_id} has no item {item_id!r}") from None
+        if len(set(value)) != len(value):
+            raise ValueError("each framework is selected once")
+        return value
+
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        if not self.vulnerabilities and not self.frameworks:
+            raise ValueError("list vulnerabilities, or select them with frameworks")
         if self.agent is not None and self.environment is None:
             raise ValueError("agent names the registered agent of an environment run; set environment")
         if self.environment is not None and self.tools.proxy:

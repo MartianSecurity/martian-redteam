@@ -51,7 +51,8 @@ gate: { fail_on: confirmed, severity: high }
 | `version` | yes | `2` |
 | `target` | yes | What is attacked. See [target](#target) |
 | `models` | no | The models that attack and judge, called with your own key. Without them, attacks are generated and judged by the Martian platform, as in version 0.2 |
-| `vulnerabilities` | yes | At least one vulnerability to probe |
+| `vulnerabilities` | yes, or `frameworks` | The vulnerabilities to probe |
+| `frameworks` | no | Also probe every catalogue entry these frameworks or framework items map, such as `owasp_agentic_2026` or `owasp_llm_2025:LLM06` ([framework maps](catalog.md#framework-maps)). An entry `vulnerabilities` lists keeps its own settings. A selected entry runs every type that needs no setting the file lacks, decided by its default form, or by its first form that needs no goal tool call; one that cannot run is skipped, and the run's limitations say why. The run's provenance records the selection as `frameworks` |
 | `attacks` | yes | At least one attack method, by `name` (and optional `weight`), as in version 0.2. `martian redteam catalog` lists them |
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |

@@ -704,8 +704,35 @@
             "title": "Coverage",
             "type": "string"
           },
+          "disclaimer": {
+            "title": "Disclaimer",
+            "type": "string"
+          },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogFrameworkItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_revision": {
+            "title": "Source Revision",
             "type": "string"
           },
           "vulnerability_ids": {
@@ -718,10 +745,53 @@
         },
         "required": [
           "id",
+          "label",
+          "source_revision",
+          "source",
           "coverage",
-          "vulnerability_ids"
+          "vulnerability_ids",
+          "items",
+          "notes",
+          "disclaimer"
         ],
         "title": "CatalogFramework",
+        "type": "object"
+      },
+      "CatalogFrameworkItem": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "title": "Coverage",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "vulnerability_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Vulnerability Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "coverage",
+          "note",
+          "vulnerability_ids"
+        ],
+        "title": "CatalogFrameworkItem",
         "type": "object"
       },
       "CatalogOut": {
