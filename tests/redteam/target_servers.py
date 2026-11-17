@@ -24,7 +24,7 @@ class Recorded:
 
 @contextmanager
 def json_server(handle: Handler) -> Iterator[tuple[str, Recorded]]:
-    """A JSON endpoint on 127.0.0.1 that answers each POST and PUT with ``handle(body, headers)``. The
+    """A JSON endpoint on 127.0.0.1 that answers each POST, PUT and GET with ``handle(body, headers)``. The
     headers hold the request's path too, under ``:path``."""
     recorded = Recorded()
 
@@ -45,6 +45,7 @@ def json_server(handle: Handler) -> Iterator[tuple[str, Recorded]]:
             self.wfile.write(data)
 
         do_PUT = do_POST  # noqa: N815 - the standard library's name
+        do_GET = do_POST  # noqa: N815 - a GET has no body: it reads as {}
 
         def log_message(self, *_: Any) -> None:
             pass

@@ -591,6 +591,88 @@ def push_command(
     _push(found)
 
 
+@app.command("campaign")
+def campaign_command(
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="The registered agent's id. Default: the agent the API key is bound to."),
+    ] = None,
+    depth: Annotated[str, typer.Option("--depth", help="quick, standard or deep.")] = "standard",
+    objective: Annotated[str | None, typer.Option("--objective", help="What the campaign assesses, in words.")] = None,
+    outcomes: Annotated[
+        list[str] | None, typer.Option("--outcome", help="money, persist, data or control. Repeat it.")
+    ] = None,
+    environment: Annotated[
+        str | None, typer.Option("--environment", help="Run the campaign in this environment.")
+    ] = None,
+    output: Annotated[Path, typer.Option("-o", "--output", help="Folder for redteam-run.json and the reports.")] = Path(
+        "results"
+    ),
+    wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Follow the campaign until it finishes.")] = True,
+    poll: Annotated[float, typer.Option("--poll", min=1, help="Seconds between readings.")] = 15.0,
+    timeout: Annotated[float, typer.Option("--timeout", min=1, help="Seconds to follow it at most.")] = 7200.0,
+    allow_conditional: Annotated[
+        bool, typer.Option("--allow-conditional", help="Exit 0 on a CONDITIONAL release decision, with a warning.")
+    ] = False,
+) -> None:
+    """Start a planned campaign on the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), follow it and
+    write its result. Exits 0 on an APPROVED release decision, 1 on BLOCKED or CONDITIONAL, 2 without one."""
+    from martian.redteam.campaign import CampaignClient, CampaignError, exit_code
+
+    if depth not in ("quick", "standard", "deep"):
+        _stop("--depth is quick, standard or deep.")
+    try:
+        config = MartianConfig.from_env()
+    except ConfigError as error:
+        _stop("A campaign runs on a Martian server: " + safe_text(error))
+
+    async def go() -> Any:
+        client = CampaignClient(config)
+        try:
+            started = await client.start(
+                agent=agent, depth=depth, objective=objective, outcomes=outcomes or [], environment=environment
+            )
+            console.print(
+                f"Started campaign {started.run_code} ({started.id}); the console shows it at {started.console_path}",
+                markup=False,
+            )
+            if not wait:
+                return started
+            return await client.follow(started, every=poll, within=timeout)
+        finally:
+            await client.aclose()
+
+    try:
+        found = asyncio.run(go())
+    except CampaignError as error:
+        _stop("The campaign: " + safe_text(error))
+    if not wait:
+        return
+    console.print(
+        f"Campaign {found.run_code}: {found.state}; release decision {found.decision}"
+        + (f" ({', '.join(found.reasons)})" if found.reasons else ""),
+        markup=False,
+    )
+    if found.redteam_run is not None:
+        from martian.redteam.engine.report import JSON_NAME, MARKDOWN_NAME, REPORT_NAME
+        from martian.redteam.model import RedteamRun
+        from martian.redteam.report import build_report, render_markdown
+
+        run = RedteamRun.model_validate(found.redteam_run)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / JSON_NAME).write_text(run.model_dump_json(indent=2), encoding="utf-8")
+        standard = build_report(run)
+        (output / REPORT_NAME).write_text(standard.model_dump_json(indent=2), encoding="utf-8")
+        (output / MARKDOWN_NAME).write_text(render_markdown(run, standard), encoding="utf-8")
+        console.print(f"Wrote {output / JSON_NAME}, {REPORT_NAME} and {MARKDOWN_NAME}", markup=False)
+    code = exit_code(found, allow_conditional=allow_conditional)
+    if not found.finished:
+        errors.print(f"The campaign did not finish within {timeout:g} seconds.", style="red", markup=False)
+    elif found.decision == "CONDITIONAL" and code == 0:
+        errors.print("Warning: the release decision is CONDITIONAL.", style="yellow", markup=False)
+    raise typer.Exit(code=code)
+
+
 @app.command("compare")
 def compare_command(
     baseline: Annotated[str, typer.Argument(help="The baseline run: a redteam-run.json or a run id.")],

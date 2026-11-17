@@ -5,7 +5,7 @@ Every red team route is under `/v1/redteam`. The routes are frozen as version 5 
 The contract has two parts:
 
 - **The core's routes.** `martian.redteam.server` serves them. They read the evals core's record store. `martian.evals.server.create_app` mounts the router, so the local edition (`martian ui`) serves them with its Red Team pages. The hosted backend mounts it too. The app leaves the routes out of its OpenAPI document: this contract is theirs.
-- **The SDK routes.** The hosted backend serves these: the four operations and the environment runs. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
+- **The SDK routes.** The hosted backend serves these: the four operations, the environment runs and the campaigns. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
 
 ## Routes
 
@@ -27,6 +27,8 @@ The contract has two parts:
 | `GET /v1/redteam/operations/{operation_id}` | Hosted: read an operation |
 | `POST /v1/redteam/operations/{operation_id}/cancel` | Hosted: cancel an operation |
 | `POST /v1/redteam/environment-runs` | Hosted: admit a run in a Martian environment for an approved agent; answers the session for the agent's tools and a run key ([environments](redteam-run-file.md#environments)) |
+| `POST /v1/redteam/campaigns` | Hosted: start the console's planned campaign for an approved agent at a depth, as the member the API key belongs to ([campaigns](redteam-reports.md#a-planned-campaign-on-a-martian-server)) |
+| `GET /v1/redteam/campaigns/{run_id}` | Hosted: a campaign's state, release decision and, once it finished, its run in the shared model |
 | `POST /v1/redteam/environment-runs/{run_id}/world` | Hosted, with the run key: `prepare`, `observe` or `outcome` of one attempt's world: reset it, then read its state checks and the gateway's calls of the attempt |
 | `POST /v1/redteam/environment-runs/{run_id}/finish` | Hosted, with the run key: end the run, releasing its session and instances |
 

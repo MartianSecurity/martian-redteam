@@ -34,6 +34,10 @@ class FakeMartianServer:
         self.reads: set[str] = set()
         self.refusal: tuple[int, str] | None = None
         self.pushed: list[dict[str, Any]] = []
+        self.campaigns: list[dict[str, Any]] = []
+        self.decision: tuple[str, list[str]] = ("APPROVED", ["declared_policy_gates_met"])
+        self.readings_to_finish = 1
+        self.campaign_run: dict[str, Any] | None = None
         self.run_id = str(uuid.uuid4())
 
     def __call__(self, body: dict[str, Any], headers: dict[str, str]) -> tuple[int, Any]:
@@ -45,6 +49,16 @@ class FakeMartianServer:
             if self.refusal is not None:
                 return self.refusal[0], {"detail": self.refusal[1]}
             return 201, self.run(body)
+        if path == "/v1/redteam/campaigns":
+            if headers.get("authorization") != f"Bearer {TOKEN}":
+                return 401, {"detail": "API key is not active"}
+            self.campaigns.append(body)
+            if self.refusal is not None:
+                return self.refusal[0], {"detail": self.refusal[1]}
+            return 202, self.campaign(finished=False)
+        if path == f"/v1/redteam/campaigns/{self.run_id}":
+            self.readings_to_finish -= 1
+            return 200, self.campaign(finished=self.readings_to_finish <= 0)
         if path.startswith("/v1/push/redteam/runs/"):
             if headers.get("authorization") != f"Bearer {TOKEN}":
                 return 401, {"detail": "API key is not active"}
@@ -125,3 +139,18 @@ class FakeMartianServer:
         """What the agent reads in its inbox in the attempt of ``action_id``: what was planted there."""
         self.reads.add(action_id)
         return [self.planted[action_id]] if action_id in self.planted else []
+
+    def campaign(self, *, finished: bool) -> dict[str, Any]:
+        status, reasons = self.decision if finished else ("PENDING", ["assessment_not_projected"])
+        return {
+            "id": self.run_id,
+            "run_code": "MR-2001",
+            "agent_id": str(uuid.uuid4()),
+            "state": "completed" if finished else "running",
+            "phase": "done" if finished else "submitted",
+            "finished": finished,
+            "verdict": "FINDINGS" if finished else "",
+            "release_decision": {"status": status, "reason_codes": reasons},
+            "console_path": f"/#/runs/{self.run_id}",
+            "redteam_run": self.campaign_run if finished else None,
+        }
