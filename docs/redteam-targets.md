@@ -103,7 +103,7 @@ Each proxied server has a mode:
 | Mode | What the proxy does | `executed` in the ledger |
 | --- | --- | --- |
 | `record` | Forwards the call | `true` |
-| `inject` | Forwards the call and adds the `inject` text to the result the agent reads. The ledger records the delivery | `true` |
+| `inject` | Forwards the call and adds the `inject` text to the result the agent reads. An attack method's `tool_result` route instead adds its own attack, for one conversation only ([delivery routes](redteam-methods.md#delivery-routes)). The ledger records the delivery | `true` |
 | `block` | Answers with `block_reply` and does not forward: the tool server never sees the call. A blocked tool is listed without its output schema, so the text is a valid answer | `false` |
 
 `tools` limits `inject` and `block` to the tools it names. A call that fails on its way to the tool server is recorded with `executed` unknown, and the agent gets an error result that never repeats what the server sent.

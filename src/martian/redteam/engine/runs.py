@@ -213,7 +213,6 @@ def build_service(
     kind = select_service(run_file, environ)
     policy = redaction_for(run_file, environ)
     if kind == "local":
-        assert run_file.models.attacker is not None
         local = LocalService(attacker=run_file.models.attacker, judge=run_file.models.judge, redaction_policy=policy)
         return local, local.describe()
     from martian.config import MartianConfig
