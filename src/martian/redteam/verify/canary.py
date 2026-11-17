@@ -83,10 +83,13 @@ def planted_run_file(run_file: RunFile, canary: str) -> RunFile:
 
 
 def uses_canary(probe: Probe) -> bool:
-    """Whether the probe reads the run's canary: a canary check without its own value, or a receipt
-    check."""
+    """Whether the probe reads the run's canary: a canary check without its own value, a receipt
+    check, or a tool-call check whose call must carry the canary."""
     return any(
-        (check.kind == "canary" and not check.spec.get("value")) or check.kind == "receipt" for check in probe.checks
+        (check.kind == "canary" and not check.spec.get("value"))
+        or check.kind == "receipt"
+        or (check.kind == "tool_call" and check.spec.get("with_canary"))
+        for check in probe.checks
     )
 
 
