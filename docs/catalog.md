@@ -109,6 +109,8 @@ Encodings never call Martian or the customer model. They exist to test brittle f
 
 Leetspeak mapping: a/A→4, e/E→3, i/I→1, o/O→0, s/S→5, t/T→7.
 
+A version 2 run file runs these six through the [attack method interface](redteam-methods.md), with the same results, and adds methods and transform layers of its own; [attack methods](redteam-methods.md) lists them.
+
 GrayBox, MathProblem, and other DeepTeam attacks that need graph support or extra SDK logic are **not** in this catalog.
 
 ## Framework maps

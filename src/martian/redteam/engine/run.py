@@ -1,9 +1,11 @@
 """The plan, attack, verify loop of a version 2 run, producing a :class:`~martian.redteam.model.RedteamRun`.
 
 - **Plan** (:mod:`martian.redteam.engine.plan`): the probes and their checks, before anything runs.
-- **Attack**: the attack method drives the target. Today every catalogue method is one turn: the
-  service writes the attack (an encoding method rewrites a generated injection), and the target is
-  called once, in a session of its own per attempt.
+- **Attack**: the attack method (:mod:`martian.redteam.methods`) drives the target through an
+  :class:`~martian.redteam.engine.attempt.AttemptRun`: it writes attacks (the service's attacker, a
+  template, a change of a seed), sends them after its transform layers, and reads the checks'
+  feedback. A version 0.2 method writes one attack and sends it once, in a session of its own per
+  attempt.
 - **Verify**: each check decides with the verdict rules (:mod:`martian.redteam.verify.rules`): text,
   canary and tool-call checks first, by code; the judge last, through the service. The attempt's
   outcome is :func:`~martian.redteam.verify.rules.attempt_outcome` of their results.
@@ -27,11 +29,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
+from martian.redteam.engine.attempt import AttemptRun
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
 from martian.redteam.engine.fingerprint import attempt_fingerprint
 from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
+from martian.redteam.methods import GenerationMode
 from martian.redteam.model import (
     Attempt,
     Check,
@@ -42,7 +46,6 @@ from martian.redteam.model import (
     RedteamRun,
     Spend,
     TargetRef,
-    Turn,
 )
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
@@ -58,7 +61,6 @@ from martian.redteam.verify.rules import (
 )
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError, UndecidedJudgment
-from martian_redteam.encoding import apply_encoding
 from martian_redteam.orchestrator import DEFAULT_TARGET_TIMEOUT_SECONDS
 from martian_redteam.types import EvaluatorContext, ModelUsage, RedteamService, SimulatorContext
 
@@ -206,6 +208,7 @@ class Engine:
 
     async def _attempt(self, planned: PlannedProbe, number: int) -> Attempt:
         probe = planned.probe
+        method = planned.attack_method
         spending = _Spending(self.ledger, probe.id)
         fields: dict[str, Any] = {
             "id": f"{probe.id}#{number}",
@@ -215,8 +218,12 @@ class Engine:
             "graph_revision": PROMPTS_REVISION,
             "fingerprint": self.fingerprint(planned, number),
         }
+        context = AttemptRun(self, planned, fields["id"], spending, method)
 
         def done(**update: Any) -> Attempt:
+            if not method.legacy:
+                trace = self._keep_trace(fields["id"], context, update["outcome"])
+                fields["evidence_ids"] = [*fields.get("evidence_ids", []), trace.id]
             return Attempt(
                 **fields,
                 **update,
@@ -225,27 +232,36 @@ class Engine:
                 finished_at=datetime.now(UTC),
             )
 
+        def so_far() -> None:
+            """What an attempt that ended early had sent: its last message, and every turn when it
+            sent more than one."""
+            fields.update(input=context.last_message, policy_revision=context.policy_revision)
+            if context.queries > 1 or (context.exchanges and not method.legacy):
+                observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
+                fields.update(target_calls=context.queries, turns=context.turns, evidence_ids=observed)
+
         try:
             self.ledger.check()
-            payload, generated = await self._generate(planned, spending)
-            fields.update(input=payload, policy_revision=generated.get("policy_revision"))
-            reply = await self._send(fields["id"], payload, spending)
+            final = await method.run(context)
         except BudgetExhausted as exhausted:
+            so_far()
             return done(outcome="stopped", stopped_by=exhausted.limit)
         except AttemptFailed as failed:
+            so_far()
             return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
-        evidence = self._keep_reply(fields["id"], reply)
-        observed = self._keep_observed(reply)
+        fields.update(input=final.message, policy_revision=context.policy_revision)
+        evidence = self._keep_reply(fields["id"], final.reply)
+        observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
         fields.update(
-            output=reply.text,
-            target_calls=1,
+            output=final.reply.text,
+            target_calls=context.queries,
             evidence_ids=[evidence.id, *observed],
-            turns=[
-                Turn(role="attacker", content=payload),
-                Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
-            ],
+            turns=context.turns,
         )
-        results, failure, stop = await self._verify(planned, payload, reply, spending, evidence.id)
+        if final.verified is not None:
+            results, failure, stop = final.verified
+        else:
+            results, failure, stop = await self._verify(planned, final.message, final.reply, spending, evidence.id)
         outcome, level = attempt_outcome(results)
         if outcome != "hit" and stop is not None:
             return done(outcome="stopped", stopped_by=stop.limit, check_results=results)
@@ -259,20 +275,32 @@ class Engine:
             )
         return done(outcome=outcome, level=level, check_results=results)
 
-    async def _generate(self, planned: PlannedProbe, spending: _Spending) -> tuple[str, dict[str, Any]]:
+    async def _generate(
+        self,
+        planned: PlannedProbe,
+        spending: _Spending,
+        *,
+        method: str | None = None,
+        request: str | None = None,
+        mode: GenerationMode = "baseline",
+    ) -> tuple[str, dict[str, Any]]:
+        """One attack in the style of attack method ``method``, asked for with ``request``. A refused
+        or empty generation is asked for once more, with the defensive framing."""
         attack, probe = planned.attack, planned.probe
         context = SimulatorContext(
             vulnerability=probe.vulnerability,
             vulnerability_type=probe.vulnerability_type,
             purpose=self.run_file.target.purpose,
-            attack_method=attack.id if attack.kind == "llm" else "prompt_injection",
+            attack_method=method or (attack.id if attack.kind == "llm" else "prompt_injection"),
+            mode=mode,
         )
         found: str | None = None
         # A refusal or an empty generation is asked once more, with the defensive framing.
-        for request in (None, DEFENSIVE_FRAMING):
+        again = DEFENSIVE_FRAMING if request is None else f"{request}\n\n{DEFENSIVE_FRAMING}"
+        for asked in (request, again):
             spending.reserve("attacker")
             try:
-                output = await self.service.simulate(context, prompt=request)
+                output = await self.service.simulate(context, prompt=asked)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:
@@ -281,8 +309,7 @@ class Engine:
                 spending.record(output.usage)
                 found = classify(output.attack)
                 if found is None:
-                    payload = apply_encoding(output.attack, attack.id) if attack.kind == "encoding" else output.attack
-                    return payload, {"policy_revision": output.policy_revision}
+                    return output.attack, {"policy_revision": output.policy_revision}
             spending.refusals += 1
         raise AttemptFailed(
             "attacker",
@@ -318,6 +345,18 @@ class Engine:
             content=reply.text,
             captured_at=datetime.now(UTC),
             metadata={"tool_calls": len(reply.tool_calls), "tool_calls_observed": reply.tool_calls_observed},
+        )
+        self.evidence[evidence.id] = evidence
+        return evidence
+
+    def _keep_trace(self, attempt_id: str, context: AttemptRun, outcome: str) -> Evidence:
+        """The method's record of an attempt: what it sent, what it was told and what ended it."""
+        evidence = Evidence(
+            id=f"{attempt_id}/method",
+            kind="trace",
+            source=f"method:{context.method.id}",
+            captured_at=datetime.now(UTC),
+            metadata=context.trace(outcome),
         )
         self.evidence[evidence.id] = evidence
         return evidence

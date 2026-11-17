@@ -1,6 +1,7 @@
 """Plan: expand a version 2 run file into probes, each with its checks fixed before the attack runs.
 
-One probe per vulnerability, type and attack method, with ``budget.attempts_per_probe`` attempts. A
+One probe per vulnerability, type and attack method, with ``budget.attempts_per_probe`` attempts. Each
+``attacks`` entry is resolved to its configured method (:mod:`martian.redteam.methods`). A
 vulnerability without checks is decided by the judge. The plan calls no model and loads no target.
 """
 
@@ -9,9 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from martian.redteam.methods import AttackMethod, MethodError, needs_attacker, resolve
 from martian.redteam.model import Check, Probe
 from martian.redteam.model.maps import objective_of, probe_id
-from martian.redteam.runfile import CheckDecl, RunFile, Vulnerability
+from martian.redteam.runfile import AttackSpec, CheckDecl, RunFile, Vulnerability
 from martian_redteam.catalog.attacks import Attack, get_attack
 from martian_redteam.catalog.vulnerabilities import Vulnerability as CatalogVulnerability
 from martian_redteam.catalog.vulnerabilities import get_vulnerability
@@ -23,12 +25,19 @@ class PlanError(ValueError):
 
 @dataclass(frozen=True)
 class PlannedProbe:
-    """A probe, and the catalogue entries it was planned from."""
+    """A probe, the catalogue entries it was planned from and the method that attacks it.
+    ``attack`` is the catalogue's entry for a version 0.2 method, and a stand-in for any other."""
 
     probe: Probe
     vulnerability: CatalogVulnerability
     attack: Attack
     severity: str | None = None
+    method: AttackMethod | None = None
+
+    @property
+    def attack_method(self) -> AttackMethod:
+        """The configured method; one planned without it is the catalogue method ``attack`` names."""
+        return self.method if self.method is not None else resolve(AttackSpec(name=self.attack.id))
 
     def attempt_ids(self) -> list[str]:
         return [attempt_id(self.probe.id, number) for number in range(1, self.probe.planned_attempts + 1)]
@@ -63,10 +72,23 @@ def _goal(spec: Vulnerability) -> str:
     return f"call {spec.goal.tool}" + (f" with {where}" if where else "")
 
 
+def _stand_in(method: AttackMethod, weight: float | None) -> Attack:
+    try:
+        return get_attack(method.id, weight=weight)
+    except KeyError:
+        if method.kind == "transform":
+            return Attack(id=method.id, label=method.label, kind="encoding", weight=weight or 1.0)
+        return Attack(id=method.id, label=method.label, kind="llm", weight=weight or 1.0)
+
+
 def plan(run_file: RunFile) -> list[PlannedProbe]:
     """Every probe of the run, in the run file's order."""
-    local = run_file.models.attacker is not None
-    attacks = [get_attack(item.name, weight=item.weight) for item in run_file.attacks]
+    try:
+        methods = [resolve(item) for item in run_file.attacks]
+    except MethodError as error:
+        raise PlanError(f"attacks: {error}") from None
+    local = run_file.models.attacker is not None or (run_file.models.judge is not None and not needs_attacker(run_file))
+    attacks = [(_stand_in(method, item.weight), method) for item, method in zip(run_file.attacks, methods, strict=True)]
     planned: list[PlannedProbe] = []
     for index, spec in enumerate(run_file.vulnerabilities):
         vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
@@ -75,25 +97,31 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
             raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
         for vulnerability_type in vulnerability.types or vulnerability.allowed_types:
-            for attack in attacks:
-                identifier = probe_id(vulnerability.id, vulnerability_type, attack.id)
+            for attack, method in attacks:
+                identifier = probe_id(vulnerability.id, vulnerability_type, method.id)
                 if any(item.probe.id == identifier for item in planned):
                     raise PlanError(f"vulnerabilities[{index}]: probe {identifier} is planned twice")
                 probe = Probe(
                     id=identifier,
                     vulnerability=vulnerability.id,
                     vulnerability_type=vulnerability_type,
-                    attack_method=attack.id,
+                    attack_method=method.id,
                     objective_class=spec.objective or objective_of(vulnerability.id),
                     goal=_goal(spec),
                     gated=vulnerability.gated,
                     criteria=vulnerability.criteria,
                     checks=checks,
                     planned_attempts=run_file.budget.attempts_per_probe,
-                    metadata={"severity": spec.severity, "attack_kind": attack.kind},
+                    metadata=_metadata(spec.severity, attack, method),
                 )
-                planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity))
+                planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity, method))
     return planned
+
+
+def _metadata(severity: str | None, attack: Attack, method: AttackMethod) -> dict[str, Any]:
+    if method.legacy:
+        return {"severity": severity, "attack_kind": attack.kind}
+    return {"severity": severity, "attack_kind": method.kind, "method": method.describe()}
 
 
 __all__ = ["PlanError", "PlannedProbe", "attempt_id", "plan"]

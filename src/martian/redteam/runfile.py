@@ -316,6 +316,16 @@ class Budget(_Model):
     max_concurrent: int = Field(default=2, ge=1, le=64)
 
 
+class AttackSpec(NamedSpec):
+    """An attack method of a version 2 run: by ``name``, as in version 0.2, with the transforms to
+    apply on top of what it sends (``layers``) and its own settings. ``id`` renames the method in
+    probe ids, so one method can run twice with other settings. ``docs/redteam-methods.md`` lists
+    each method and the settings it takes."""
+
+    layers: list[str] = Field(default_factory=list, max_length=4)
+    """Transforms applied, in order, to every attack the method sends, such as ``[Base64]``."""
+
+
 class Gate(_Model):
     """When the run fails. ``fail_on: confirmed`` fails on a finding at level 2 or above;
     ``suspected`` also fails on a finding a model judged only."""
@@ -338,7 +348,7 @@ class RunFile(_Model):
     target: Target
     models: Models = Field(default_factory=Models)
     vulnerabilities: list[Vulnerability] = Field(min_length=1)
-    attacks: list[NamedSpec] = Field(min_length=1)
+    attacks: list[AttackSpec] = Field(min_length=1)
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
@@ -349,6 +359,13 @@ class RunFile(_Model):
 
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        from martian.redteam.methods.registry import MethodError, resolve
+
+        for index, attack in enumerate(self.attacks):
+            try:
+                resolve(attack)
+            except MethodError as error:
+                raise ValueError(f"attacks[{index}]: {error}") from None
         for index, vulnerability in enumerate(self.vulnerabilities):
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
@@ -425,6 +442,7 @@ def problems(path: str | Path) -> list[str]:
 
 __all__ = [
     "VERSION",
+    "AttackSpec",
     "Budget",
     "CanaryCheck",
     "Gate",
