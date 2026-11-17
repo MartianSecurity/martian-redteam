@@ -13,7 +13,7 @@ need not be installed. Every mapping is listed in [red team interop](redteam-int
 | `redteam.provider`, which generates and grades | `models.attacker` and `models.judge`, called with your own key |
 | A plugin, such as `pii:direct` | A vulnerability and its types, such as `PIILeakage` `direct_disclosure` (`martian redteam catalog`) |
 | The `policy` plugin | A custom vulnerability with `criteria` |
-| A strategy, such as `base64` | An attack method, such as `Base64` |
+| A strategy, such as `base64` or `crescendo` | An attack method, such as `Base64` or `Escalation` ([attack methods](redteam-methods.md)) |
 | `numTests`, `maxConcurrency` | `budget.attempts_per_probe`, `budget.max_concurrent`; the budget also caps target queries, model calls, tokens, cost and time |
 | `promptfoo redteam generate`, then `eval` of the generated `redteam.yaml` | One `martian redteam run`: plan, attack and verify, with the run kept after every attempt and resumable. No generated test file |
 | The plugin's grader, a model reading the reply | A `judge` check, which is evidence level 1, suspected. Checks stated in advance decide on evidence: `text` and `canary` (level 2), `tool_call` (level 3) and `receipt` (level 4), confirmed ([verdicts](redteam-verdicts.md)) |
@@ -28,14 +28,15 @@ need not be installed. Every mapping is listed in [red team interop](redteam-int
 
 - **Configs convert** (`martian redteam convert promptfoo`): an HTTP target with a JSON body, its
   headers with `{{env.NAME}}`, a `json.…` response path; the purpose; an `openai:` provider; 27
-  plugins onto the catalogue's 12 vulnerabilities, and policies; `base64`, `rot13`, `leetspeak` and
-  `prompt-injection`; `numTests` and `maxConcurrency`.
+  plugins onto the catalogue's 12 vulnerabilities, and policies; the encodings, `prompt-injection`,
+  `citation`, `jailbreak:tree` (as `TreeSearch`), `crescendo` (as `Escalation`) and `best-of-n` (as
+  `Mutation`); `numTests` and `maxConcurrency`.
 - **Results import** (`martian redteam import promptfoo`) as runs in the local store that `martian ui`
   opens. Every hit stays suspected: promptfoo's grader is a model that read the reply.
 - **Not converted, and listed with the reason** in the command's output and at the top of the run
   file: plugins with no vulnerability in the catalogue (such as `bola`), dataset plugins, `intent`,
-  promptfoo's adaptive strategies (`jailbreak:meta`, `jailbreak:composite`, `jailbreak:tree`,
-  `crescendo`, `goat` and the rest), other transforms, media, request and response code
+  promptfoo's service-run strategies (`jailbreak:meta`, `jailbreak:composite`, `goat`,
+  `jailbreak:hydra` and the rest), other transforms, media, request and response code
   (`transformRequest`, `transformResponse` functions), session parsers, auth and TLS settings, and
   a promptfoo Python provider, which has another signature: give `--target FILE.py:FUNCTION`.
 - `basic` needs nothing: every attack method writes its own attack for the vulnerability. A config
@@ -57,11 +58,11 @@ martian redteam import promptfoo results.json
 ```
 
 1. The first command converts the config as it is: the HTTP target at `localhost:8300`, five
-   vulnerabilities and `Base64`. It lists `bola`, `basic`, `jailbreak:composite`, `crescendo` and
-   `language` as not converted.
+   vulnerabilities, `Base64` and `Escalation` (from `crescendo`). It lists `bola`, `basic`,
+   `jailbreak:composite` and `language` as not converted.
 2. `validate` checks the run file without calling anything.
-3. The second conversion attacks `agent.py`'s `reply` function instead, and adds `PromptInjection`,
-   since `basic` and promptfoo's adaptive strategies have no method here.
+3. The second conversion attacks `agent.py`'s `reply` function instead, and adds `PromptInjection`, a
+   single written attack in place of promptfoo's `basic` tests.
 4. `run` attacks the function with the model in `redteam.provider` (`openai:/gpt-4.1-mini`), with
    `OPENAI_API_KEY` and, for another endpoint, `OPENAI_API_BASE` set ([quickstart](redteam-quickstart.md#2-point-it-at-a-model)).
    Its findings are suspected, since the converted vulnerabilities have no checks stated in advance,

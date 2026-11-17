@@ -130,7 +130,7 @@ Everything above is Community, free and Apache-2.0, and stays free.
 | Attack generation and judging | Your own model, called with your key | Adds Martian's engine (`redteam_hosted_generation`) | Same as Enterprise |
 | Targets | Python function, HTTP endpoint, MCP server, through the recording proxy | Same, and agents registered in the console | Same as Enterprise |
 | Evidence | A model's verdict (level 1), text checks and canaries (2), tool calls (3), receipts on a local listener (4) | Adds the state of a Martian environment (level 5), in a run in an environment (`redteam_environments`) | Same as Enterprise |
-| Depth | Probe runs with a budget, resumed from the local store | Adds planned campaigns started from the console (`redteam_campaigns`) | Same as Enterprise |
+| Depth | Probe runs with fixed, written and adaptive [attack methods](redteam-methods.md) and a budget, resumed from the local store | Adds planned campaigns started from the console (`redteam_campaigns`) | Same as Enterprise |
 | Results | `martian ui`, one user; JSON, Markdown, HTML, CSV, SARIF and JUnit; findings with status, pins, comparison | The console | The console |
 | Interop | promptfoo configs and results, garak probes | Same | Same |
 | Limits | No limit | `concurrent_redteam_operations`: 2 hosted generation and judging operations at once | No limit |

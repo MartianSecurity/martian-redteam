@@ -116,32 +116,40 @@ STRATEGIES: dict[str, str] = {
     "base64": "Base64",
     "rot13": "ROT13",
     "leetspeak": "Leetspeak",
+    "hex": "Hex",
+    "homoglyph": "Homoglyph",
+    "morse": "Morse",
     "prompt-injection": "PromptInjection",
+    "citation": "Citation",
+    "jailbreak:tree": "TreeSearch",
+    "crescendo": "Escalation",
+    "best-of-n": "Mutation",
 }
-"""promptfoo strategy id → the catalogue attack method (its YAML name)."""
+"""promptfoo strategy id → the attack method (its YAML name, docs/redteam-methods.md)."""
+
+STRATEGY_SETTINGS: dict[str, dict[str, str]] = {
+    "crescendo": {"maxTurns": "max_turns", "maxBacktracks": "max_backtracks"},
+}
+"""A strategy's ``config`` keys that become its attack method's settings."""
 
 _ADAPTIVE = (
-    "an adaptive or model-written method; this release's attack methods are prompt injection, roleplay, "
-    "prompt probing and three encodings"
+    "an adaptive method that promptfoo runs on its own service, or one with no attack method here "
+    "(docs/redteam-methods.md)"
 )
-_TRANSFORM = "a transform with no attack method in the catalogue"
+_TRANSFORM = "a transform with no attack method here"
 STRATEGY_REASONS: dict[str, str] = {
     **dict.fromkeys(
         (
             "jailbreak",
             "jailbreak:meta",
-            "jailbreak:tree",
             "jailbreak:composite",
             "jailbreak:likert",
             "jailbreak:hydra",
             "jailbreak:goblin",
-            "crescendo",
             "goat",
             "custom",
             "mischievous-user",
-            "best-of-n",
             "gcg",
-            "citation",
             "math-prompt",
             "authoritative-markup-injection",
         ),
@@ -149,9 +157,6 @@ STRATEGY_REASONS: dict[str, str] = {
     ),
     **dict.fromkeys(
         (
-            "hex",
-            "homoglyph",
-            "morse",
             "piglatin",
             "camelcase",
             "emoji",
@@ -454,18 +459,24 @@ def _strategies(config: dict[str, Any], conversion: Conversion) -> list[dict[str
             expanded += [(member, {}) for member in DEFAULT_STRATEGIES]
         else:
             expanded.append((identifier, entry))
-    attacks: list[str] = []
+    attacks: dict[str, dict[str, Any]] = {}
     for identifier, entry in expanded:
         if identifier in STRATEGIES:
-            attacks.append(STRATEGIES[identifier])
+            attack = attacks.setdefault(STRATEGIES[identifier], {"name": STRATEGIES[identifier]})
             settings = (entry.get("config") or {}) if isinstance(entry, dict) else {}
             if "plugins" in settings:
                 conversion.notes.append(
                     f"strategy {identifier} applied to the plugins it lists; here {STRATEGIES[identifier]} "
                     "applies to every vulnerability"
                 )
+            mapped = STRATEGY_SETTINGS.get(identifier, {})
             for setting in sorted(set(settings) - {"plugins", "enabled"}):
-                conversion.skipped.append((f"strategy {identifier} config.{setting}", "the attack has no settings"))
+                if setting in mapped and isinstance(settings[setting], int) and settings[setting] >= 1:
+                    attack[mapped[setting]] = settings[setting]
+                else:
+                    conversion.skipped.append(
+                        (f"strategy {identifier} config.{setting}", "the attack method has no such setting")
+                    )
         elif identifier.startswith("file://"):
             conversion.skipped.append(
                 (f"strategy {identifier}", "custom JavaScript, which this converter does not run")
@@ -473,7 +484,7 @@ def _strategies(config: dict[str, Any], conversion: Conversion) -> list[dict[str
         else:
             reason = STRATEGY_REASONS.get(identifier, "no attack method in the catalogue covers it")
             conversion.skipped.append((f"strategy {identifier}", reason))
-    return [{"name": name} for name in dict.fromkeys(attacks)]
+    return list(attacks.values())
 
 
 def convert_config(
@@ -637,7 +648,9 @@ def plugin_of(row: PromptfooResult) -> str | None:
 def _probe_names(plugin: str, strategy: str) -> tuple[str, str, str]:
     """The probe's vulnerability, type and attack method: the catalogue's when they map, else promptfoo's
     ids under ``promptfoo:``."""
-    from martian_redteam.catalog import get_attack, get_vulnerability
+    from martian.redteam.methods.registry import resolve
+    from martian.redteam.runfile import AttackSpec
+    from martian_redteam.catalog import get_vulnerability
 
     if plugin in PLUGINS:
         name, types = PLUGINS[plugin]
@@ -647,7 +660,7 @@ def _probe_names(plugin: str, strategy: str) -> tuple[str, str, str]:
         vulnerability_id, kind = "promptfoo:policy", "custom"
     else:
         vulnerability_id, kind = f"promptfoo:{plugin}", "promptfoo"
-    method = get_attack(STRATEGIES[strategy]).id if strategy in STRATEGIES else f"promptfoo:{strategy}"
+    method = resolve(AttackSpec(name=STRATEGIES[strategy])).id if strategy in STRATEGIES else f"promptfoo:{strategy}"
     return vulnerability_id, kind, method
 
 

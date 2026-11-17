@@ -28,6 +28,9 @@
       "src/martian_redteam/*.yml",
       "src/martian_redteam/*.parquet"
     ],
+    "delegated": [
+      {"glob": "src/martian/redteam/methods/prompts/*", "register": "src/martian/redteam/methods/prompts/register.json", "reason": "The attack methods' prompt files have their own register (files: licence, source, references), which tests/redteam/test_method_prompts.py also checks; a file listed there with a permitted licence and a source is covered here."}
+    ],
     "not_content": [
       {"glob": "src/martian/redteam/server/contract/*.json", "reason": "The /v1/redteam API contract: a schema, not attack content."}
     ]
@@ -45,6 +48,18 @@
     {"path": "src/martian/redteam/verify/canary.py", "kind": "phrases", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The confidential note a context canary is planted in."},
     {"path": "src/martian/redteam/verify/selftest.py", "kind": "test-vectors", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The self-test's deliberately vulnerable target and its scripted attacks."},
     {"path": "src/martian/redteam/verify/vectors.json", "kind": "test-vectors", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The verdict rules' test vectors."},
+    {"path": "src/martian/redteam/methods/__init__.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack methods package."},
+    {"path": "src/martian/redteam/methods/base.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack method interface and its budget."},
+    {"path": "src/martian/redteam/methods/delivery.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Delivery of an attack: direct, or planted for the agent to read."},
+    {"path": "src/martian/redteam/methods/escalation.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Multi-turn escalation with backtracking, written here; modelled on the published Crescendo idea, no code copied."},
+    {"path": "src/martian/redteam/methods/library.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Loads the prompt files and their register."},
+    {"path": "src/martian/redteam/methods/mutation.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Mutation of templates, written here."},
+    {"path": "src/martian/redteam/methods/registry.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack method registry and aliases."},
+    {"path": "src/martian/redteam/methods/rewrites.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Model-written rewrites of an attack."},
+    {"path": "src/martian/redteam/methods/search.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "PAIR-style refinement and TAP-style tree search, written here; the reference code of both is MIT and was not copied."},
+    {"path": "src/martian/redteam/methods/templates.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Fixed templates, the control arm."},
+    {"path": "src/martian/redteam/methods/transforms.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Static transforms (encodings and the like), written here from their definitions."},
+    {"path": "src/martian/redteam/methods/prompts/register.json", "kind": "register", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack methods' prompt register, delegated to from this one."},
     {"path": "src/martian/redteam/interop/__init__.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "No content."},
     {"path": "src/martian/redteam/interop/cli.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "No content."},
     {"path": "src/martian/redteam/interop/promptfoo.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security; promptfoo plugin and strategy identifiers (MIT)", "commercial_use": true, "notes": "Names promptfoo's identifiers to map them onto the catalogue. No promptfoo code, prompt or grader rubric is included."},

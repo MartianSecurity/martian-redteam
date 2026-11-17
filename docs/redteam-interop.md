@@ -63,8 +63,15 @@ do not convert.
 
 | promptfoo strategy | Attack method |
 | --- | --- |
-| `base64`, `rot13`, `leetspeak` | `Base64`, `ROT13`, `Leetspeak` |
+| `base64`, `rot13`, `leetspeak`, `hex`, `homoglyph`, `morse` | `Base64`, `ROT13`, `Leetspeak`, `Hex`, `Homoglyph`, `Morse` |
 | `prompt-injection` | `PromptInjection` |
+| `citation` | `Citation` |
+| `jailbreak:tree` | `TreeSearch` |
+| `crescendo`, with `maxTurns` and `maxBacktracks` | `Escalation`, with `max_turns` and `max_backtracks` |
+| `best-of-n` | `Mutation` |
+
+The [attack methods](redteam-methods.md) say what each one does and spends; promptfoo's and ours
+are written independently, so the same name is the same idea, not the same prompts.
 
 Listed, not converted:
 
@@ -78,8 +85,8 @@ Listed, not converted:
 | `file://` plugins and strategies | Custom prompts or JavaScript; write a custom vulnerability with `criteria` |
 | `basic` | promptfoo's plain plugin tests. Every attack method here writes its own attack, so it needs no method of its own |
 | `default` strategy, or no `strategies` | promptfoo's `basic`, `jailbreak:meta` and `jailbreak:composite`; none converts, so give `--attack` |
-| `jailbreak`, `jailbreak:meta`, `jailbreak:tree`, `jailbreak:composite`, `crescendo`, `goat`, `jailbreak:hydra`, `best-of-n`, `math-prompt` and other adaptive or model-written strategies | This release's attack methods are prompt injection, roleplay, prompt probing and three encodings |
-| `hex`, `homoglyph`, `morse`, `jailbreak-templates`, `multilingual` and other transforms | No attack method in the catalogue |
+| `jailbreak`, `jailbreak:meta`, `jailbreak:composite`, `jailbreak:likert`, `goat`, `jailbreak:hydra`, `math-prompt` and other model-written strategies | promptfoo runs most of them on its own service; none has an attack method here |
+| `piglatin`, `camelcase`, `emoji`, `jailbreak-templates`, `multilingual` and other transforms | No attack method here |
 | `image`, `audio`, `video` | Targets here take text |
 | `layer`, `retry` | Convert each layered strategy; pin confirmed findings with `martian redteam pin add` instead of `retry` |
 | A plugin's or strategy's other `config` keys, and `language`, `frameworks`, `entities`, `contexts`, `testGenerationInstructions`, `graderExamples`, `delay`, `tracing` | The run file has no such setting |

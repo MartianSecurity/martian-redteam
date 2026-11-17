@@ -3,7 +3,7 @@
 The register is ``src/martian/redteam/catalog/licences.json``. A content file is a file Git tracks that
 matches one of ``content.globs`` and none of ``content.not_content``. The check fails when:
 
-- a content file has no entry;
+- a content file has no entry, here or in a register ``content.delegated`` names for its folder;
 - an entry names a file that is not tracked, or names one twice;
 - an entry's licence is not in ``permitted``, or it does not allow commercial use, or names no source;
 - a source marked ``shipped`` has a licence outside ``permitted`` or does not allow commercial use.
@@ -47,8 +47,22 @@ def content_files(files: Iterable[str], register: Mapping[str, Any]) -> list[str
     ]
 
 
-def check(files: Iterable[str], register: Mapping[str, Any]) -> list[str]:
-    """One line per problem; empty when the register covers every content file of ``files``."""
+def _delegated(register: Mapping[str, Any], root: Path) -> dict[str, Mapping[str, Any]]:
+    """The entries of the registers ``content.delegated`` names, by path, for the files their glob matches."""
+    found: dict[str, Mapping[str, Any]] = {}
+    for item in register["content"].get("delegated", []):
+        other = Path(item["register"])
+        listed = json.loads((root / other).read_text(encoding="utf-8"))["files"]
+        for name, entry in listed.items():
+            path = (other.parent / name).as_posix()
+            if fnmatch.fnmatchcase(path, item["glob"]):
+                found[path] = entry
+    return found
+
+
+def check(files: Iterable[str], register: Mapping[str, Any], root: Path = ROOT) -> list[str]:
+    """One line per problem; empty when the register covers every content file of ``files``. A file a
+    delegated register lists is covered by its entry there."""
     files = list(files)
     permitted = set(register["permitted"])
     problems: list[str] = []
@@ -68,7 +82,15 @@ def check(files: Iterable[str], register: Mapping[str, Any]) -> list[str]:
             problems.append(f"{path}: its licence must allow commercial use to ship")
         if not str(entry.get("source") or "").strip():
             problems.append(f"{path}: names no source")
+    delegated = _delegated(register, root)
     for path in content_files(files, register):
+        if path in delegated:
+            entry = delegated[path]
+            if entry.get("licence") not in permitted:
+                problems.append(f"{path}: licence {entry.get('licence')!r} in its delegated register is not permitted")
+            if not str(entry.get("source") or "").strip():
+                problems.append(f"{path}: its delegated register names no source")
+            continue
         if path not in entries:
             problems.append(
                 f"{path}: content with no entry in {REGISTER.relative_to(ROOT)}; add its licence, source and "

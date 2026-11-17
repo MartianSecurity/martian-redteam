@@ -621,7 +621,9 @@ file (`.json`, `.jsonl`, `.csv`, `.txt`, `.yaml`, `.parquet`) under `martian/red
 `martian_redteam`, less the API contract. `scripts/content_licences.py` fails when a content file has
 no entry, an entry names a file that is gone, or an entry's licence is not permitted or does not allow
 commercial use; `tests/redteam/test_content_licences.py` runs it in CI. New content needs its entry
-in the same change.
+in the same change. The attack methods' prompt files keep their own register
+(`martian/redteam/methods/prompts/register.json`, with each file's references), which the content
+register delegates to (`content.delegated`): a file listed there is covered on the same terms.
 
 The register also lists sources that do not ship. BeaverTails (CC BY-NC 4.0) and Do-Not-Answer
 (non-commercial) may not enter the package, and neither may text derived from the OWASP Machine

@@ -79,3 +79,25 @@ def test_the_register_ships_in_the_package():
 
     text = resources.files("martian.redteam.catalog").joinpath("licences.json").read_text(encoding="utf-8")
     assert json.loads(text)["version"] == 1
+
+
+def test_a_delegated_register_covers_its_folder_on_the_same_terms(tmp_path):
+    """The attack methods' prompt files are covered by their own register, held to this one's licences."""
+    register = copy.deepcopy(REGISTER)
+    [delegated] = register["content"]["delegated"]
+    methods = json.loads((ROOT / delegated["register"]).read_text(encoding="utf-8"))
+    files = content_licences.tracked()
+    assert "src/martian/redteam/methods/prompts/templates-v1.json" in content_licences.content_files(files, REGISTER)
+    assert content_licences.check(files, REGISTER) == []
+    # A prompt file its register does not list, and one under a licence this register does not permit.
+    methods["files"]["templates-v1.json"]["licence"] = "CC-BY-SA-4.0"
+    other = tmp_path / delegated["register"]
+    other.parent.mkdir(parents=True)
+    other.write_text(json.dumps(methods))
+    problems = content_licences.check([*files, "src/martian/redteam/methods/prompts/new.md"], register, root=tmp_path)
+    assert sorted(problems) == [
+        "src/martian/redteam/methods/prompts/new.md: content with no entry in "
+        "src/martian/redteam/catalog/licences.json; add its licence, source and commercial use",
+        "src/martian/redteam/methods/prompts/templates-v1.json: licence 'CC-BY-SA-4.0' in its delegated register is "
+        "not permitted",
+    ]

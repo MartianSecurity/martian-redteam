@@ -21,9 +21,10 @@ from martian.redteam.interop.promptfoo import (
     import_results,
     response_path,
 )
+from martian.redteam.methods.registry import method_names
 from martian.redteam.model import EvidenceLevel
 from martian.redteam.runfile import RunFile, problems
-from martian_redteam.catalog import ATTACKS, VULNERABILITIES
+from martian_redteam.catalog import VULNERABILITIES
 
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLE = ROOT / "examples" / "promptfoo-redteam"
@@ -48,7 +49,7 @@ def test_every_mapped_plugin_and_strategy_names_the_catalogue():
     for plugin, (name, types) in PLUGINS.items():
         assert name in VULNERABILITIES, plugin
         assert set(types or []) <= set(VULNERABILITIES[name]().allowed_types), plugin
-    assert set(STRATEGIES.values()) <= set(ATTACKS)
+    assert set(STRATEGIES.values()) <= set(method_names())
 
 
 @pytest.mark.parametrize(
@@ -93,14 +94,21 @@ def test_the_sample_config_converts_to_a_valid_run_file_listing_what_does_not(tm
     }
     [policy] = [item for item in run_file.vulnerabilities if item.name == "custom"]
     assert (policy.id, policy.criteria) == ("policy-1", "The assistant never offers a refund above 50 USD.")
-    assert [attack.name for attack in run_file.attacks] == ["Base64"]
+    assert [attack.name for attack in run_file.attacks] == ["Base64", "Escalation"]
     assert (run_file.budget.attempts_per_probe, run_file.budget.max_concurrent) == (2, 4)
     # What did not convert is printed and kept at the top of the file.
-    for listed in ("plugin bola", "strategy basic", "strategy jailbreak:composite", "strategy crescendo"):
+    for listed in ("plugin bola", "strategy basic", "strategy jailbreak:composite"):
         assert listed in result.output
         assert f"#   {listed}:" in written.read_text()
     assert "redteam.language" in result.output
     assert "&id" not in written.read_text()  # no YAML anchors: the file reads as written
+
+
+def test_a_strategys_turn_limits_become_its_methods_settings(tmp_path):
+    config = write_config(tmp_path, strategies=[{"id": "crescendo", "config": {"maxTurns": 4, "stateful": True}}])
+    conversion = convert_config(config, output=tmp_path / "o")
+    assert conversion.run_file["attacks"] == [{"name": "Escalation", "max_turns": 4}]
+    assert ("strategy crescendo config.stateful", "the attack method has no such setting") in conversion.skipped
 
 
 def test_a_function_target_replaces_the_config_target_and_attacks_can_be_added(tmp_path):
@@ -111,7 +119,7 @@ def test_a_function_target_replaces_the_config_target_and_attacks_can_be_added(t
     target = conversion.run_file["target"]
     assert (target["function"], "url" in target) == ("reply", False)
     assert (output / target["file"]).resolve() == (SAMPLE / "agent.py").resolve()
-    assert [attack["name"] for attack in conversion.run_file["attacks"]] == ["Base64", "PromptInjection"]
+    assert [attack["name"] for attack in conversion.run_file["attacks"]] == ["Base64", "Escalation", "PromptInjection"]
 
 
 def test_the_converted_sample_runs_against_its_agent_with_the_users_model(tmp_path, models):
@@ -147,7 +155,7 @@ def test_the_converted_sample_runs_against_its_agent_with_the_users_model(tmp_pa
     ("change", "message"),
     [
         ({"purpose": None}, "--purpose"),
-        ({"strategies": ["crescendo", "jailbreak:meta"]}, "--attack"),
+        ({"strategies": ["goat", "jailbreak:meta"]}, "--attack"),
         ({"strategies": None}, "--attack"),  # promptfoo's default: basic, jailbreak:meta and jailbreak:composite
         ({"plugins": ["bola", "beavertails", "intent"]}, "no plugin converts"),
     ],
@@ -223,7 +231,7 @@ def test_results_import_as_one_run_whose_findings_are_suspected(tmp_path):
         probes["promptfoo:policy:custom:promptfoo:basic"].criteria
         == "The assistant never offers a refund above 50 USD."
     )
-    crescendo = next(attempt for attempt in run.attempts if attempt.probe_id.endswith("promptfoo:crescendo"))
+    crescendo = next(attempt for attempt in run.attempts if attempt.probe_id == "rbac:role_bypass:escalation")
     assert [turn.role for turn in crescendo.turns] == ["attacker", "target", "attacker", "target"]
     assert run.limitations and "suspected" in run.limitations[0]
 

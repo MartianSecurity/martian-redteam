@@ -36,7 +36,7 @@ def test_the_guides_commands_work_on_the_sample_project(tmp_path, models, monkey
         result = runner.invoke(app, words[1:])
         assert result.exit_code == 0, f"{' '.join(words)}\n{result.output}"
         outputs.append(result.output)
-    for listed in ("plugin bola", "strategy basic", "strategy jailbreak:composite", "strategy crescendo"):
+    for listed in ("plugin bola", "strategy basic", "strategy jailbreak:composite"):
         assert listed in outputs[0]
     run = RedteamRun.model_validate_json((tmp_path / "sample" / "results" / "redteam-run.json").read_text())
     assert run.findings and {finding.evidence_level for finding in run.findings} == {EvidenceLevel.JUDGED}
