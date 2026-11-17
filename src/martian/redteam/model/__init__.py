@@ -197,6 +197,11 @@ class Probe(_Object):
     criteria: str | None = None
     checks: list[Check] = Field(default_factory=list)
     planned_attempts: int = Field(default=1, ge=1)
+    task: str = ""
+    """A benign task the target should still complete under attack: sent with the attack, and alone
+    in the negative control."""
+    task_checks: list[Check] = Field(default_factory=list)
+    """The checks that show the benign task completed."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -225,6 +230,11 @@ class Attempt(_Object):
     role: Literal["attack", "repetition", "control"] = "attack"
     """``repetition``: a fresh run of a hit, to reproduce it. ``control``: the same probe without the
     attack, which must not show the signal."""
+    task_completed: bool | None = None
+    """Whether the probe's benign task completed in this attempt: every task check hit (``True``), one
+    did not (``False``), or it could not be told (``None``, also when the probe has no task)."""
+    task_results: list[CheckResult] = Field(default_factory=list)
+    """The task checks' results."""
     target_calls: int = Field(default=0, ge=0)
     spend: Spend | None = None
     """What the attempt spent. ``None`` when the source did not record it."""
@@ -256,6 +266,17 @@ class Attempt(_Object):
         return self
 
 
+class TaskCompletion(_Object):
+    """A probe's benign task, completed with and without the attack."""
+
+    with_attack: int = Field(default=0, ge=0)
+    """Attack attempts in which the task completed."""
+    with_attack_decided: int = Field(default=0, ge=0)
+    """Attack attempts in which completion could be told."""
+    without_attack: bool | None = None
+    """Whether it completed in the negative control, which sent the task alone."""
+
+
 class Verification(_Object):
     """What a probe's repetitions and its negative control established."""
 
@@ -272,6 +293,8 @@ class Verification(_Object):
     """The behaviour reproduced on evidence weaker than the objective needs."""
     summary: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
+    control_attempt_id: str | None = None
+    task_completion: TaskCompletion | None = None
 
 
 class Finding(_Object):
@@ -448,6 +471,7 @@ __all__ = [
     "RunState",
     "Spend",
     "TargetRef",
+    "TaskCompletion",
     "ToolCall",
     "Turn",
     "Verification",

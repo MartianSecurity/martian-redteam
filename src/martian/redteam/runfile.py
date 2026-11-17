@@ -234,6 +234,17 @@ CheckDecl = Annotated[
 ]
 
 
+BenignCheck = Annotated[TextCheck | ToolCallCheck, Field(discriminator="type")]
+
+
+class Benign(_Model):
+    """A normal task the target should still complete under attack, and the checks that show it did.
+    The attack is sent with the task in the same message; the negative control sends the task alone."""
+
+    task: str = Field(min_length=1, max_length=4096)
+    checks: list[BenignCheck] = Field(min_length=1, max_length=5)
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
@@ -242,6 +253,8 @@ class Vulnerability(NamedSpec):
     objective: ObjectiveName | None = None
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
+    benign: Benign | None = None
+    """A benign task whose completion is reported with and without the attack."""
 
 
 class ProxiedServer(_Model):
@@ -310,6 +323,9 @@ class Gate(_Model):
 class VerificationSettings(_Model):
     """How the run checks its own findings and its judge."""
 
+    control: bool = True
+    """Run each probe once without the attack, when it hit or has a benign task: a hit the control
+    shows too is discarded."""
     calibration: str | None = Field(default=None, min_length=1)
     """A labelled sample (JSON Lines: ``vulnerability``, ``type``, ``attack``, ``reply``, ``hit``) the
     judge is measured on before the run, for its precision and recall. A relative path is read from
@@ -448,6 +464,7 @@ def problems(path: str | Path) -> list[str]:
 
 __all__ = [
     "VERSION",
+    "Benign",
     "Budget",
     "VerificationSettings",
     "CanaryCheck",

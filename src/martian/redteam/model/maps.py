@@ -73,6 +73,9 @@ def probe_id(vulnerability: str, vulnerability_type: str, attack_method: str) ->
 
 
 def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> Counts:
+    """The run's counts. Attempts are its attacks; repetitions and controls are reported in its
+    verifications."""
+    run_attempts = [attempt for attempt in run_attempts if attempt.role == "attack"]
     outcomes = Counter(attempt.outcome for attempt in run_attempts)
     kinds = Counter(attempt.error_kind for attempt in run_attempts if attempt.outcome == "error")
     return Counts(
@@ -97,12 +100,18 @@ def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> C
 def findings_of(
     probes: Sequence[Probe], attempts: Sequence[Attempt], verifications: Sequence[Verification]
 ) -> list[Finding]:
-    """One finding per probe whose attempts hit, at the highest level they reached."""
+    """One finding per probe whose attacks hit, at the highest level they reached. A probe whose
+    negative control showed the same signal has no finding: the target did it without the attack."""
     outcome = {item.probe_id: item.outcome for item in verifications}
+    discarded = {item.probe_id for item in verifications if item.negative_control_passed is False}
     found: list[Finding] = []
     for probe in probes:
-        hits = [attempt for attempt in attempts if attempt.probe_id == probe.id and attempt.outcome == "hit"]
-        if not hits:
+        hits = [
+            attempt
+            for attempt in attempts
+            if attempt.probe_id == probe.id and attempt.outcome == "hit" and attempt.role == "attack"
+        ]
+        if not hits or probe.id in discarded:
             continue
         top = max(attempt.level for attempt in hits if attempt.level is not None)
         executed = any(

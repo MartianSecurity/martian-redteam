@@ -7,13 +7,13 @@
 | Object | What it is |
 | --- | --- |
 | `RedteamRun` | One run: an SDK probe run, a local run or a hosted campaign. It holds the rest |
-| `Probe` | One planned test: vulnerability, type, attack method, objective class, goal and the checks fixed before the attack |
+| `Probe` | One planned test: vulnerability, type, attack method, objective class, goal and the checks fixed before the attack, and a benign `task` with its `task_checks` |
 | `Check` | A rule stated before the attack: `judge`, `text`, `canary`, `tool_call`, `receipt` or `state` |
-| `Attempt` | One execution of a probe: what the attacker wrote (`input`) and what the harness planted with it (`planted`, such as the note holding the run's canary), its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control` |
+| `Attempt` | One execution of a probe: what the attacker wrote (`input`) and what the harness planted with it (`planted`, such as the note holding the run's canary), its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control`, with ids `probe#n`, `probe#r<n>` and `probe#control`. `task_completed` and `task_results` say whether the probe's benign task completed in it |
 | `Turn`, `ToolCall` | A message of the conversation, and a tool call in it with its arguments and whether it ran |
 | `CheckResult` | One check's result on one attempt: a hit, no hit, or undetermined, the level it supports, its `source` (`rule`, `judge:<model>`, `judge:service`, `listener` or `server`) and the `verifier` version that decided it |
 | `Evidence` | Raw evidence captured at a trusted boundary: a reply, a tool call, a receipt, a state diff |
-| `Verification` | What a probe's repetitions and negative control established |
+| `Verification` | What a probe's repetitions and negative control established: its outcome, `successful_reproductions` of `repetitions`, `negative_control_passed`, the control's attempt (`control_attempt_id`) and the benign task's completion with and without the attack (`task_completion`: `with_attack` of `with_attack_decided` attack attempts, and `without_attack`) |
 | `Finding` | What a run reports for a probe that hit, with its level, label, how it is counted (`counted_as`: `confirmed`, `attempted` or `suspected`), status and annotations |
 | `Counts` | Attempts by outcome and errors by class, and findings confirmed (level 2 and above), attempted (a tool call that matched the goal but is not known to have run) and suspected (level 1), never summed. `decided` is hits plus resisted, and `hit_rate` is hits over decided attempts. `generations` and `refusals` give the attacker's `refusal_rate` |
 

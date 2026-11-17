@@ -510,10 +510,16 @@ def verify(
             reason=reason,
         )
 
+    if require_control and control_passed is False:
+        # The target did it without the attack: whatever the repetitions show, the attack did not cause it.
+        status: ReproductionStatus = (
+            "state_dependent" if successes else ("not_reproduced" if repetitions else "untested")
+        )
+        return verdict("not_reproducible", status, "the negative control showed the same signal")
     if not repetitions:
         return verdict("unverifiable", "untested", "no repetition ran")
     if undecided:
-        status: ReproductionStatus = "state_dependent" if successes else "untested"
+        status = "state_dependent" if successes else "untested"
         return verdict("unverifiable", status, "a repetition was undetermined or did not complete")
     if successes == 0:
         if judged:
@@ -527,8 +533,6 @@ def verify(
         )
     if require_control and control_passed is None:
         return verdict("unverifiable", "state_dependent", "the negative control was undetermined or did not run")
-    if require_control and control_passed is False:
-        return verdict("not_reproducible", "state_dependent", "the negative control showed the same signal")
     assert tier is not None
     if TIER_RANK[tier] < TIER_RANK[REQUIRED_TIER[objective]]:
         return verdict(

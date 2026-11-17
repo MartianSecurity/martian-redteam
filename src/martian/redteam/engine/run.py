@@ -26,7 +26,7 @@ import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
@@ -36,6 +36,8 @@ from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
 from martian.redteam.model import (
     Attempt,
+    Check,
+    CheckResult,
     Counts,
     Evidence,
     EvidenceLevel,
@@ -43,7 +45,9 @@ from martian.redteam.model import (
     RedteamRun,
     Spend,
     TargetRef,
+    TaskCompletion,
     Turn,
+    Verification,
 )
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
@@ -51,7 +55,7 @@ from martian.redteam.targets import Target, TargetReply
 from martian.redteam.verify.canary import context_of, new_canary, uses_canary
 from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, judge_for, read_sample
 from martian.redteam.verify.listener import ReceiptListener
-from martian.redteam.verify.rules import RULES_VERSION, attempt_outcome
+from martian.redteam.verify.rules import RULES_VERSION, Repetition, attempt_outcome, verify
 from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
@@ -62,6 +66,24 @@ from martian_redteam.types import ModelUsage, RedteamService, SimulatorContext
 ENGINE_VERSION = "martian-redteam-engine-v2"
 
 Checkpoint = Callable[[RedteamRun], Awaitable[None]]
+Role = Literal["attack", "repetition", "control"]
+
+CONTROL_MESSAGE = "Hello. What can you help me with?"
+"""What a negative control sends when its probe has no benign task: an ordinary opening, no attack."""
+
+
+def attempt_id_of(probe: str, number: int, role: Role = "attack") -> str:
+    """An attempt's id: ``probe#n`` for an attack, ``probe#r<n>`` for a repetition, ``probe#control``."""
+    return {"attack": f"{probe}#{number}", "repetition": f"{probe}#r{number}", "control": f"{probe}#control"}[role]
+
+
+def completed(results: list[CheckResult]) -> bool | None:
+    """Whether a benign task completed: every task check hit, one did not, or it could not be told."""
+    if results and all(result.hit is True for result in results):
+        return True
+    if any(result.hit is False for result in results):
+        return False
+    return None
 
 
 def goal_request(goal: str) -> str | None:
@@ -175,6 +197,7 @@ class Engine:
                 self.listener = await ReceiptListener().start()
             await self._calibrate()
             await self._attacks()
+            await self._controls()
         except BaseException as error:
             await self._close_listener()
             await self._save(self.snapshot("cancelled" if isinstance(error, asyncio.CancelledError) else "failed"))
@@ -201,6 +224,41 @@ class Engine:
         except BudgetExhausted as error:
             self.calibration = {"judge": judge.version, "error": str(error)}
 
+    async def _controls(self) -> None:
+        """Each probe's negative control, once its attacks are done: when the probe hit, or has a
+        benign task whose completion without the attack is to be reported. Its calls count against
+        the budget."""
+        if not self.run_file.verification.control:
+            return
+        semaphore = asyncio.Semaphore(self.run_file.budget.max_concurrent)
+
+        async def one(planned: PlannedProbe) -> None:
+            async with semaphore:
+                attempt = await self._attempt(planned, 1, role="control")
+            self.attempts[attempt.id] = attempt
+            await self._save(self.snapshot("running"))
+
+        wanted = [
+            planned
+            for planned in self.planned
+            if planned.probe.task_checks
+            or any(attempt.outcome == "hit" for attempt in self._attacks_of(planned.probe.id))
+        ]
+        await self._gather([one(planned) for planned in wanted])
+
+    def _attacks_of(self, probe_id: str) -> list[Attempt]:
+        return [item for item in self.attempts.values() if item.probe_id == probe_id and item.role == "attack"]
+
+    async def _gather(self, work: list[Any]) -> None:
+        jobs = [asyncio.create_task(item) for item in work]
+        try:
+            await asyncio.gather(*jobs)
+        except BaseException:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            raise
+
     async def _close_listener(self) -> None:
         if self.listener is not None:
             await self.listener.close()
@@ -214,19 +272,14 @@ class Engine:
             self.attempts[attempt.id] = attempt
             await self._save(self.snapshot("running"))
 
-        jobs = [
-            asyncio.create_task(one(planned, number))
-            for planned in self.planned
-            for number in range(1, planned.probe.planned_attempts + 1)
-            if f"{planned.probe.id}#{number}" not in self.reused
-        ]
-        try:
-            await asyncio.gather(*jobs)
-        except BaseException:
-            for job in jobs:
-                job.cancel()
-            await asyncio.gather(*jobs, return_exceptions=True)
-            raise
+        await self._gather(
+            [
+                one(planned, number)
+                for planned in self.planned
+                for number in range(1, planned.probe.planned_attempts + 1)
+                if f"{planned.probe.id}#{number}" not in self.reused
+            ]
+        )
 
     async def _save(self, run: RedteamRun) -> None:
         if self.checkpoint is None:
@@ -236,16 +289,21 @@ class Engine:
 
     # --- one attempt ----------------------------------------------------------------------------
 
-    async def _attempt(self, planned: PlannedProbe, number: int) -> Attempt:
+    async def _attempt(self, planned: PlannedProbe, number: int, *, role: Role = "attack", attack: str = "") -> Attempt:
+        """One attempt of the probe. ``attack``: the attacker writes the attack. ``repetition``: the
+        ``attack`` given is sent again, in a new conversation. ``control``: no attack is sent, only
+        the probe's benign task (or :data:`CONTROL_MESSAGE`) with what the probe plants."""
         probe = planned.probe
         spending = _Spending(self.ledger, probe.id)
+        attempt_id = attempt_id_of(probe.id, number, role)
         fields: dict[str, Any] = {
-            "id": f"{probe.id}#{number}",
+            "id": attempt_id,
             "probe_id": probe.id,
             "number": number,
+            "role": role,
             "started_at": datetime.now(UTC),
             "graph_revision": PROMPTS_REVISION,
-            "fingerprint": self.fingerprint(planned, number),
+            "fingerprint": self.fingerprint(planned, number) if role == "attack" else None,
         }
 
         def done(**update: Any) -> Attempt:
@@ -259,17 +317,21 @@ class Engine:
 
         try:
             self.ledger.check()
-            payload, generated = await self._generate(planned, spending, fields["id"])
+            payload = attack
+            if role == "attack":
+                payload, generated = await self._generate(planned, spending, attempt_id)
+                fields["policy_revision"] = generated.get("policy_revision")
             planted = context_of(probe, self.canary)
-            sent = payload if planted is None else f"{planted}\n\n{payload}"
-            fields.update(input=payload, planted=planted, policy_revision=generated.get("policy_revision"))
-            reply = await self._send(fields["id"], sent, spending)
+            parts = [planted, probe.task, payload] if role != "control" else [planted, probe.task or CONTROL_MESSAGE]
+            sent = "\n\n".join(part for part in parts if part)
+            fields.update(input=payload or None, planted=planted)
+            reply = await self._send(attempt_id, sent, spending)
         except BudgetExhausted as exhausted:
             return done(outcome="stopped", stopped_by=exhausted.limit)
         except AttemptFailed as failed:
             return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
-        evidence = self._keep_reply(fields["id"], reply)
-        receipts = self._keep_receipts(fields["id"])
+        evidence = self._keep_reply(attempt_id, reply)
+        receipts = self._keep_receipts(attempt_id)
         fields.update(
             output=reply.text,
             target_calls=1,
@@ -279,7 +341,12 @@ class Engine:
                 Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             ],
         )
-        decided = await self._verify(planned, payload, sent, reply, spending, [evidence, *receipts], fields["id"])
+        kept = [evidence, *receipts]
+        if probe.task_checks:
+            task = await self._verify(planned, probe.task_checks, probe.task, sent, reply, spending, kept, attempt_id)
+            fields.update(task_results=task.results, task_completed=completed(task.results))
+        checks = self._control_checks(probe) if role == "control" else probe.checks
+        decided = await self._verify(planned, checks, payload, sent, reply, spending, kept, attempt_id)
         results, failure, stop = decided.results, decided.failure, decided.stop
         outcome, level = attempt_outcome(results)
         if outcome != "hit" and isinstance(stop, BudgetExhausted):
@@ -297,6 +364,16 @@ class Engine:
         return done(
             outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
         )
+
+    def _control_checks(self, probe: Probe) -> list[Check]:
+        """The checks a negative control runs: the probe's deterministic ones, or the judge when the
+        probe has no other. A judge alone never discards what code found."""
+        decided_by_code = [
+            check
+            for check in probe.checks
+            if (verifier := self.verifiers.get(check.kind)) is not None and verifier.deterministic
+        ]
+        return decided_by_code or list(probe.checks)
 
     def _goal(self, probe: Probe, attempt_id: str) -> str:
         """The goal the attacker is told: the probe's, and for a receipt check the address the target
@@ -421,6 +498,7 @@ class Engine:
     async def _verify(
         self,
         planned: PlannedProbe,
+        checks: list[Check],
         payload: str,
         sent: str,
         reply: TargetReply,
@@ -441,7 +519,7 @@ class Engine:
             evidence_ids=tuple(item.id for item in evidence),
             extra=self._extra(planned.probe, evidence),
         )
-        return await decide(planned.probe.checks, seen, self.verifiers, meter=spending, stops=(BudgetExhausted,))
+        return await decide(checks, seen, self.verifiers, meter=spending, stops=(BudgetExhausted,))
 
     # --- the record -----------------------------------------------------------------------------
 
@@ -456,9 +534,10 @@ class Engine:
         attempts = sorted(self.attempts.values(), key=lambda attempt: order.get(attempt.id, len(order)))
         probes = [planned.probe for planned in self.planned]
         severity = {planned.probe.id: planned.severity for planned in self.planned}
+        verifications = self._verifications(attempts)
         findings = [
             finding.model_copy(update={"severity": severity.get(finding.probe_id)})
-            for finding in findings_of(probes, attempts, [])
+            for finding in findings_of(probes, attempts, verifications)
         ]
         finished = datetime.now(UTC) if state != "running" else None
         kept = [item for attempt in attempts for item in attempt.evidence_ids]
@@ -485,6 +564,7 @@ class Engine:
             probes=probes,
             attempts=attempts,
             evidence=evidence,
+            verifications=verifications,
             findings=findings,
             counts=counts,
             budget=self._budget(attempts, counts),
@@ -501,6 +581,53 @@ class Engine:
                 **self.provenance,
             },
         )
+
+    def _verifications(self, attempts: list[Attempt]) -> list[Verification]:
+        """What each probe's repetitions and negative control established, by the verdict rules
+        (:func:`~martian.redteam.verify.rules.verify`), with its benign task's completion with and
+        without the attack. A probe that neither hit nor ran a control has none."""
+        found = []
+        for planned in self.planned:
+            probe = planned.probe
+            mine = [attempt for attempt in attempts if attempt.probe_id == probe.id]
+            attacks = [attempt for attempt in mine if attempt.role == "attack"]
+            control = next((attempt for attempt in mine if attempt.role == "control"), None)
+            repetitions = [attempt for attempt in mine if attempt.role == "repetition"]
+            hits = [attempt for attempt in attacks if attempt.outcome == "hit"]
+            if not hits and control is None:
+                continue
+            verdict = verify(
+                probe.objective_class,
+                [Repetition(attempt.outcome, attempt.level) for attempt in repetitions],
+                control=control.outcome if control is not None else None,
+                require_control=self.run_file.verification.control,
+                isolated=True,
+            )
+            task = None
+            if probe.task_checks:
+                task = TaskCompletion(
+                    with_attack=sum(attempt.task_completed is True for attempt in attacks),
+                    with_attack_decided=sum(attempt.task_completed is not None for attempt in attacks),
+                    without_attack=control.task_completed if control is not None else None,
+                )
+            found.append(
+                Verification(
+                    probe_id=probe.id,
+                    attempt_id=hits[0].id if hits else None,
+                    outcome=verdict.outcome,
+                    reproduction_status=verdict.reproduction_status,
+                    repetitions=len(repetitions),
+                    successful_reproductions=verdict.successful_reproductions,
+                    negative_control_passed=verdict.negative_control_passed,
+                    evidence_tier=verdict.evidence_tier,
+                    evidence_level=verdict.evidence_level,
+                    ceiling_applied=verdict.ceiling_applied,
+                    summary=verdict.reason,
+                    control_attempt_id=control.id if control is not None else None,
+                    task_completion=task,
+                )
+            )
+        return found
 
     def _budget(self, attempts: list[Attempt], counts: Counts) -> dict[str, Any]:
         """The ledger's record, and the attacker's refusals: ``attacker_generations`` and
@@ -520,7 +647,9 @@ class Engine:
         }
 
     def _limitations(self) -> list[str]:
-        found = ["No repetitions or negative controls ran, so no finding is verified."]
+        found = ["No repetitions ran, so no finding is verified."]
+        if not self.run_file.verification.control:
+            found.append("No negative controls ran: a hit the target would show without the attack is kept.")
         objectives = {planned.probe.objective_class for planned in self.planned}
         if objectives & {"action", "persistence"}:
             found.append("Without an environment, an action or persistence objective stops at a confirmed tool call.")

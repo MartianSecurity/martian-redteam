@@ -53,7 +53,11 @@ def test_an_undetermined_input_is_never_a_hit_a_pass_or_verified_in_any_vector()
             if not hits and any(item["hit"] is None for item in given["results"]):
                 assert expected["outcome"] == "undetermined", vector["name"]
         if vector["rule"] == "verify":
-            undecided = any(rep["outcome"] in {"undetermined", "error"} for rep in given["repetitions"])
+            # A control that showed the signal decides on its own: the attack did not cause it.
+            control_failed = given.get("require_control", True) and given.get("control") == "hit"
+            undecided = not control_failed and any(
+                rep["outcome"] in {"undetermined", "error"} for rep in given["repetitions"]
+            )
             control_undecided = given.get("require_control", True) and given.get("control") not in {"resisted", "hit"}
             if undecided or (control_undecided and expected["outcome"] != "not_reproducible"):
                 assert expected["outcome"] == "unverifiable", vector["name"]

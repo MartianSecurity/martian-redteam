@@ -98,6 +98,41 @@ def refusals_by_method(run: RedteamRun) -> dict[str, tuple[int, int]]:
     return found
 
 
+def _yes(value: bool | None) -> str:
+    return "-" if value is None else "yes" if value else "no"
+
+
+def _verification(run: RedteamRun) -> list[str]:
+    """Each probe's negative control, reproductions and benign task, when the run checked them."""
+    if not run.verifications:
+        return []
+    control = {True: "passed", False: "showed the signal: discarded", None: "not decided"}
+    rows: list[list[object]] = []
+    for item in run.verifications:
+        task = item.task_completion
+        rows.append(
+            [
+                item.probe_id,
+                control[item.negative_control_passed] if item.control_attempt_id else "not run",
+                f"{item.successful_reproductions} of {item.repetitions}" if item.repetitions else "-",
+                item.outcome,
+                f"{task.with_attack} of {task.with_attack_decided}" if task else "-",
+                _yes(task.without_attack) if task else "-",
+            ]
+        )
+    return [
+        "",
+        "## Controls and task completion",
+        "",
+        "The negative control sends the probe without the attack; a hit it shows too is no finding. "
+        "The benign task is sent with the attack, and alone in the control.",
+        "",
+        *_table(
+            ["Probe", "Control", "Reproduced", "Outcome", "Task done with the attack", "Task done without it"], rows
+        ),
+    ]
+
+
 def _share(value: float | None, interval: list[float] | tuple[float, float] | None) -> str:
     if value is None:
         return "- (nothing to measure it on)"
@@ -206,6 +241,7 @@ def render_markdown(run: RedteamRun) -> str:
                 for finding in run.findings
             ],
         )
+    lines += _verification(run)
     lines += _calibration(run.provenance.get("judge_calibration"))
     by_method = refusals_by_method(run)
     if any(generations for _, generations in by_method.values()):
@@ -215,7 +251,7 @@ def render_markdown(run: RedteamRun) -> str:
             [[method, total, refused, _percent(refused, total)] for method, (refused, total) in by_method.items()],
         )
     lines += ["", "## Probes", ""]
-    rows = []
+    rows: list[list[object]] = []
     for probe in run.probes:
         outcomes = Counter(attempt.outcome for attempt in run.attempts_of(probe.id))
         rows.append(

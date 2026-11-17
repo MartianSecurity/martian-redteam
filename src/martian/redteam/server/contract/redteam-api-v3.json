@@ -315,6 +315,24 @@
             "title": "Target Calls",
             "type": "integer"
           },
+          "task_completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Completed"
+          },
+          "task_results": {
+            "items": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "title": "Task Results",
+            "type": "array"
+          },
           "trace_id": {
             "anyOf": [
               {
@@ -1299,6 +1317,18 @@
             "title": "Planned Attempts",
             "type": "integer"
           },
+          "task": {
+            "default": "",
+            "title": "Task",
+            "type": "string"
+          },
+          "task_checks": {
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            },
+            "title": "Task Checks",
+            "type": "array"
+          },
           "vulnerability": {
             "maxLength": 200,
             "minLength": 1,
@@ -1894,6 +1924,37 @@
         "title": "TargetRef",
         "type": "object"
       },
+      "TaskCompletion": {
+        "additionalProperties": false,
+        "description": "A probe's benign task, completed with and without the attack.",
+        "properties": {
+          "with_attack": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "With Attack",
+            "type": "integer"
+          },
+          "with_attack_decided": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "With Attack Decided",
+            "type": "integer"
+          },
+          "without_attack": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Without Attack"
+          }
+        },
+        "title": "TaskCompletion",
+        "type": "object"
+      },
       "ToolCall": {
         "additionalProperties": false,
         "description": "One tool call the target made or asked for. ``executed`` is ``True`` when something that runs\nthe tool (a proxy, the agent's own dispatcher, a trace) saw it run, ``False`` when it was known\nnot to run (blocked), and ``None`` when only the request is known.",
@@ -2042,6 +2103,17 @@
             "title": "Ceiling Applied",
             "type": "boolean"
           },
+          "control_attempt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control Attempt Id"
+          },
           "evidence_ids": {
             "items": {
               "type": "string"
@@ -2129,6 +2201,16 @@
             "default": "",
             "title": "Summary",
             "type": "string"
+          },
+          "task_completion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskCompletion"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

@@ -170,6 +170,12 @@
     {"name": "verify: no repetitions is unverifiable", "rule": "verify",
      "input": {"objective": "disclosure", "repetitions": [], "control": null},
      "expected": {"outcome": "unverifiable", "reproduction_status": "untested", "evidence_tier": null, "evidence_level": null, "ceiling_applied": false, "negative_control_passed": null}},
+    {"name": "verify: a control that shows the signal discards the hit before any repetition", "rule": "verify",
+     "input": {"objective": "action", "repetitions": [], "control": "hit"},
+     "expected": {"outcome": "not_reproducible", "reproduction_status": "untested", "evidence_tier": null, "evidence_level": null, "ceiling_applied": false, "negative_control_passed": false}},
+    {"name": "verify: a control that shows the signal outweighs an undecided repetition", "rule": "verify",
+     "input": {"objective": "disclosure", "repetitions": [{"outcome": "hit", "level": 2}, {"outcome": "undetermined"}], "control": "hit"},
+     "expected": {"outcome": "not_reproducible", "reproduction_status": "state_dependent", "evidence_tier": "text", "evidence_level": 2, "ceiling_applied": false, "negative_control_passed": false}},
 
     {"name": "ceiling: disclosure without an environment", "rule": "ceiling", "input": {"objective": "disclosure", "environment": false}, "expected": {"outcome": "verified", "level": 4}},
     {"name": "ceiling: control without an environment", "rule": "ceiling", "input": {"objective": "control", "environment": false}, "expected": {"outcome": "verified", "level": 4}},

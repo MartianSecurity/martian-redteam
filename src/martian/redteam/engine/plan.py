@@ -63,6 +63,15 @@ def _checks(declared: list[CheckDecl], goal: Goal | None = None) -> list[Check]:
     return checks or [Check(id="judge", kind="judge")]
 
 
+def _task_checks(spec: Vulnerability) -> list[Check]:
+    if spec.benign is None:
+        return []
+    return [
+        Check(id=f"task-{index}", kind=check.type, spec=_check_spec(check))
+        for index, check in enumerate(spec.benign.checks, start=1)
+    ]
+
+
 def _goal(spec: Vulnerability) -> str:
     if spec.goal is None:
         return ""
@@ -99,6 +108,8 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     criteria=vulnerability.criteria,
                     checks=checks,
                     planned_attempts=run_file.budget.attempts_per_probe,
+                    task=spec.benign.task if spec.benign else "",
+                    task_checks=_task_checks(spec),
                     metadata={"severity": spec.severity, "attack_kind": attack.kind},
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity))

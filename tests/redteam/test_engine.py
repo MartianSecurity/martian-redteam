@@ -384,7 +384,8 @@ def test_the_launcher_starts_a_run_from_the_api_and_keeps_it(tmp_path, served):
     assert started.json()["state"] == "running"
     done = wait_for(served, started.json()["id"], {"completed"})
     assert done["counts"]["hits"] == 1 and done["counts"]["attempts"] == 2
-    assert done["budget"]["spent"]["target_queries"] == 2
+    # Two attacks, and the negative control of the probe that hit.
+    assert done["budget"]["spent"]["target_queries"] == 3
 
 
 def test_the_launcher_stops_a_run(tmp_path, served):

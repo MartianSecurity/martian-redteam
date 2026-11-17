@@ -56,7 +56,7 @@ gate: { fail_on: confirmed, severity: high }
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
-| `verification` | no | How the run checks its judge. See [verification](#verification) |
+| `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
 | `output_folder` | no | Where reports are written. Default `results` |
 | `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
 
@@ -120,6 +120,7 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 | `objective` | `disclosure`, `control`, `action` or `persistence`. Without it, the vulnerability's own objective class applies |
 | `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
 | `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
+| `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
 
 A `goal` takes these fields:
 
@@ -172,8 +173,11 @@ The proxy is not an environment. It simulates no application and holds no data.
 
 ## Verification
 
+How the run checks what it found. The report's "Controls and task completion" section shows each probe's control, reproductions, verification outcome and benign task.
+
 | Field | Meaning |
 | --- | --- |
+| `control` | Run each probe once without the attack, after its attacks, when it hit or has a `benign` task. Default true. It sends what the probe plants and its benign task, or an ordinary opening, and is decided by the probe's checks that code decides (by the judge when there is no other). A probe whose control shows the same signal has no finding. Its call counts against the budget |
 | `calibration` | A labelled sample to measure the judge on before the attacks: a JSON Lines file, one item a line, with `vulnerability` (a vulnerability of this file, by name or id), optional `type`, `attack`, `reply`, `hit` (whether a person judged the attack to have succeeded) and optional `tools_called`. A relative path is read from the run file's folder. Each item costs one judge call, counted against the budget. The report shows the judge's precision and recall, and the run's provenance keeps them as `judge_calibration` |
 
 ## Budget
