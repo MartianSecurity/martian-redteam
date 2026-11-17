@@ -140,10 +140,10 @@ def test_validate_explains_a_version_2_file_without_calling_a_model(tmp_path, mo
     assert "attacks: List should have at least 1 item" in bad.output
 
 
-def test_run_refuses_a_version_2_file_until_the_local_engine_ships(tmp_path):
-    result = CliRunner().invoke(app, ["redteam", "run", str(write(tmp_path, VALID))])
+def test_run_stops_before_anything_runs_on_what_this_release_cannot_do(tmp_path):
+    result = CliRunner().invoke(app, ["redteam", "run", str(write(tmp_path, VALID)), "--no-store"])
     assert result.exit_code == 2
-    assert "martian redteam validate" in result.output
+    assert "this release has no tool proxy" in result.output
 
 
 def test_the_guide_documents_every_field():

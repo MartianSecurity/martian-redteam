@@ -83,6 +83,11 @@ def counts_of(run_attempts: Sequence[Attempt], findings: Sequence[Finding]) -> C
         errors=outcomes["error"],
         infrastructure_errors=kinds["infrastructure"],
         target_errors=kinds["target"],
+        attacker_errors=kinds["attacker"],
+        judge_errors=kinds["judge"],
+        stopped=outcomes["stopped"],
+        generations=sum(attempt.spend.attacker_calls for attempt in run_attempts if attempt.spend is not None),
+        refusals=sum(attempt.attacker_refusals for attempt in run_attempts),
         confirmed=sum(confirmed(finding.evidence_level) for finding in findings),
         suspected=sum(finding.evidence_level == EvidenceLevel.JUDGED for finding in findings),
     )
@@ -284,6 +289,22 @@ def _legacy_calls(calls: Sequence[ToolCall]) -> list[Any]:
     return [ToolCallRecord.model_validate(call.model_dump()) for call in calls]
 
 
+def _legacy_error(attempt: Attempt) -> str | None:
+    if attempt.outcome == "stopped":
+        return attempt.error or f"stopped: the budget's {attempt.stopped_by} ran out"
+    return attempt.error or None if attempt.outcome == "error" or attempt.error else None
+
+
+def _legacy_kind(attempt: Attempt) -> Literal["infrastructure", "target"] | None:
+    """The version 0.2 report knows target and infrastructure errors only: a failure of the attacker
+    or the judge model, or a stop by the budget, is not the target's, so it is an infrastructure error."""
+    if attempt.outcome == "stopped":
+        return "infrastructure"
+    if attempt.error_kind is None:
+        return None
+    return "target" if attempt.error_kind == "target" else "infrastructure"
+
+
 def to_risk_assessment(run: RedteamRun) -> Any:
     """A red team run as a version 0.2 ``RiskAssessment``. Only attack attempts become test cases:
     the format has no place for repetitions or controls."""
@@ -314,8 +335,8 @@ def to_risk_assessment(run: RedteamRun) -> Any:
             ],
             score=_score_of(attempt),
             reason=(judge.rationale or None) if judge is not None else None,
-            error=attempt.error or None if attempt.outcome == "error" or attempt.error else None,
-            error_kind=attempt.error_kind,
+            error=_legacy_error(attempt),
+            error_kind=_legacy_kind(attempt),
             graph_revision=attempt.graph_revision,
             policy_revision=attempt.policy_revision,
             simulation_operation_id=attempt.operations.get("simulate"),

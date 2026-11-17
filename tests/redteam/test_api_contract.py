@@ -33,7 +33,7 @@ from martian_redteam.types import EvaluatorContext, RiskAssessment, SimulatorCon
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIX = (
-    "The /v1/redteam routes no longer match contract/redteam-api-v1.json. If the change is intended, "
+    f"The /v1/redteam routes no longer match {CONTRACT_PATH.name}. If the change is intended, "
     "raise REDTEAM_API_VERSION and run scripts/redteam_contract.py."
 )
 OPERATION_ROUTES = {

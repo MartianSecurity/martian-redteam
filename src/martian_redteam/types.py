@@ -248,6 +248,16 @@ class EvaluatorContext(BaseModel):
     criteria: str | None = None
 
 
+class ModelUsage(BaseModel):
+    """What one model call used, as its provider reported it. ``None`` where it reported nothing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cost_usd: float | None = Field(default=None, ge=0)
+
+
 class SimulatorOutput(BaseModel):
     """Graph state returned by POST /runs/wait for the simulator."""
 
@@ -259,6 +269,8 @@ class SimulatorOutput(BaseModel):
     policy_revision: str | None = None
     operation_id: str | None = None
     messages: list[Any] = Field(default_factory=list)
+    usage: ModelUsage | None = None
+    """What the generation used, when the service reports it (the local service does)."""
 
     @field_validator("attack", "attack_method")
     @classmethod
@@ -279,6 +291,8 @@ class EvaluatorOutput(BaseModel):
     policy_revision: str | None = None
     operation_id: str | None = None
     messages: list[Any] = Field(default_factory=list)
+    usage: ModelUsage | None = None
+    """What the judgment used, when the service reports it (the local service does)."""
 
     @field_validator("reason")
     @classmethod

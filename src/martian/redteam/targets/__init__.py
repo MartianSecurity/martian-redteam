@@ -36,6 +36,9 @@ class TargetReply(BaseModel):
 
     text: str
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_calls_observed: bool = False
+    """Whether the target reports its tool calls. When false, an empty ``tool_calls`` says nothing,
+    and a tool-call check cannot find that no call was made."""
     session: str | None = None
     latency_ms: float | None = Field(default=None, ge=0)
     evidence: list[Evidence] = Field(default_factory=list)

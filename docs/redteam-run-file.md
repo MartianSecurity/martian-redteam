@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-This release validates version 2 files. `martian redteam run` refuses one and says so, because the local engine that runs it is not in this release yet.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). This release runs a `file` and `function` target; a `url` or `mcp` target, `tools.proxy` and `environment` stop the run before anything is called, with a message that says so.
 
 ```yaml
 version: 2
@@ -116,6 +116,17 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 
 A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set.
 
+Which service generates and judges the attacks:
+
+| `models.attacker` | Martian connection (`MARTIAN_API_URL`, `MARTIAN_API_TOKEN`) | Service |
+| --- | --- | --- |
+| set | not set | Local: your models, called with your key. Nothing is sent to Martian |
+| not set | set | The Martian platform, as in version 0.2 |
+| set | set | None: the run stops. Unset the variables or remove `models` |
+| not set | not set | None: the run stops and says how to set either |
+
+A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.
+
 ## Vulnerabilities
 
 Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criteria` and `gated`, and these:
@@ -166,12 +177,26 @@ The proxy is not an environment. It simulates no application and holds no data. 
 | Field | Meaning |
 | --- | --- |
 | `target_queries` | The most calls of the target the run makes |
-| `model_calls` | The most attacker and judge calls |
+| `model_calls` | The most attacker and judge calls, together |
+| `tokens` | The most tokens the attacker and judge calls report, input and output together |
+| `cost_usd` | The most the model calls may cost, when their prices are known (`MLFLOW_MODEL_CATALOG_URI`, see [security and data](security-and-data.md#judges-and-the-model-catalogue)) |
 | `max_seconds` | The longest the run may take |
 | `attempts_per_probe` | Attacks per vulnerability type and attack method. Default 1 |
 | `max_concurrent` | Probes at the same time. Default 2 |
 
-A run stops at the first limit it reaches and its report says which.
+A run stops at the first limit it reaches and its report says which. Every call is counted before it is made, so a run never makes more target or model calls than `target_queries` and `model_calls` allow. Tokens and cost are known only after a call returns, so the last model call may cross `tokens` or `cost_usd`, and none is made after it. An attempt the budget stopped before it was decided is reported `stopped`, never as held, and the run's state is `stopped`. Each attempt records what it spent, and `redteam-run.json` gives the run's and each probe's totals.
+
+## How a run works
+
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
+2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
+3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
+
+The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
+
+The run is kept after every attempt, each with a fingerprint of what produced it: the catalogue version, the prompt and verdict rule revisions, its probe and checks, the target block and the service with its models. `martian redteam run FILE --resume RUN_ID` continues a run from the local store: each finished attempt (vulnerable, held or undetermined) whose fingerprint is unchanged is reused and calls no model and no target; an attempt that errored or was stopped, or whose fingerprint changed, runs again. A changed check reruns only its vulnerability's attempts; a new catalogue version or another model reruns every attempt. What the earlier session spent still counts against the budget.
+
+The command exits 0 when the gate passes, 1 when it fails and 2 when the run could not start.
 
 ## Gate
 
@@ -179,5 +204,8 @@ A run stops at the first limit it reaches and its report says which.
 | --- | --- |
 | `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above. `suspected` also fails on a finding a model judged only |
 | `severity` | Only findings of vulnerabilities at this severity or above fail the gate |
-| `fail_on_infrastructure_error` | Fail when the attacker, the judge or the platform failed. Default true |
+| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true |
 | `ignore_target_errors` | Do not fail on calls of the target that failed. Default false |
+| `undetermined` | `fail` (the default) fails the run when no check could decide an attempt. `ignore` leaves those out; the report still counts them |
+
+The gate also fails a finding of a vulnerability with no `severity` when `severity` is set, a run with no attempt, and a run that made fewer attempts than it planned.

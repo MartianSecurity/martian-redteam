@@ -3351,8 +3351,9 @@ martian ui --ui-dir ../frontend/dist-evals   # another build, from `npm run buil
   the red team routes under `/v1/redteam` ([red team API](redteam-api.md)), the session call, and
   the local targets and runs under `/v1/local`. The red team routes read the runs that
   `martian redteam run` keeps in the same data folder, and a finding's status and comments are kept
-  there. Starting or stopping a red team run from the UI answers `501`: the local edition binds no
-  red team launcher yet (MartianSecurity/martian-notes#295). Every other path is a file
+  there. Starting or stopping a red team run runs the red team engine in the server's process
+  (`LocalLauncher`, [red team API](redteam-api.md)); a run file's relative `file` is read from the
+  folder `martian ui` was started in. Every other path is a file
   of the built UI. The UI uses hash routes and relative asset paths, and calls `/v1` on its own
   origin. `/ui-version.json` names the UI's version and the frontend commit it was built from.
   The page and the other unhashed files are sent with `Cache-Control: no-cache`, so a browser
@@ -4259,7 +4260,6 @@ which each get their own; and covers what a push and the server refuse, and the 
 | Deleting a run's record in the store (`EvalStore`): its MLflow run, `martian/run.json` and its artifacts; `delete_run` removes the record store's rows only | Not filed yet |
 | `delete_traces` and `delete_traces_before` on the Martian server's MLflow REST binding (`ServerStore` in MartianSecurity/MartianBackend) | MartianSecurity/martian-notes#162 |
 | The Martian server mounting the red team router (`martian.redteam.server.router`) beside the evals routers | MartianSecurity/martian-notes#299 |
-| A red team launcher in the local edition, so the UI can start and stop a red team run | MartianSecurity/martian-notes#295 |
 
 ## The Martian server
 

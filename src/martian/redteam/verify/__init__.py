@@ -12,7 +12,7 @@ import json
 from importlib import resources
 from typing import Any
 
-from martian.redteam.model import CheckResult, EvidenceLevel
+from martian.redteam.model import CheckResult, EvidenceLevel, ToolCall
 from martian.redteam.verify.rules import (
     DETERMINISTIC,
     LEVEL_OF_KIND,
@@ -21,6 +21,7 @@ from martian.redteam.verify.rules import (
     TIER_RANK,
     Repetition,
     VerificationVerdict,
+    argument_matches,
     attempt_outcome,
     canary_check,
     ceiling,
@@ -29,6 +30,7 @@ from martian.redteam.verify.rules import (
     label,
     text_check,
     tier_of,
+    tool_call_check,
     verify,
 )
 
@@ -49,6 +51,15 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     if rule == "canary_check":
         hit, _ = canary_check(given["reply"], canary=given["canary"], probe=given["probe"])
         return {"hit": hit}
+    if rule == "tool_call_check":
+        hit, detail = tool_call_check(
+            [ToolCall.model_validate(call) for call in given["calls"]],
+            tool=given["tool"],
+            where=given.get("where", {}),
+            executed=given.get("executed", False),
+            observed=given.get("observed", True),
+        )
+        return {"hit": hit, "executed": detail["executed"]}
     if rule == "judge_result":
         return {"hit": judge_result(given["verdict"])}
     if rule == "attempt_outcome":
@@ -97,6 +108,7 @@ __all__ = [
     "TIER_RANK",
     "Repetition",
     "VerificationVerdict",
+    "argument_matches",
     "attempt_outcome",
     "canary_check",
     "ceiling",
@@ -107,5 +119,6 @@ __all__ = [
     "run_vector",
     "text_check",
     "tier_of",
+    "tool_call_check",
     "verify",
 ]

@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 from uuid import uuid4
 
 import typer
@@ -45,7 +45,7 @@ def main(
         typer.Option("--version", help="Print the package version and exit.", callback=_version_callback),
     ] = False,
 ) -> None:
-    """Martian red-team CLI. Orchestrates probes locally; simulation and judging stay on Martian Agents."""
+    """Martian red-team CLI. Runs probes locally; attacks are generated and judged by your models or by Martian."""
 
 
 def _print_assessment(assessment: RiskAssessment) -> None:
@@ -163,10 +163,28 @@ def run_command(
             help="Keep the run in the local store that martian ui reads (needs martian-sdk[evals]).",
         ),
     ] = True,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help="Version 2 files: continue this run from the local store, reusing its finished attempts.",
+        ),
+    ] = None,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
     destination = output or Path("results")
-    _refuse_version_2(config_path, "run")
+    if _is_version_2(config_path):
+        _run_version_2(
+            config_path,
+            output=output,
+            store=store,
+            max_concurrent=max_concurrent,
+            attempts_per_probe=attacks_per_vuln,
+            resume=resume,
+        )
+        return
+    if resume is not None:
+        _stop("--resume continues a version 2 run; this is a version 0.2 file.")
     try:
         config = _apply_run_overrides(
             RunConfig.from_yaml(config_path),
@@ -234,21 +252,135 @@ def run_command(
         raise typer.Exit(code=1) from None
 
 
-def _refuse_version_2(config_path: Path, command: str) -> None:
-    """Stop before anything runs when a version 2 file reaches a command that does not run one yet."""
+def _is_version_2(config_path: Path) -> bool:
     from martian.redteam.runfile import read_yaml
 
     try:
-        version = read_yaml(config_path).get("version")
+        return "version" in read_yaml(config_path)
     except (OSError, ValueError, yaml.YAMLError):
-        return
-    if version is not None and command == "run":
-        errors.print(
-            "A version 2 run file runs with the local red team engine, which this release does not include "
-            "yet. Check it with 'martian redteam validate'.",
-            markup=False,
+        return False
+
+
+def _stop(message: str) -> NoReturn:
+    errors.print(message, markup=False, soft_wrap=True)
+    raise typer.Exit(code=2)
+
+
+def _run_version_2(
+    config_path: Path,
+    *,
+    output: Path | None,
+    store: bool,
+    max_concurrent: int | None,
+    attempts_per_probe: int | None,
+    resume: str | None = None,
+) -> None:
+    """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
+    from contextlib import AsyncExitStack
+
+    from martian.redteam.engine.gate import gate_failures
+    from martian.redteam.engine.plan import PlanError, plan
+    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.runs import TargetUnavailable, build_service, build_target, execute, unsupported
+    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.runfile import RunFile, problems
+
+    found = problems(config_path)
+    if found:
+        _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
+    run_file = RunFile.from_yaml(config_path)
+    budget = run_file.budget.model_copy(
+        update={
+            key: value
+            for key, value in (("max_concurrent", max_concurrent), ("attempts_per_probe", attempts_per_probe))
+            if value is not None
+        }
+    )
+    run_file = run_file.model_copy(update={"budget": budget})
+    if missing := unsupported(run_file):
+        _stop("This run file asks for what this release cannot do: " + "; ".join(missing))
+    try:
+        plan(run_file)
+    except PlanError as error:
+        _stop(f"The run cannot be planned: {error}")
+    destination = output or Path(run_file.output_folder)
+    keeper: Any = None
+    if store:
+        try:
+            from martian.redteam.store import RedteamStore
+
+            keeper = RedteamStore.local()
+        except ImportError:
+            console.print("Not kept in the local store: install martian-sdk[evals] for that.")
+    earlier = None
+    if resume is not None:
+        if keeper is None:
+            _stop("--resume reads the run from the local store: drop --no-store, and install martian-sdk[evals].")
+        earlier = asyncio.run(keeper.get("default", resume))
+        if earlier is None:
+            keeper.close()
+            _stop(f"No red team run {resume} is in the local store.")
+
+    async def go() -> Any:
+        async with AsyncExitStack() as stack:
+            service, provenance = build_service(run_file, stack)
+            target = build_target(run_file.target)
+            stack.push_async_callback(target.close)
+            run = await execute(
+                run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
+            )
+            return run, service
+
+    try:
+        run, service = asyncio.run(go())
+    except (ServiceSelectionError, TargetUnavailable, ConfigError) as error:
+        _stop(safe_text(error))
+    except (FileNotFoundError, ImportError, AttributeError):
+        _stop("Could not load the target. Check its file, dependencies and function name.")
+    finally:
+        if keeper is not None:
+            keeper.close()
+    written, markdown, report = write_reports(run, destination, policy=service.redaction_policy)
+    _print_run(report)
+    console.print(f"Wrote {written} and {markdown}")
+    if keeper is not None:
+        console.print(f"Kept in the local store as {run.id}")
+    if reused := run.provenance.get("resumed_attempts"):
+        console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
+    failures = gate_failures(run, run_file.gate)
+    if failures:
+        errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)
+        raise typer.Exit(code=1)
+
+
+def _print_run(run: Any) -> None:
+    counts = run.counts
+    table = Table(title=f"Martian red team run {run.id}")
+    for column in ("Attempts", "Vulnerable", "Held", "Undetermined", "Stopped", "Errors", "Confirmed", "Suspected"):
+        table.add_column(column)
+    table.add_row(
+        *(
+            str(value)
+            for value in (
+                counts.attempts,
+                counts.hits,
+                counts.resisted,
+                counts.undetermined,
+                counts.stopped,
+                counts.errors,
+                counts.confirmed,
+                counts.suspected,
+            )
         )
-        raise typer.Exit(code=2)
+    )
+    console.print(table)
+    if counts.generations:
+        console.print(
+            f"Attacker refused or left empty {counts.refusals} of {counts.generations} generations "
+            f"({counts.refusals / counts.generations:.0%})."
+        )
+    if run.budget.get("stopped_by"):
+        console.print(f"Stopped by the budget: {run.budget['stopped_by']} ran out.")
 
 
 def _keep_locally(assessment: RiskAssessment) -> None:

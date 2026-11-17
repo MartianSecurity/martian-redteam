@@ -45,6 +45,7 @@ _STATUS: dict[AttemptOutcome, CaseStatus] = {
     "resisted": "passed",
     "error": "error",
     "undetermined": "error",
+    "stopped": "error",
 }
 _LISTS = ("probes", "attempts", "evidence", "verifications", "findings")
 _ATTEMPT_IN_CASE = ("id", "probe_id", "input", "check_results")
@@ -64,7 +65,7 @@ def as_eval_run(run: RedteamRun) -> Run:
             cases=counts.attempts,
             passed=counts.resisted,
             failed=counts.hits,
-            errors=counts.errors + counts.undetermined,
+            errors=counts.errors + counts.undetermined + counts.stopped,
         ),
         provenance={"redteam": header},
         created_at=run.started_at,
@@ -76,6 +77,8 @@ def as_eval_run(run: RedteamRun) -> Run:
 def as_case_result(run_id: str, position: int, attempt: Attempt) -> CaseResult:
     output = attempt.model_dump(mode="json", exclude=set(_ATTEMPT_IN_CASE))
     error = attempt.error or (UNDETERMINED if attempt.outcome == "undetermined" else "")
+    if attempt.outcome == "stopped" and not error:
+        error = f"stopped: the budget's {attempt.stopped_by} ran out"
     if attempt.outcome == "error" and not error:
         error = f"{attempt.error_kind or 'attempt'} error"
     return CaseResult(

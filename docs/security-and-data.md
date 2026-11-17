@@ -23,6 +23,25 @@ proxies are off unless proxies are explicitly opted in. Constructor connections
 must supply a complete URL/token pair. No `.env` is loaded and unused legacy
 variables are ignored; legacy auth is never selected after a failed public call.
 
+A version 2 red team run file that names `models` runs locally instead
+(`martian.redteam.engine.LocalService`): the attacker and judge prompts, the
+purpose, the attacks and the target's replies go only to the models it names,
+with the user's own key, through the judges' model routing. Nothing is sent to a
+Martian server, and a run with both `models` and a Martian connection configured
+stops rather than choose one.
+
+The local engine treats the target's output as hostile
+(`martian.redteam.engine.hostile`). The judge sees the attack, the reply and the
+tool calls only as data fields between markers that carry a fresh random id,
+after an instruction never to follow anything inside them; a run of three or
+more `<` or `>` in that text is broken up, so a reply cannot close its field.
+Before any prompt is sent, the value of every environment variable named like
+a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
+characters or more) and of the models' headers is replaced by `[redacted]`, so
+a key the target leaks never reaches a model provider. The headers themselves
+are still sent to the model endpoint. A listener the harness opens binds to
+loopback only.
+
 Reports default to content digests. Content opt-in does not disable credential
 redaction, including constructor secrets after client close and report copies.
 Explicit input/output redaction flags take precedence. Raw in-memory assessment
@@ -538,7 +557,7 @@ and Apache-2.0, and its Inter font files are OFL-1.1, each listed with its licen
 Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
-`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. The simulation and evaluation prompts (`martian.redteam.catalog.prompts`, which martian-agents imports) are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 

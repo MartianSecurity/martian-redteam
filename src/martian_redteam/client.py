@@ -30,6 +30,11 @@ class ClientError(RuntimeError):
     code: str | None = None
 
 
+class UndecidedJudgment(ClientError):
+    """The judge answered, but its judgment could not be read. It decides nothing: the probe is
+    undetermined, never a pass and never an error of the target."""
+
+
 class RetryableClientError(ClientError):
     """A failure known to precede execution (connect or admission 429)."""
 
