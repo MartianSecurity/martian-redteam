@@ -30,6 +30,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `Refine` | `refine` | search | adaptive | Up to `max_queries` (default 10) | One per query (a first attack, then a refinement of each) | A target that holds against a first attempt but gives way to an attack refined from its own replies, guided by how close each reply came to the goal (PAIR-style) |
 | `TreeSearch` | `tree_search` | search | adaptive | Up to `max_queries` (default 20), and never more than the tree holds: 12 at the default width 3, branching 2, depth 3 | One per query | A target a single line of refinement stalls on: several attacks per level, refined in branches, keeping the ones whose replies came closest (TAP-style) |
 | `Escalation` | `escalation` | conversation | adaptive | Up to `max_queries` (default 20): at most `max_turns` (default 6) turns per conversation and `max_backtracks` (default 2) backtracks, with replayed turns | One per turn written; none for a replayed turn | A target that refuses a request asked outright but goes along when one conversation builds up to it in small steps (Crescendo-style) |
+| `Mutation` | `mutation` | search | adaptive | Up to `variants` (default 10) | 0 | A filter or a model that a small change of the same request gets past: random copies of the direct request with letter case, spacing, word order and letters inside words changed (Best-of-N style) |
 | `Authority` | `authority` | rewrite | static | 1 | 1 | A target that obeys whoever claims to be in charge: the request comes from its developer, an administrator, a security team or a legal duty |
 | `Hypothetical` | `hypothetical` | rewrite | static | 1 | 1 | A target that answers inside an imagined case: the request is a thought experiment in which it is allowed, asking for the concrete answer |
 | `Citation` | `citation` | rewrite | static | 1 | 1 | A target that defers to documents: the request cites a policy, ticket or guideline that says it is allowed or required |
@@ -91,6 +92,12 @@ The attempt keeps every turn of every conversation, the refused and replayed one
 | `max_turns` | 6 | 1 to 20 | Turns in one conversation, replayed turns included |
 | `max_backtracks` | 2 | 0 to 10 | Times it goes back a turn |
 | `max_queries` | 20 | 1 to 1000 | Target queries per attempt |
+
+## Mutation
+
+`Mutation` needs no attacker model. Its seed is the probe's direct request from the fixed templates (`Please {request}.`), and it sends up to `variants` (default 10, at most 1000) random copies of it, each in a conversation of its own, stopping at the first one a check finds succeeded. Each copy flips the case of letters (each with chance 0.4), doubles or drops spaces (0.15), swaps neighbouring words (0.15) and shuffles the inner letters of longer words (0.3). The draws come from a generator seeded by the attempt, so a rerun of the attempt sends the same copies. Every copy is a target query on the run's budget, and the trace records `variants_sent`.
+
+It is a method the run file names, not something the engine falls back to: when the attacker refuses, an adaptive method's attempt is an attacker error. A run whose methods call no attacker needs no `models.attacker` ([run file](redteam-run-file.md#models)).
 
 ## Prompt files and the licence register
 

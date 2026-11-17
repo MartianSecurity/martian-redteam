@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
 from martian.redteam.methods.escalation import Escalation
+from martian.redteam.methods.mutation import Mutation
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
 from martian.redteam.methods.search import Refine, TreeSearch
 from martian.redteam.methods.templates import Templates
@@ -197,6 +198,11 @@ register_method(
         id="escalation", label="Multi-turn escalation", layers=layers, values=values
     ),
     aliases=["escalation", "crescendo"],
+)
+register_method(
+    "Mutation",
+    lambda spec, layers, values: Mutation(id="mutation", label="Mutation", layers=layers, values=values),
+    aliases=["mutation", "best_of_n"],
 )
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])

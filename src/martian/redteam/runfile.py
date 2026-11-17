@@ -336,6 +336,8 @@ class AttackSpec(NamedSpec):
     """Escalation: the most turns in one conversation."""
     max_backtracks: int | None = Field(default=None, ge=0, le=10)
     """Escalation: the most times it goes back a turn after a refusal."""
+    variants: int | None = Field(default=None, ge=1, le=1000)
+    """Mutation: the most changed copies of the seed it sends."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
