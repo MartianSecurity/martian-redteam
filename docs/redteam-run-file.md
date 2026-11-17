@@ -241,14 +241,16 @@ How the run checks what it found: the probe's attacks run first, then the repeti
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `strategies` | false | Read and update the strategy library |
+| `order` | false | Run each objective's attack methods best first by their record on this target, not in the order `attacks` lists them |
+| `methods_per_objective` | all | With `order`: run at most this many methods per objective. The others are left out of the plan |
 | `folder` | `redteam/strategies` in the data folder | Where the library is. The data folder is `MARTIAN_EVALS_HOME`, else `~/.martian/evals`. A relative path is read from the run file's folder |
-| `explore` | 0.2 | The share kept for exploration: the chance that an attempt is given no strategy and writes its own attacks |
+| `explore` | 0.2 | The share kept for exploration: the chance that an attempt is given no strategy and writes its own attacks, and the share of an objective's method places filled by a draw |
 | `seed` | drawn | Seeds the draws, so a rerun with the same seed and the same files draws the same. A drawn seed is kept in the run's provenance as `memory.seed`, which a resumed run reuses |
 
 The library is a folder of files you can read, edit and delete:
 
 - `strategy-<id>.json`, one per strategy: an attack that reached a confirmed success on an objective (a vulnerability, its type and its goal), the method that found it, and the run, attempt and evidence level it came from. The run's canary and receipt address are kept as `{{canary}}` and `{{receipt_url}}`, and secret values are scrubbed. The target's replies are never kept.
-- `stats.csv`, a table with one row per strategy, objective and target: `kind`, `name`, `objective`, `target` (a digest of the run file's `target` block, its headers and timeout left out), `attempts`, `successes` and `last_seen`.
+- `stats.csv`, a table with one row per strategy or attack method, objective and target: `kind` (`strategy` or `method`), `name`, `objective`, `target` (a digest of the run file's `target` block, its headers and timeout left out), `attempts`, `successes` and `last_seen`.
 
 Deleting a strategy's file forgets it, and its rows go when the table is next written; deleting the folder forgets everything. A file that cannot be read stops the run with exit code 2 and says which one.
 
@@ -257,6 +259,14 @@ How the library is used and updated:
 1. **Picked.** Each attempt of a search method (`Refine`, `TreeSearch`) is given up to three strategies for its probe's objective: none with chance `explore`, else those whose success on this target, `(successes + 1) / (attempts + 2)`, is at least one half, best first. The draw comes from `seed` and the attempt.
 2. **Sent first.** The search sends them as its first attacks, one per fresh attack it would have asked the attacker for, and refines from them as from its own when they do not hit. A strategy sent costs a target query and no attacker call. The attempt's method record lists them as `strategies`, each with the query that sent it.
 3. **Updated when the run ends**, only from attempts the checks decided: a strategy counts an attempt each time it is sent, and a success when the query that sent it is the one the attempt was decided on at level 2 or above and the probe's negative control did not show the same signal. A hit only the judge found trains nothing. Such a success with an attack the method wrote itself becomes a new strategy, unless the method is `Escalation`, whose last message means nothing alone. The run's provenance counts `strategies_sent` and `strategies_learned`.
+
+With `order`, the run counts each method's decided attempts and confirmed successes in the same table, by the same rules, and plans each objective's probes in this order:
+
+1. Of `k` places (every listed method, or `methods_per_objective`), `round(explore × k)` are kept for exploration.
+2. The other places go to the methods with the best record on this target, `(successes + 1) / (attempts + 2)`, ties in the listed order. A method with no record scores one half, above one that failed and below one that succeeded.
+3. The kept places go to methods drawn at random from the rest, after the record's choice. The draw comes from `seed` and the objective.
+
+Methods past `k` are left out: the run plans no probe for them. The run's provenance keeps `memory.order` (each objective's methods in order) and `memory.left_out`. The same seed and the same files give the same order; a resumed run keeps the order its first session had.
 
 A run in an `environment` takes no `memory`.
 

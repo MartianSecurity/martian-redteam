@@ -552,11 +552,27 @@ class Memory(_Model):
     folder: str | None = Field(default=None, min_length=1)
     """The library's folder. Default ``<data folder>/redteam/strategies``. A relative path is read
     from the run file's folder."""
+    order: bool = False
+    """Order each objective's attack methods by their recorded success on this target, best first,
+    instead of as listed, and count each method's attempts and confirmed successes in the table."""
+    methods_per_objective: int | None = Field(default=None, ge=1, le=50)
+    """With ``order``: run at most this many methods per objective; the others are left out."""
     explore: float = Field(default=0.2, ge=0, le=1)
-    """The share kept for exploration: the chance that an attempt is given no strategy."""
+    """The share kept for exploration: the chance that an attempt is given no strategy, and the
+    share of an objective's methods placed by a draw rather than by their record."""
     seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
     """Seeds the draws, so a rerun with the same seed and the same files draws the same. Without it,
     the run draws a seed and records it in its provenance as ``memory.seed``."""
+
+    @model_validator(mode="after")
+    def _capped(self) -> Memory:
+        if self.methods_per_objective is not None and not self.order:
+            raise ValueError("methods_per_objective caps the methods order chooses; set order")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.strategies or self.order
 
 
 class RunFile(_Model):
@@ -610,8 +626,8 @@ class RunFile(_Model):
                     f"tools.proxy {server.name!r}: inject mode needs the text to inject, or an attack whose "
                     "tool_result route names it"
                 )
-        if self.environment is not None and self.memory.strategies:
-            raise ValueError("memory.strategies applies to a run without an environment")
+        if self.environment is not None and self.memory.enabled:
+            raise ValueError("memory applies to a run without an environment")
         if self.agent is not None and self.environment is None:
             raise ValueError("agent names the registered agent of an environment run; set environment")
         if self.environment is not None and self.tools.proxy:

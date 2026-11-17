@@ -1,12 +1,12 @@
-"""The local attack memory: a strategy library learned from the user's own runs.
+"""The local attack memory: a strategy library and method record learned from the user's own runs.
 
 A run file with ``memory.strategies`` reads and updates a folder of plain files
 (``<data folder>/redteam/strategies`` by default, :func:`default_folder`):
 
 - ``strategy-<id>.json``, one per strategy: an attack that reached a confirmed success (evidence
   level 2 or above, decided by code) on a probe's objective, with the method that found it and where.
-- ``stats.csv``, a table with one row per strategy, objective and target fingerprint: attempts,
-  confirmed successes and when it was last used.
+- ``stats.csv``, a table with one row per strategy or attack method, objective and target
+  fingerprint: attempts, confirmed successes and when it was last used.
 
 Deleting a strategy file forgets it (its rows are dropped when the table is next read); deleting the
 folder forgets everything. Nothing in it leaves the machine.
@@ -17,6 +17,10 @@ they do not hit. :meth:`StrategyLibrary.pick` chooses them: with chance ``explor
 writes its own), else up to three whose success on this target, ``(successes + 1) / (attempts + 2)``,
 is at least one half, best first. The draw is seeded by the run's memory seed and the attempt, so a
 rerun with the same seed and the same files picks the same strategies.
+
+With ``memory.order``, :meth:`StrategyLibrary.order` runs each objective's methods best first by
+their record on this target, keeps a share of places for methods drawn at random, and leaves out
+those past ``methods_per_objective``; the draw is seeded the same way.
 
 The table is updated when a run ends, only from attempts the checks decided by code: a strategy
 counts a success when the query that sent it hit at level 2 or above and the probe's negative control
@@ -181,6 +185,32 @@ class StrategyLibrary:
             if value >= 0.5:
                 ranked.append((-value, -row.successes, strategy.created_at, strategy.id, strategy))
         return [item[-1] for item in sorted(ranked)[:PICKED]]
+
+    def order(
+        self,
+        objective: str,
+        target: str,
+        methods: list[str],
+        *,
+        rng: random.Random,
+        explore: float,
+        cap: int | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """The methods to run for ``objective``, in order, and those left out. Of ``k`` places (every
+        method, or ``cap``), ``round(explore * k)`` go to methods drawn at random from those the
+        record does not place; the rest go to the best by their score on ``target``, ties in listed
+        order. The record's choice comes first, then the draw."""
+        places = len(methods) if cap is None else min(cap, len(methods))
+        drawn = min(places, int(explore * places + 0.5))
+
+        def rank(item: tuple[int, str]) -> tuple[float, int, int]:
+            row = self.row("method", item[1], objective, target)
+            return (-score(row.attempts, row.successes), -row.successes, item[0])
+
+        ranked = [method for _, method in sorted(enumerate(methods), key=rank)]
+        chosen, rest = ranked[: places - drawn], ranked[places - drawn :]
+        explored = rng.sample(rest, drawn)
+        return chosen + explored, [method for method in rest if method not in explored]
 
     # --- learning ---------------------------------------------------------------------------------
 

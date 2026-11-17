@@ -224,9 +224,12 @@ class Engine:
             if memory.seed is not None
             else (recorded if isinstance(recorded, int) else secrets.randbits(32))
         )
-        if memory.strategies:
+        if memory.enabled:
             self.memory = StrategyLibrary(memory.folder or default_folder())
             self.provenance["memory"] = {"seed": self.memory_seed, "explore": memory.explore, "target": self.target_key}
+        if memory.order:
+            earlier = (resume.provenance.get("memory") or {}).get("order") if resume is not None else None
+            self._order(earlier if isinstance(earlier, dict) else None)
         if resume is not None:
             self._resume(resume)
 
@@ -602,10 +605,44 @@ class Engine:
 
     # --- the strategy library ---------------------------------------------------------------------
 
+    def _order(self, recorded: dict[str, list[str]] | None) -> None:
+        """Put each objective's probes in the order of their methods' record on this target
+        (:meth:`StrategyLibrary.order`), and leave out those past ``methods_per_objective``. The order
+        is kept in the provenance as ``memory.order``; a resumed run keeps the order it had."""
+        assert self.memory is not None
+        memory = self.run_file.memory
+        groups: dict[str, list[PlannedProbe]] = {}
+        for planned in self.planned:
+            groups.setdefault(objective_key(planned.probe), []).append(planned)
+        ordered: list[PlannedProbe] = []
+        chosen: dict[str, list[str]] = {}
+        left_out: dict[str, list[str]] = {}
+        for objective, probes in groups.items():
+            by_method = {planned.attack_method.id: planned for planned in probes}
+            if recorded is not None and objective in recorded:
+                order = [method for method in recorded[objective] if method in by_method]
+                rest = [method for method in by_method if method not in order]
+            else:
+                rng = random.Random(f"{self.memory_seed}:order:{objective}")
+                order, rest = self.memory.order(
+                    objective,
+                    self.target_key,
+                    list(by_method),
+                    rng=rng,
+                    explore=memory.explore,
+                    cap=memory.methods_per_objective,
+                )
+            ordered += [by_method[method] for method in order]
+            chosen[objective] = order
+            if rest:
+                left_out[objective] = rest
+        self.planned = ordered
+        self.provenance["memory"] = {**self.provenance["memory"], "order": chosen, "left_out": left_out}
+
     def strategies_for(self, planned: PlannedProbe, attempt_id: str) -> list[Strategy]:
         """The strategies a search method's attempt sends first (:meth:`StrategyLibrary.pick`),
         drawn from the run's memory seed and the attempt."""
-        if self.memory is None or planned.attack_method.kind != "search":
+        if self.memory is None or not self.run_file.memory.strategies or planned.attack_method.kind != "search":
             return []
         rng = random.Random(f"{self.memory_seed}:{attempt_id}")
         return self.memory.pick(
@@ -625,12 +662,13 @@ class Engine:
         )
 
     def _learn(self) -> None:
-        """Update the strategy library from this run's attack attempts, once its controls ran: each
-        strategy an attempt sent counts an attempt, and a success when the query that sent it is the
-        one the attempt was decided on at level 2 or above (a check decided by code) and the probe's
-        negative control did not show the same signal. Such a success with an attack the method
-        wrote itself becomes a strategy, unless the method is a conversation, whose last message
-        means nothing alone."""
+        """Update the strategy library from this run's attack attempts, once its controls ran. Each
+        method counts an attempt for each decided attempt, and a success for a confirmed one (level 2
+        or above, a check decided by code, and a negative control that did not show the same
+        signal). With ``strategies``, each strategy an attempt sent counts an attempt, and a success
+        when the query that sent it is the one a confirmed attempt was decided on. Such a success
+        with an attack the method wrote itself becomes a strategy, unless the method is a
+        conversation, whose last message means nothing alone."""
         if self.memory is None:
             return
         from martian.redteam.engine.hostile import scrub_secrets, secret_values
@@ -642,8 +680,7 @@ class Engine:
         planned = {item.probe.id: item for item in self.planned}
         hidden = secret_values(policy=self.service.redaction_policy)
         for attempt in attempts:
-            learned = self.learned.get(attempt.id)
-            if learned is None or attempt.outcome not in ("hit", "resisted"):
+            if attempt.outcome not in ("hit", "resisted"):
                 continue
             probe = planned[attempt.probe_id].probe
             objective = objective_key(probe)
@@ -653,6 +690,10 @@ class Engine:
                 and attempt.level >= EvidenceLevel.TEXT
                 and control.get(probe.id) is not False
             )
+            self.memory.count("method", probe.attack_method, objective, self.target_key, success=confirmed)
+            learned = self.learned.get(attempt.id)
+            if learned is None or not self.run_file.memory.strategies:
+                continue
             for strategy, query in learned.used:
                 self.memory.count(
                     "strategy", strategy, objective, self.target_key, success=confirmed and query == learned.query

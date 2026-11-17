@@ -15,6 +15,10 @@ Every method has one of four kinds:
 
 And one arm, which the report uses to compare them: `control` (fixed templates, the same every run), `static` (one written attack) or `adaptive` (it reads the replies or the checks' feedback).
 
+## Order
+
+Methods run in the order `attacks` lists them, unless the run file's `memory.order` puts each objective's methods best first by their record on the target, with a share kept for exploration and an optional cap per objective ([memory](redteam-run-file.md#memory)).
+
 ## Budget
 
 Each method has a cap on target queries per attempt. Every call of the target, the attacker and the judge is also counted on the run's `budget` before it is made, so a method never spends past the run's limits; an attempt the run's budget stops is `stopped`, never held. The six version 0.2 methods send one query per attempt and call the attacker once (twice when it refuses).
