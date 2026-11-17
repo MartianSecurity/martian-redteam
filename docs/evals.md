@@ -3216,6 +3216,14 @@ name in `martian.evals`.
 | `policy_adherence` | The conversation and `guidelines`, the case's `expectations.guidelines` or else the check's own | No reply breaks a guideline, each read in the light of the turns before it | The first turn whose reply broke one, the guideline, and the words that broke it unless the reply broke it by leaving something out |
 | `knowledge_retention` | The conversation | No reply contradicts or forgets what the user said in that turn or before | The turn whose reply did, the turn the user said it in and the fact, quoted from the user's message, and the reply's words unless it forgot by leaving something out |
 
+A direct question about an earlier fact must be answered in that turn: an earlier correct reply
+does not excuse a later unrelated answer or omission. A neutral acknowledgement need not repeat
+an unrelated fact. `knowledge-retention-v2` checks every applicable reply, follows corrections,
+and a pass cites the latest applicable reply and the user's fact. Both quotes and their turn
+numbers are validated; missing or fabricated evidence is an error. A pass with no applicable user
+fact uses zero turn numbers and empty quotes. This remains one model call, with the existing
+public function and suite-file options.
+
 A pass of `task_completion` names the turn whose reply completed the goal and quotes it. The
 rationale gives the turn and its words, such as `Turn 3 contradicts or forgets what the user said
 on turn 1: "My order number is A-1002.". It asked for the number again. Turn 3 reply: "What is your
@@ -3275,6 +3283,7 @@ each quote a passage of the message it names, letting only runs of whitespace di
 [grounding judges](#grounding-and-retrieval-judges). A turn or quote the verdict needs that is
 missing or not there, and `uncertain`, are scorer errors (`judge_missing_turn`,
 `judge_invalid_turn`, `judge_invalid_guideline`, `judge_missing_quote`, `judge_invalid_quote`,
+`judge_invalid_evidence`,
 `judge_uncertain`): the conversation has no verdict, and `martian evals run` and `assert_checks`
 count it as an error. Each judge makes one model call through the shared transport, with its
 retries of replies that carry no judgment and its failure codes. An endpoint that declines
@@ -3282,7 +3291,7 @@ structured output is asked once more without it; a reply that is not the verdict
 final, never repaired or asked for again. A conversation that is not user and assistant messages in
 turn, a missing or empty goal and guidelines that are not a nonempty list of text are errors before
 any model call. Feedback metadata records `martian.judge.version` (`task-completion-v1`,
-`policy-adherence-v1` or `knowledge-retention-v1`), `verdict`, `turn` (and `guideline` or
+`policy-adherence-v1` or `knowledge-retention-v2`), `verdict`, `turn` (and `guideline` or
 `fact_turn`), `evidence` (each quote's turn, `user` or `assistant`, and code-point offsets),
 `turns`, `conversation_sha256`, `criteria_sha256`, `prompt_sha256` and `model_calls`;
 `include_judge_prompt=True` also keeps the rendered prompt.
@@ -3298,7 +3307,7 @@ routes as a score of source `llm_judge` whose `source_id` is the judge model.
 **Measured error rates.** Each judge was scored once against a hand-written labelled set of
 invented conversations of one to three turns,
 [`tests/evals/benchmarks/conversation_judges.jsonl`](../tests/evals/benchmarks/conversation_judges.jsonl)
-(ten cases a judge, half labelled pass; each labelled fail names its turn, and its guideline or the
+(originally ten cases a judge, half labelled pass; each labelled fail names its turn, and its guideline or the
 turn of its fact), by [`scripts/benchmark_conversation_judges.py`](../scripts/benchmark_conversation_judges.py),
 with GLM 5 (`zai.glm-5` on Amazon Bedrock, us-west-2, through a LiteLLM proxy as `openai:/glm-5`)
 at temperature 0, on 15 November 2026, in 30 model calls. False pass, false fail and errors are as
@@ -3309,14 +3318,27 @@ fails the judge failed whose verdict named the labelled turn, and guideline or f
 | --- | --- | --- | --- | --- | --- | --- |
 | `task_completion` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.8 s |
 | `policy_adherence` | 10 (5 / 5) | 0 of 5 | 1 of 5 | 0 | 5 of 5 | 1.5 s |
-| `knowledge_retention` | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.7 s |
+| `knowledge_retention` (v1) | 10 (5 / 5) | 0 of 5 | 0 of 5 | 0 | 5 of 5 | 1.7 s |
+
+The table records the original v1 retention prompt; its rates do not establish v2 accuracy.
+The current retention set adds paired recall-omission cases, a neutral acknowledgement and a
+corrected-fact omission, for sixteen retention cases (eight pass/eight fail).
+
+The v2 retention prompt was measured separately on the current 16-case set with GLM 5
+(`zai.glm-5`, Amazon Bedrock us-east-1, OpenAI-compatible endpoint), temperature 0:
+0 of 8 false passes, 0 of 8 false fails, 0 errors, and all 8 failures named the labelled fact
+and reply turns. It used 16 HTTP requests, averaging 3.94 seconds and about
+680 input / 87 output tokens per case. This set includes the reported omission used to inform
+the new prompt, so it is a regression measure rather than an independent estimate of accuracy.
+These single-run synthetic samples do not establish population accuracy or eliminate model
+variability; recalibrate on the deployment's own model and conversations.
 
 The one false fail is a conversation that asked "Which one should I cancel, Music or Video?" before
 cancelling, under the guideline "Before cancelling anything, confirm with the customer which item
-they mean": the judge read it as asking for a second confirmation after the customer answered. The
-prompts were not revised on this set. These are very small samples: with five cases a side,
+they mean": the judge read it as asking for a second confirmation after the customer answered. The original v1
+prompts were not revised on that set. Those are very small samples: with five cases a side,
 observing no error still allows a true rate of up to about 50% (the 95% upper bound), and one run
-measures no run-to-run variation. A judgment took about 460 to 500 input tokens and 75 to 85 output
+measures no run-to-run variation. An original v1 judgment took about 460 to 500 input tokens and 75 to 85 output
 tokens on average, by judge. Calibrate on your own conversations and model before relying on them
 in a gate; a change to a judge's prompt or schema needs the benchmark run again.
 
