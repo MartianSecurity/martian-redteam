@@ -201,7 +201,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
 3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 
-The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
+The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)), `redteam-report.json` (the [report standard](redteam-reports.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. `-f html,csv,sarif,junit` (or `-f all`) also writes those [formats](redteam-reports.md#output-formats). As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
 
 The run is kept after every attempt, each with a fingerprint of what produced it: the catalogue version, the prompt and verdict rule revisions, its probe and checks, the target block and the service with its models. `martian redteam run FILE --resume RUN_ID` continues a run from the local store: each finished attempt (vulnerable, held or undetermined) whose fingerprint is unchanged is reused and calls no model and no target; an attempt that errored or was stopped, or whose fingerprint changed, runs again. A changed check reruns only its vulnerability's attempts; a new catalogue version or another model reruns every attempt. What the earlier session spent still counts against the budget.
 
@@ -209,12 +209,24 @@ The command exits 0 when the gate passes, 1 when it fails and 2 when the run cou
 
 ## Gate
 
+The gate decides the exit code: 0 when nothing fails it, 1 when something does, 2 when the run could not start. A warning is printed and kept in `redteam-report.json` under `gate.warnings` ([reports](redteam-reports.md)), and never changes the exit code.
+
 | Field | Meaning |
 | --- | --- |
-| `fail_on` | `confirmed` (the default) fails on a finding at level 2 or above. `suspected` also fails on a finding a model judged only |
-| `severity` | Only findings of vulnerabilities at this severity or above fail the gate |
-| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true |
-| `ignore_target_errors` | Do not fail on calls of the target that failed. Default false |
-| `undetermined` | `fail` (the default) fails the run when no check could decide an attempt. `ignore` leaves those out; the report still counts them |
+| `fail_on` | The evidence level a finding must reach to fail the gate: `confirmed` (the default, level 2 and above), `suspected` (level 1 too, a finding a model judged only) or a level from 1 to 5 ([levels](redteam-verdicts.md#evidence-levels)), such as `3` for a tool call and above |
+| `severity` | Only findings of vulnerabilities at this severity or above fail the gate. A finding of a vulnerability with no `severity` counts |
+| `warn_on` | Warn about a finding at this level or above that does not fail the gate: one below `fail_on`, or below `severity`. Takes the same values as `fail_on`, at or below it. Default: no warning |
+| `undetermined` | What an attempt no check could decide, or one the budget stopped, does: `fail` (the default), `warn` or `ignore`. The report counts them whatever this says |
+| `errors` | What an attempt that did not complete does, by whose failure it was: `target`, `attacker`, `judge` and `infrastructure`, each `fail`, `warn` or `ignore` |
+| `fail_on_infrastructure_error` | Fail when the attacker, the judge, the platform or the harness failed. Default true. The same as `errors` `attacker`, `judge` and `infrastructure` at `fail` (true) or `ignore` (false); give one or the other |
+| `ignore_target_errors` | Do not fail on calls of the target that failed. Default false. The same as `errors.target: ignore`; give one or the other |
 
-The gate also fails a finding of a vulnerability with no `severity` when `severity` is set, a run with no attempt, and a run that made fewer attempts than it planned.
+The gate always fails a run with no attempt, and a run that made fewer attempts than it planned.
+
+A run whose results are only suspected passes with a warning under:
+
+```yaml
+gate: { fail_on: confirmed, warn_on: suspected }
+```
+
+A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) gives the same result as before.

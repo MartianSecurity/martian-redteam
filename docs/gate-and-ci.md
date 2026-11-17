@@ -13,7 +13,14 @@ martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-expo
 
 `martian redteam run` returns 0 for a passing local gate, 1 for a failed gate,
 and 2 for setup/execution failures. It writes JSON/Markdown before applying the
-gate. `martian ci` requires a complete Backend acknowledgment as well as complete
+gate. A version 0.2 file gates on the pass rate of gated vulnerability types. A
+version 2 file gates on its `gate` block: the evidence level and severity a
+finding must reach to fail, what only warns (such as a run whose results are
+all suspected), and whether undetermined attempts and each kind of error fail,
+warn or are ignored ([run file gate](redteam-run-file.md#gate)). A warning
+never changes the exit code. `martian redteam pin run` re-runs
+[pinned findings](redteam-reports.md#pinned-findings) with no model, and exits 1
+when one still reproduces or is not decided. `martian ci` requires a complete Backend acknowledgment as well as complete
 passing local results. Keep its typed receipt, report and probe checkpoints with
 `if: always()`; a running/incomplete receipt never passes.
 
@@ -47,6 +54,8 @@ A downstream deployment should depend on that gate and deploy its tested artifac
 The root [composite action](../action.yml) and [reusable workflow](../.github/workflows/red-team.yml)
 run **`martian redteam run`**, a local report/gate through Backend. They do not
 persist a CI session. Both require a Backend URL and token with `redteam:run`.
+For a red team run on your own models with no Martian token, use the evals
+action's `redteam` input ([below](#red-team-results-in-the-comment)).
 The action accepts YAML path, output, `max-concurrent` and `attacks-per-vuln`.
 Use `martian ci` for console session history/export requirements.
 
@@ -77,7 +86,9 @@ prompts.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `suite` | required | The suite file, relative to the workspace |
+| `suite` | empty | The suite file, relative to the workspace. Give `suite`, `redteam` or both |
+| `redteam` | empty | A version 2 [red team run file](redteam-run-file.md), relative to the workspace; see [red team results in the comment](#red-team-results-in-the-comment) |
+| `redteam-output` | `results/redteam` | Folder for the red team reports |
 | `output` | `results/evals` | Folder for `results.jsonl`, `summary.json`, `junit.xml` and `verdicts.json`; one per suite |
 | `github-token` | the workflow token | Writes the comment |
 | `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request. A suite's own [matrix](evals.md#a-matrix-of-prompts-and-models) needs none: its combinations share one comment and one baseline |
@@ -142,6 +153,45 @@ prompts.
   step. Trigger on `pull_request`, never `pull_request_target`: the suite runs
   the pull request's code, and `pull_request_target` would give that code a
   write token and the repository's secrets.
+
+### Red team results in the comment
+
+With `redteam`, the action also runs that version 2 run file with
+`martian redteam run --no-store --format sarif,junit,html` and adds its result
+to the same comment. [examples/github-action](../examples/github-action/)
+holds a [sample run file](../examples/github-action/redteam/redteam.yaml), a
+deliberately weak [agent](../examples/github-action/redteam/agent.py), the
+`redteam` job of the [workflow](../examples/github-action/workflow.yml), and
+the [comment](../examples/github-action/comments/redteam.md) they produce.
+
+- **No Martian token.** The run is local: the run file's `models` generate and
+  judge the attacks with your own key, read from the step's `env` (such as
+  `OPENAI_API_KEY`). The step clears `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
+  so a token set on the job is neither needed nor read, and nothing reaches
+  Martian. A run file without `models` cannot run here. The pull request's
+  code runs in the step and can read the model key, so use a key kept for red
+  team runs; GitHub gives no secrets to pull requests from forks.
+- **What it says.** The headline follows the run's exit code: passed, passed
+  with warnings, failed, or did not finish (exit 2, or no report). Below it
+  are the attempts by outcome, the service, attacker and judge models and
+  attack methods, the budget and what was spent, the attacker's refusal rate,
+  the confirmed and suspected finding counts with the success rate per attempt
+  and its 95% interval (an upper bound when nothing succeeded), up to 25
+  confirmed findings by vulnerability, type, attack method, label, level,
+  severity and verification, the suspected count, errors by kind, and the
+  gate's failures and warnings. It is read from `redteam-report.json`
+  ([red team reports](redteam-reports.md)), which holds no attack or reply
+  text, so neither does the comment.
+- **The key.** With a suite, the comment is keyed by `comment-key` or the
+  suite path; with a red team run file only, by `comment-key` or the run
+  file's path.
+- **The exit code.** The action fails with 2 when the suite or the red team
+  run did not finish, else with 1 when either failed, else it passes.
+- **The reports.** The step writes `redteam-report.json`, `redteam-report.md`,
+  `redteam-report.html`, `redteam.sarif` and `redteam-junit.xml` to
+  `redteam-output`. Upload them with `if: always()`. To show findings in code
+  scanning, upload `redteam.sarif` with `github/codeql-action/upload-sarif`,
+  which needs `security-events: write`.
 
 ### Compared with the last result of main
 

@@ -80,7 +80,7 @@ async def test_an_attacker_that_always_refuses_yields_no_held_result_and_a_full_
     assert run.budget["refusals_by_method"]["roleplay"] == {"generations": 4, "refusals": 4}
     summary = render_markdown(run)
     assert "Attacker refusals: 8 of 8 generations refused or empty (100%)" in summary
-    assert "| roleplay | 4 | 4 | 100% |" in summary
+    assert "| roleplay | 4 | 4 | 100% (51–100%), 4 of 4 |" in summary
 
 
 async def test_one_refusal_is_retried_with_the_framing_and_the_attack_then_runs():
