@@ -253,7 +253,7 @@ def render_markdown(run: RedteamRun) -> str:
     lines += ["", "## Probes", ""]
     rows: list[list[object]] = []
     for probe in run.probes:
-        outcomes = Counter(attempt.outcome for attempt in run.attempts_of(probe.id))
+        outcomes = Counter(attempt.outcome for attempt in run.attempts_of(probe.id) if attempt.role == "attack")
         rows.append(
             [
                 probe.vulnerability,
