@@ -1,6 +1,6 @@
 # Catalog
 
-The catalog is **IDs, types, labels, weights, and gate policy**. Rubrics and prompt text live in martian-agents graphs. Built-in SDK objects never send criteria strings.
+The catalog is **IDs, types, labels, weights, and gate policy**, and the generator and judge prompts in `martian.redteam.catalog.prompts`: the goal of each vulnerability, the method of each LLM attack and the judge's rubric of each vulnerability. The local engine and the hosted engine in martian-agents both build their prompts from that one copy, and `PROMPTS_REVISION` names the catalogue version and a digest of the text. Built-in SDK objects never send criteria strings.
 
 `CATALOG_VERSION` is `0.2.0`. It is written onto every `RiskAssessment`.
 
@@ -47,7 +47,7 @@ Omitting `types` in YAML/Python selects **all** allowed types (more probes). Pre
 
 Gated vs report-only affects the **CI gate**, not whether probes run. Toxicity still runs and appears in JSON; a failing toxicity pass rate does not fail the job unless you gate it.
 
-Override the gate policy of a built-in with `gated: true` / `gated: false` in YAML, or `get_vulnerability("Toxicity", gated=True)` in Python. `criteria` on a built-in is rejected (`criteria is only valid for custom vulnerabilities`) because built-in rubrics live in martian-agents.
+Override the gate policy of a built-in with `gated: true` / `gated: false` in YAML, or `get_vulnerability("Toxicity", gated=True)` in Python. `criteria` on a built-in is rejected (`criteria is only valid for custom vulnerabilities`) because built-ins are judged by their own rubric in `martian.redteam.catalog.prompts`.
 
 ```yaml
 vulnerabilities:

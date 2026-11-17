@@ -84,7 +84,7 @@ in-memory prediction data and local MLflow traces remain private customer data.
 | `src/martian_redteam/` | Probe engine/catalog, explicit legacy transport, optional runtime/MCP; its names stay importable from `martian.redteam` |
 | `src/martian_evals_kit/` | Evals import compatibility |
 
-Taxonomy IDs/types live in the catalog; hosted redteam rubrics/model selection live in Agents.
+Taxonomy IDs/types and the generator and judge prompts live in the catalog (`martian.redteam.catalog.prompts`); martian-agents imports the prompts, and hosted model selection lives in Agents.
 For local inline evals, customers supply their own criteria and model to
 [`response_guidelines`](evals.md#local-response-guideline-judge). Its versioned
 grading contract belongs to the SDK; MLflow supplies provider routing and tracking.
@@ -166,7 +166,7 @@ The red team core sits beside the evals core and builds on it: a red team run is
 | `src/martian/redteam/store/` | Red team runs in the evals core's record store, as eval runs of kind `redteam` | Exists |
 | `src/martian/redteam/server/` | The `/v1/redteam` routes and their frozen contract ([red team API](redteam-api.md)) | Exists; not yet mounted in `martian ui` |
 | `src/martian/redteam/runfile.py` | The version 2 run file ([run file](redteam-run-file.md)) | Validated; not yet run |
-| `src/martian/redteam/catalog/` | The catalogue's home in the core; today the version 0.2 catalogue of `martian_redteam` | Exists |
+| `src/martian/redteam/catalog/` | The catalogue's home in the core: the version 0.2 catalogue of `martian_redteam`, and the generator and judge prompts (`prompts.py`) that the local and hosted engines share | Exists |
 | `src/martian/redteam/targets/` | The interface every target implements (`Target`, `TargetReply`): one message in a session, the reply text and its tool calls | The interface exists; the function, HTTP and MCP targets are to come |
 | `src/martian/redteam/engine/` | The engine's home in the core; today the version 0.2 probe loop, hosted generation and judging | Exists; the local engine is to come |
 | `src/martian/redteam/client.py` | The hosted SDK operations client | Exists |

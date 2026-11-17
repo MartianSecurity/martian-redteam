@@ -538,7 +538,7 @@ and Apache-2.0, and its Inter font files are OFL-1.1, each listed with its licen
 Paid Martian features are not in this repository. Report a vulnerability as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 
-`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. Simulation and evaluation prompts in martian-agents are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
+`NOTICE` records DeepTeam as the source of taxonomy identifiers and labels, and the Evals UI's packages with the MIT notice of the shadcn/ui code in them. The simulation and evaluation prompts (`martian.redteam.catalog.prompts`, which martian-agents imports) are authored by Martian Security and are not copies of DeepTeam template corpora. Do not paste DeepTeam metric class files into this tree.
 
 ## Resource runtime metadata
 

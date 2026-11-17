@@ -12,7 +12,7 @@ eval engine is canonical here; compatibility namespaces retain old imports.
 
 This includes the in-process adversarial-testing SDK and CLI (`martian-redteam`, Python 3.12+, hatchling `src/martian_redteam`). Probes are orchestrated in the customer's process; modern customer calls go through typed Backend `/v1/redteam` operations; Agents owns attack generation and judging, and the customer's model stays behind a local `model_callback`. The package is published on PyPI; publishing a new version requires a separate explicit user request. Do not expose customer API tokens to unreviewed CI code. Legacy direct-Agents access is explicitly operator-only, with a dedicated origin/key pair.
 
-- The catalog holds vulnerability and attack ids only. Rubric prose belongs in the martian-agents evaluator graph, not here. Bump `CATALOG_VERSION` when ids, types or gate flags change.
+- The catalog holds vulnerability and attack ids, and the one copy of the generator and judge prompts (`martian.redteam.catalog.prompts`), which martian-agents imports. Bump `CATALOG_VERSION` when ids, types or gate flags change; a change to the prompt text changes `PROMPTS_REVISION` and needs `tests/redteam/fixtures/hosted-prompt-digests.json` regenerated on purpose.
 - The gate fails closed on transport/schema errors and on gated pass rate. Do not add fallback or retry-to-pass behavior unless explicitly requested.
 - `martian_redteam.__all__` is the supported surface. Keep `protocol`, `config` and `catalog.get_*` internal.
 - Keep GitHub Actions SHA-pinned; never revert a pin to a floating tag. Customer examples pin the SDK to a tag or SHA, not `@main`.
