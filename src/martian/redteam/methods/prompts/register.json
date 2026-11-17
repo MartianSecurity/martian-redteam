@@ -1,0 +1,125 @@
+{
+  "$comment": "Every prompt file of the attack methods, with who wrote it, its licence and what it was modelled on. tests/redteam/test_method_prompts.py fails when a file under this folder is not listed here, when an entry names no file, or when a licence is not one scripts/licence-policy.json allows. References name ideas the text was modelled on; no text was copied from them.",
+  "files": {
+    "rewrites/authority.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Skeleton Key and authority-claim jailbreaks, as described in public write-ups",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "rewrites/hypothetical.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Hypothetical and thought-experiment framings, a published jailbreak category",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "rewrites/citation.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Authority-endorsement and citation persuasion techniques (Zeng et al., 2024, persuasive adversarial prompts)",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "rewrites/task_framing.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Task-embedding and indirect request framings, a published jailbreak category",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "rewrites/format_shift.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Output-format and structured-output jailbreaks, a published jailbreak category",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "templates-v1.json": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Instruction-override and 'important instructions' injection styles, as described in the AgentDojo paper (Debenedetti et al., 2024)",
+          "licence": "not copied"
+        },
+        {
+          "name": "Skeleton Key behaviour-update jailbreak, as described by Microsoft (2024)",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "search/start.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "PAIR, iterative refinement of an attack from the target's reply (Chao et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "TAP, tree of attacks with pruning (Mehrotra et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "MetaPI's four-rung tool signal: not called, wrong tool, wrong arguments, matched",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "search/refine.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "PAIR, iterative refinement of an attack from the target's reply (Chao et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "TAP, tree of attacks with pruning (Mehrotra et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "MetaPI's four-rung tool signal: not called, wrong tool, wrong arguments, matched",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "escalation/turn.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Crescendo, gradual multi-turn escalation with backtracking on refusal (Russinovich et al., 2024); PyRIT's implementation is MIT, not copied",
+          "licence": "MIT"
+        }
+      ]
+    },
+    "escalation/backtrack.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Crescendo, gradual multi-turn escalation with backtracking on refusal (Russinovich et al., 2024); PyRIT's implementation is MIT, not copied",
+          "licence": "MIT"
+        }
+      ]
+    }
+  }
+}

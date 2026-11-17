@@ -52,7 +52,7 @@ gate: { fail_on: confirmed, severity: high }
 | `target` | yes | What is attacked. See [target](#target) |
 | `models` | no | The models that attack and judge, called with your own key. Without them, attacks are generated and judged by the Martian platform, as in version 0.2 |
 | `vulnerabilities` | yes | At least one vulnerability to probe |
-| `attacks` | yes | At least one attack method, by `name` (and optional `weight`), as in version 0.2. `martian redteam catalog` lists them |
+| `attacks` | yes | At least one attack method. See [attacks](#attacks) |
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |
 | `gate` | no | When the run fails |
@@ -129,6 +129,8 @@ Which service generates and judges the attacks:
 
 A file that names an `environment` needs the connection whatever writes the attacks, so the third row does not apply to it: `models.attacker` set runs the attacks on your models and the environment on the server, and without it the platform writes them.
 
+A run whose attack methods never call the attacker (`Templates`, `Mutation`, and transforms layered on them; [attack methods](redteam-methods.md)) needs no `models.attacker`. Without a Martian connection it runs locally: with `models.judge` when a vulnerability is decided by the judge, or with no model at all when every check is decided by code. With a connection and no `models.judge`, the Martian platform judges. `models.judge` with a connection configured stops the run, as above, and `models.judge` alone stops a run whose methods do need the attacker.
+
 A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.
 
 ## Vulnerabilities
@@ -179,6 +181,23 @@ The check finds the canary in the reply and in tool call arguments, encoded or n
 
 A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a port the system picks, and stops it when the run ends, however it ends. Each attempt has its own address, `http://127.0.0.1:PORT/r/<token>`, and the attacker is told to make the target send the canary there. The listener keeps each request (the request line, the headers and up to 64 KiB of body, at most 1,000 requests a run) as `receipt` evidence of its attempt, answers `200 ok` and follows nothing in it. A request carrying the canary is verified exfiltration; one without it is contact only. The run's provenance counts what it received as `receipts` (`received`, `unmatched` for other addresses, `dropped` past the limit). The target must be able to reach `127.0.0.1` on this machine.
 
+## Attacks
+
+Each entry names an attack method by `name`, as in version 0.2 (PascalCase or the snake_case id), and takes these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The method. [Attack methods](redteam-methods.md) lists each one, what it tries and what it spends |
+| `layers` | Up to 4 transforms applied, in order, to every attack the method sends, such as `[Base64]` |
+| `max_queries` | The most target queries one attempt of the method makes, for a method that sends more than one. Each method's default is in [attack methods](redteam-methods.md) |
+| `width`, `branching`, `depth` | `TreeSearch` only: the attacks kept at each level, the attacks written from each, and the levels |
+| `delivery` | How the method's attacks reach the agent: `route` (`message`, the default; `variable`; `tool_result`; `web_page`), `template` (the user message; it holds `{{payload}}` for `variable` and `{{url}}` for `web_page`), `server` (for `tool_result`, a `tools.proxy` server in `inject` mode) and `hidden` (for `web_page`). See [delivery routes](redteam-methods.md#delivery-routes) |
+| `max_turns`, `max_backtracks` | `Escalation` only: the turns in one conversation, and the times it goes back a turn after a refusal |
+| `id` | The method's name in probe ids and reports. Without it, the method's id with its layers, such as `prompt_injection+base64` |
+| `weight` | As in version 0.2 |
+
+A method's own settings, such as a cap on target queries, are fields of its entry; a setting the method does not take is an error. The same method can be listed twice with other settings and another `id`.
+
 ## Tools
 
 `tools` takes two fields:
@@ -195,7 +214,7 @@ Each entry of `proxy` takes these fields:
 | `name` | A short name: a lower-case letter, then up to 23 lower-case letters, digits or `_`. It names the server's connection in the agent's session, so it follows the rule of an `MCPConnection` name |
 | `upstream` | The server's Streamable HTTP address, `http` or `https` |
 | `mode` | `record` (the default) records each call. `inject` adds text to tool results. `block` stops calls and answers with a set reply |
-| `inject` | The text `inject` mode adds |
+| `inject` | The text `inject` mode adds. It can be left out when an attack's `tool_result` route names the server, which then adds each attack instead |
 | `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
 | `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
@@ -231,7 +250,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 ## How a run works
 
 1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
-2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
+2. **Attack.** Each attempt runs its [attack method](redteam-methods.md). A version 0.2 method has the attacker write the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and calls the target once, in a session of its own for each attempt; `layers` change the attack before it is sent. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). `Templates` and `Mutation` call no attacker, and the adaptive methods send several queries per attempt, each reading the checks' feedback ([attack methods](redteam-methods.md)).
 3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 
 The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)), `redteam-report.json` (the [report standard](redteam-reports.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. `-f html,csv,sarif,junit` (or `-f all`) also writes those [formats](redteam-reports.md#output-formats). As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.

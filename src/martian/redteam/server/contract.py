@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-REDTEAM_API_VERSION = 5
+REDTEAM_API_VERSION = 6
 FOLDER = Path(__file__).resolve().parent / "contract"
 CONTRACT_PATH = FOLDER / f"redteam-api-v{REDTEAM_API_VERSION}.json"
 OPERATIONS_PATH = FOLDER / "redteam-operations.json"

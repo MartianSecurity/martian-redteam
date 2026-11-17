@@ -126,7 +126,10 @@ What runs where:
 - **Red team** probes run in your process and call your agent through a local
   callback or function. A version 2 run file that names `models` generates and
   judges the attacks with your own models and sends nothing to Martian
-  ([run file](docs/redteam-run-file.md)). Without `models`, the Martian platform
+  ([run file](docs/redteam-run-file.md)), with fixed templates as a control arm beside
+  adaptive attack methods that refine attacks from the target's replies within a
+  stated budget ([attack methods](docs/redteam-methods.md)); templates and mutation
+  need no attacker model. Without `models`, the Martian platform
   generates and judges them, which needs a platform connection and a token with
   `redteam:run`.
 - Hosted features also need the SDK APIs enabled for your organisation.

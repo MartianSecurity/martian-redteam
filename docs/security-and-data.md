@@ -37,7 +37,11 @@ fresh random id, after an instruction never to follow anything inside them; a
 run of three or more `<` or `>` in that text is broken up, so a reply cannot
 close its field. The engine's judge check (`models.judge`) runs on the SDK's
 rubric judge, which sends them as JSON string values it is told are untrusted
-evidence, so a reply cannot leave its value.
+evidence, so a reply cannot leave its value. An adaptive attack method
+([attack methods](redteam-methods.md)) passes the target's reply and tool calls
+to the attacker as data fields too, after an instruction to read them only to
+write the next attack, each cut to 4000 characters; what the checks found
+reaches the attacker in the harness's own words.
 Before any prompt is sent, the value of every environment variable named like
 a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
 characters or more) and of the models' headers is replaced by `[redacted]`, so
