@@ -97,7 +97,7 @@ DeepTeam-compatible `run` flags. YAML `system_config` is the default; flags over
 martian redteam --version
 martian redteam catalog
 martian redteam validate CONFIG.yaml
-martian redteam run CONFIG.yaml [-o DIR] [-c N] [-a N]
+martian redteam run CONFIG.yaml [-o DIR] [-c N] [-a N] [--no-store]
 ```
 
 | Flag | Long form | Overrides | Notes |
@@ -105,6 +105,9 @@ martian redteam run CONFIG.yaml [-o DIR] [-c N] [-a N]
 | `-o` | `--output` | `system_config.output_folder` | Directory for JSON + Markdown. Created if missing. |
 | `-c` | `--max-concurrent` | `system_config.max_concurrent` | In-flight probes. Keep at **2** (or 1) unless the granted Backend admission limits support more. |
 | `-a` | `--attacks-per-vuln` | `system_config.attacks_per_vulnerability_type` | Repeats per (vuln type × attack). Cost scales linearly. |
+| | `--no-store` | | Do not keep the run in the local store. By default `run` keeps it in the local data folder (`MARTIAN_EVALS_HOME`, else `~/.martian/evals`) as a [red team run](redteam-model.md#where-a-run-is-stored); this needs the `evals` extra. |
+
+This page documents version 0.2 files, which have no `version` key. Version 2 files are documented in [the run file guide](redteam-run-file.md); this release validates them and does not run them yet.
 
 ```bash
 martian redteam validate config.yaml
