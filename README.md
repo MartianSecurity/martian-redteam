@@ -86,8 +86,9 @@ pull request with the last result of `main` and name the cases that went from pa
   see
   [the local edition](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
   Its Red Team pages show the red team runs kept in the same data folder: each run's report,
-  attempts, findings (which you can annotate), the catalogue and framework coverage. They cannot
-  start a red team run yet. It also shows the traces an application records into it with
+  attempts, findings (which you can annotate), the catalogue and framework coverage. They also
+  start a red team run against one of those endpoints with your own models, and stop and resume
+  it. It also shows the traces an application records into it with
   [MLflow tracing](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly

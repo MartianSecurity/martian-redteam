@@ -896,9 +896,10 @@ def _expand(text: str, setting: str, value_of: Callable[[str], str | None], sour
     return _ENV_REFERENCE.sub(value, text)
 
 
-def _from_environment(text: str, setting: str) -> str:
-    """Replace ${NAME} with the environment's value. The suite file itself holds no secrets."""
-    return _expand(text, setting, os.environ.get, "the environment variable")
+def _from_environment(text: str, setting: str, environ: Mapping[str, str] | None = None) -> str:
+    """Replace ${NAME} with the environment's value, ``environ`` or the process's. The suite file
+    itself holds no secrets."""
+    return _expand(text, setting, (os.environ if environ is None else environ).get, "the environment variable")
 
 
 def _status_reason(response: httpx.Response) -> str:
