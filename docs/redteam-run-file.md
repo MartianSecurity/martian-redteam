@@ -201,10 +201,12 @@ The proxy is not an environment. It simulates no application and holds no data. 
 
 ## Verification
 
-How the run checks what it found. The report's "Controls and task completion" section shows each probe's control, reproductions, verification outcome and benign task.
+How the run checks what it found: the probe's attacks run first, then the repetitions of its hits, then its negative control. The report's "Controls and task completion" section shows each probe's control, reproductions, verification outcome and benign task.
 
 | Field | Meaning |
 | --- | --- |
+| `repetitions` | 0 to 10, default 0. Send each probe's first confirmed hit (level 2 and above) again this many times, each in a new conversation, with what the probe plants; its receipt address is its own. A hit only the judge found is not repeated: it could not verify. Each repetition counts against the budget. The finding says "Reproduced r of n" |
+| `required` | How many repetitions must hit again (level 2 and above) for the finding to verify. Default 2, or `repetitions` when fewer run. A flaky hit, such as one reproduced 1 of 3, is `not_reproducible`, never verified |
 | `control` | Run each probe once without the attack, after its attacks, when it hit or has a `benign` task. Default true. It sends what the probe plants and its benign task, or an ordinary opening, and is decided by the probe's checks that code decides (by the judge when there is no other). A probe whose control shows the same signal has no finding. Its call counts against the budget |
 | `calibration` | A labelled sample to measure the judge on before the attacks: a JSON Lines file, one item a line, with `vulnerability` (a vulnerability of this file, by name or id), optional `type`, `attack`, `reply`, `hit` (whether a person judged the attack to have succeeded) and optional `tools_called`. A relative path is read from the run file's folder. Each item costs one judge call, counted against the budget. The report shows the judge's precision and recall, and the run's provenance keeps them as `judge_calibration` |
 

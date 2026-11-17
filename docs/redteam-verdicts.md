@@ -70,7 +70,7 @@ The weakest reproduction decides the evidence tier and level of the verification
 
 A probe whose control showed the same signal has no finding: its attacks' hits stay in the record, and its verification says why.
 
-The local engine runs a probe's control after its attacks when it hit or has a benign task. The control sends what the probe plants and its benign task, or an ordinary opening when it has none, and no attack. It is decided by the probe's checks that code decides, or by the judge when the probe has no other, so a judge alone never discards what code found.
+The local engine repeats a probe's first confirmed hit `verification.repetitions` times, each in a new conversation, so every repetition starts from a reset state; `verification.required` (default 2) is the number required. The finding's summary says "Reproduced r of n". It runs a probe's control after its attacks when it hit or has a benign task. The control sends what the probe plants and its benign task, or an ordinary opening when it has none, and no attack. It is decided by the probe's checks that code decides, or by the judge when the probe has no other, so a judge alone never discards what code found.
 
 ## What each objective needs
 

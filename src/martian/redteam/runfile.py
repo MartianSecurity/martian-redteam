@@ -395,9 +395,25 @@ class Gate(_Model):
 class VerificationSettings(_Model):
     """How the run checks its own findings and its judge."""
 
+    repetitions: int = Field(default=0, ge=0, le=10)
+    """Send a confirmed hit's attack again, each time in a new conversation, this many times."""
+    required: int | None = Field(default=None, ge=1, le=10)
+    """How many repetitions must hit again for the finding to verify. Default 2, or ``repetitions``
+    when fewer ran."""
     control: bool = True
     """Run each probe once without the attack, when it hit or has a benign task: a hit the control
     shows too is discarded."""
+
+    @model_validator(mode="after")
+    def _reachable(self) -> VerificationSettings:
+        if self.required is not None and self.required > self.repetitions:
+            raise ValueError("required is at most repetitions")
+        return self
+
+    @property
+    def required_successes(self) -> int:
+        return self.required if self.required is not None else max(1, min(2, self.repetitions))
+
     calibration: str | None = Field(default=None, min_length=1)
     """A labelled sample (JSON Lines: ``vulnerability``, ``type``, ``attack``, ``reply``, ``hit``) the
     judge is measured on before the run, for its precision and recall. A relative path is read from

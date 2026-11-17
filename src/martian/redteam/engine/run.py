@@ -209,6 +209,7 @@ class Engine:
                 self.listener = await ReceiptListener().start()
             await self._calibrate()
             await self._attacks()
+            await self._repetitions()
             await self._controls()
         except BaseException as error:
             await self._close_listener()
@@ -235,6 +236,42 @@ class Engine:
             self.calibration = {"judge": judge.version, "error": str(error)}
         except BudgetExhausted as error:
             self.calibration = {"judge": judge.version, "error": str(error)}
+
+    async def _repetitions(self) -> None:
+        """Send each probe's first confirmed hit again, ``verification.repetitions`` times, each in a
+        new conversation, with what the probe plants. A hit only a model judged is not repeated: it
+        could not verify whatever the repetitions showed. Each repetition counts against the budget."""
+        count = self.run_file.verification.repetitions
+        if not count:
+            return
+        semaphore = asyncio.Semaphore(self.run_file.budget.max_concurrent)
+
+        async def one(planned: PlannedProbe, number: int, original: Attempt) -> None:
+            attack = original.input or ""
+            if self.listener is not None:
+                # The receipt address is the attempt's own: a repetition is sent its own.
+                attack = attack.replace(
+                    self.listener.address(original.id),
+                    self.listener.address(attempt_id_of(planned.probe.id, number, "repetition")),
+                )
+            async with semaphore:
+                attempt = await self._attempt(planned, number, role="repetition", attack=attack)
+            self.attempts[attempt.id] = attempt
+            await self._save(self.snapshot("running"))
+
+        work = []
+        for planned in self.planned:
+            hit = next(
+                (
+                    attempt
+                    for attempt in sorted(self._attacks_of(planned.probe.id), key=lambda item: item.number)
+                    if attempt.outcome == "hit" and attempt.level is not None and attempt.level >= EvidenceLevel.TEXT
+                ),
+                None,
+            )
+            if hit is not None:
+                work += [one(planned, number, hit) for number in range(1, count + 1)]
+        await self._gather(work)
 
     async def _controls(self) -> None:
         """Each probe's negative control, once its attacks are done: when the probe hit, or has a
@@ -622,6 +659,7 @@ class Engine:
                 probe.objective_class,
                 [Repetition(attempt.outcome, attempt.level) for attempt in repetitions],
                 control=control.outcome if control is not None else None,
+                required_successes=self.run_file.verification.required_successes,
                 require_control=self.run_file.verification.control,
                 isolated=True,
             )
@@ -669,7 +707,9 @@ class Engine:
         }
 
     def _limitations(self) -> list[str]:
-        found = ["No repetitions ran, so no finding is verified."]
+        found = []
+        if not self.run_file.verification.repetitions:
+            found.append("No repetitions ran, so no finding is verified.")
         if not self.run_file.verification.control:
             found.append("No negative controls ran: a hit the target would show without the attack is kept.")
         objectives = {planned.probe.objective_class for planned in self.planned}

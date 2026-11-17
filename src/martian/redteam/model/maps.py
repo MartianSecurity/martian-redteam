@@ -103,6 +103,11 @@ def findings_of(
     """One finding per probe whose attacks hit, at the highest level they reached. A probe whose
     negative control showed the same signal has no finding: the target did it without the attack."""
     outcome = {item.probe_id: item.outcome for item in verifications}
+    reproduced = {
+        item.probe_id: f"Reproduced {item.successful_reproductions} of {item.repetitions}."
+        for item in verifications
+        if item.repetitions
+    }
     discarded = {item.probe_id for item in verifications if item.negative_control_passed is False}
     found: list[Finding] = []
     for probe in probes:
@@ -136,6 +141,7 @@ def findings_of(
                 label=label(top, executed=executed, objective=probe.objective_class, contact=contact),
                 counted_as=counted,
                 outcome=outcome.get(probe.id),
+                summary=reproduced.get(probe.id, ""),
                 attempt_ids=[attempt.id for attempt in hits],
             )
         )
