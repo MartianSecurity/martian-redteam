@@ -325,8 +325,12 @@ for no update and needs no account. Every connection it can open:
 | The receipt listener | When a vulnerability has a `receipt` check: the run listens on `127.0.0.1` and the target is asked to send the canary there ([trust boundary](#trust-boundary)) | Nothing: it only receives |
 | A model price catalogue | Only when `MLFLOW_MODEL_CATALOG_URI` names one, to price `budget.cost_usd` ([below](#judges-and-the-model-catalogue)) | Nothing of the run |
 
-A run with no `models` uses the Martian platform instead, with `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
-and says so; a run never chooses one when both are configured ([run file models](redteam-run-file.md#models)).
+Three things connect to a Martian server, each only when you ask for it with `MARTIAN_API_URL` and
+`MARTIAN_API_TOKEN`: a run file with no `models`, whose attacks the Martian platform generates and judges
+(a run never chooses one when both are configured, [run file models](redteam-run-file.md#models)); a
+run file that names an `environment`, which the server provides ([environments](redteam-run-file.md#environments));
+and `martian redteam push` and `martian redteam campaign`, which send a run to a server or start a
+campaign on one ([red team reports](redteam-reports.md#pushing-a-run-to-a-martian-server)).
 
 The other red team commands connect to nothing: `validate`, `catalog`, `report`, `compare`,
 `pin add`, `convert promptfoo`, `import promptfoo` and `import garak`. `selftest` calls no model and

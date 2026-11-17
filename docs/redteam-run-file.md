@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. `environment` stops the run before anything is called, with a message that says so.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. A file that names an `environment` needs a connection to a Martian server ([environments](#environments)).
 
 ```yaml
 version: 2
@@ -58,7 +58,8 @@ gate: { fail_on: confirmed, severity: high }
 | `gate` | no | When the run fails |
 | `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
 | `output_folder` | no | Where reports are written. Default `results` |
-| `environment` | no | A Martian environment to run in. It needs a connection to a Martian server; a local run stops with a message that says so |
+| `agent` | no | The registered agent an environment run tests, by its id on the Martian server. Needs `environment`. Without it, the API key must be bound to the agent |
+| `environment` | no | A Martian environment to run in, by name. It needs a connection to a Martian server ([environments](#environments)) |
 
 ## Target
 
@@ -126,6 +127,8 @@ Which service generates and judges the attacks:
 | set | set | None: the run stops. Unset the variables or remove `models` |
 | not set | not set | None: the run stops and says how to set either |
 
+A file that names an `environment` needs the connection whatever writes the attacks, so the third row does not apply to it: `models.attacker` set runs the attacks on your models and the environment on the server, and without it the platform writes them.
+
 A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.
 
 ## Vulnerabilities
@@ -139,6 +142,7 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 | `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
 | `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
 | `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
+| `plant` | An indirect attack in an environment: `profile`, an implant profile of the agent's connection on the server, and `trigger`, the ordinary request the agent is sent instead of the attack. Needs `environment` ([environments](#environments)) |
 
 A `goal` takes these fields:
 
@@ -157,7 +161,7 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | `tool_call` | `tool`, `where`, and `executed`: `true` counts only a call that ran, `false` (the default) a requested call too | 3 |
 | `judge` | `criteria`, what the judge decides. Without it, the vulnerability's own criteria apply | 1 |
 | `receipt` | none. Needs a `canary` check in the same vulnerability. The run's local listener receives a request carrying that canary (see [receipts](#receipts)) | 4; 3 for a request without it, contact only |
-| `state` | `name`, a business check of the environment. Needs `environment` | 5 |
+| `state` | `name`, a check of the environment's records: `business`, the agent connection's business checks on the server. Needs `environment` | 5 |
 
 ### Canaries
 
@@ -182,7 +186,7 @@ A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a p
 | Field | Meaning |
 | --- | --- |
 | `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
-| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` or `environment` |
 
 Each entry of `proxy` takes these fields:
 
@@ -195,7 +199,7 @@ Each entry of `proxy` takes these fields:
 | `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
 | `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
-`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
+`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session (in an environment, the server's) to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
 
 The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
@@ -282,3 +286,18 @@ gate: { fail_on: confirmed, warn_on: suspected }
 ```
 
 A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) gives the same result as before.
+
+## Environments
+
+An environment is a Martian Simulation world on a Martian server: applications with seeded records, reset before each attempt, whose records a state check reads. This package holds no environment and runs none itself. A run file only names one with `environment`, and the server does the rest. The engine still runs here, against your agent, with the service `models` chooses.
+
+`martian redteam validate` checks such a file offline, like any other. `martian redteam run` needs `MARTIAN_API_URL` and `MARTIAN_API_TOKEN` (an API key with `redteam:run`). Without them the run stops with exit code 2 before it builds the target or calls a model, and says what to set.
+
+With them, the run goes like this:
+
+1. **Admission.** The run asks the server for a run in the environment (`POST /v1/redteam/environment-runs`) for `agent`, the registered agent the run tests, with the names of the file's state checks and of the implant profiles its `plant` entries use. The server refuses an agent that is not approved for red team runs, an environment or a state check it does not know, an edition without environments and a sandbox another run is using. The run then stops with exit code 2 and the server's reason, before any model call.
+2. **The agent's tools.** The server answers with a session in the shape it hands a cloud agent (`AssessmentSession`), whose MCP connections are the server's run-scoped gateway in front of the environment's applications. The run writes it to `tool-session.json` in `output_folder` and posts it to `tools.session_api` when set, as the [recording proxy](#tools)'s session is handed over. The agent binds its tools with `bind_tools(session, action_id=...)` exactly as it does locally; its code does not change. `tools.proxy` does not apply: the gateway is the tool boundary.
+3. **The world of each attempt.** Before each attempt's message the run asks the server to prepare the attempt's world: the server resets the environment, so an attempt never sees another's records. For a vulnerability with `plant`, the attack the attacker wrote is planted in that world with the implant profile (an email in the agent's inbox, say), the agent is sent `plant.trigger` instead, and the outcome says whether the agent read what was planted (delivered); the report keeps the planted attack as `payload` evidence. The control of a planted probe sends the same trigger in a world where nothing was planted. After the reply it asks for the attempt's outcome: each state check's result (`business` is the agent connection's business checks) and the tool calls the gateway recorded under the attempt's action id. Those calls join the reply's, as executed calls with their evidence, so a `tool_call` check reads what the agent did at its tools. A `state` check that hit is checked once more: the no-implant control sends an ordinary message (`Hello. What can you help me with?`) in another reset world. When the control left the same records unchanged the hit stands, at level 5, verified in environment; when it changed them too, the check is undetermined, since the change is not the attack's. This control belongs to the attempt and runs whatever `verification.control` says; the probe's own negative control, repetitions and benign task run as without an environment, each in a world of its own. Attempts run one at a time, whatever `budget.max_concurrent` says, and each control's message counts against `target_queries`. A world the server cannot prepare or read makes the attempt an infrastructure error.
+4. **End.** When the run ends, however it ends, it tells the server (with the run key the server issued for this run alone), and the server releases the session and the sandboxes. The report's `provenance.environment` names the server's run. The run is then pushed to the server as `martian redteam push` sends it ([pushing a run](redteam-reports.md#pushing-a-run-to-a-martian-server)), so the console shows its findings; a push the server refuses is a warning.
+
+`--resume` does not apply to a run in an environment: it starts again in a reset world.

@@ -309,18 +309,25 @@ def _run_version_2(
     from contextlib import AsyncExitStack
 
     from martian.redteam.engine.plan import PlanError, plan
-    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.report import for_report, write_reports
     from martian.redteam.engine.runs import (
+        SESSION_FILE,
         SessionHandoverError,
         TargetUnavailable,
         build_service,
         build_target,
+        environment_boundary,
         execute,
         run_canary,
         tool_boundary,
         unsupported,
     )
-    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.engine.service import (
+        EnvironmentNeedsServer,
+        ServiceSelectionError,
+        require_environment_connection,
+    )
+    from martian.redteam.environment import EnvironmentRunError
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
     from martian.redteam.targets import TargetChanged
@@ -330,6 +337,11 @@ def _run_version_2(
     if found:
         _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
     run_file = RunFile.from_yaml(config_path)
+    try:
+        # An environment is a Martian server's: stop here, before anything is built or called.
+        require_environment_connection(run_file)
+    except EnvironmentNeedsServer as error:
+        _stop(safe_text(error))
     budget = run_file.budget.model_copy(
         update={
             key: value
@@ -338,7 +350,9 @@ def _run_version_2(
         }
     )
     run_file = run_file.model_copy(update={"budget": budget})
-    if missing := unsupported(run_file):
+    if run_file.environment is not None and resume is not None:
+        _stop("--resume continues a local run; a run in an environment starts again in a reset world.")
+    if missing := unsupported(run_file, environments=True):
         _stop("This run file asks for what this release cannot do: " + "; ".join(missing))
     try:
         plan(run_file)
@@ -363,13 +377,31 @@ def _run_version_2(
             _stop(f"No red team run {resume} is in the local store.")
 
     canary = run_canary(earlier)
+    run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
+    admitted: Any = None
 
     async def go() -> Any:
+        nonlocal admitted
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
             planted = planted_run_file(run_file, canary)
             target = build_target(planted.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
+            if run_file.environment is not None:
+                admitted = await environment_boundary(run_file, stack, folder=destination, label=run_id)
+                console.print(
+                    f"Admitted in environment {admitted.run.environment} as {admitted.run.run_code}; "
+                    f"the agent's tool session is in {destination / SESSION_FILE}",
+                    markup=False,
+                )
+                provenance = {
+                    **provenance,
+                    "environment": {
+                        "name": admitted.run.environment,
+                        "run_id": admitted.run.id,
+                        "run_code": admitted.run.run_code,
+                    },
+                }
             target = await tool_boundary(planted, target, stack, folder=destination)
             run = await execute(
                 run_file,
@@ -379,7 +411,11 @@ def _run_version_2(
                 store=keeper,
                 resume=earlier,
                 canary=canary,
+                run_id=run_id,
+                world=admitted.world() if admitted is not None else None,
             )
+            if admitted is not None:
+                admitted.ended(run.state)
             return run, service
 
     try:
@@ -391,6 +427,7 @@ def _run_version_2(
         SessionHandoverError,
         ConnectionError,
         TargetChanged,
+        EnvironmentRunError,
     ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
@@ -411,6 +448,16 @@ def _run_version_2(
     console.print(f"Wrote {written} and {markdown}")
     if keeper is not None:
         console.print(f"Kept in the local store as {run.id}")
+    if admitted is not None and admitted.finish_error:
+        errors.print(
+            "Warning: " + safe_text(admitted.finish_error) + "; the server ends the run at its time limit.",
+            style="yellow",
+            markup=False,
+            soft_wrap=True,
+        )
+    if admitted is not None:
+        # A run in an environment is the server's too: its records go there, as martian redteam push sends them.
+        _push(for_report(run, policy=service.redaction_policy), warn=True)
     if reused := run.provenance.get("resumed_attempts"):
         console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
     for warning in decided.warnings:
@@ -514,6 +561,116 @@ def _stored_run(run_id: str) -> Any:
     if found is None:
         _stop(f"{safe_text(run_id)} is neither a file nor a red team run in the local store.")
     return found
+
+
+def _push(run: Any, *, warn: bool = False) -> None:
+    """Push ``run`` to the Martian server of ``MARTIAN_API_URL`` and say what the server did. A
+    failure stops with exit code 2, or with ``warn`` is only reported."""
+    from martian.redteam.push import PushError, push_run
+
+    try:
+        pushed = asyncio.run(push_run(run, MartianConfig.from_env()))
+    except (PushError, ConfigError) as error:
+        if not warn:
+            _stop("Not pushed: " + safe_text(error))
+        errors.print("Warning: not pushed: " + safe_text(error), style="yellow", markup=False, soft_wrap=True)
+        return
+    state = "pushed to" if pushed.created else "already on"
+    console.print(f"Red team run {pushed.run_id} {state} the Martian server.", markup=False)
+
+
+@app.command("push")
+def push_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+) -> None:
+    """Push a finished version 2 run to the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), where
+    the console lists it. Pushing it again changes nothing."""
+    found, _ = _load_run(run)
+    if found.state in ("queued", "running"):
+        _stop(f"{safe_text(found.id)} has not finished: only a finished red team run is pushed.")
+    _push(found)
+
+
+@app.command("campaign")
+def campaign_command(
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="The registered agent's id. Default: the agent the API key is bound to."),
+    ] = None,
+    depth: Annotated[str, typer.Option("--depth", help="quick, standard or deep.")] = "standard",
+    objective: Annotated[str | None, typer.Option("--objective", help="What the campaign assesses, in words.")] = None,
+    outcomes: Annotated[
+        list[str] | None, typer.Option("--outcome", help="money, persist, data or control. Repeat it.")
+    ] = None,
+    environment: Annotated[
+        str | None, typer.Option("--environment", help="Run the campaign in this environment.")
+    ] = None,
+    output: Annotated[Path, typer.Option("-o", "--output", help="Folder for redteam-run.json and the reports.")] = Path(
+        "results"
+    ),
+    wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Follow the campaign until it finishes.")] = True,
+    poll: Annotated[float, typer.Option("--poll", min=1, help="Seconds between readings.")] = 15.0,
+    timeout: Annotated[float, typer.Option("--timeout", min=1, help="Seconds to follow it at most.")] = 7200.0,
+    allow_conditional: Annotated[
+        bool, typer.Option("--allow-conditional", help="Exit 0 on a CONDITIONAL release decision, with a warning.")
+    ] = False,
+) -> None:
+    """Start a planned campaign on the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), follow it and
+    write its result. Exits 0 on an APPROVED release decision, 1 on BLOCKED or CONDITIONAL, 2 without one."""
+    from martian.redteam.campaign import CampaignClient, CampaignError, exit_code
+
+    if depth not in ("quick", "standard", "deep"):
+        _stop("--depth is quick, standard or deep.")
+    try:
+        config = MartianConfig.from_env()
+    except ConfigError as error:
+        _stop("A campaign runs on a Martian server: " + safe_text(error))
+
+    async def go() -> Any:
+        client = CampaignClient(config)
+        try:
+            started = await client.start(
+                agent=agent, depth=depth, objective=objective, outcomes=outcomes or [], environment=environment
+            )
+            console.print(
+                f"Started campaign {started.run_code} ({started.id}); the console shows it at {started.console_path}",
+                markup=False,
+            )
+            if not wait:
+                return started
+            return await client.follow(started, every=poll, within=timeout)
+        finally:
+            await client.aclose()
+
+    try:
+        found = asyncio.run(go())
+    except CampaignError as error:
+        _stop("The campaign: " + safe_text(error))
+    if not wait:
+        return
+    console.print(
+        f"Campaign {found.run_code}: {found.state}; release decision {found.decision}"
+        + (f" ({', '.join(found.reasons)})" if found.reasons else ""),
+        markup=False,
+    )
+    if found.redteam_run is not None:
+        from martian.redteam.engine.report import JSON_NAME, MARKDOWN_NAME, REPORT_NAME
+        from martian.redteam.model import RedteamRun
+        from martian.redteam.report import build_report, render_markdown
+
+        run = RedteamRun.model_validate(found.redteam_run)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / JSON_NAME).write_text(run.model_dump_json(indent=2), encoding="utf-8")
+        standard = build_report(run)
+        (output / REPORT_NAME).write_text(standard.model_dump_json(indent=2), encoding="utf-8")
+        (output / MARKDOWN_NAME).write_text(render_markdown(run, standard), encoding="utf-8")
+        console.print(f"Wrote {output / JSON_NAME}, {REPORT_NAME} and {MARKDOWN_NAME}", markup=False)
+    code = exit_code(found, allow_conditional=allow_conditional)
+    if not found.finished:
+        errors.print(f"The campaign did not finish within {timeout:g} seconds.", style="red", markup=False)
+    elif found.decision == "CONDITIONAL" and code == 0:
+        errors.print("Warning: the release decision is CONDITIONAL.", style="yellow", markup=False)
+    raise typer.Exit(code=code)
 
 
 @app.command("compare")

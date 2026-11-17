@@ -193,6 +193,7 @@ def create_app(
         raise TypeError("judge_settings must implement martian.evals.judge_settings.JudgeSettings")
     # Imported here: the red team routes import this package's dependencies.
     from martian.redteam.server import router as redteam_router
+    from martian.redteam.server.push import router as redteam_push_router
 
     if isinstance(worker, Lifecycle):
         fastapi_options["lifespan"] = _with_worker(worker, fastapi_options.get("lifespan"))
@@ -236,6 +237,7 @@ def create_app(
     # Left out of this app's OpenAPI document: the red team contract is generated from the router on
     # its own, and both cores name a schema ``Attempt``, which FastAPI would rename in this document.
     app.include_router(redteam_router, include_in_schema=False)
+    app.include_router(redteam_push_router, include_in_schema=False)
     return app
 
 

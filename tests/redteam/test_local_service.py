@@ -144,11 +144,11 @@ def test_neither_stops_and_names_both_ways():
     assert not connection_configured({"MARTIAN_API_URL": "", "MARTIAN_API_TOKEN": " "})
 
 
-def test_a_judge_without_an_attacker_or_an_environment_stops():
+def test_a_judge_without_an_attacker_or_an_environment_without_a_connection_stops():
     with pytest.raises(ServiceSelectionError, match="needs models.attacker"):
         select_service(run_file(models={"judge": JUDGE}), {})
-    with pytest.raises(ServiceSelectionError, match="environment"):
-        select_service(run_file(environment="refund-desk"), CONNECTED)
+    with pytest.raises(ServiceSelectionError, match="environments run only on a Martian server"):
+        select_service(run_file(environment="refund-desk"), {})
 
 
 # --- a whole run, with nothing sent to Martian ------------------------------------------------
