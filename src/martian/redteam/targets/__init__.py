@@ -23,12 +23,14 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.redteam.model import ToolCall
+from martian.redteam.model import Evidence, ToolCall
 
 
 class TargetReply(BaseModel):
     """One reply of the target. ``tool_calls`` are the calls the target reported or the harness
-    observed, with ``ToolCall.executed`` saying whether each one ran."""
+    observed, with ``ToolCall.executed`` saying whether each one ran. ``evidence`` is what a boundary
+    the harness trusts captured about them: the recording proxy's ledger, or a trace's tool spans,
+    each with its source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -36,6 +38,7 @@ class TargetReply(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     session: str | None = None
     latency_ms: float | None = Field(default=None, ge=0)
+    evidence: list[Evidence] = Field(default_factory=list)
 
 
 class TargetChanged(RuntimeError):

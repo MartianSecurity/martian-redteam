@@ -33,7 +33,7 @@ from typing import Any
 
 from martian.evals._digits import ascii_digits
 from martian.evals.runner import TargetCallError
-from martian.redteam.model import ToolCall
+from martian.redteam.model import Evidence, ToolCall
 from martian.redteam.targets import TargetReply
 
 REPLY_KEYS = frozenset({"text", "tool_calls"})
@@ -131,4 +131,36 @@ def reply_from(value: Any, *, session: str | None = None, latency_ms: float | No
     return TargetReply(text=reply_text(value), **update)
 
 
-__all__ = ["REPLY_KEYS", "read_path", "reply_from", "reply_text", "tool_call", "tool_calls"]
+def with_observed(
+    reply: TargetReply,
+    observed: Sequence[ToolCall],
+    evidence: Sequence[Evidence] = (),
+    *,
+    captured: Sequence[bool] | None = None,
+) -> TargetReply:
+    """``reply`` with the calls a boundary the harness trusts observed, and their evidence. A call
+    the target reported itself is kept once, as observed: one with the same ``call_id``, or the same
+    name and arguments. When the boundary did not capture a call's arguments (``captured``), the same
+    name is enough, and the reported arguments are kept on the observed call."""
+    remaining = list(reply.tool_calls)
+    seen = []
+    for index, call in enumerate(observed):
+        has_arguments = captured[index] if captured is not None else True
+        match = next(
+            (
+                position
+                for position, reported in enumerate(remaining)
+                if (reported.call_id is not None and reported.call_id == call.call_id)
+                or (reported.name == call.name and (not has_arguments or reported.arguments == call.arguments))
+            ),
+            None,
+        )
+        if match is not None:
+            reported = remaining.pop(match)
+            if not has_arguments:
+                call = call.model_copy(update={"arguments": reported.arguments})
+        seen.append(call)
+    return reply.model_copy(update={"tool_calls": [*remaining, *seen], "evidence": [*reply.evidence, *evidence]})
+
+
+__all__ = ["REPLY_KEYS", "read_path", "reply_from", "reply_text", "tool_call", "tool_calls", "with_observed"]

@@ -61,6 +61,7 @@ from martian.redteam._mcp import HeldClient, LoopbackServer, every_tool
 from martian.redteam.model import Evidence, ToolCall
 from martian.redteam.runfile import ProxiedServer
 from martian.redteam.targets import Target, TargetReply
+from martian.redteam.targets.reply import with_observed
 from martian_redteam.integration import AssessmentSession, MCPConnection
 
 ACTION_HEADER = "x-martian-action-id"
@@ -426,7 +427,7 @@ class ProxiedTarget:
     reply's session. The agent passes its conversation's id (the body's ``{{session_id}}``, a
     function's ``session_id``) as ``action_id`` to :func:`martian_redteam.bind_tools`. A call the
     target reported itself and the proxy recorded, by its ``call_id`` or by its name and arguments,
-    is kept once, with what the proxy saw."""
+    is kept once, with what the proxy saw. Each reply carries the calls' evidence too."""
 
     def __init__(self, target: Target, proxy: ToolProxy) -> None:
         self._target = target
@@ -446,18 +447,11 @@ class ProxiedTarget:
         if not recorded:
             return reply
         self._seen[reply.session] = recorded[-1].sequence
-        observed = [call.tool_call() for call in recorded]
-        reported = [call for call in reply.tool_calls if not any(_same(call, seen) for seen in observed)]
-        return reply.model_copy(update={"tool_calls": [*reported, *observed]})
+        evidence = [item for call in recorded for item in call.evidence()]
+        return with_observed(reply, [call.tool_call() for call in recorded], evidence)
 
     async def close(self) -> None:
         await self._target.close()
-
-
-def _same(reported: ToolCall, observed: ToolCall) -> bool:
-    if reported.call_id is not None and reported.call_id == observed.call_id:
-        return True
-    return reported.name == observed.name and reported.arguments == observed.arguments
 
 
 __all__ = [

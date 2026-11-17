@@ -213,6 +213,7 @@ async def test_a_proxied_target_adds_the_calls_of_its_session_to_each_reply():
         ("think", None, None),
         ("issue_refund", True, "proxy-1"),
     ]
+    assert [(item.kind, item.source) for item in first.evidence] == [("tool_call", "proxy:commerce")]
     assert [call.call_id for call in second.tool_calls if call.call_id] == ["proxy-2"]
     assert [call.call_id for call in other.tool_calls if call.call_id] == ["proxy-3"]
 

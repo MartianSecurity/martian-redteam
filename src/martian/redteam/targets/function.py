@@ -9,7 +9,9 @@ Each message is sent as the keyword argument ``message``, the suite file's defau
 that takes ``session_id`` or ``history`` is also given the conversation's id and its earlier turns
 (:mod:`martian.redteam.targets.conversations`), as a suite file's conversation cases give them. Its
 return value must be JSON: text, or ``{"text": ..., "tool_calls": [...]}``, the reply contract of
-:mod:`martian.redteam.targets.reply`. A function that
+:mod:`martian.redteam.targets.reply`. A function that traces itself with MLflow, or calls a library
+MLflow's autologging traces, has the tool spans of each call read as executed calls
+(:mod:`martian.redteam.targets.traces`), as a suite file's function target has its spans kept. A function that
 raises is a :class:`~martian.evals.runner.TargetCallError` naming the exception's type only; its
 text may hold anything and is not kept.
 """
@@ -54,7 +56,7 @@ class FunctionTarget:
     async def _ready(self) -> TargetProcess:
         async with self._starting:
             if self._process is None:
-                process = TargetProcess(self._file, self._function, private=self._private, trace=False)
+                process = TargetProcess(self._file, self._function, private=self._private, trace=True)
                 try:
                     await asyncio.to_thread(process.ready)
                     signature = await asyncio.to_thread(process.signature)
@@ -72,11 +74,15 @@ class FunctionTarget:
             inputs = {MESSAGE: message, **{name: given[name] for name in self._takes}}
             started = time.perf_counter()
             try:
-                value, _ = await asyncio.to_thread(process.call, inputs, self._timeout)
+                value, trace = await asyncio.to_thread(process.call, inputs, self._timeout)
             except TargetRaised as raised:
                 raise TargetCallError(f"the target raised {raised}") from None
             latency = (time.perf_counter() - started) * 1000
             reply = reply_from(value, session=conversation.session, latency_ms=latency)
+            if trace is not None:
+                from martian.redteam.targets.traces import calls_in_mlflow, with_traced
+
+                reply = with_traced(reply, calls_in_mlflow(trace))
             conversation.answered(message, reply.text)
             return reply
 

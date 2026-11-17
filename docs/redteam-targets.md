@@ -7,7 +7,7 @@ async def send(message: str, *, session: str | None = None) -> TargetReply
 async def close() -> None
 ```
 
-`TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, the `session` the message was sent in, and `latency_ms`.
+`TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, the `session` the message was sent in, `latency_ms`, and the `evidence` a boundary the harness trusts captured about the calls: the [recording proxy](#recording-proxy)'s ledger or a [trace](#tool-calls-from-traces)'s tool spans, each with its source.
 
 `target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
 
@@ -107,7 +107,7 @@ Each proxied server has a mode:
 
 Each ledger entry (`ProxyCall`) holds the server, the tool, its arguments, the action id, the mode, whether it ran, the injected text, the start of the result, and when. `call.tool_call()` is the call as an attempt keeps it; `call.evidence()` is its evidence: the call at the tool boundary, and a payload's delivery (level 0) in inject mode.
 
-The proxy records each call with the `X-Martian-Action-Id` header that `bind_tools(..., action_id=...)` sends. An agent that passes its conversation's id (the HTTP body's `{{session_id}}`, a function's `session_id`) as the action id lets `ProxiedTarget(target, proxy)` add that conversation's calls to each reply. A call the target reported itself and the proxy saw, by its id or by its name and arguments, is kept once, as the proxy saw it.
+The proxy records each call with the `X-Martian-Action-Id` header that `bind_tools(..., action_id=...)` sends. An agent that passes its conversation's id (the HTTP body's `{{session_id}}`, a function's `session_id`) as the action id lets `ProxiedTarget(target, proxy)` add that conversation's calls and their evidence to each reply. A call the target reported itself and the proxy saw, by its id or by its name and arguments, is kept once, as the proxy saw it.
 
 The proxy is not an environment. It simulates no application and holds no data: the ledger, in memory, is all it keeps. It listens on 127.0.0.1 only, one port per server. It records at most 10,000 calls a run, and refuses a call past that rather than leave it out. It needs the `mcp` extra. The upstream must be a Streamable HTTP server.
 
@@ -135,3 +135,15 @@ async with bind_sandbox_mcp(payload, action_id=conversation_id) as tools:
 | `mcp_connections` | One per proxied server: its loopback address, `Authorization: Bearer` with the session's token, and the tools its upstream lists now | One per sandbox system: the run-scoped gateway, its bearer token, the approved tools |
 
 Every request to the proxy must carry the token of an open session. A session ends when `end_session(session_id)` is called, when it expires, or when the proxy stops at the end of the run; after that its requests are refused with `401` before they reach a tool, and nothing is recorded. The ledger records each call's session, and its action id from the binding's `X-Martian-Action-Id` header.
+
+## Tool calls from traces
+
+An agent that already traces itself records its tool calls as tool spans. A tool span is a call that ran, so it is evidence of an executed call with no change to the agent. The spans are read through the evals core's [trace mapping](evals-core.md#trace-conventions), which knows MLflow's span types, the OpenTelemetry GenAI conventions and OpenInference. Spans inside a tool span are the tool's own work and are not read.
+
+| Route | How the spans are found |
+| --- | --- |
+| A function target | Its process records each call's MLflow spans and hands them back with the reply, as a suite file's function target does. A function that uses `@mlflow.trace(span_type="TOOL")`, or a library MLflow's autologging traces, needs nothing else |
+| `TracedTarget(target, StoreTraces(store, principal))` | After each message, the traces in the local trace store of the reply's session that started since. The local edition's OpenTelemetry endpoint (`POST /v1/traces`) writes them; the agent puts the conversation's id in `gen_ai.conversation.id` (or OpenInference's `session.id`). `settle_seconds` waits for an exporter that sends spans in batches |
+| `calls_in_trace(trace)`, `calls_in_mlflow(trace)` | A trace the caller already has |
+
+The OpenTelemetry GenAI conventions make a tool call's arguments opt-in (`gen_ai.tool.call.arguments`). A span that names its tool and nothing else is name-only evidence: its evidence says `arguments_captured: false`. When the target also reported that call, the call is kept once, marked as executed, with the arguments the target reported. Every call from a trace has evidence of kind `tool_call` whose source is `trace:otel_genai`, `trace:openinference` or `trace:mlflow`, with its trace and span ids.
