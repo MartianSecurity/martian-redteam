@@ -112,6 +112,18 @@ def _goal(spec: Vulnerability, checks: list[Check] | None = None) -> str:
     return text
 
 
+def _vulnerability_of(spec: Vulnerability) -> CatalogVulnerability:
+    """The catalogue vulnerability a run file's entry names. A custom one decided by its declared
+    checks or its goal's tool call needs no criteria: they are for the judge."""
+    if spec.is_custom and not (spec.criteria or "").strip():
+        assert spec.id is not None  # the run file checks it
+        types = tuple(spec.types or ("custom",))
+        return CatalogVulnerability(
+            id=spec.id, label=spec.id, allowed_types=types, types=types, gated=bool(spec.gated), criteria=None
+        )
+    return get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
+
+
 def _entry_of(spec: Vulnerability) -> CatalogEntry | None:
     """The catalogue entry a run file's vulnerability names; ``None`` for a custom one."""
     return find_entry(spec.name)
@@ -178,7 +190,7 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     for index, spec in enumerate(run_file.vulnerabilities):
         if (found := _entry_of(spec)) is not None and found.id in left_out:
             continue
-        vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
+        vulnerability = _vulnerability_of(spec)
         entry = _entry_of(spec)
         form = _form_of(index, spec, entry)
         checks = _checks(list(spec.checks), spec.goal, form, chosen=spec.form is not None)

@@ -328,7 +328,23 @@ vulnerabilities:
     gated: true
 ```
 
-`id` and `criteria` are required for `name: custom` / `CustomVulnerability`. Empty criteria is rejected.
+`id` and `criteria` are required for `name: custom` / `CustomVulnerability` in a version 0.2 file and in Python. Empty criteria is rejected.
+
+In a version 2 [run file](redteam-run-file.md#vulnerabilities), a custom entry can declare its evidence instead: `text` checks, `canary` checks, `receipt` checks and tool-call goals, each decided by code. Its `criteria` are then optional; they are for the judge, and a custom entry the judge decides (one with no checks and no goal that names a tool, or with a `judge` check without its own criteria) still needs them. An entry with criteria only runs as before, decided by the judge with them. `objective` and `severity` apply as to any entry; without `objective`, a custom entry is a `control` objective.
+
+```yaml
+vulnerabilities:
+  - name: custom
+    id: refund_policy
+    objective: action
+    severity: high
+    goal: { tool: issue_refund, where: { amount: "> 50" } }   # confirmed by the tool call, no judge
+  - name: custom
+    id: refund_limit_leak
+    checks:
+      - { type: text, all_of: ["refund limit is 50 USD"] }
+      - { type: canary }
+```
 
 ## Attacks
 

@@ -329,7 +329,27 @@ class Vulnerability(NamedSpec):
     def _form_or_checks(self) -> Vulnerability:
         if self.form is not None and self.checks:
             raise ValueError("give a form or checks, not both: a form is a set of checks")
+        if self.is_custom:
+            if not (self.id or "").strip():
+                raise ValueError("a custom vulnerability needs an id")
+            judged = not self.declares_evidence or any(
+                check.type == "judge" and check.criteria is None for check in self.checks
+            )
+            if judged and not (self.criteria or "").strip():
+                raise ValueError(
+                    "a custom vulnerability the judge decides needs criteria; or declare checks (text, canary, "
+                    "tool_call, receipt) or a goal that names a tool"
+                )
         return self
+
+    @property
+    def is_custom(self) -> bool:
+        return self.name.strip().lower().replace("-", "_") in {"custom", "customvulnerability"}
+
+    @property
+    def declares_evidence(self) -> bool:
+        """Whether checks or a goal that names a tool decide it, rather than the judge alone."""
+        return bool(self.checks) or (self.goal is not None and self.goal.tool is not None)
 
 
 class ProxiedServer(_Model):
