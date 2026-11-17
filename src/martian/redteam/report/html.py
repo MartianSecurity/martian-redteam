@@ -100,7 +100,12 @@ def render_html(run: RedteamRun, report: RedteamReport | None = None) -> str:
     spent = budget.spent
     rows: list[list[object]] = [
         ["Service", report.service],
-        ["Attacker", report.attacker.model if report.attacker else "not recorded"],
+        [
+            "Attacker",
+            ", ".join(info.model for info in report.attackers)
+            if report.attackers
+            else (report.attacker.model if report.attacker else "not recorded"),
+        ],
         ["Judge", report.judge.model if report.judge else ("not recorded" if report.judge_used else "not used")],
         ["Attack methods", ", ".join(report.methods)],
         ["Target", f"{report.target.kind} {report.target.name}" if report.target else "not recorded"],
@@ -256,12 +261,35 @@ def render_html(run: RedteamRun, report: RedteamReport | None = None) -> str:
             )
         )
 
+    if report.by_attacker:
+        add("<h2>By attacker</h2>")
+        add(
+            _table(
+                ["Attacker", "Attempts", "Decided", "Confirmed", "Suspected", "Attacker calls", "Refused"],
+                [
+                    [
+                        group.name,
+                        group.attempts,
+                        group.decided,
+                        _rate(group.confirmed),
+                        _rate(group.suspected),
+                        group.attacker_calls,
+                        group.refusals,
+                    ]
+                    for group in report.by_attacker
+                ],
+                numeric=(1, 2, 5, 6),
+            )
+        )
+
     add("<h2>Attempts</h2>")
     for attempt in run.attempts:
         probe = run.probe(attempt.probe_id)
         heading = (
             f"{probe.vulnerability}/{probe.vulnerability_type} via {probe.attack_method} · {attempt.role} "
-            f"{attempt.number} · {attempt.outcome}" + (f" at level {int(attempt.level)}" if attempt.level else "")
+            f"{attempt.number} · {attempt.outcome}"
+            + (f" at level {int(attempt.level)}" if attempt.level else "")
+            + (f" · attacker {attempt.attacker}" if attempt.attacker else "")
         )
         checks = _table(
             ["Check", "Kind", "Result", "Level", "Why"],

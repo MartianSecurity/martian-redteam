@@ -242,6 +242,9 @@ class Attempt(_Object):
     """The budget limit that stopped the attempt, when its outcome is ``stopped``."""
     attacker_refusals: int = Field(default=0, ge=0)
     """Generations of this attempt that the attacker refused to write or left empty."""
+    attacker: str | None = None
+    """In a run with a pool of attackers, the model that wrote this attempt's attacks (a repetition
+    names the one that wrote the hit it repeats). ``None`` with one attacker, the run's."""
     fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     """A digest of what produced the attempt. A resumed run reuses a finished attempt whose
     fingerprint is unchanged."""

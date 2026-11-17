@@ -162,15 +162,52 @@ def _model(value: Any) -> Any:
 
 class Models(_Model):
     """The attacker writes the attacks; the judge decides the checks of kind ``judge``. Without them,
-    attacks are generated and judged by the Martian platform, as in version 0.2."""
+    attacks are generated and judged by the Martian platform, as in version 0.2.
+
+    ``attacker`` may list 2 to 5 different models, a pool: the run splits its attack attempts between
+    them and the report attributes each success to the one that wrote it. ``attacker`` is then the
+    first of them and ``attackers`` the whole pool."""
 
     attacker: Annotated[ModelConfig, Field()] | None = None
     judge: Annotated[ModelConfig, Field()] | None = None
+    attackers: list[ModelConfig] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _pool(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("attacker"), list):
+            if data.get("attackers"):
+                raise ValueError("list the pool in attacker, not in attackers too")
+            pool = data["attacker"]
+            if not 2 <= len(pool) <= 5:
+                raise ValueError("a pool of attackers lists 2 to 5 models; give one model as a string")
+            data = {**data, "attacker": pool[0], "attackers": pool}
+        return data
 
     @field_validator("attacker", "judge", mode="before")
     @classmethod
     def _short_form(cls, value: Any) -> Any:
         return _model(value)
+
+    @field_validator("attackers", mode="before")
+    @classmethod
+    def _short_forms(cls, value: Any) -> Any:
+        return [_model(item) for item in value] if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Models:
+        if self.attackers:
+            names = [item.model for item in self.attackers]
+            if len(set(names)) != len(names):
+                raise ValueError("each attacker of a pool is a different model")
+            if self.attacker != self.attackers[0]:
+                raise ValueError("attacker is the first model of the pool")
+        return self
+
+    @property
+    def pool(self) -> list[ModelConfig]:
+        """The attackers: the pool, or the one attacker."""
+        return list(self.attackers) or ([self.attacker] if self.attacker is not None else [])
 
 
 class Goal(_Model):

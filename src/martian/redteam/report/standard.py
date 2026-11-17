@@ -11,6 +11,8 @@ states:
   are separate rates and are never added together;
 - the attacker's refusal rate, for the run and for each method. A refused generation is never a
   resisted attack;
+- with a pool of attackers, each attacker's attempts, success rates, calls and refusals, and on each
+  finding the attackers whose attempts hit;
 - findings by evidence level, with what verified each and the negative control's result when the run
   carries them, and "not evaluated" when it does not;
 - errors, undetermined and stopped attempts as outcomes beside the decided ones.
@@ -198,6 +200,8 @@ class FindingRow(_Out):
     status: str = "open"
     hits: int = 0
     attempts: int = 0
+    attackers: list[str] = Field(default_factory=list)
+    """In a run with a pool of attackers, the attackers whose attempts hit."""
     verification: str = NOT_EVALUATED
     reproductions: str = NOT_EVALUATED
     negative_control: str = NOT_EVALUATED
@@ -253,6 +257,15 @@ class Group(_Out):
     suspected: Rate
     target_queries: int = 0
     queries_to_first_hit_median: float | None = None
+
+
+class AttackerGroup(Group):
+    """The attack attempts one attacker of a pool wrote: its success rates, the target queries its
+    attempts made, its calls (``attacker_calls``) and the generations it refused or left empty."""
+
+    attacker_calls: int = 0
+    refusals: int = 0
+    refusal_rate: Rate | None = None
 
 
 class ProbeRow(_Out):
@@ -329,6 +342,8 @@ class RedteamReport(_Out):
     target: TargetInfo | None = None
     service: str = "unknown"
     attacker: ModelInfo | None = None
+    attackers: list[ModelInfo] = Field(default_factory=list)
+    """A pool of attackers, when the run had one; ``attacker`` is then its first."""
     judge: ModelInfo | None = None
     judge_used: bool = False
     methods: list[str] = Field(default_factory=list)
@@ -342,6 +357,8 @@ class RedteamReport(_Out):
     judge_calibration: JudgeCalibration | None = None
     by_method: list[Group] = Field(default_factory=list)
     by_vulnerability: list[Group] = Field(default_factory=list)
+    by_attacker: list[AttackerGroup] = Field(default_factory=list)
+    """One group per attacker of a pool, in the pool's order; empty with one attacker."""
     probes: list[ProbeRow] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     gate: GateOutcome | None = None
@@ -498,6 +515,33 @@ def _method_group(name: str, probes: list[Probe], attempts: Sequence[Attempt], r
     )
 
 
+def _models(provenance: dict[str, Any]) -> list[ModelInfo]:
+    found = provenance.get("attackers")
+    if not isinstance(found, list):
+        return []
+    return [
+        ModelInfo(model=str(item["model"]), inference_params=dict(item.get("inference_params") or {}))
+        for item in found
+        if isinstance(item, dict) and item.get("model")
+    ]
+
+
+def _attacker_group(name: str, run: RedteamRun, attempts: Sequence[Attempt]) -> AttackerGroup:
+    probes = {attempt.probe_id for attempt in attempts}
+    group = _group(name, (probe for probe in run.probes if probe.id in probes), attempts)
+    calls = sum(attempt.spend.attacker_calls if attempt.spend is not None else 0 for attempt in attempts)
+    refused = sum(attempt.attacker_refusals for attempt in attempts)
+    return AttackerGroup(
+        **{
+            **group.model_dump(),
+            "target_queries": sum(_queries(attempt) for attempt in attempts),
+            "attacker_calls": calls,
+            "refusals": refused,
+            "refusal_rate": rate_of(refused, calls),
+        }
+    )
+
+
 def _group(name: str, probes: Iterable[Probe], attempts: Sequence[Attempt]) -> Group:
     counted = _outcomes(attempts)
     return Group(
@@ -544,6 +588,11 @@ def _findings(run: RedteamRun, attack: dict[str, list[Attempt]]) -> Findings:
                 status=finding.status,
                 hits=sum(attempt.outcome == "hit" for attempt in attempts),
                 attempts=len(attempts),
+                attackers=list(
+                    dict.fromkeys(
+                        attempt.attacker for attempt in attempts if attempt.outcome == "hit" and attempt.attacker
+                    )
+                ),
                 verification=verification.outcome if verification is not None else NOT_EVALUATED,
                 reproductions=(
                     f"{verification.successful_reproductions} of {verification.repetitions}"
@@ -694,6 +743,7 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
         target=TargetInfo(kind=run.target.kind, name=run.target.name) if run.target is not None else None,
         service=str(provenance.get("service", "unknown")),
         attacker=_model(provenance, "attacker"),
+        attackers=_models(provenance),
         judge=_model(provenance, "judge"),
         judge_used=any(check.kind == "judge" for probe in run.probes for check in probe.checks),
         methods=methods,
@@ -733,6 +783,10 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
             )
             for name in vulnerabilities
         ],
+        by_attacker=[
+            _attacker_group(info.model, run, [attempt for attempt in attack if attempt.attacker == info.model])
+            for info in _models(provenance)
+        ],
         probes=probe_rows,
         limitations=list(run.limitations),
         gate=gate,
@@ -741,6 +795,7 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
 
 __all__ = [
     "NOT_EVALUATED",
+    "AttackerGroup",
     "REPORT_VERSION",
     "Budget",
     "Controls",

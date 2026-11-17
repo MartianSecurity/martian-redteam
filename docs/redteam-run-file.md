@@ -117,6 +117,16 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 | `inference_params` | Settings such as `temperature` |
 | `headers` | Added to each model request. `${NAME}` is read from the environment |
 
+`attacker` can also list 2 to 5 different models, a pool, each a string or a mapping:
+
+```yaml
+models:
+  attacker: ["openai:/FIRST_ATTACKER", "openai:/SECOND_ATTACKER"]
+  judge: "openai:/YOUR_JUDGE_MODEL"
+```
+
+The run splits its attack attempts between them: attempt `n` of the probe at place `p` in the plan is written by attacker `(p + n - 1)` round the pool, so each attacker writes an equal share of the attempts and a probe with as many attempts as there are attackers (`attempts_per_probe`) is attacked by each. All of an attempt's attacker calls go to its attacker, and the run's budget is shared. The first model is the one the run records as `attacker`, the pool is `attackers`, and the judge is the run's one judge. Each attempt names its attacker, and the report gives each attacker's results and each finding's attackers ([reports](redteam-reports.md#groups-and-probes)).
+
 A `judge` check needs `models.judge` when attacks run locally, that is when `models.attacker` is set. With `models.judge`, judge checks run on the SDK's judge engine (the rubric judge of [evals](evals.md)), which cites the parts of the reply that show the attack succeeded.
 
 Which service generates and judges the attacks:

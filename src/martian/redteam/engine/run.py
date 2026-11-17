@@ -153,11 +153,13 @@ class AttemptFailed(Exception):
 class _Spending:
     """What one attempt spent, kept beside the run's ledger, and the generations the attacker refused."""
 
-    def __init__(self, ledger: Ledger, probe_id: str) -> None:
+    def __init__(self, ledger: Ledger, probe_id: str, service: RedteamService | None = None) -> None:
         self.ledger = ledger
         self.probe_id = probe_id
         self.spend = Spend()
         self.refusals = 0
+        self.service = service
+        """The pool member that writes this attempt's attacks, in a run with a pool of attackers."""
 
     def reserve(self, kind: CallKind) -> None:
         self.spend = self.spend + self.ledger.reserve(kind, self.probe_id)
@@ -230,12 +232,30 @@ class Engine:
         if memory.order:
             earlier = (resume.provenance.get("memory") or {}).get("order") if resume is not None else None
             self._order(earlier if isinstance(earlier, dict) else None)
+        self.pool: list[Any] = list(getattr(service, "members", None) or [])
+        """The attackers of a pool (:class:`~martian.redteam.engine.local.PooledService`), else empty."""
         if resume is not None:
             self._resume(resume)
 
+    def attacker_of(self, planned: PlannedProbe, number: int) -> int | None:
+        """The pool member that writes attempt ``number`` of ``planned``: the probe's place in the plan
+        plus the attempt's number, round the pool. Attempts are split evenly, and a probe with as many
+        attempts as there are attackers is attacked by each."""
+        if not self.pool:
+            return None
+        return (self.planned.index(planned) + number - 1) % len(self.pool)
+
+    def attacker_name(self, index: int | None) -> str | None:
+        return None if index is None else self.service.name(index)  # type: ignore[attr-defined]
+
     def fingerprint(self, planned: PlannedProbe, number: int) -> str:
         return attempt_fingerprint(
-            planned, number, run_file=self.run_file, service=self.provenance, engine_version=ENGINE_VERSION
+            planned,
+            number,
+            run_file=self.run_file,
+            service=self.provenance,
+            engine_version=ENGINE_VERSION,
+            attacker=self.attacker_name(self.attacker_of(planned, number)),
         )
 
     def _resume(self, earlier: RedteamRun) -> None:
@@ -318,6 +338,7 @@ class Engine:
 
         async def one(planned: PlannedProbe, number: int, original: Attempt) -> None:
             attack = original.input or ""
+            attacker = original.attacker
             if self.listener is not None:
                 # The receipt address is the attempt's own: a repetition is sent its own.
                 attack = attack.replace(
@@ -325,7 +346,7 @@ class Engine:
                     self.listener.address(attempt_id_of(planned.probe.id, number, "repetition")),
                 )
             async with semaphore:
-                attempt = await self._attempt(planned, number, role="repetition", attack=attack)
+                attempt = await self._attempt(planned, number, role="repetition", attack=attack, attacker=attacker)
             self.attempts[attempt.id] = attempt
             await self._save(self.snapshot("running"))
 
@@ -414,12 +435,22 @@ class Engine:
 
     # --- one attempt ----------------------------------------------------------------------------
 
-    async def _attempt(self, planned: PlannedProbe, number: int, *, role: Role = "attack", attack: str = "") -> Attempt:
-        """One attempt of the probe. ``attack``: the attacker writes the attack. ``repetition``: the
-        ``attack`` given is sent again, in a new conversation. ``control``: no attack is sent, only
-        the probe's benign task (or :data:`CONTROL_MESSAGE`) with what the probe plants."""
+    async def _attempt(
+        self,
+        planned: PlannedProbe,
+        number: int,
+        *,
+        role: Role = "attack",
+        attack: str = "",
+        attacker: str | None = None,
+    ) -> Attempt:
+        """One attempt of the probe. ``attack``: the attacker writes the attack (in a pool, the member
+        :meth:`attacker_of` names). ``repetition``: the ``attack`` given is sent again, in a new
+        conversation, naming ``attacker``, who wrote it. ``control``: no attack is sent, only the
+        probe's benign task (or :data:`CONTROL_MESSAGE`) with what the probe plants."""
         probe = planned.probe
-        spending = _Spending(self.ledger, probe.id)
+        member = self.attacker_of(planned, number) if role == "attack" else None
+        spending = _Spending(self.ledger, probe.id, self.pool[member] if member is not None else None)
         attempt_id = attempt_id_of(probe.id, number, role)
         fields: dict[str, Any] = {
             "id": attempt_id,
@@ -429,6 +460,7 @@ class Engine:
             "started_at": datetime.now(UTC),
             "graph_revision": PROMPTS_REVISION,
             "fingerprint": self.fingerprint(planned, number) if role == "attack" else None,
+            "attacker": self.attacker_name(member) if role == "attack" else attacker,
         }
 
         if role == "attack" and self.world is None:
@@ -888,7 +920,7 @@ class Engine:
         for prompt in asked:
             spending.reserve("attacker")
             try:
-                output = await self.service.simulate(context, prompt=prompt)
+                output = await (spending.service or self.service).simulate(context, prompt=prompt)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:
