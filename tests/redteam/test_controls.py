@@ -86,8 +86,8 @@ async def test_the_report_shows_task_completion_with_and_without_the_attack():
     task = verification.task_completion
     assert (task.with_attack, task.with_attack_decided, task.without_attack) == (0, 2, True)
     text = render_markdown(found)
-    assert "## Controls and task completion" in text
-    assert "| 0 of 2 | yes |" in text
+    assert "Benign task completed, with the attack and without it" in text
+    assert "| 0 of 2 | completed |" in text
 
 
 async def test_a_task_without_a_hit_still_reports_completion_without_the_attack():

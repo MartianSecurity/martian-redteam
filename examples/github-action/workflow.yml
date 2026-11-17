@@ -25,6 +25,14 @@
 # suite with an LLM judge or a URL target reads its provider key or agent
 # credential from the step's env, as `martian evals run` does on your machine.
 #
+# The redteam job runs redteam/redteam.yaml with the same action: a red team
+# run on your own attacker and judge models, against redteam/agent.py, which
+# is weak on purpose. It needs no Martian account or token, only the model
+# key in the step's env; comments/redteam.md shows its comment. The pull
+# request's code runs in that step and can read the key, so use a key kept
+# for red team runs. GitHub gives no secrets to pull requests from forks, so
+# their red team run cannot call the models and fails.
+#
 # Use `pull_request`, never `pull_request_target`: the suite runs the pull
 # request's code. Pull requests from forks and from Dependabot get a read-only
 # token, and the result then goes to the job summary only.
@@ -80,4 +88,36 @@ jobs:
             results/${{ matrix.suite }}/junit.xml
             results/${{ matrix.suite }}/verdicts.json
             results/${{ matrix.suite }}/comparison.json
+          if-no-files-found: ignore
+
+  redteam:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: redteam-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Red team and comment
+        uses: MartianSecurity/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
+        with:
+          redteam: examples/github-action/redteam/redteam.yaml
+          redteam-output: results/redteam
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # The reports hold digests of the attacks and replies, not the text.
+      - name: Upload red team reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redteam
+          path: |
+            results/redteam/redteam-report.json
+            results/redteam/redteam-report.html
+            results/redteam/redteam.sarif
+            results/redteam/redteam-junit.xml
           if-no-files-found: ignore

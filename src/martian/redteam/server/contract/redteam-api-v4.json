@@ -389,6 +389,46 @@
         "title": "AttemptPage",
         "type": "object"
       },
+      "Budget": {
+        "additionalProperties": false,
+        "description": "What the run was allowed and what it spent. ``attempts_per_probe`` is the most attempts any\nprobe planned. ``stopped_by`` names the limit that stopped the run.",
+        "properties": {
+          "attempts_per_probe": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempts Per Probe"
+          },
+          "limits": {
+            "additionalProperties": true,
+            "title": "Limits",
+            "type": "object"
+          },
+          "spent": {
+            "additionalProperties": true,
+            "title": "Spent",
+            "type": "object"
+          },
+          "stopped_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped By"
+          }
+        },
+        "title": "Budget",
+        "type": "object"
+      },
       "CatalogAttack": {
         "additionalProperties": false,
         "properties": {
@@ -654,6 +694,44 @@
         "title": "CheckResult",
         "type": "object"
       },
+      "Controls": {
+        "additionalProperties": false,
+        "description": "Negative controls: the probe run without the attack. ``passed`` held, ``failed`` showed the\nsignal, ``undetermined`` neither. ``evaluated`` is false when no control ran.",
+        "properties": {
+          "evaluated": {
+            "default": false,
+            "title": "Evaluated",
+            "type": "boolean"
+          },
+          "failed": {
+            "default": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "passed": {
+            "default": 0,
+            "title": "Passed",
+            "type": "integer"
+          },
+          "ran": {
+            "default": 0,
+            "title": "Ran",
+            "type": "integer"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "title": "Controls",
+        "type": "object"
+      },
       "Counts": {
         "additionalProperties": false,
         "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above, ``attempted`` those whose strongest evidence is a tool call that did not run,\n``suspected`` those a model judged only. They are never added together.",
@@ -750,6 +828,33 @@
           }
         },
         "title": "Counts",
+        "type": "object"
+      },
+      "ErrorCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "attacker": {
+            "default": 0,
+            "title": "Attacker",
+            "type": "integer"
+          },
+          "infrastructure": {
+            "default": 0,
+            "title": "Infrastructure",
+            "type": "integer"
+          },
+          "judge": {
+            "default": 0,
+            "title": "Judge",
+            "type": "integer"
+          },
+          "target": {
+            "default": 0,
+            "title": "Target",
+            "type": "integer"
+          }
+        },
+        "title": "ErrorCounts",
         "type": "object"
       },
       "EvaluateRequest": {
@@ -1146,6 +1251,230 @@
         "title": "FindingList",
         "type": "object"
       },
+      "FindingRow": {
+        "additionalProperties": false,
+        "description": "One finding as the report shows it. ``verification`` is the verification outcome,\n``reproductions`` ``\"r of n\"`` and ``negative_control`` passed, failed or undetermined, each\n``\"not evaluated\"`` when the run carries no such result.",
+        "properties": {
+          "attack_method": {
+            "title": "Attack Method",
+            "type": "string"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "counted_as": {
+            "enum": [
+              "confirmed",
+              "attempted",
+              "suspected"
+            ],
+            "title": "Counted As",
+            "type": "string"
+          },
+          "evidence_level": {
+            "title": "Evidence Level",
+            "type": "integer"
+          },
+          "hits": {
+            "default": 0,
+            "title": "Hits",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "negative_control": {
+            "default": "not evaluated",
+            "title": "Negative Control",
+            "type": "string"
+          },
+          "objective_class": {
+            "title": "Objective Class",
+            "type": "string"
+          },
+          "probe_id": {
+            "title": "Probe Id",
+            "type": "string"
+          },
+          "reproductions": {
+            "default": "not evaluated",
+            "title": "Reproductions",
+            "type": "string"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Severity"
+          },
+          "status": {
+            "default": "open",
+            "title": "Status",
+            "type": "string"
+          },
+          "verification": {
+            "default": "not evaluated",
+            "title": "Verification",
+            "type": "string"
+          },
+          "vulnerability": {
+            "title": "Vulnerability",
+            "type": "string"
+          },
+          "vulnerability_type": {
+            "title": "Vulnerability Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "probe_id",
+          "vulnerability",
+          "vulnerability_type",
+          "attack_method",
+          "objective_class",
+          "evidence_level",
+          "label",
+          "counted_as"
+        ],
+        "title": "FindingRow",
+        "type": "object"
+      },
+      "Findings": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted": {
+            "default": 0,
+            "title": "Attempted",
+            "type": "integer"
+          },
+          "by_level": {
+            "items": {
+              "$ref": "#/components/schemas/LevelCount"
+            },
+            "title": "By Level",
+            "type": "array"
+          },
+          "confirmed": {
+            "default": 0,
+            "title": "Confirmed",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FindingRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "suspected": {
+            "default": 0,
+            "title": "Suspected",
+            "type": "integer"
+          }
+        },
+        "title": "Findings",
+        "type": "object"
+      },
+      "GateOutcome": {
+        "additionalProperties": false,
+        "description": "The gate's result, when the report was written by a run that applied one: ``passed`` (exit\n0), what failed it and what it only warns about.",
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "failures": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failures",
+            "type": "array"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "passed"
+        ],
+        "title": "GateOutcome",
+        "type": "object"
+      },
+      "Group": {
+        "additionalProperties": false,
+        "description": "The attack attempts of one attack method or one vulnerability.",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "confirmed": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "decided": {
+            "default": 0,
+            "title": "Decided",
+            "type": "integer"
+          },
+          "errors": {
+            "default": 0,
+            "title": "Errors",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "probes": {
+            "default": 0,
+            "title": "Probes",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "title": "Stopped",
+            "type": "integer"
+          },
+          "suspected": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "confirmed",
+          "suspected"
+        ],
+        "title": "Group",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1157,6 +1486,166 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JudgeCalibration": {
+        "additionalProperties": false,
+        "description": "The judge measured on a labelled sample before the run. ``precision`` is its true positives\nover all it called hits; ``recall`` its true positives over the sample's real hits. ``error`` says\nwhy it could not be measured.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "false_negative": {
+            "default": 0,
+            "title": "False Negative",
+            "type": "integer"
+          },
+          "false_positive": {
+            "default": 0,
+            "title": "False Positive",
+            "type": "integer"
+          },
+          "judge": {
+            "title": "Judge",
+            "type": "string"
+          },
+          "precision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sample": {
+            "default": 0,
+            "title": "Sample",
+            "type": "integer"
+          },
+          "true_negative": {
+            "default": 0,
+            "title": "True Negative",
+            "type": "integer"
+          },
+          "true_positive": {
+            "default": 0,
+            "title": "True Positive",
+            "type": "integer"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "judge"
+        ],
+        "title": "JudgeCalibration",
+        "type": "object"
+      },
+      "LevelCount": {
+        "additionalProperties": false,
+        "properties": {
+          "counted_as": {
+            "enum": [
+              "confirmed",
+              "suspected",
+              "not a finding"
+            ],
+            "title": "Counted As",
+            "type": "string"
+          },
+          "findings": {
+            "default": 0,
+            "title": "Findings",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "level": {
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Level",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "level",
+          "label",
+          "counted_as"
+        ],
+        "title": "LevelCount",
+        "type": "object"
+      },
+      "MethodRefusals": {
+        "additionalProperties": false,
+        "properties": {
+          "generations": {
+            "default": 0,
+            "title": "Generations",
+            "type": "integer"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "rate": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "refusals": {
+            "default": 0,
+            "title": "Refusals",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "method",
+          "rate"
+        ],
+        "title": "MethodRefusals",
+        "type": "object"
+      },
+      "ModelInfo": {
+        "additionalProperties": false,
+        "description": "A model the run called: its provider and name, and its settings.",
+        "properties": {
+          "inference_params": {
+            "additionalProperties": true,
+            "title": "Inference Params",
+            "type": "object"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "ModelInfo",
         "type": "object"
       },
       "OperationResponse": {
@@ -1250,6 +1739,73 @@
           "deadline_at"
         ],
         "title": "OperationResponse",
+        "type": "object"
+      },
+      "Outcomes": {
+        "additionalProperties": false,
+        "description": "The attack attempts by outcome. ``decided`` is hits plus resisted; every rate is over it.\n``confirmed_hits`` reached level 2 or above (a tool call that only was asked for excepted),\n``attempted_hits`` only a tool call that was asked for and not known to run, ``suspected_hits``\nlevel 1 only.",
+        "properties": {
+          "attempted_hits": {
+            "default": 0,
+            "title": "Attempted Hits",
+            "type": "integer"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "confirmed_hits": {
+            "default": 0,
+            "title": "Confirmed Hits",
+            "type": "integer"
+          },
+          "decided": {
+            "default": 0,
+            "title": "Decided",
+            "type": "integer"
+          },
+          "errors": {
+            "default": 0,
+            "title": "Errors",
+            "type": "integer"
+          },
+          "errors_by_kind": {
+            "$ref": "#/components/schemas/ErrorCounts",
+            "default": {
+              "attacker": 0,
+              "infrastructure": 0,
+              "judge": 0,
+              "target": 0
+            }
+          },
+          "hits": {
+            "default": 0,
+            "title": "Hits",
+            "type": "integer"
+          },
+          "resisted": {
+            "default": 0,
+            "title": "Resisted",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "title": "Stopped",
+            "type": "integer"
+          },
+          "suspected_hits": {
+            "default": 0,
+            "title": "Suspected Hits",
+            "type": "integer"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "title": "Outcomes",
         "type": "object"
       },
       "Probe": {
@@ -1350,6 +1906,476 @@
           "objective_class"
         ],
         "title": "Probe",
+        "type": "object"
+      },
+      "ProbeRow": {
+        "additionalProperties": false,
+        "properties": {
+          "attack_method": {
+            "title": "Attack Method",
+            "type": "string"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "errors": {
+            "default": 0,
+            "title": "Errors",
+            "type": "integer"
+          },
+          "evidence_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Level"
+          },
+          "hits": {
+            "default": 0,
+            "title": "Hits",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "objective_class": {
+            "title": "Objective Class",
+            "type": "string"
+          },
+          "queries_to_first_hit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queries To First Hit"
+          },
+          "resisted": {
+            "default": 0,
+            "title": "Resisted",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "title": "Stopped",
+            "type": "integer"
+          },
+          "target_queries": {
+            "default": 0,
+            "title": "Target Queries",
+            "type": "integer"
+          },
+          "task_with_attack": {
+            "default": "not evaluated",
+            "title": "Task With Attack",
+            "type": "string"
+          },
+          "task_without_attack": {
+            "default": "not evaluated",
+            "title": "Task Without Attack",
+            "type": "string"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          },
+          "vulnerability": {
+            "title": "Vulnerability",
+            "type": "string"
+          },
+          "vulnerability_type": {
+            "title": "Vulnerability Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "vulnerability",
+          "vulnerability_type",
+          "attack_method",
+          "objective_class"
+        ],
+        "title": "ProbeRow",
+        "type": "object"
+      },
+      "Rate": {
+        "additionalProperties": false,
+        "description": "``successes`` of ``trials`` with its Wilson 95% interval (``low``, ``high``).\n\nWith no trial, every value is ``None``. With no success, ``rate`` is ``None`` and ``upper_bound``\nis ``high``: zero successes bound the rate, they do not measure it as 0%. ``display`` is the text\nevery output shows.",
+        "properties": {
+          "display": {
+            "title": "Display",
+            "type": "string"
+          },
+          "high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High"
+          },
+          "low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "successes": {
+            "minimum": 0.0,
+            "title": "Successes",
+            "type": "integer"
+          },
+          "trials": {
+            "minimum": 0.0,
+            "title": "Trials",
+            "type": "integer"
+          },
+          "upper_bound": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upper Bound"
+          }
+        },
+        "required": [
+          "successes",
+          "trials",
+          "display"
+        ],
+        "title": "Rate",
+        "type": "object"
+      },
+      "RedteamReport": {
+        "additionalProperties": false,
+        "description": "The red team report standard (``redteam-report.json``). ``docs/redteam-reports.md`` defines\nevery field.",
+        "properties": {
+          "attacker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "budget": {
+            "$ref": "#/components/schemas/Budget",
+            "default": {
+              "limits": {},
+              "spent": {}
+            }
+          },
+          "by_method": {
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "title": "By Method",
+            "type": "array"
+          },
+          "by_vulnerability": {
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "title": "By Vulnerability",
+            "type": "array"
+          },
+          "catalog_version": {
+            "title": "Catalog Version",
+            "type": "string"
+          },
+          "controls": {
+            "$ref": "#/components/schemas/Controls",
+            "default": {
+              "evaluated": false,
+              "failed": 0,
+              "note": "",
+              "passed": 0,
+              "ran": 0,
+              "undetermined": 0
+            }
+          },
+          "duration_seconds": {
+            "default": 0.0,
+            "title": "Duration Seconds",
+            "type": "number"
+          },
+          "engine_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine Version"
+          },
+          "findings": {
+            "$ref": "#/components/schemas/Findings",
+            "default": {
+              "attempted": 0,
+              "by_level": [],
+              "confirmed": 0,
+              "items": [],
+              "suspected": 0
+            }
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "gate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GateOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge_calibration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeCalibration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge_used": {
+            "default": false,
+            "title": "Judge Used",
+            "type": "boolean"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "methods": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Methods",
+            "type": "array"
+          },
+          "outcomes": {
+            "$ref": "#/components/schemas/Outcomes",
+            "default": {
+              "attempted_hits": 0,
+              "attempts": 0,
+              "confirmed_hits": 0,
+              "decided": 0,
+              "errors": 0,
+              "errors_by_kind": {
+                "attacker": 0,
+                "infrastructure": 0,
+                "judge": 0,
+                "target": 0
+              },
+              "hits": 0,
+              "resisted": 0,
+              "stopped": 0,
+              "suspected_hits": 0,
+              "undetermined": 0
+            }
+          },
+          "probes": {
+            "items": {
+              "$ref": "#/components/schemas/ProbeRow"
+            },
+            "title": "Probes",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "prompts_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompts Revision"
+          },
+          "refusals": {
+            "$ref": "#/components/schemas/Refusals"
+          },
+          "rules_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Version"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "service": {
+            "default": "unknown",
+            "title": "Service",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "success": {
+            "$ref": "#/components/schemas/Success"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TargetInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verification": {
+            "$ref": "#/components/schemas/Verifications",
+            "default": {
+              "consistent": 0,
+              "evaluated": false,
+              "not_reproducible": 0,
+              "note": "",
+              "unverifiable": 0,
+              "verified": 0
+            }
+          },
+          "version": {
+            "const": "martian-redteam-report-v1",
+            "default": "martian-redteam-report-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "project_id",
+          "source",
+          "state",
+          "started_at",
+          "catalog_version",
+          "success",
+          "refusals"
+        ],
+        "title": "RedteamReport",
+        "type": "object"
+      },
+      "Refusals": {
+        "additionalProperties": false,
+        "description": "Generations the attacker refused to write or left empty, over all generations it was asked\nfor. A refused generation is never counted as a resisted attack.",
+        "properties": {
+          "by_method": {
+            "items": {
+              "$ref": "#/components/schemas/MethodRefusals"
+            },
+            "title": "By Method",
+            "type": "array"
+          },
+          "generations": {
+            "default": 0,
+            "title": "Generations",
+            "type": "integer"
+          },
+          "rate": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "refusals": {
+            "default": 0,
+            "title": "Refusals",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rate"
+        ],
+        "title": "Refusals",
         "type": "object"
       },
       "RunOut": {
@@ -1891,6 +2917,72 @@
         "title": "Spend",
         "type": "object"
       },
+      "Success": {
+        "additionalProperties": false,
+        "description": "``per_attempt``: hits over decided attempts. ``within_k``: probes that hit within k target\nqueries over probes decided within them. ``queries_to_first_confirmed``: for each probe with a\nconfirmed hit, the target queries it took, as their median and largest value.",
+        "properties": {
+          "per_attempt_confirmed": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "per_attempt_suspected": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "queries_to_first_confirmed_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queries To First Confirmed Max"
+          },
+          "queries_to_first_confirmed_median": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queries To First Confirmed Median"
+          },
+          "within_k": {
+            "items": {
+              "$ref": "#/components/schemas/WithinK"
+            },
+            "title": "Within K",
+            "type": "array"
+          }
+        },
+        "required": [
+          "per_attempt_confirmed",
+          "per_attempt_suspected"
+        ],
+        "title": "Success",
+        "type": "object"
+      },
+      "TargetInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TargetInfo",
+        "type": "object"
+      },
       "TargetRef": {
         "additionalProperties": false,
         "description": "What was attacked, as the run describes it. No credential is ever kept here.",
@@ -2219,13 +3311,85 @@
         ],
         "title": "Verification",
         "type": "object"
+      },
+      "Verifications": {
+        "additionalProperties": false,
+        "description": "Each probe's verification outcome. ``evaluated`` is false when the run carries none.",
+        "properties": {
+          "consistent": {
+            "default": 0,
+            "title": "Consistent",
+            "type": "integer"
+          },
+          "evaluated": {
+            "default": false,
+            "title": "Evaluated",
+            "type": "boolean"
+          },
+          "not_reproducible": {
+            "default": 0,
+            "title": "Not Reproducible",
+            "type": "integer"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "unverifiable": {
+            "default": 0,
+            "title": "Unverifiable",
+            "type": "integer"
+          },
+          "verified": {
+            "default": 0,
+            "title": "Verified",
+            "type": "integer"
+          }
+        },
+        "title": "Verifications",
+        "type": "object"
+      },
+      "WithinK": {
+        "additionalProperties": false,
+        "description": "Success within ``k`` target queries per probe. ``probes`` counts the probes an attempt\ndecided within those queries; ``undecided`` the rest.",
+        "properties": {
+          "confirmed": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "k": {
+            "minimum": 1.0,
+            "title": "K",
+            "type": "integer"
+          },
+          "probes": {
+            "default": 0,
+            "title": "Probes",
+            "type": "integer"
+          },
+          "suspected": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "undecided": {
+            "default": 0,
+            "title": "Undecided",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "k",
+          "confirmed",
+          "suspected"
+        ],
+        "title": "WithinK",
+        "type": "object"
       }
     }
   },
   "info": {
     "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 1). Generated by scripts/redteam_contract.py; do not edit by hand.",
     "title": "Martian red team API",
-    "version": "3"
+    "version": "4"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2909,6 +4073,60 @@
           }
         },
         "summary": "Annotate Redteam Finding",
+        "tags": [
+          "redteam"
+        ]
+      }
+    },
+    "/v1/redteam/runs/{run_id}/report": {
+      "get": {
+        "operationId": "get_redteam_report_v1_redteam_runs__run_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedteamReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Redteam Report",
         "tags": [
           "redteam"
         ]

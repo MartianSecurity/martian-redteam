@@ -40,7 +40,7 @@ async def test_a_flaky_hit_is_reproduced_1_of_3_not_verified():
     assert verification.outcome == "not_reproducible" and verification.reproduction_status == "state_dependent"
     [finding] = found.findings
     assert finding.outcome == "not_reproducible" and finding.summary == "Reproduced 1 of 3."
-    assert "| 1 of 3 | not_reproducible |" in render_markdown(found)
+    assert "| not_reproducible | 1 of 3 | passed |" in render_markdown(found)
 
 
 async def test_a_hit_that_reproduces_in_new_conversations_is_verified():

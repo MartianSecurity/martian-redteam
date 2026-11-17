@@ -101,7 +101,7 @@ async def test_a_report_with_a_calibration_sample_shows_the_judge_precision_and_
     assert measured["precision_interval"] == list(wilson(2, 3)) or measured["precision_interval"] == wilson(2, 3)
     assert found.budget["by_probe"]["calibration"]["judge_calls"] == 5
     text = render_markdown(found)
-    assert "## Judge calibration" in text and "precision 67% (95% interval" in text and "recall 67%" in text
+    assert "## Judge calibration" in text and "precision 67% (" in text and "recall 67% (" in text
     # The run's own hits stay suspected whatever the calibration says.
     assert "stay suspected" in text
 

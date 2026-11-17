@@ -1,6 +1,6 @@
 # Red team API
 
-Every red team route is under `/v1/redteam`. The routes are frozen as version 3 in `src/martian/redteam/server/contract/redteam-api-v3.json`, an OpenAPI document.
+Every red team route is under `/v1/redteam`. The routes are frozen as version 4 in `src/martian/redteam/server/contract/redteam-api-v4.json`, an OpenAPI document.
 
 The contract has two parts:
 
@@ -17,6 +17,7 @@ The contract has two parts:
 | `GET /v1/redteam/runs/{run_id}/attempts/{attempt_id}` | One attempt with its conversation, tool calls and check results |
 | `GET /v1/redteam/runs/{run_id}/evidence/{evidence_id}` | One piece of evidence |
 | `GET /v1/redteam/runs/{run_id}/findings` | The run's findings |
+| `GET /v1/redteam/runs/{run_id}/report` | The run's [report standard](redteam-reports.md): what attacked, the budget, success rates with intervals, refusals, findings by level, verification and controls |
 | `POST /v1/redteam/runs/{run_id}/findings/{finding_id}/annotations` | Add a comment, a status (`open`, `accepted`, `fixed`, `false_positive`) or both to a finding |
 | `GET /v1/redteam/catalog` | The vulnerabilities with their objective class, the attack methods and the framework maps |
 | `POST /v1/redteam/runs` | Start a run from a version 2 [run file](redteam-run-file.md). Answers `202` |
