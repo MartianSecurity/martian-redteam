@@ -41,7 +41,7 @@ def test_signatures_have_their_own_branch_and_the_allowlist_names_exact_accounts
     assert inputs["branch"] == "cla-signatures"
     assert inputs["path-to-signatures"] == "signatures/cla.json"
     # The action's "*" is an unanchored pattern.
-    assert inputs["allowlist"].split(",") == ["kloudd", "dependabot[bot]", "github-actions[bot]"]
+    assert inputs["allowlist"].split(",") == ["kloudd", "artreimus", "dependabot[bot]", "github-actions[bot]"]
 
 
 def test_the_bot_links_agreements_in_this_repository_that_give_its_signature_line():

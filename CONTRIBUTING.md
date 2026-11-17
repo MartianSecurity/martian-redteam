@@ -104,8 +104,8 @@ comment's ID, when you posted it and the pull request's number to `signatures/cl
 repository's `cla-signatures` branch. When a pull request is closed, the bot locks its
 conversation, so signature comments stay as they were signed.
 
-Dependabot, GitHub Actions and MartianSecurity's maintainer account are on the check's allowlist
-and are not asked to sign.
+Dependabot, GitHub Actions and MartianSecurity's staff accounts are on the check's allowlist
+and are not asked to sign: their work belongs to the company.
 
 ### If you contribute for your employer
 
