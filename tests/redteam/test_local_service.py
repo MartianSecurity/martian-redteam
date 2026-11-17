@@ -3,6 +3,7 @@
 A loopback OpenAI-compatible server plays the attacker and the judge (``fake_models``). Nothing calls a
 real model or a Martian server."""
 
+import ipaddress
 import os
 import socket
 
@@ -189,7 +190,9 @@ async def test_a_run_completes_with_only_a_model_key_and_sends_nothing_to_martia
     assert {case.score for case in assessment.test_cases} == {0}
     assert not [case for case in assessment.test_cases if case.error]
     assert len(models.requests) == 4
-    # Every connection went to the loopback model server, and no name was looked up but its own.
+    # The model server was reached, nothing beyond loopback was, and no other name was looked up.
+    # (Under pytest-xdist another test's threads in this worker may also connect, to loopback only.)
     addresses = {address for kind, address in connections if kind == "connect"}
-    assert addresses == {("127.0.0.1", models.port)}
-    assert {host for kind, host in connections if kind == "lookup"} <= {"127.0.0.1"}
+    assert ("127.0.0.1", models.port) in addresses
+    assert all(ipaddress.ip_address(address[0]).is_loopback for address in addresses), addresses
+    assert {host for kind, host in connections if kind == "lookup"} <= {"127.0.0.1", "localhost"}

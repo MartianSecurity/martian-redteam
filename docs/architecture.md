@@ -3,7 +3,8 @@
 `martian-sdk` contains `martian.evals`, `martian.redteam` and the combined CI
 runner. One scoped API token is bound to one approved Backend origin. The SDK
 runs in the customer's process; Backend owns public admission/auth, canonical
-eval scores/history and exports; Agents owns attack generation and judging.
+eval scores/history and exports; Agents owns hosted attack generation and judging. A version 2
+red team run file that names `models` generates and judges locally with the customer's models instead.
 
 ```mermaid
 flowchart LR

@@ -116,8 +116,11 @@ What runs where:
   deterministic checks need only a model you supply. Pinned datasets, dataset
   scores and CI sessions are recorded by the Martian platform and need a token.
 - **Red team** probes run in your process and call your agent through a local
-  callback. Attack generation and judging are done by the Martian platform, so
-  red team needs a platform connection and a token with `redteam:run`.
+  callback or function. A version 2 run file that names `models` generates and
+  judges the attacks with your own models and sends nothing to Martian
+  ([run file](docs/redteam-run-file.md)). Without `models`, the Martian platform
+  generates and judges them, which needs a platform connection and a token with
+  `redteam:run`.
 - Hosted features also need the SDK APIs enabled for your organisation.
   Installing the package does not enable them.
 
