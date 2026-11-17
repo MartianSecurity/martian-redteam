@@ -49,6 +49,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `Morse` | `morse` | transform | static | 1 | 1 | A filter that matches plain text: Morse code, letters by spaces and words by ` / `; characters with no code are left out |
 | `AlternatingCase` | `alternating_case` | transform | static | 1 | 1 | A filter that matches words case by case: letters alternate lower and upper case |
 | `PayloadSplit` | `payload_split` | transform | static | 1 | 1 | A filter that reads one piece at a time: three quoted parts and a request to join and answer them |
+| `ReviewedCases` | `reviewed_cases` | rewrite | static | 1 | 1, on the Martian server | A target that falls to attacks Martian has reviewed: a connected Martian server writes each attack from one published reviewed case and one attack skill ([reviewed cases](#reviewed-cases)) |
 
 Every transform runs locally with no model call and no network, and is a pure function of the text: the same attack always becomes the same message. Its tests check a round trip (or, for alternating case and Morse, the property that holds) on generated texts.
 
@@ -104,6 +105,10 @@ The attempt keeps every turn of every conversation, the refused and replayed one
 `Mutation` needs no attacker model. Its seed is the probe's direct request from the fixed templates (`Please {request}.`), and it sends up to `variants` (default 10, at most 1000) random copies of it, each in a conversation of its own, stopping at the first one a check finds succeeded. Each copy flips the case of letters (each with chance 0.4), doubles or drops spaces (0.15), swaps neighbouring words (0.15) and shuffles the inner letters of longer words (0.3). The draws come from a generator seeded by the attempt, so a rerun of the attempt sends the same copies. Every copy is a target query on the run's budget, and the trace records `variants_sent`.
 
 It is a method the run file names, not something the engine falls back to: when the attacker refuses, an adaptive method's attempt is an attacker error. A run whose methods call no attacker needs no `models.attacker` ([run file](redteam-run-file.md#models)).
+
+## Reviewed cases
+
+`ReviewedCases` runs only with a Martian connection (`MARTIAN_API_URL` and `MARTIAN_API_TOKEN`, a key with `redteam:run`) and no `models.attacker`. Each attack is one simulate operation with `source: reviewed_cases` ([red team API](redteam-api.md)): the server's engine picks one published reviewed case and one attack skill for the probe's vulnerability and type, writes the attack from them in the prompt-injection style, and answers the attack alone. The cases and skills stay on the server; this package never receives them, and each operation reads one case, at a rate the server limits. Reviewed cases need an edition that includes them (Enterprise or On-Premises). A Community organisation is refused with `403`, and the attempt is an `error` with code `http_403`, never a held attack. Without a connection, or with `models.attacker` set, the run stops before it starts and says why. The method record has `source: reviewed_cases`.
 
 ## Prompt files and the licence register
 

@@ -140,6 +140,8 @@ Which service generates and judges the attacks:
 
 A file that names an `environment` needs the connection whatever writes the attacks, so the third row does not apply to it: `models.attacker` set runs the attacks on your models and the environment on the server, and without it the platform writes them.
 
+`ReviewedCases` is written by the Martian server from its reviewed cases, so a run file that lists it takes no `models.attacker` and needs the connection ([reviewed cases](redteam-methods.md#reviewed-cases)).
+
 A run whose attack methods never call the attacker (`Templates`, `Mutation`, and transforms layered on them; [attack methods](redteam-methods.md)) needs no `models.attacker`. Without a Martian connection it runs locally: with `models.judge` when a vulnerability is decided by the judge, or with no model at all when every check is decided by code. With a connection and no `models.judge`, the Martian platform judges. `models.judge` with a connection configured stops the run, as above, and `models.judge` alone stops a run whose methods do need the attacker.
 
 A run never moves from one service to the other. The run records the attacker and judge models, never their headers. The local service uses the judges' model routing ([evals](evals.md)), so `openai:/MODEL` reads `OPENAI_API_KEY` and `OPENAI_API_BASE`. A reply that holds no attack, or a judgment that is not the integer 0 or 1 with a reason, is kept as such and never read as a pass.

@@ -898,6 +898,7 @@ class Engine:
         method: str | None = None,
         request: str | None = None,
         mode: GenerationMode = "baseline",
+        source: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """One attack in the style of attack method ``method``. ``request`` is the method's own
         instruction; without one, the attacker is asked for the probe's goal. A refused or empty
@@ -920,7 +921,12 @@ class Engine:
         for prompt in asked:
             spending.reserve("attacker")
             try:
-                output = await (spending.service or self.service).simulate(context, prompt=prompt)
+                service = spending.service or self.service
+                if source is not None:
+                    # Only the hosted client takes a source; the run file allows it with no other.
+                    output = await service.simulate(context, prompt=prompt, source=source)  # type: ignore[call-arg]
+                else:
+                    output = await service.simulate(context, prompt=prompt)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:

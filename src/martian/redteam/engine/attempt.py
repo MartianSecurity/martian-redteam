@@ -114,7 +114,12 @@ class AttemptRun:
     # --- what a method does -----------------------------------------------------------------------
 
     async def generate(
-        self, *, request: str | None = None, method: str | None = None, mode: GenerationMode = "baseline"
+        self,
+        *,
+        request: str | None = None,
+        method: str | None = None,
+        mode: GenerationMode = "baseline",
+        source: str | None = None,
     ) -> str:
         if mode == "baseline" and self._strategies:
             # A picked strategy is the next fresh attack: no attacker call.
@@ -125,7 +130,13 @@ class AttemptRun:
         if request is not None:
             request = scrub_secrets(request, self._hidden)
         payload, generated = await self.engine._generate(
-            self.planned, self.spending, self.attempt_id, method=method or self.method.id, request=request, mode=mode
+            self.planned,
+            self.spending,
+            self.attempt_id,
+            method=method or self.method.id,
+            request=request,
+            mode=mode,
+            source=source,
         )
         self.policy_revision = generated.get("policy_revision") or self.policy_revision
         return payload

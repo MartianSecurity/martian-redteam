@@ -17,6 +17,11 @@ sensitive target data; they cross the customer boundary and enter the service's
 controlled operation/recovery lifecycle. SDK digests do not remove data from
 actual model requests. Backend needs raw dataset outputs for canonical scoring.
 
+The `ReviewedCases` attack method sends the same simulate request with
+`source: reviewed_cases`. The server writes the attack from its reviewed cases
+and attack skills and answers the attack alone; their content never reaches
+the SDK.
+
 Requests cannot choose model/service/target endpoints. YAML cannot override the
 platform origin. HTTPS is required except loopback; redirects and environment
 proxies are off unless proxies are explicitly opted in. Constructor connections

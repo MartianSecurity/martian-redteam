@@ -656,6 +656,12 @@ class RunFile(_Model):
                     raise ValueError(
                         f"attacks[{index}]: the tool_result route needs {route.server!r} in tools.proxy, in inject mode"
                     )
+        for index, attack in enumerate(self.attacks):
+            if resolve(attack).hosted_only and self.models.attacker is not None:
+                raise ValueError(
+                    f"attacks[{index}]: {attack.name} is written by a Martian server from its reviewed cases; "
+                    "remove models.attacker to run it there"
+                )
         delivered = {attack.delivery.server for attack in self.attacks if attack.delivery is not None}
         for server in self.tools.proxy:
             if server.mode == "inject" and not server.inject and server.name not in delivered:

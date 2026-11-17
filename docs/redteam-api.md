@@ -22,7 +22,7 @@ The contract has two parts:
 | `GET /v1/redteam/catalog` | The vulnerabilities with their objective class, the attack methods and the framework maps |
 | `POST /v1/redteam/runs` | Start a run from a version 2 [run file](redteam-run-file.md). Answers `202` |
 | `POST /v1/redteam/runs/{run_id}/stop` | Stop a run |
-| `POST /v1/redteam/simulate` | Hosted: generate an attack |
+| `POST /v1/redteam/simulate` | Hosted: generate an attack. With `source: reviewed_cases`, the server writes it from one reviewed case and one attack skill and answers the attack alone; an edition without reviewed cases is refused with `403` |
 | `POST /v1/redteam/evaluate` | Hosted: judge a reply |
 | `GET /v1/redteam/operations/{operation_id}` | Hosted: read an operation |
 | `POST /v1/redteam/operations/{operation_id}/cancel` | Hosted: cancel an operation |

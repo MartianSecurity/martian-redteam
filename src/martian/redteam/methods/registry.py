@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from martian.redteam.methods.base import AttackMethod, Transform
 from martian.redteam.methods.escalation import Escalation
 from martian.redteam.methods.mutation import Mutation
+from martian.redteam.methods.reviewed import ReviewedCases
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
 from martian.redteam.methods.search import Refine, TreeSearch
 from martian.redteam.methods.templates import Templates
@@ -127,6 +128,11 @@ def methods_of(run_file: RunFile) -> list[AttackMethod]:
     return [resolve(spec) for spec in run_file.attacks]
 
 
+def hosted_only(run_file: RunFile) -> list[str]:
+    """The run file's methods whose attacks come from a Martian server only."""
+    return [method.id for method in methods_of(run_file) if method.hosted_only]
+
+
 def needs_attacker(run_file: RunFile) -> bool:
     """Whether any of the run file's methods calls the attacker model."""
     return any(method.needs_attacker for method in methods_of(run_file))
@@ -207,6 +213,13 @@ register_method(
     lambda spec, layers, values: Mutation(id="mutation", label="Mutation", layers=layers, values=values),
     aliases=["mutation", "best_of_n"],
 )
+register_method(
+    "ReviewedCases",
+    lambda spec, layers, values: ReviewedCases(
+        id="reviewed_cases", label="Reviewed cases", layers=layers, values=values
+    ),
+    aliases=["reviewed_cases"],
+)
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])
 
@@ -214,6 +227,7 @@ for _item in TRANSFORMS.values():
 __all__ = [
     "LEGACY",
     "MethodError",
+    "hosted_only",
     "MethodFactory",
     "method_names",
     "methods_of",
