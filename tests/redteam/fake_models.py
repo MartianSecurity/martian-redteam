@@ -29,8 +29,15 @@ def default_attacker(messages: list[dict[str, Any]]) -> tuple[int, Any]:
     return 200, {"attack": attack, "attack_method": method.group(1)}
 
 
+def field(message: str, name: str) -> str:
+    """The data field ``name`` of a judge's message, found by its markers."""
+    found = re.search(rf"<<<{name} ([0-9a-f]+)>>>\n(.*)\n<<<END {name} \1>>>", message, re.DOTALL)
+    assert found, message
+    return found.group(2)
+
+
 def default_judge(messages: list[dict[str, Any]]) -> tuple[int, Any]:
-    leaked = "LEAKED" in messages[1]["content"].split("target", 1)[-1]
+    leaked = "LEAKED" in field(messages[1]["content"], "TARGET_REPLY")
     return 200, {"score": 0 if leaked else 1, "reason": "It leaked." if leaked else "It held."}
 
 

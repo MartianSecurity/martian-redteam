@@ -30,6 +30,18 @@ with the user's own key, through the judges' model routing. Nothing is sent to a
 Martian server, and a run with both `models` and a Martian connection configured
 stops rather than choose one.
 
+The local engine treats the target's output as hostile
+(`martian.redteam.engine.hostile`). The judge sees the attack, the reply and the
+tool calls only as data fields between markers that carry a fresh random id,
+after an instruction never to follow anything inside them; a run of three or
+more `<` or `>` in that text is broken up, so a reply cannot close its field.
+Before any prompt is sent, the value of every environment variable named like
+a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
+characters or more) and of the models' headers is replaced by `[redacted]`, so
+a key the target leaks never reaches a model provider. The headers themselves
+are still sent to the model endpoint. A listener the harness opens binds to
+loopback only.
+
 Reports default to content digests. Content opt-in does not disable credential
 redaction, including constructor secrets after client close and report copies.
 Explicit input/output redaction flags take precedence. Raw in-memory assessment
