@@ -64,6 +64,42 @@
           "licence": "not copied"
         }
       ]
+    },
+    "search/start.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "PAIR, iterative refinement of an attack from the target's reply (Chao et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "TAP, tree of attacks with pruning (Mehrotra et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "MetaPI's four-rung tool signal: not called, wrong tool, wrong arguments, matched",
+          "licence": "not copied"
+        }
+      ]
+    },
+    "search/refine.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "PAIR, iterative refinement of an attack from the target's reply (Chao et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "TAP, tree of attacks with pruning (Mehrotra et al., 2023); reference code MIT, not copied",
+          "licence": "MIT"
+        },
+        {
+          "name": "MetaPI's four-rung tool signal: not called, wrong tool, wrong arguments, matched",
+          "licence": "not copied"
+        }
+      ]
     }
   }
 }

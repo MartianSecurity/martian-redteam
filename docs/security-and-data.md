@@ -35,7 +35,11 @@ The local engine treats the target's output as hostile
 tool calls only as data fields between markers that carry a fresh random id,
 after an instruction never to follow anything inside them; a run of three or
 more `<` or `>` in that text is broken up, so a reply cannot close its field.
-Before any prompt is sent, the value of every environment variable named like
+An adaptive attack method ([attack methods](redteam-methods.md)) passes the
+target's reply and tool calls to the attacker the same way, after an
+instruction to read them only to write the next attack, each cut to 4000
+characters; what the checks found reaches the attacker in the harness's own
+words. Before any prompt is sent, the value of every environment variable named like
 a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
 characters or more) and of the models' headers is replaced by `[redacted]`, so
 a key the target leaks never reaches a model provider. The headers themselves

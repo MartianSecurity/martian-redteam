@@ -27,6 +27,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `Roleplay` | `roleplay` | rewrite | static | 1 | 1 | A roleplay or hypothetical frame that takes the target outside its role |
 | `PromptProbing` | `prompt_probing` | rewrite | static | 1 | 1 | A probing question for hidden instructions, tools or policy, without a blunt override |
 | `Templates` | `templates` | rewrite | control | Up to `max_queries` (default and most 10, one per template) | 0 | Nothing adaptive: the same fixed templates every run, the baseline every adaptive method is compared with. The set has a direct request, two instruction overrides, "important instructions", a behaviour update in the Skeleton Key style, a mode switch, a closed delimiter, an answer prefix, a task wrapper and urgency |
+| `Refine` | `refine` | search | adaptive | Up to `max_queries` (default 10) | One per query (a first attack, then a refinement of each) | A target that holds against a first attempt but gives way to an attack refined from its own replies, guided by how close each reply came to the goal (PAIR-style) |
 | `Authority` | `authority` | rewrite | static | 1 | 1 | A target that obeys whoever claims to be in charge: the request comes from its developer, an administrator, a security team or a legal duty |
 | `Hypothetical` | `hypothetical` | rewrite | static | 1 | 1 | A target that answers inside an imagined case: the request is a thought experiment in which it is allowed, asking for the concrete answer |
 | `Citation` | `citation` | rewrite | static | 1 | 1 | A target that defers to documents: the request cites a policy, ticket or guideline that says it is allowed or required |
@@ -53,10 +54,18 @@ Prompt injection, roleplay and prompt probing take their style from the catalogu
 ```yaml
 attacks:
   - name: Templates     # control arm
-  - name: Roleplay      # static
+  - name: Refine        # adaptive
 ```
 
-The report's `by_method` gives each method's `arm` ([red team reports](redteam-reports.md#groups-and-probes)), so the control's success rate and queries to first hit read beside each static and adaptive method's.
+The report's `by_method` gives each method's `arm` ([red team reports](redteam-reports.md#groups-and-probes)), so the control's success rate and queries to first hit read beside each adaptive method's.
+
+## Refinement driven by the check result
+
+`Refine` writes a first attack toward the probe's goal, sends it in a conversation of its own and reads the checks' feedback. While no check has hit and queries remain, the attacker refines its last attack from three things: the attack, the target's reply and its tool calls (as data fields it is told never to follow, cut to 4000 characters, with secret values scrubbed), and the checks' finding in the harness's own words. For a tool goal the finding is one of four rungs: no tool called, another tool called, the goal tool called with other arguments, or matched. The search stops at the first hit or after `max_queries` queries (default 10).
+
+The feedback comes from the checks decided by code when the probe has any (`text`, `canary`, `tool_call`), at no cost; a judge check of the same probe is asked once, on the exchange the attempt ends with. When the judge is the probe's only check, it is the signal: one judge call per query, and the last one is not repeated. The attempt is decided on the hit, or on the attack whose reply came closest. Each query is a target query on the run's budget and each refinement an attacker call; a refusal is asked for once more and a second refusal fails the attempt as the attacker's.
+
+The attempt's trace records each query's rung (`signals`), `queries_to_first_success` and `tree` (each query's level and the query it refined); the report's `queries_to_first_hit` counts the same queries per probe ([red team reports](redteam-reports.md#groups-and-probes)). The request text is in `prompts/search/`.
 
 ## Prompt files and the licence register
 

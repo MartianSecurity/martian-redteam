@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
+from martian.redteam.methods.search import Refine
 from martian.redteam.methods.templates import Templates
 from martian.redteam.methods.transforms import TRANSFORMS
 from martian_redteam.catalog.attacks import ATTACKS
@@ -179,6 +180,11 @@ def _templates(spec: AttackSpec, layers: tuple[Transform, ...], values: dict[str
 
 
 register_method("Templates", _templates, aliases=["templates"])
+register_method(
+    "Refine",
+    lambda spec, layers, values: Refine(id="refine", label="Iterative refinement", layers=layers, values=values),
+    aliases=["refine"],
+)
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])
 
