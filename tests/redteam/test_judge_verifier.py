@@ -129,3 +129,12 @@ def test_wilson_interval():
     low, high = wilson(2, 3)
     assert 0.2 < low < 0.21 and 0.93 < high < 0.94
     assert wilson(0, 0) is None and wilson(0, 10)[0] == 0.0
+
+
+def test_the_launcher_reads_a_relative_calibration_sample_from_its_folder(tmp_path):
+    from martian.evals.records.sql import SqlRecordStore
+    from martian.redteam.engine.launcher import LocalLauncher
+
+    launcher = LocalLauncher(SqlRecordStore(f"sqlite:///{tmp_path / 'm.db'}"), base_dir=tmp_path)
+    mapping = leakage(verification={"calibration": "labels.jsonl"}).model_dump(mode="json", exclude_none=True)
+    assert launcher._run_file(mapping).verification.calibration == str((tmp_path / "labels.jsonl").resolve())

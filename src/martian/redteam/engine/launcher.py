@@ -59,6 +59,10 @@ class LocalLauncher:
         if run_file.target.file is not None and not Path(run_file.target.file).is_absolute():
             target = run_file.target.model_copy(update={"file": str((self.base_dir / run_file.target.file).resolve())})
             run_file = run_file.model_copy(update={"target": target})
+        sample = run_file.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = run_file.verification.model_copy(update={"calibration": str((self.base_dir / sample).resolve())})
+            run_file = run_file.model_copy(update={"verification": settings})
         return run_file
 
     async def start(self, principal: Principal, request: RunStart) -> RedteamRun:
