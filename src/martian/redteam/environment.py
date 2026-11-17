@@ -73,7 +73,7 @@ def admission(run_file: RunFile, *, request_id: str, label: str | None = None) -
         "request_id": request_id,
         "environment": run_file.environment,
         "state_checks": checks,
-        "implant_profiles": [],
+        "implant_profiles": sorted({item.plant.profile for item in run_file.vulnerabilities if item.plant}),
         "max_seconds": int(run_file.budget.max_seconds or DEFAULT_MAX_SECONDS),
     }
     if run_file.agent is not None:
@@ -187,7 +187,8 @@ class ServerWorld:
             raise WorldUnavailable(str(error)) from None
 
     async def prepare(self, attempt: str, action_id: str, *, implant: Any = None) -> dict[str, Any]:
-        found = await self._call("prepare", attempt, action_id)
+        extra = {"implant": {"profile": implant.profile, "text": implant.text}} if implant is not None else {}
+        found = await self._call("prepare", attempt, action_id, **extra)
         world = found.get("world")
         return dict(world) if isinstance(world, dict) else {}
 
@@ -246,7 +247,14 @@ class ServerWorld:
                 )
         except (KeyError, TypeError, ValueError):
             raise WorldUnavailable("The Martian server's world answer is not one this SDK reads") from None
-        return WorldOutcome(checks=checks, tool_calls=calls, evidence=evidence, receipt=found)
+        delivered = found.get("delivered")
+        return WorldOutcome(
+            checks=checks,
+            tool_calls=calls,
+            evidence=evidence,
+            delivered=delivered if isinstance(delivered, bool) else None,
+            receipt=found,
+        )
 
 
 FINISHED = {"completed": "completed", "stopped": "stopped", "failed": "failed", "cancelled": "cancelled"}

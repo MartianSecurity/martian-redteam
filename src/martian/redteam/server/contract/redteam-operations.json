@@ -521,6 +521,30 @@
         "title": "OperationResponse",
         "type": "object"
       },
+      "Plant": {
+        "additionalProperties": false,
+        "description": "Content a probe plants in the world: an implant profile of the agent connection, admitted\nwith the run, and the text its writable fields take.",
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "text"
+        ],
+        "title": "Plant",
+        "type": "object"
+      },
       "SafeOperationError": {
         "additionalProperties": false,
         "properties": {
@@ -780,6 +804,17 @@
             "title": "Checks",
             "type": "object"
           },
+          "delivered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered"
+          },
           "operation": {
             "title": "Operation",
             "type": "string"
@@ -825,6 +860,16 @@
             "minLength": 1,
             "title": "Attempt",
             "type": "string"
+          },
+          "implant": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Plant"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "operation": {
             "enum": [

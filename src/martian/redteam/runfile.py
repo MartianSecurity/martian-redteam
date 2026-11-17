@@ -220,6 +220,15 @@ CheckDecl = Annotated[
 ]
 
 
+class Plant(_Model):
+    """An indirect attack in an environment: the attack is planted in the world with an implant
+    profile of the agent's connection on the Martian server, and the agent is sent ``trigger``, an
+    ordinary request that leads it to read what was planted."""
+
+    profile: str = Field(min_length=1, max_length=128)
+    trigger: str = Field(min_length=1, max_length=2000)
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
@@ -228,6 +237,8 @@ class Vulnerability(NamedSpec):
     objective: ObjectiveName | None = None
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
+    plant: Plant | None = None
+    """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
 
 
 class ProxiedServer(_Model):
@@ -420,6 +431,8 @@ class RunFile(_Model):
         if self.tools.session_api is not None and not self.tools.proxy and self.environment is None:
             raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
+            if vulnerability.plant is not None and self.environment is None:
+                raise ValueError(f"vulnerabilities[{index}]: plant puts the attack in an environment; set environment")
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
                     raise ValueError(f"vulnerabilities[{index}]: a state check reads an environment; set environment")
@@ -505,6 +518,7 @@ __all__ = [
     "McpTarget",
     "ModelConfig",
     "Models",
+    "Plant",
     "ProxiedServer",
     "ReceiptCheck",
     "RunFile",

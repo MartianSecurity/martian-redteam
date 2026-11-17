@@ -90,7 +90,11 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     criteria=vulnerability.criteria,
                     checks=checks,
                     planned_attempts=run_file.budget.attempts_per_probe,
-                    metadata={"severity": spec.severity, "attack_kind": attack.kind},
+                    metadata={
+                        "severity": spec.severity,
+                        "attack_kind": attack.kind,
+                        **({"plant": spec.plant.model_dump()} if spec.plant is not None else {}),
+                    },
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity))
     return planned
