@@ -199,6 +199,31 @@ def test_knowledge_retention_names_the_turn_and_the_fact_it_forgot(fake_model):
     assert (result.metadata["martian.judge.fact_turn"], result.metadata["martian.judge.turn"]) == ("1", "2")
 
 
+def test_knowledge_retention_pass_checks_its_fact_and_reply_quotes(fake_model):
+    inputs = {
+        "messages": [
+            {"role": "user", "content": "My reference is BLUE-42."},
+            {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": "What reference did I give?"},
+            {"role": "assistant", "content": "Your reference is BLUE-42."},
+        ]
+    }
+    fake_model(retained("pass", fact="My reference is BLUE-42.", quote="Your reference is BLUE-42."))
+    result = knowledge_retention(model="openai:/stub")(inputs=inputs, outputs=None, expectations={})
+    assert result.value is True
+    assert [(p["role"], p["turn"], p["text"]) for p in evidence_of(result)] == [
+        ("user", 1, "My reference is BLUE-42."),
+        ("assistant", 2, "Your reference is BLUE-42."),
+    ]
+
+
+def test_knowledge_retention_allows_no_applicable_facts_without_invented_evidence(fake_model):
+    fake_model({**retained("pass", fact_turn=0, fact="", turn=0, quote=""), "reason": "Only a greeting."})
+    inputs = {"messages": [{"role": "user", "content": "Hello."}, {"role": "assistant", "content": "Hello!"}]}
+    result = knowledge_retention(model="openai:/stub")(inputs=inputs, outputs=None, expectations={})
+    assert result.value is True and evidence_of(result) == []
+
+
 @pytest.mark.parametrize(
     ("judge", "expectations", "reply", "message"),
     [
@@ -223,6 +248,9 @@ def test_knowledge_retention_names_the_turn_and_the_fact_it_forgot(fake_model):
         (knowledge_retention, {}, retained(fact=" "), r"gave no fact quote .* \[judge_missing_quote\]"),
         (knowledge_retention, {}, retained(fact_turn=2, turn=1), r"turn 1 is not a turn it may name, 2 to 2"),
         (knowledge_retention, {}, retained(fact_turn=0), r"gave no fact_turn \[judge_missing_turn\]"),
+        (knowledge_retention, {}, retained("pass", quote="waiting for stock"), r"in turn 2 \[judge_invalid_quote\]"),
+        (knowledge_retention, {}, retained("pass", quote=""), r"gave no quote .* \[judge_missing_quote\]"),
+        (knowledge_retention, {}, retained("pass", fact_turn=0, turn=0), r"\[judge_invalid_evidence\]"),
     ],
 )
 def test_evidence_that_is_not_in_the_conversation_is_an_error(fake_model, judge, expectations, reply, message):
