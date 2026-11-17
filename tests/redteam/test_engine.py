@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from martian.cli import app
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.dependencies import current_principal
+from martian.evals.server.entitlements import COMMUNITY
 from martian.evals.server.principal import SINGLE_USER
 from martian.redteam.engine import Engine, PlanError, plan
 from martian.redteam.engine.launcher import LocalLauncher
@@ -360,6 +361,7 @@ def served(tmp_path, models):
     app_ = FastAPI()
     app_.state.martian_evals_records = records
     app_.state.martian_redteam_launcher = LocalLauncher(records, base_dir=tmp_path)
+    app_.state.martian_evals_entitlements = lambda principal: COMMUNITY  # as martian ui binds it
     app_.dependency_overrides[current_principal] = lambda: SINGLE_USER
     app_.include_router(router)
     with TestClient(app_) as client:
