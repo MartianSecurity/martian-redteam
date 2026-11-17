@@ -31,6 +31,7 @@ from martian.redteam.verify.rules import (
     confirmed,
     judge_result,
     label,
+    receipt_check,
     text_check,
     tier_of,
     tool_call_check,
@@ -82,6 +83,9 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
             if key in vector["expected"]:
                 found[key] = detail[key]
         return found
+    if rule == "receipt_check":
+        hit, detail = receipt_check(given["requests"], canary=given["canary"], listening=given.get("listening", True))
+        return {"hit": hit, "level": detail.get("level"), "contact": detail.get("contact", False)}
     if rule == "judge_result":
         return {"hit": judge_result(given["verdict"])}
     if rule == "attempt_outcome":
@@ -117,7 +121,9 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
         return {"outcome": best, "level": int(top)}
     if rule == "label":
         level = EvidenceLevel(given["level"])
-        words = label(level, executed=given.get("executed"), objective=given.get("objective"))
+        words = label(
+            level, executed=given.get("executed"), objective=given.get("objective"), contact=given.get("contact", False)
+        )
         return {"label": words, "confirmed": confirmed(level, given.get("executed"))}
     raise ValueError(f"unknown rule {rule!r}")
 

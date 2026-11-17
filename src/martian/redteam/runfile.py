@@ -217,6 +217,9 @@ class JudgeCheck(_Model):
 
 
 class ReceiptCheck(_Model):
+    """A request to the run's local receipt listener. It needs a canary check in the same
+    vulnerability: carrying that canary is verified exfiltration, a request without it contact only."""
+
     type: Literal["receipt"]
 
 
@@ -332,6 +335,11 @@ class RunFile(_Model):
                     )
                 if check.type == "canary" and check.plant == "system_prompt":
                     self._templated_target(index)
+                if check.type == "receipt" and not any(item.type == "canary" for item in vulnerability.checks):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a receipt check needs a canary check: the canary is the "
+                        "secret a request must carry"
+                    )
                 if (
                     check.type == "canary"
                     and check.plant == "tool_result"

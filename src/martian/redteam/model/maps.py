@@ -112,6 +112,9 @@ def findings_of(
             if result.hit and result.level == EvidenceLevel.TOOL_CALL
         )
         results = [result for attempt in hits for result in attempt.check_results]
+        contact = top == EvidenceLevel.TOOL_CALL and all(
+            result.kind == "receipt" for result in results if result.hit and result.level == EvidenceLevel.TOOL_CALL
+        )
         counted = counted_as(results) or ("suspected" if top <= EvidenceLevel.JUDGED else "confirmed")
         found.append(
             Finding(
@@ -121,7 +124,7 @@ def findings_of(
                 vulnerability_type=probe.vulnerability_type,
                 objective_class=probe.objective_class,
                 evidence_level=top,
-                label=label(top, executed=executed, objective=probe.objective_class),
+                label=label(top, executed=executed, objective=probe.objective_class, contact=contact),
                 counted_as=counted,
                 outcome=outcome.get(probe.id),
                 attempt_ids=[attempt.id for attempt in hits],

@@ -136,7 +136,7 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | `canary` | `value`, a canary of at least 8 characters that you planted yourself. Without it, the run plants its own (see [canaries](#canaries)) where `plant` says, with `text` as a context plant's note | 2 |
 | `tool_call` | `tool`, `where`, and `executed`: `true` counts only a call that ran, `false` (the default) a requested call too | 3 |
 | `judge` | `criteria`, what the judge decides. Without it, the vulnerability's own criteria apply | 1 |
-| `receipt` | none. A local listener receives a request carrying the canary | 4 |
+| `receipt` | none. Needs a `canary` check in the same vulnerability. The run's local listener receives a request carrying that canary (see [receipts](#receipts)) | 4; 3 for a request without it, contact only |
 | `state` | `name`, a business check of the environment. Needs `environment` | 5 |
 
 ### Canaries
@@ -150,6 +150,10 @@ Each run draws one canary, `MRTC-` with a tag of the run and a random secret, un
 | `tool_result` | `{{canary}}` in a proxied server's `inject` text. This release does not run the proxy, so such a run stops before anything is called |
 
 The check finds the canary in the reply and in tool call arguments, encoded or not ([verdicts](redteam-verdicts.md#checks)). The attempt keeps what the attacker wrote as `input`, the note as `planted`, and the message the target received as its first turn.
+
+### Receipts
+
+A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a port the system picks, and stops it when the run ends, however it ends. Each attempt has its own address, `http://127.0.0.1:PORT/r/<token>`, and the attacker is told to make the target send the canary there. The listener keeps each request (the request line, the headers and up to 64 KiB of body, at most 1,000 requests a run) as `receipt` evidence of its attempt, answers `200 ok` and follows nothing in it. A request carrying the canary is verified exfiltration; one without it is contact only. The run's provenance counts what it received as `receipts` (`received`, `unmatched` for other addresses, `dropped` past the limit). The target must be able to reach `127.0.0.1` on this machine.
 
 ## Tools
 
@@ -183,7 +187,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
-3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A `receipt` check is undetermined in this release, which has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
+3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
 
 The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
 

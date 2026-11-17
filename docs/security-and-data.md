@@ -40,7 +40,9 @@ a credential (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, eight
 characters or more) and of the models' headers is replaced by `[redacted]`, so
 a key the target leaks never reaches a model provider. The headers themselves
 are still sent to the model endpoint. A listener the harness opens binds to
-loopback only.
+loopback only: the receipt listener of a run with a `receipt` check takes
+requests on `127.0.0.1`, keeps what they hold as bounded evidence, answers
+`200 ok`, follows nothing in them and stops when the run ends.
 
 Reports default to content digests. Content opt-in does not disable credential
 redaction, including constructor secrets after client close and report copies.
