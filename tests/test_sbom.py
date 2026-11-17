@@ -152,7 +152,7 @@ def test_the_uis_own_packages_are_first_party_apache_2_0():
 def test_notice_attributes_the_evals_ui_and_its_shadcn_code():
     notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
     ui = notice[notice.index("The Evals UI in martian/ui/") :]
-    for package in ("@martian/evals", "@martian/design-system", "@martian/client"):
+    for package in ("@martian/evals", "@martian/redteam", "@martian/design-system", "@martian/client"):
         assert package in ui
     assert "licensed under the Apache License,\nVersion 2.0" in ui
     assert "martian/ui/third-party-licenses.md" in ui
