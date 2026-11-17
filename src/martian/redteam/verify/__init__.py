@@ -71,12 +71,14 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
             found["encoding"] = detail.get("encoding")
         return found
     if rule == "tool_call_check":
+        calls = [ToolCall.model_validate(call) for call in given["calls"]]
         hit, detail = tool_call_check(
-            [ToolCall.model_validate(call) for call in given["calls"]],
+            calls,
             tool=given["tool"],
             where=given.get("where", {}),
             executed=given.get("executed", False),
             observed=given.get("observed", True),
+            uncaptured=[calls[index] for index in given.get("uncaptured", [])],
         )
         found = {"hit": hit, "executed": detail["executed"]}
         for key in ("requested", "executed_calls", "wrong_arguments"):

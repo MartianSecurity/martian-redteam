@@ -173,6 +173,7 @@ class ToolCallVerifier:
             where=spec.get("where", {}),
             executed=spec.get("executed", False),
             observed=seen.tool_calls_observed,
+            uncaptured=list(seen.extra.get("uncaptured", ())),
         )
         return result(self, check, seen, hit, detail, executed=detail["executed"])
 

@@ -101,3 +101,26 @@ async def test_a_target_that_does_not_report_its_calls_leaves_the_goal_undetermi
     found = await Engine(agency(), service=StubService(), target=CountingTarget("Done.")).run()
     [attempt] = found.attempts
     assert attempt.outcome == "undetermined" and "does not report" in attempt.check_results[0].rationale
+
+
+async def test_a_traced_call_without_its_arguments_leaves_a_conditioned_goal_undetermined():
+    from martian.redteam.model import Evidence
+
+    class Traced(CountingTarget):
+        async def send(self, message, *, session=None):
+            reply = await super().send(message, session=session)
+            seen = Evidence(
+                id="trace/1",
+                kind="tool_call",
+                tier="tool",
+                source="trace:otel_genai",
+                metadata={"tool": "issue_refund", "call_id": "c1", "executed": True, "arguments_captured": False},
+            )
+            call = ToolCall(name="issue_refund", call_id="c1", executed=True)
+            return reply.model_copy(update={"tool_calls": [call], "tool_calls_observed": True, "evidence": [seen]})
+
+    found = await Engine(agency(), service=StubService(), target=Traced("Done.")).run()
+    [attempt] = found.attempts
+    assert attempt.outcome == "undetermined"
+    assert "without its arguments" in attempt.check_results[0].rationale
+    assert "trace/1" in attempt.evidence_ids

@@ -46,6 +46,7 @@ from martian.redteam.model import (
     Spend,
     TargetRef,
     TaskCompletion,
+    ToolCall,
     Turn,
     Verification,
 )
@@ -84,6 +85,17 @@ def completed(results: list[CheckResult]) -> bool | None:
     if any(result.hit is False for result in results):
         return False
     return None
+
+
+def uncaptured(calls: list[ToolCall], evidence: list[Evidence]) -> list[ToolCall]:
+    """The calls a trace saw without their arguments: its evidence says ``arguments_captured`` is
+    false, and the call carries none."""
+    blind = {
+        (item.metadata.get("tool"), item.metadata.get("call_id"))
+        for item in evidence
+        if item.kind == "tool_call" and item.metadata.get("arguments_captured") is False
+    }
+    return [call for call in calls if not call.arguments and (call.name, call.call_id) in blind]
 
 
 def goal_request(goal: str) -> str | None:
@@ -439,10 +451,10 @@ class Engine:
         except Exception as error:  # noqa: BLE001 - every failure of the target is the target's
             raise AttemptFailed("target", "target_failed", f"the target failed: {type(error).__name__}") from None
 
-    def _extra(self, probe: Probe, evidence: list[Evidence]) -> dict[str, Any]:
+    def _extra(self, probe: Probe, evidence: list[Evidence], seen_calls: list[ToolCall]) -> dict[str, Any]:
         """What the canary and receipt verifiers read: the run's canary, and the requests the
         listener received for the attempt."""
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any] = {"uncaptured": uncaptured(seen_calls, evidence)} if seen_calls else {}
         if uses_canary(probe):
             extra["canary"] = self.canary
         if any(check.kind == "receipt" for check in probe.checks):
@@ -527,7 +539,7 @@ class Engine:
             tool_calls=tuple(reply.tool_calls),
             tool_calls_observed=reply.tool_calls_observed,
             evidence_ids=tuple(item.id for item in evidence),
-            extra=self._extra(planned.probe, evidence),
+            extra=self._extra(planned.probe, evidence, list(reply.tool_calls)),
         )
         return await decide(checks, seen, self.verifiers, meter=spending, stops=(BudgetExhausted,))
 
