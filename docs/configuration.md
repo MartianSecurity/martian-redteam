@@ -107,7 +107,7 @@ martian redteam run CONFIG.yaml [-o DIR] [-c N] [-a N] [--no-store] [--resume RU
 | `-a` | `--attacks-per-vuln` | `system_config.attacks_per_vulnerability_type` | Repeats per (vuln type × attack). Cost scales linearly. |
 | | `--no-store` | | Do not keep the run in the local store. By default `run` keeps it in the local data folder (`MARTIAN_EVALS_HOME`, else `~/.martian/evals`) as a [red team run](redteam-model.md#where-a-run-is-stored); this needs the `evals` extra. |
 
-This page documents version 0.2 files, which have no `version` key. Version 2 files are documented in [the run file guide](redteam-run-file.md). `run` runs either; for a version 2 file `-o` overrides `output_folder`, `-c` `budget.max_concurrent` and `-a` `budget.attempts_per_probe`, and the command writes `redteam-run.json` and `redteam-report.md`. `--resume RUN_ID` continues a version 2 run from the local store ([resume](redteam-run-file.md#how-a-run-works)).
+This page documents version 0.2 files, which have no `version` key. Version 2 files are documented in [the run file guide](redteam-run-file.md). `run` runs either; for a version 2 file `-o` overrides `output_folder`, `-c` `budget.max_concurrent` and `-a` `budget.attempts_per_probe`, and the command writes `redteam-run.json`, `redteam-report.json` and `redteam-report.md` ([red team reports](redteam-reports.md)). `--resume RUN_ID` continues a version 2 run from the local store ([resume](redteam-run-file.md#how-a-run-works)).
 
 ```bash
 martian redteam validate config.yaml
