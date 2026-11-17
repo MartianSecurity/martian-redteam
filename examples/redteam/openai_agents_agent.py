@@ -32,6 +32,9 @@ from examples.redteam.shared import (
 )
 from martian_redteam import AssessmentSession, bind_tools
 
+# The SDK exports its own traces to OpenAI by default; the example keeps everything local.
+set_tracing_disabled(True)
+
 
 class StubModel(Model):
     """A model that looks the order up, asks for the refund, then answers."""
@@ -107,7 +110,6 @@ def build(session: AssessmentSession) -> Answer:
 
 
 async def main() -> None:
-    set_tracing_disabled(True)
     show(await attack(build))
 
 
