@@ -152,6 +152,8 @@ martian evals push
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml
 martian redteam run redteam.yaml -o results/redteam
+# A stored version 2 run decided again by the file's current checks, without calling the target:
+martian redteam rejudge redteam.yaml --run RUN_ID
 ```
 
 Python and `martian ci` use one runner and one pytest execution. The YAML suite

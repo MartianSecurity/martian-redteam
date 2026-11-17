@@ -166,6 +166,8 @@ class Engine:
         earlier = resume.provenance.get("canary") if resume is not None else None
         self.canary: str = canary or earlier or new_canary()
         self.listener: ReceiptListener | None = None
+        self.listened = False
+        """Re-judging: whether the stored run had a receipt listener."""
         if resume is not None:
             self._resume(resume)
 
@@ -495,7 +497,7 @@ class Engine:
         if uses_canary(probe):
             extra["canary"] = self.canary
         if any(check.kind == "receipt" for check in probe.checks):
-            extra["listening"] = self.listener is not None
+            extra["listening"] = self.listener is not None or self.listened
             extra["receipts"] = [item.content or "" for item in evidence if item.kind == "receipt"]
         return extra
 

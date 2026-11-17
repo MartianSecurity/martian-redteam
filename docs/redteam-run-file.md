@@ -236,6 +236,12 @@ The run is kept after every attempt, each with a fingerprint of what produced it
 
 The command exits 0 when the gate passes, 1 when it fails and 2 when the run could not start.
 
+## Re-judging a stored run
+
+`martian redteam rejudge FILE --run RUN` decides a stored run again with the run file's current checks and verifiers, without calling the target. `RUN` is a run id in the local store or a `redteam-run.json` file. Each stored attempt's attack, the message the target received, its reply, tool calls and receipts are read back; only a `judge` check calls a model, the judge, counted in the new run's `budget` as `rejudge`. The result is a new run, `RUN-rejudged-N`, kept in the local store unless given `--no-store` and written to `-o` (default `rejudged-RUN` in `output_folder`). Its provenance names the run it re-judged (`rejudged_from`), the rules and verifier versions that decided the stored run (`original_rules_version`, `original_verifiers`) and how many attempts changed; every check result names its verifier. The stored run is not changed, so its verdict stays readable beside the new one. The command lists the attempts whose outcome changed and applies the gate to the new run.
+
+A stored attempt keeps digests of its content unless the run kept content (`MARTIAN_REPORT_INCLUDE_CONTENT=1`). Its checks are then undetermined: there is nothing to decide them on.
+
 ## Gate
 
 | Field | Meaning |

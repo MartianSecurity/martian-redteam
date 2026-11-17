@@ -447,6 +447,101 @@ def _validate_version_2(config_path: Path) -> None:
     )
 
 
+@app.command("rejudge")
+def rejudge_command(
+    config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    run: Annotated[
+        str, typer.Option("--run", help="A run id in the local store, or a redteam-run.json file to re-judge.")
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Output folder. Default: rejudged-<run id> in the file's output_folder."),
+    ] = None,
+    store: Annotated[
+        bool, typer.Option("--store/--no-store", help="Keep the re-judged run in the local store.")
+    ] = True,
+) -> None:
+    """Decide a stored version 2 run again with this run file's checks, without calling the target."""
+    from contextlib import AsyncExitStack
+
+    from martian.redteam.engine.gate import gate_failures
+    from martian.redteam.engine.plan import PlanError, plan
+    from martian.redteam.engine.rejudge import rejudge
+    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.runs import build_service
+    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.model import RedteamRun
+    from martian.redteam.runfile import RunFile, problems
+
+    if not _is_version_2(config_path):
+        _stop("rejudge reads a version 2 run file.")
+    found = problems(config_path)
+    if found:
+        _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
+    run_file = RunFile.from_yaml(config_path)
+    try:
+        planned = plan(run_file)
+    except PlanError as error:
+        _stop(f"The run cannot be planned: {error}")
+    keeper: Any = None
+    if store or not Path(run).is_file():
+        try:
+            from martian.redteam.store import RedteamStore
+
+            keeper = RedteamStore.local()
+        except ImportError:
+            _stop("rejudge keeps runs in the local store: install martian-sdk[evals], or pass a file and --no-store.")
+    try:
+        if Path(run).is_file():
+            stored = RedteamRun.model_validate_json(Path(run).read_text(encoding="utf-8"))
+        else:
+            stored = asyncio.run(keeper.get("default", run))
+            if stored is None:
+                _stop(f"No red team run {run} is in the local store.")
+        number = 1
+        while keeper is not None and asyncio.run(keeper.get(stored.project_id, f"{stored.id}-rejudged-{number}")):
+            number += 1
+        judged = any(check.kind == "judge" for item in planned for check in item.probe.checks)
+
+        async def go() -> Any:
+            async with AsyncExitStack() as stack:
+                service = build_service(run_file, stack)[0] if judged else None
+                return await rejudge(stored, run_file, service=service, number=number), service
+
+        again, service = asyncio.run(go())
+        if keeper is not None and store:
+            from martian.redteam.engine.report import for_report
+
+            policy = service.redaction_policy if service is not None else None
+            asyncio.run(keeper.save(for_report(again, policy=policy)))
+    except (ServiceSelectionError, ConfigError) as error:
+        _stop(safe_text(error))
+    except ValueError as error:
+        _stop(f"Could not read the run: {safe_text(error)}")
+    finally:
+        if keeper is not None:
+            keeper.close()
+    destination = output or Path(run_file.output_folder) / f"rejudged-{stored.id}"
+    written, markdown, report = write_reports(again, destination)
+    _print_run(report)
+    before = {attempt.id: attempt for attempt in stored.attempts}
+    table = Table(title=f"Re-judged {stored.id} as {again.id}; the target was not called")
+    for column in ("Attempt", "Before", "After"):
+        table.add_column(column)
+    for attempt in again.attempts:
+        earlier = before[attempt.id]
+        if (earlier.outcome, earlier.level) != (attempt.outcome, attempt.level):
+            table.add_row(attempt.id, f"{earlier.outcome} {earlier.level}", f"{attempt.outcome} {attempt.level}")
+    console.print(table)
+    console.print(f"Wrote {written} and {markdown}")
+    if keeper is not None and store:
+        console.print(f"Kept in the local store as {again.id}; {stored.id} is unchanged.")
+    failures = gate_failures(again, run_file.gate)
+    if failures:
+        errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("validate")
 def validate_command(
     ctx: typer.Context,
