@@ -31,7 +31,6 @@ from martian.redteam.verify.rules import (
     LEVEL_OF_KIND,
     attempt_outcome,
     canary_check,
-    confirmed,
     text_check,
     tool_call_check,
 )
@@ -158,7 +157,7 @@ def _evidence_attempt(run: RedteamRun, finding: Finding) -> tuple[Attempt, list[
 
 def pin_finding(run: RedteamRun, finding: Finding, *, now: datetime | None = None) -> Pin:
     """``finding`` of ``run`` as a pin. Raises :class:`PinError` when it cannot be pinned."""
-    if not confirmed(finding.evidence_level):
+    if finding.counted_as == "suspected":
         raise PinError(f"{finding.id}: a suspected finding rests on a judge, so it cannot be pinned")
     attempt, checks = _evidence_attempt(run, finding)
     if _digest(attempt.input) or _digest(attempt.output):
@@ -209,7 +208,7 @@ def pin_findings(run: RedteamRun, finding_ids: list[str] | None = None) -> list[
             raise PinError(f"the run has no finding {', '.join(unknown)}")
         chosen = [findings[item] for item in finding_ids]
     else:
-        chosen = [finding for finding in run.findings if confirmed(finding.evidence_level)]
+        chosen = [finding for finding in run.findings if finding.counted_as != "suspected"]
         if not chosen:
             raise PinError("the run has no confirmed finding to pin")
     return [pin_finding(run, finding) for finding in chosen]

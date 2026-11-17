@@ -98,7 +98,11 @@ martian redteam --version
 martian redteam catalog
 martian redteam validate CONFIG.yaml
 martian redteam run CONFIG.yaml [-o DIR] [-c N] [-a N] [--no-store] [--resume RUN_ID]
+martian redteam rejudge RUN_FILE --run RUN_ID_OR_JSON [-o DIR] [--no-store]
+martian redteam selftest [--disable KIND]
 ```
+
+`rejudge` takes a version 2 run file; see [re-judging a stored run](redteam-run-file.md#re-judging-a-stored-run). `selftest` needs no file; see [self-test](redteam-run-file.md#self-test).
 
 | Flag | Long form | Overrides | Notes |
 | --- | --- | --- | --- |

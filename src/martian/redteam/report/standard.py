@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from martian.evals.stats import rate_text, wilson
 from martian.redteam.model import Attempt, EvidenceLevel, Probe, RedteamRun
-from martian.redteam.verify.rules import confirmed, label
+from martian.redteam.verify.rules import confirmed, counted_as, label
 
 REPORT_VERSION: Literal["martian-redteam-report-v1"] = "martian-redteam-report-v1"
 NOT_EVALUATED = "not evaluated"
@@ -116,12 +116,15 @@ class ErrorCounts(_Out):
 
 class Outcomes(_Out):
     """The attack attempts by outcome. ``decided`` is hits plus resisted; every rate is over it.
-    ``confirmed_hits`` reached level 2 or above, ``suspected_hits`` level 1 only."""
+    ``confirmed_hits`` reached level 2 or above (a tool call that only was asked for excepted),
+    ``attempted_hits`` only a tool call that was asked for and not known to run, ``suspected_hits``
+    level 1 only."""
 
     attempts: int = 0
     decided: int = 0
     hits: int = 0
     confirmed_hits: int = 0
+    attempted_hits: int = 0
     suspected_hits: int = 0
     resisted: int = 0
     undetermined: int = 0
@@ -190,7 +193,7 @@ class FindingRow(_Out):
     objective_class: str
     evidence_level: int
     label: str
-    counted_as: Literal["confirmed", "suspected"]
+    counted_as: Literal["confirmed", "attempted", "suspected"]
     severity: str | None = None
     status: str = "open"
     hits: int = 0
@@ -202,6 +205,7 @@ class FindingRow(_Out):
 
 class Findings(_Out):
     confirmed: int = 0
+    attempted: int = 0
     suspected: int = 0
     by_level: list[LevelCount] = Field(default_factory=list)
     items: list[FindingRow] = Field(default_factory=list)
@@ -260,6 +264,28 @@ class ProbeRow(_Out):
     evidence_level: int | None = None
     target_queries: int = 0
     queries_to_first_hit: int | None = None
+    task_with_attack: str = NOT_EVALUATED
+    """The probe's benign task: ``"k of n"`` attack attempts in which it completed."""
+    task_without_attack: str = NOT_EVALUATED
+    """Whether it completed in the negative control: ``completed``, ``not completed`` or
+    ``undetermined``."""
+
+
+class JudgeCalibration(_Out):
+    """The judge measured on a labelled sample before the run. ``precision`` is its true positives
+    over all it called hits; ``recall`` its true positives over the sample's real hits. ``error`` says
+    why it could not be measured."""
+
+    judge: str
+    sample: int = 0
+    true_positive: int = 0
+    false_positive: int = 0
+    false_negative: int = 0
+    true_negative: int = 0
+    undetermined: int = 0
+    precision: Rate | None = None
+    recall: Rate | None = None
+    error: str | None = None
 
 
 class GateOutcome(_Out):
@@ -306,6 +332,7 @@ class RedteamReport(_Out):
     findings: Findings = Findings()
     verification: Verifications = Verifications()
     controls: Controls = Controls()
+    judge_calibration: JudgeCalibration | None = None
     by_method: list[Group] = Field(default_factory=list)
     by_vulnerability: list[Group] = Field(default_factory=list)
     probes: list[ProbeRow] = Field(default_factory=list)
@@ -320,12 +347,20 @@ def _queries(attempt: Attempt) -> int:
     return attempt.spend.target_queries if attempt.spend is not None else attempt.target_calls
 
 
+def _counted(attempt: Attempt) -> str | None:
+    return counted_as(attempt.check_results, attempt.level) if attempt.outcome == "hit" else None
+
+
 def _confirmed_hit(attempt: Attempt) -> bool:
-    return attempt.outcome == "hit" and confirmed(attempt.level)
+    return _counted(attempt) == "confirmed"
+
+
+def _attempted_hit(attempt: Attempt) -> bool:
+    return _counted(attempt) == "attempted"
 
 
 def _suspected_hit(attempt: Attempt) -> bool:
-    return attempt.outcome == "hit" and attempt.level == EvidenceLevel.JUDGED
+    return _counted(attempt) == "suspected"
 
 
 def _model(provenance: dict[str, Any], role: str) -> ModelInfo | None:
@@ -347,6 +382,7 @@ def _outcomes(attempts: Sequence[Attempt]) -> Outcomes:
         decided=hits + resisted,
         hits=hits,
         confirmed_hits=sum(_confirmed_hit(attempt) for attempt in attempts),
+        attempted_hits=sum(_attempted_hit(attempt) for attempt in attempts),
         suspected_hits=sum(_suspected_hit(attempt) for attempt in attempts),
         resisted=resisted,
         undetermined=sum(attempt.outcome == "undetermined" for attempt in attempts),
@@ -471,7 +507,7 @@ def _findings(run: RedteamRun, attack: dict[str, list[Attempt]]) -> Findings:
                 objective_class=finding.objective_class,
                 evidence_level=int(finding.evidence_level),
                 label=finding.label,
-                counted_as="confirmed" if confirmed(finding.evidence_level) else "suspected",
+                counted_as=finding.counted_as,
                 severity=finding.severity,
                 status=finding.status,
                 hits=sum(attempt.outcome == "hit" for attempt in attempts),
@@ -492,7 +528,7 @@ def _findings(run: RedteamRun, attack: dict[str, list[Attempt]]) -> Findings:
     for level in EvidenceLevel:
         if level == EvidenceLevel.DELIVERED:
             continue
-        counted_as: Literal["confirmed", "suspected"] = "confirmed" if confirmed(level) else "suspected"
+        counted_as: Literal["confirmed", "suspected"] = "confirmed" if confirmed(level, executed=True) else "suspected"
         levels.append(
             LevelCount(
                 level=int(level),
@@ -502,8 +538,9 @@ def _findings(run: RedteamRun, attack: dict[str, list[Attempt]]) -> Findings:
             )
         )
     return Findings(
-        confirmed=sum(confirmed(finding.evidence_level) for finding in run.findings),
-        suspected=sum(finding.evidence_level == EvidenceLevel.JUDGED for finding in run.findings),
+        confirmed=sum(finding.counted_as == "confirmed" for finding in run.findings),
+        attempted=sum(finding.counted_as == "attempted" for finding in run.findings),
+        suspected=sum(finding.counted_as == "suspected" for finding in run.findings),
         by_level=levels,
         items=rows,
     )
@@ -537,6 +574,39 @@ def _controls(run: RedteamRun) -> Controls:
     return Controls(note="Not evaluated: no negative control ran.")
 
 
+def _task(run: RedteamRun, probe: Probe, attempts: Sequence[Attempt]) -> tuple[str, str]:
+    if not probe.task_checks:
+        return NOT_EVALUATED, NOT_EVALUATED
+    decided = [attempt for attempt in attempts if attempt.task_completed is not None]
+    done = sum(attempt.task_completed is True for attempt in decided)
+    control = next(
+        (attempt for attempt in run.attempts if attempt.probe_id == probe.id and attempt.role == "control"), None
+    )
+    alone = NOT_EVALUATED
+    if control is not None:
+        alone = {True: "completed", False: "not completed", None: "undetermined"}[control.task_completed]
+    return (f"{done} of {len(decided)}" if decided else NOT_EVALUATED), alone
+
+
+def _calibration(found: Any) -> JudgeCalibration | None:
+    if not isinstance(found, dict) or "judge" not in found:
+        return None
+    if "error" in found:
+        return JudgeCalibration(judge=str(found["judge"]), error=str(found["error"]))
+    tp, fp, fn = found["true_positive"], found["false_positive"], found["false_negative"]
+    return JudgeCalibration(
+        judge=str(found["judge"]),
+        sample=found["sample"],
+        true_positive=tp,
+        false_positive=fp,
+        false_negative=fn,
+        true_negative=found["true_negative"],
+        undetermined=found["undetermined"],
+        precision=rate_of(tp, tp + fp),
+        recall=rate_of(tp, tp + fn),
+    )
+
+
 def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> RedteamReport:
     """The report standard for ``run``. Counts and rates are of attack attempts; repetitions and
     controls are reported under verification and controls."""
@@ -554,7 +624,8 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
     for probe in run.probes:
         attempts = by_probe[probe.id]
         counted = _outcomes(attempts)
-        levels = [attempt.level for attempt in attempts if attempt.level is not None]
+        levels = [attempt.level for attempt in attempts if attempt.outcome == "hit" and attempt.level is not None]
+        with_attack, without_attack = _task(run, probe, attempts)
         probe_rows.append(
             ProbeRow(
                 id=probe.id,
@@ -572,6 +643,8 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
                 evidence_level=int(max(levels)) if levels else None,
                 target_queries=sum(_queries(attempt) for attempt in attempts),
                 queries_to_first_hit=_first_hit(tracks[probe.id], confirmed_only=False),
+                task_with_attack=with_attack,
+                task_without_attack=without_attack,
             )
         )
     return RedteamReport(
@@ -610,6 +683,7 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
         findings=_findings(run, by_probe),
         verification=_verifications(run),
         controls=_controls(run),
+        judge_calibration=_calibration(provenance.get("judge_calibration")),
         by_method=[
             _group(
                 method,
@@ -642,6 +716,7 @@ __all__ = [
     "Findings",
     "GateOutcome",
     "Group",
+    "JudgeCalibration",
     "LevelCount",
     "MethodRefusals",
     "ModelInfo",
