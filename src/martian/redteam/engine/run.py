@@ -1,9 +1,11 @@
 """The plan, attack, verify loop of a version 2 run, producing a :class:`~martian.redteam.model.RedteamRun`.
 
 - **Plan** (:mod:`martian.redteam.engine.plan`): the probes and their checks, before anything runs.
-- **Attack**: the attack method drives the target. Today every catalogue method is one turn: the
-  service writes the attack (an encoding method rewrites a generated injection), and the target is
-  called once, in a session of its own per attempt.
+- **Attack**: the attack method (:mod:`martian.redteam.methods`) drives the target through an
+  :class:`~martian.redteam.engine.attempt.AttemptRun`: it writes attacks (the service's attacker, a
+  template, a change of a seed), sends them after its transform layers and delivery route, and reads
+  the checks' feedback. A version 0.2 method writes one attack and sends it once, in a session of its
+  own per attempt. A repetition and a negative control send what they are given, once.
 - **Verify**: the run's verifiers (:mod:`martian.redteam.verify.verifiers`) decide each check with the
   verdict rules (:mod:`martian.redteam.verify.rules`): text, canary and tool-call checks first, by
   code; the judge last. The attempt's outcome is
@@ -38,11 +40,15 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
+from martian.redteam.engine.attempt import AttemptRun
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
 from martian.redteam.engine.fingerprint import attempt_fingerprint
 from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
+from martian.redteam.methods import GenerationMode
+from martian.redteam.methods.delivery import Deliverer, PageServer
+from martian.redteam.methods.library import METHODS_REVISION
 from martian.redteam.model import (
     Attempt,
     Check,
@@ -71,7 +77,6 @@ from martian.redteam.verify.rules import RULES_VERSION, Repetition, attempt_outc
 from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
-from martian_redteam.encoding import apply_encoding
 from martian_redteam.orchestrator import DEFAULT_TARGET_TIMEOUT_SECONDS
 from martian_redteam.types import ModelUsage, RedteamService, SimulatorContext
 
@@ -186,6 +191,7 @@ class Engine:
         self.listener: ReceiptListener | None = None
         self.listened = False
         """Re-judging: whether the stored run had a receipt listener."""
+        self.deliverer = Deliverer(proxy=getattr(target, "proxy", None))
         if resume is not None:
             self._resume(resume)
 
@@ -221,12 +227,17 @@ class Engine:
     # --- the run --------------------------------------------------------------------------------
 
     async def run(self) -> RedteamRun:
-        """Run every planned attempt. A run with a receipt check starts the receipt listener first
-        and stops it when the run ends, however it ends."""
+        """Run every planned attempt. A run with a receipt check starts the receipt listener first,
+        and one with a ``web_page`` route the page server; both stop when the run ends, however it
+        ends."""
         listens = any(check.kind == "receipt" for planned in self.planned for check in planned.probe.checks)
+        routes = {p.attack_method.delivery.route for p in self.planned if p.attack_method.delivery is not None}
         try:
             if listens:
                 self.listener = await ReceiptListener().start()
+            if "web_page" in routes:
+                self.deliverer.pages = PageServer()
+                await self.deliverer.pages.start()
             await self._calibrate()
             await self._attacks()
             await self._repetitions()
@@ -335,6 +346,8 @@ class Engine:
     async def _close_listener(self) -> None:
         if self.listener is not None:
             await self.listener.close()
+        if self.deliverer.pages is not None:
+            await self.deliverer.pages.stop()
 
     async def _attacks(self) -> None:
         semaphore = asyncio.Semaphore(self._concurrency())
@@ -379,6 +392,9 @@ class Engine:
             "fingerprint": self.fingerprint(planned, number) if role == "attack" else None,
         }
 
+        if role == "attack" and self.world is None:
+            return await self._method_attempt(planned, number, fields, spending)
+
         def done(**update: Any) -> Attempt:
             return Attempt(
                 **fields,
@@ -395,7 +411,10 @@ class Engine:
             self.ledger.check()
             payload = attack
             if role == "attack":
+                # In an environment, only the six version 0.2 methods run: one attack, written once.
                 payload, generated = await self._generate(planned, spending, attempt_id)
+                for layer in planned.attack_method.layers:
+                    payload = layer(payload)
                 fields["policy_revision"] = generated.get("policy_revision")
             planted = context_of(probe, self.canary)
             message = plant["trigger"] if plant else payload
@@ -460,6 +479,98 @@ class Engine:
         return done(
             outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
         )
+
+    async def _method_attempt(
+        self, planned: PlannedProbe, number: int, fields: dict[str, Any], spending: _Spending
+    ) -> Attempt:
+        """An attack attempt, run by its method (:mod:`martian.redteam.methods`). It is decided, as
+        any attempt, on the exchange the method ends with; every query is in its turns."""
+        probe, method = planned.probe, planned.attack_method
+        attempt_id = fields["id"]
+        context = AttemptRun(self, planned, attempt_id, spending, method)
+
+        def done(**update: Any) -> Attempt:
+            if not method.legacy:
+                trace = self._keep_trace(attempt_id, context, update["outcome"])
+                fields["evidence_ids"] = [*fields.get("evidence_ids", []), trace.id]
+            return Attempt(
+                **fields,
+                **update,
+                spend=spending.spend,
+                attacker_refusals=spending.refusals,
+                finished_at=datetime.now(UTC),
+            )
+
+        def so_far() -> None:
+            """What an attempt that ended early had sent: its last attack, and every turn when it
+            sent more than one."""
+            fields["policy_revision"] = context.policy_revision
+            if context.last_attack is not None:
+                fields.update(input=context.last_attack or None, planted=context.planted)
+            if context.queries > 1 or (context.exchanges and not method.legacy):
+                observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
+                fields.update(
+                    target_calls=context.queries, turns=context.turns, evidence_ids=[*observed, *context.delivery_ids]
+                )
+
+        try:
+            self.ledger.check()
+            final = await method.run(context)
+        except BudgetExhausted as exhausted:
+            so_far()
+            return done(outcome="stopped", stopped_by=exhausted.limit)
+        except AttemptFailed as failed:
+            so_far()
+            return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
+        fields.update(input=final.attack or None, planted=context.planted, policy_revision=context.policy_revision)
+        reply = final.reply
+        evidence = self._keep_reply(attempt_id, reply)
+        observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
+        receipts = self._keep_receipts(attempt_id)
+        fields.update(
+            output=reply.text,
+            target_calls=context.queries,
+            evidence_ids=[evidence.id, *observed, *(item.id for item in receipts), *context.delivery_ids],
+            turns=context.turns,
+        )
+        kept = [evidence, *reply.evidence, *receipts]
+        if probe.task_checks:
+            task = await self._verify(
+                planned, probe.task_checks, probe.task, final.sent, reply, spending, kept, attempt_id
+            )
+            fields.update(task_results=task.results, task_completed=completed(task.results))
+        decided = final.verified or await self._verify(
+            planned, probe.checks, final.attack, final.sent, reply, spending, kept, attempt_id
+        )
+        results, failure, stop = decided.results, decided.failure, decided.stop
+        outcome, level = attempt_outcome(results)
+        if outcome != "hit" and isinstance(stop, BudgetExhausted):
+            return done(outcome="stopped", stopped_by=stop.limit, check_results=results, level=EvidenceLevel.DELIVERED)
+        if outcome != "hit" and failure is not None:
+            return done(
+                outcome="error",
+                error=str(failure),
+                error_kind=failure.kind,
+                error_code=failure.code,
+                check_results=results,
+                level=EvidenceLevel.DELIVERED,
+            )
+        # The attack reached the target: an attempt that did not hit is at level 0, delivered.
+        return done(
+            outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
+        )
+
+    def _keep_trace(self, attempt_id: str, context: AttemptRun, outcome: str) -> Evidence:
+        """The method's record of an attempt: what it sent, what it was told and what ended it."""
+        evidence = Evidence(
+            id=f"{attempt_id}/method",
+            kind="trace",
+            source=f"method:{context.method.id}",
+            captured_at=datetime.now(UTC),
+            metadata=context.trace(outcome),
+        )
+        self.evidence[evidence.id] = evidence
+        return evidence
 
     # --- the world -----------------------------------------------------------------------------
 
@@ -589,22 +700,37 @@ class Engine:
         return ", and ".join(goals)
 
     async def _generate(
-        self, planned: PlannedProbe, spending: _Spending, attempt_id: str
+        self,
+        planned: PlannedProbe,
+        spending: _Spending,
+        attempt_id: str,
+        *,
+        method: str | None = None,
+        request: str | None = None,
+        mode: GenerationMode = "baseline",
     ) -> tuple[str, dict[str, Any]]:
+        """One attack in the style of attack method ``method``. ``request`` is the method's own
+        instruction; without one, the attacker is asked for the probe's goal. A refused or empty
+        generation is asked for once more, with the defensive framing."""
         attack, probe = planned.attack, planned.probe
         context = SimulatorContext(
             vulnerability=probe.vulnerability,
             vulnerability_type=probe.vulnerability_type,
             purpose=self.run_file.target.purpose,
-            attack_method=attack.id if attack.kind == "llm" else "prompt_injection",
+            attack_method=method or (attack.id if attack.kind == "llm" else "prompt_injection"),
+            mode=mode,
         )
         found: str | None = None
-        goal = goal_request(self._goal(probe, attempt_id))
+        if request is None:
+            goal = goal_request(self._goal(probe, attempt_id))
+            asked = (goal, DEFENSIVE_FRAMING if goal is None else f"{DEFENSIVE_FRAMING} {goal}")
+        else:
+            asked = (request, f"{request}\n\n{DEFENSIVE_FRAMING}")
         # A refusal or an empty generation is asked once more, with the defensive framing.
-        for request in (goal, DEFENSIVE_FRAMING if goal is None else f"{DEFENSIVE_FRAMING} {goal}"):
+        for prompt in asked:
             spending.reserve("attacker")
             try:
-                output = await self.service.simulate(context, prompt=request)
+                output = await self.service.simulate(context, prompt=prompt)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:
@@ -613,8 +739,7 @@ class Engine:
                 spending.record(output.usage)
                 found = classify(output.attack)
                 if found is None:
-                    payload = apply_encoding(output.attack, attack.id) if attack.kind == "encoding" else output.attack
-                    return payload, {"policy_revision": output.policy_revision}
+                    return output.attack, {"policy_revision": output.policy_revision}
             spending.refusals += 1
         raise AttemptFailed(
             "attacker",
@@ -789,6 +914,7 @@ class Engine:
                 "engine_version": ENGINE_VERSION,
                 "rules_version": RULES_VERSION,
                 "prompts_revision": PROMPTS_REVISION,
+                "methods_revision": METHODS_REVISION,
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **({"receipts": self._receipts()} if self.listener is not None else {}),

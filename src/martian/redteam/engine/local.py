@@ -145,13 +145,14 @@ class LocalService:
     def __init__(
         self,
         *,
-        attacker: ModelConfig | str,
+        attacker: ModelConfig | str | None = None,
         judge: ModelConfig | str | None = None,
         max_retries: int = 2,
         rate_limit_wait_seconds: float = 60.0,
         redaction_policy: RedactionPolicy | None = None,
     ) -> None:
         self.attacker = ModelConfig(model=attacker) if isinstance(attacker, str) else attacker
+        """``None`` when the run's methods need no attacker: a generation then fails, as the attacker's."""
         self.judge = ModelConfig(model=judge) if isinstance(judge, str) else judge
         self.max_retries = max_retries
         self.rate_limit_wait_seconds = rate_limit_wait_seconds
@@ -167,8 +168,12 @@ class LocalService:
             "service": "local",
             "prompts_revision": PROMPTS_REVISION,
             "policy_revision": POLICY_REVISION,
-            "attacker": {"model": self.attacker.model, "inference_params": dict(self.attacker.inference_params)},
         }
+        if self.attacker is not None:
+            described["attacker"] = {
+                "model": self.attacker.model,
+                "inference_params": dict(self.attacker.inference_params),
+            }
         if self.judge is not None:
             described["judge"] = {"model": self.judge.model, "inference_params": dict(self.judge.inference_params)}
         return described
@@ -206,6 +211,12 @@ class LocalService:
         return parsed, _usage(metadata)
 
     async def simulate(self, context: SimulatorContext, *, prompt: str | None = None) -> SimulatorOutput:
+        if self.attacker is None:
+            raise LocalServiceError(
+                f"{ATTACKER} failed [attacker_not_configured]. Set models.attacker.",
+                kind="attacker",
+                code="attacker_not_configured",
+            )
         parsed, usage = await self._call(
             "attacker",
             self.attacker,
