@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -78,16 +79,75 @@ async def tool_boundary(
     await proxy.start()
     stack.push_async_callback(proxy.stop)
     session = await proxy.issue_session(target_id="local", campaign_id=run_id)
-    payload = session_payload(session)
+    await hand_session(session_payload(session), stack, folder=folder, session_api=run_file.tools.session_api)
+    return ProxiedTarget(target, proxy)
+
+
+async def hand_session(
+    payload: dict[str, Any], stack: AsyncExitStack, *, folder: Path, session_api: str | None
+) -> None:
+    """Give the agent its tool session: write it to ``folder``/:data:`SESSION_FILE`, mode ``0600``,
+    removed when ``stack`` closes, and post it to ``session_api``'s ``/sessions`` when one is named."""
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / SESSION_FILE
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
     stack.callback(path.unlink, missing_ok=True)
-    if run_file.tools.session_api is not None:
-        await hand_over(run_file.tools.session_api, payload)
-    return ProxiedTarget(target, proxy)
+    if session_api is not None:
+        await hand_over(session_api, payload)
+
+
+@dataclass
+class Admitted:
+    """A run the Martian server admitted in an environment, and the state it is finished with when
+    the run's stack closes: ``failed`` until the run sets it (:meth:`ended`)."""
+
+    run: Any
+    client: Any
+    state: str = "failed"
+    finish_error: str | None = None
+    """Why the server did not take the end of the run, when it did not: the run's records stand, and
+    the server ends it at its ``max_seconds``."""
+
+    def world(self) -> Any:
+        """The run's world: the server's world operations, with the run key."""
+        from martian.redteam.environment import ServerWorld
+
+        return ServerWorld(self.client, self.run)
+
+    def ended(self, state: str) -> None:
+        from martian.redteam.environment import FINISHED
+
+        self.state = FINISHED.get(state, "failed")
+
+
+async def environment_boundary(
+    run_file: RunFile, stack: AsyncExitStack, *, folder: Path, label: str, client: Any = None
+) -> Admitted:
+    """Admit the run file's run in its environment on the Martian server, and give the agent the
+    session the server issued: its tools then reach the environment's sandboxes through the
+    server's run-scoped gateway, as :func:`tool_boundary` gives it the proxy's. The run is finished
+    on the server when ``stack`` closes, with the state :meth:`Admitted.ended` set."""
+    from martian.config import MartianConfig
+    from martian.redteam.environment import EnvironmentClient
+
+    if client is None:
+        client = EnvironmentClient(MartianConfig.from_env())
+        stack.push_async_callback(client.aclose)
+    admitted = Admitted(await client.admit(run_file, label=label), client)
+
+    async def finish() -> None:
+        from martian.redteam.environment import EnvironmentRunError
+
+        try:
+            await client.finish(admitted.run, admitted.state)
+        except EnvironmentRunError as error:
+            admitted.finish_error = str(error)
+
+    stack.push_async_callback(finish)
+    await hand_session(admitted.run.session, stack, folder=folder, session_api=run_file.tools.session_api)
+    return admitted
 
 
 async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
@@ -125,9 +185,12 @@ def run_canary(earlier: RedteamRun | None = None) -> str:
     return kept if isinstance(kept, str) and kept else new_canary()
 
 
-def unsupported(run_file: RunFile) -> list[str]:
-    """What the run file asks for that this release cannot do. A run stops on any of it, rather than
-    run without it. Every target kind and the tool proxy run, so nothing is listed today."""
+def unsupported(run_file: RunFile, *, environments: bool = False) -> list[str]:
+    """What the run file asks for that this caller cannot do. A run stops on any of it, rather than
+    run without it. Every target kind and the tool proxy run. A run in an environment starts only
+    from ``martian redteam run`` (``environments``), connected to a Martian server."""
+    if run_file.environment is not None and not environments:
+        return ["environment: a run in a Martian environment starts from martian redteam run, not here"]
     return []
 
 
@@ -177,10 +240,12 @@ async def execute(
     include_content: bool = False,
     resume: RedteamRun | None = None,
     canary: str | None = None,
+    world: Any = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
     kept after each attempt and at the end, as the reports hold it. With ``resume``, an earlier
-    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run."""
+    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run. With
+    ``world`` (a run in a Martian environment), each attempt runs in a world reset for it."""
 
     async def keep(run: RedteamRun) -> None:
         copy = for_report(run, include_content=include_content, policy=service.redaction_policy)
@@ -199,18 +264,22 @@ async def execute(
         provenance=provenance,
         resume=resume,
         canary=canary,
+        world=world,
     )
     return await engine.run()
 
 
 __all__ = [
     "SESSION_FILE",
+    "Admitted",
     "SessionHandoverError",
     "TargetUnavailable",
     "build_service",
     "build_target",
+    "environment_boundary",
     "execute",
     "hand_over",
+    "hand_session",
     "redaction_for",
     "run_canary",
     "tool_boundary",
