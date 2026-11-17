@@ -19,6 +19,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
+   - [Red team quickstart](redteam-quickstart.md) — install to a first local run and its report in the UI with your own model and no account, and the Red Team rows of the edition comparison
    - [Red team data model](redteam-model.md) — the objects SDK runs, the local edition and hosted campaigns have in common, how each format maps onto them, and how a run is stored as an eval run
    - [Red team verdicts](redteam-verdicts.md) — evidence levels 0 to 5, the rules that turn checks into a verdict, and their test vectors
    - [Red team run file](redteam-run-file.md) — version 2: targets shared with suite files, models and the local or hosted service, goals and checks, the tool proxy, budget and gate, and how `martian redteam run` runs it
