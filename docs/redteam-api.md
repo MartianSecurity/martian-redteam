@@ -1,11 +1,11 @@
 # Red team API
 
-Every red team route is under `/v1/redteam`. The routes are frozen as version 5 in `src/martian/redteam/server/contract/redteam-api-v5.json`, an OpenAPI document.
+Every red team route is under `/v1/redteam`. The routes are frozen as version 6 in `src/martian/redteam/server/contract/redteam-api-v6.json`, an OpenAPI document.
 
 The contract has two parts:
 
-- **The core's routes.** `martian.redteam.server` serves them. They read the evals core's record store. `martian.evals.server.create_app` mounts the router, so the local edition (`martian ui`) serves them with its Red Team pages. The hosted backend mounts the evals routers on its own and does not mount this one yet (MartianSecurity/martian-notes#299). The app leaves the routes out of its OpenAPI document: this contract is theirs.
-- **The SDK operation routes.** The hosted backend serves these four routes. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
+- **The core's routes.** `martian.redteam.server` serves them. They read the evals core's record store. `martian.evals.server.create_app` mounts the router, so the local edition (`martian ui`) serves them with its Red Team pages. The hosted backend mounts it too. The app leaves the routes out of its OpenAPI document: this contract is theirs.
+- **The SDK routes.** The hosted backend serves these: the four operations, the environment runs and the campaigns. `contract/redteam-operations.json` is an unchanged copy of `contracts/redteam-operations.json` in MartianSecurity/MartianBackend, which that repository generates from its own routes and checks in its own tests.
 
 ## Routes
 
@@ -26,6 +26,11 @@ The contract has two parts:
 | `POST /v1/redteam/evaluate` | Hosted: judge a reply |
 | `GET /v1/redteam/operations/{operation_id}` | Hosted: read an operation |
 | `POST /v1/redteam/operations/{operation_id}/cancel` | Hosted: cancel an operation |
+| `POST /v1/redteam/environment-runs` | Hosted: admit a run in a Martian environment for an approved agent; answers the session for the agent's tools and a run key ([environments](redteam-run-file.md#environments)) |
+| `POST /v1/redteam/campaigns` | Hosted: start the console's planned campaign for an approved agent at a depth, as the member the API key belongs to ([campaigns](redteam-reports.md#a-planned-campaign-on-a-martian-server)) |
+| `GET /v1/redteam/campaigns/{run_id}` | Hosted: a campaign's state, release decision and, once it finished, its run in the shared model |
+| `POST /v1/redteam/environment-runs/{run_id}/world` | Hosted, with the run key: `prepare`, `observe` or `outcome` of one attempt's world: reset it, then read its state checks and the gateway's calls of the attempt |
+| `POST /v1/redteam/environment-runs/{run_id}/finish` | Hosted, with the run key: end the run, releasing its session and instances |
 
 Starting and stopping a run needs a launcher bound by the edition (`app.state.martian_redteam_launcher`). An installation without one answers `501`. The local edition (`martian ui`) binds `LocalLauncher`, reading a run file's relative `file` from the folder `martian ui` was started in. `martian.redteam.engine.launcher.LocalLauncher` runs the engine in the server's process: `start` saves the run as `running` and answers at once, the run is kept after each attempt, and `stop` cancels it and keeps it as `cancelled`. A run file it cannot run (a target kind this release cannot call, no service, a judge check without a judge model) is answered `422`, and a `request_id` a run already has `409`. A run file that is not valid is answered `422`, naming each problem. A run file that names an `environment` needs the edition's `redteam_environments` feature key ([editions](evals-core.md#editions-and-entitlements)); without it the route answers `403` before any launcher runs, for example "The Community edition does not include red team environments".
 
@@ -49,3 +54,7 @@ uv run --extra evals python -m martian.redteam.engine.conformance my_package.mod
 ```
 
 It prints each check and exits 1 when one fails. `tests/redteam/test_conformance.py` runs it in CI on the local service, against a loopback model server, and on the hosted client, replaying operation receipts in the shapes of `contract/redteam-operations.json`.
+
+## Pushed runs
+
+`martian.redteam.server.push` serves `PUT /v1/push/redteam/runs/{run_id}`, beside the evals push routes and outside the contract, as they are. The body is `{"run": ...}`, a finished run of the shared model. The answer is `{"run_id", "project_id", "created"}`. The route needs the `run` capability and writes as the edition's push principal: `martian ui` serves it to its single user, and the hosted backend binds organisation API keys with `redteam:run` to it. The run is kept with `provenance.execution` set to `client_executed`. The same run again answers `created: false` and writes nothing; other content under the same id is `409`; a run that has not finished, or that names another id than the path, is `422`. `martian redteam push` sends runs here ([pushing a run](redteam-reports.md#pushing-a-run-to-a-martian-server)).

@@ -265,6 +265,7 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                         "attack_kind": attack.kind,
                         **({"protocol": entry.protocol} if entry is not None and entry.protocol != "message" else {}),
                         **({"dataset": dataset[vulnerability_type]} if dataset else {}),
+                        **({"plant": spec.plant.model_dump()} if spec.plant is not None else {}),
                     },
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, severity))

@@ -333,6 +333,15 @@ class Datasets(_Model):
     ``~/.cache/martian/redteam-datasets``. A relative path is read from the run file's folder."""
 
 
+class Plant(_Model):
+    """An indirect attack in an environment: the attack is planted in the world with an implant
+    profile of the agent's connection on the Martian server, and the agent is sent ``trigger``, an
+    ordinary request that leads it to read what was planted."""
+
+    profile: str = Field(min_length=1, max_length=128)
+    trigger: str = Field(min_length=1, max_length=2000)
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
@@ -346,6 +355,8 @@ class Vulnerability(NamedSpec):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     benign: Benign | None = None
     """A benign task whose completion is reported with and without the attack."""
+    plant: Plant | None = None
+    """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
     dataset: DatasetFile | None = None
     """For ``HarmfulContent`` of type ``file``: the user's own dataset file."""
 
@@ -437,7 +448,8 @@ class Tools(_Model):
     relative path is read from the run file's folder."""
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
-    ``{session_api}/sessions`` before the first attack."""
+    ``{session_api}/sessions`` before the first attack: the proxy's, or in an environment the
+    Martian server's."""
 
     @field_validator("session_api")
     @classmethod
@@ -456,8 +468,6 @@ class Tools(_Model):
         names = [server.name for server in self.proxy] + ([self.decoy.name] if self.decoy else [])
         if len(set(names)) != len(names):
             raise ValueError("each proxied server, and the decoy, has its own name")
-        if self.session_api is not None and not self.proxy and self.decoy is None:
-            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
 
@@ -593,13 +603,31 @@ class RunFile(_Model):
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     output_folder: str = "results"
     datasets: Datasets = Field(default_factory=Datasets)
-    environment: str | None = Field(default=None, min_length=1)
+    environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
+    agent: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    """The registered agent an environment run tests, by its id on the Martian server: its approval,
+    sandbox bindings and checks. Without it, the API key must be bound to the agent."""
 
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        if self.agent is not None and self.environment is None:
+            raise ValueError("agent names the registered agent of an environment run; set environment")
+        if self.environment is not None and self.tools.proxy:
+            raise ValueError("an environment's gateway is the tool boundary; tools.proxy applies to a run without one")
+        if (
+            self.tools.session_api is not None
+            and not self.tools.proxy
+            and self.tools.decoy is None
+            and self.environment is None
+        ):
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
+            if vulnerability.plant is not None and self.environment is None:
+                raise ValueError(f"vulnerabilities[{index}]: plant puts the attack in an environment; set environment")
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
                     raise ValueError(f"vulnerabilities[{index}]: a state check reads an environment; set environment")
@@ -754,6 +782,7 @@ __all__ = [
     "McpTarget",
     "ModelConfig",
     "Models",
+    "Plant",
     "ProxiedServer",
     "ReceiptCheck",
     "RunFile",
