@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
+from martian.redteam.methods.escalation import Escalation
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
 from martian.redteam.methods.search import Refine, TreeSearch
 from martian.redteam.methods.templates import Templates
@@ -189,6 +190,13 @@ register_method(
     "TreeSearch",
     lambda spec, layers, values: TreeSearch(id="tree_search", label="Tree search", layers=layers, values=values),
     aliases=["tree_search", "tap"],
+)
+register_method(
+    "Escalation",
+    lambda spec, layers, values: Escalation(
+        id="escalation", label="Multi-turn escalation", layers=layers, values=values
+    ),
+    aliases=["escalation", "crescendo"],
 )
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])

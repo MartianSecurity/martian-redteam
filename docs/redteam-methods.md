@@ -29,6 +29,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `Templates` | `templates` | rewrite | control | Up to `max_queries` (default and most 10, one per template) | 0 | Nothing adaptive: the same fixed templates every run, the baseline every adaptive method is compared with. The set has a direct request, two instruction overrides, "important instructions", a behaviour update in the Skeleton Key style, a mode switch, a closed delimiter, an answer prefix, a task wrapper and urgency |
 | `Refine` | `refine` | search | adaptive | Up to `max_queries` (default 10) | One per query (a first attack, then a refinement of each) | A target that holds against a first attempt but gives way to an attack refined from its own replies, guided by how close each reply came to the goal (PAIR-style) |
 | `TreeSearch` | `tree_search` | search | adaptive | Up to `max_queries` (default 20), and never more than the tree holds: 12 at the default width 3, branching 2, depth 3 | One per query | A target a single line of refinement stalls on: several attacks per level, refined in branches, keeping the ones whose replies came closest (TAP-style) |
+| `Escalation` | `escalation` | conversation | adaptive | Up to `max_queries` (default 20): at most `max_turns` (default 6) turns per conversation and `max_backtracks` (default 2) backtracks, with replayed turns | One per turn written; none for a replayed turn | A target that refuses a request asked outright but goes along when one conversation builds up to it in small steps (Crescendo-style) |
 | `Authority` | `authority` | rewrite | static | 1 | 1 | A target that obeys whoever claims to be in charge: the request comes from its developer, an administrator, a security team or a legal duty |
 | `Hypothetical` | `hypothetical` | rewrite | static | 1 | 1 | A target that answers inside an imagined case: the request is a thought experiment in which it is allowed, asking for the concrete answer |
 | `Citation` | `citation` | rewrite | static | 1 | 1 | A target that defers to documents: the request cites a policy, ticket or guideline that says it is allowed or required |
@@ -76,6 +77,20 @@ The feedback comes from the checks decided by code when the probe has any (`text
 | `max_queries` | 20 | 1 to 1000 | Target queries per attempt |
 
 The attempt's trace records each query's rung (`signals`), `queries_to_first_success` and `tree` (each query's level and the query it refined); the report's `queries_to_first_hit` counts the same queries per probe ([red team reports](redteam-reports.md#groups-and-probes)). The request text is in `prompts/search/`.
+
+## Multi-turn escalation
+
+`Escalation` attacks in one conversation, through the target's sessions: the same session id and history contract as suite-file conversation cases ([red team targets](redteam-targets.md)). Before each turn the attacker reads the conversation so far (as data fields it is told never to follow) and the checks' finding on the last reply, and writes the next message, one small step closer to the goal. The checks read every reply and the attempt stops at the first hit.
+
+When the target refuses a turn (its reply opens with a refusal, by the same deterministic check as attacker refusals) and backtracks remain, the method goes back a turn: it starts a new conversation, sends again the turns the target had accepted before the refusal, and asks the attacker for a different step, showing it the refused message. Replaying works for every target, whether it resends the history or keeps its own, and each replayed turn is a target query on the budget. With no backtracks left, a refused turn stays in the conversation and the escalation goes on.
+
+The attempt keeps every turn of every conversation, the refused and replayed ones included, with a `system` turn at each backtrack and each new conversation. Its trace records `backtracks` and `turns_in_conversation`.
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `max_turns` | 6 | 1 to 20 | Turns in one conversation, replayed turns included |
+| `max_backtracks` | 2 | 0 to 10 | Times it goes back a turn |
+| `max_queries` | 20 | 1 to 1000 | Target queries per attempt |
 
 ## Prompt files and the licence register
 

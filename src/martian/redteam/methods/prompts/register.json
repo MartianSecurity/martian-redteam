@@ -100,6 +100,26 @@
           "licence": "not copied"
         }
       ]
+    },
+    "escalation/turn.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Crescendo, gradual multi-turn escalation with backtracking on refusal (Russinovich et al., 2024); PyRIT's implementation is MIT, not copied",
+          "licence": "MIT"
+        }
+      ]
+    },
+    "escalation/backtrack.md": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Crescendo, gradual multi-turn escalation with backtracking on refusal (Russinovich et al., 2024); PyRIT's implementation is MIT, not copied",
+          "licence": "MIT"
+        }
+      ]
     }
   }
 }

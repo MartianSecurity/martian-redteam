@@ -332,6 +332,10 @@ class AttackSpec(NamedSpec):
     """Tree search: the attacks written from each one kept."""
     depth: int | None = Field(default=None, ge=1, le=20)
     """Tree search: the levels."""
+    max_turns: int | None = Field(default=None, ge=1, le=20)
+    """Escalation: the most turns in one conversation."""
+    max_backtracks: int | None = Field(default=None, ge=0, le=10)
+    """Escalation: the most times it goes back a turn after a refusal."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]

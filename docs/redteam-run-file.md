@@ -167,6 +167,7 @@ Each entry names an attack method by `name`, as in version 0.2 (PascalCase or th
 | `layers` | Up to 4 transforms applied, in order, to every attack the method sends, such as `[Base64]` |
 | `max_queries` | The most target queries one attempt of the method makes, for a method that sends more than one. Each method's default is in [attack methods](redteam-methods.md) |
 | `width`, `branching`, `depth` | `TreeSearch` only: the attacks kept at each level, the attacks written from each, and the levels |
+| `max_turns`, `max_backtracks` | `Escalation` only: the turns in one conversation, and the times it goes back a turn after a refusal |
 | `id` | The method's name in probe ids and reports. Without it, the method's id with its layers, such as `prompt_injection+base64` |
 | `weight` | As in version 0.2 |
 
