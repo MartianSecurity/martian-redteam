@@ -6,7 +6,7 @@ import pytest
 
 import martian_redteam
 
-SUBPACKAGES = ["model", "engine", "verify", "catalog", "server", "store"]
+SUBPACKAGES = ["model", "engine", "verify", "catalog", "server", "store", "targets"]
 
 
 @pytest.mark.parametrize("name", SUBPACKAGES)
