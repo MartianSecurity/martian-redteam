@@ -322,13 +322,15 @@ for no update and needs no account. Every connection it can open:
 | The target | Always: a `url` target, an `mcp` target's `url`, or none for a `file` function or an `mcp` `command`, which run on this machine | The attacks |
 | The recording proxy | When the run file lists `tools.proxy`: it listens on loopback, and connects to each `upstream` | The agent's tool calls, as the agent sent them |
 | The agent's session API | When the run file names `tools.session_api`: one request to `{session_api}/sessions` | The proxy's session |
+| The receipt listener | When a vulnerability has a `receipt` check: the run listens on `127.0.0.1` and the target is asked to send the canary there ([trust boundary](#trust-boundary)) | Nothing: it only receives |
 | A model price catalogue | Only when `MLFLOW_MODEL_CATALOG_URI` names one, to price `budget.cost_usd` ([below](#judges-and-the-model-catalogue)) | Nothing of the run |
 
 A run with no `models` uses the Martian platform instead, with `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
 and says so; a run never chooses one when both are configured ([run file models](redteam-run-file.md#models)).
 
 The other red team commands connect to nothing: `validate`, `catalog`, `report`, `compare`,
-`pin add`, `convert promptfoo`, `import promptfoo` and `import garak`. `pin run` connects only to
+`pin add`, `convert promptfoo`, `import promptfoo` and `import garak`. `selftest` calls no model and
+only its own loopback listener. `rejudge` calls only the judge model. `pin run` connects only to
 the target, and the proxy's upstreams when the run file lists them. `martian ui` listens on loopback
 and serves the runs from the local store. `martian redteam garak` runs garak, a separate program
 installed by you; what garak itself connects to is garak's ([red team interop](redteam-interop.md#garak-probes)).
@@ -336,8 +338,9 @@ installed by you; what garak itself connects to is garak's ([red team interop](r
 `tests/redteam/test_no_outbound.py` proves it in CI. It runs the local workflow, each command in its
 own process with only a model key and the model's address in a clean environment (no Martian, CI,
 pytest or telemetry variable): validate, a run writing every report format, a second run, reports
-written again, the two runs compared, a confirmed finding pinned and re-run, a promptfoo config
-converted and its results imported, and `martian ui` serving the runs. Every connection and name
+written again, the two runs compared, a run re-judged, a confirmed finding pinned and re-run, a
+promptfoo config converted and its results imported, and `martian ui` serving the runs; and the
+self-test on its own. Every connection and name
 lookup for an address other than loopback is refused and fails the test, as MLflow's telemetry
 client starting does, and the loopback connections must be exactly the model and the target.
 
@@ -604,7 +607,8 @@ BSD-3-Clause, CC0-1.0, CC-BY-4.0 or the Unlicense, and only when commercial use 
 
 A content file is a file Git tracks that matches the register's `content.globs`: the catalogue
 (`martian.redteam.catalog`, `martian_redteam.catalog`), attack methods (`martian.redteam.methods`),
-the interop maps, the verdict test vectors, the attacker refusal phrases, the encodings, and any data
+the interop maps, the verdict test vectors, the self-test, the canary note, the attacker refusal
+phrases, the encodings, and any data
 file (`.json`, `.jsonl`, `.csv`, `.txt`, `.yaml`, `.parquet`) under `martian/redteam` or
 `martian_redteam`, less the API contract. `scripts/content_licences.py` fails when a content file has
 no entry, an entry names a file that is gone, or an entry's licence is not permitted or does not allow

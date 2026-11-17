@@ -143,6 +143,7 @@ def test_a_local_red_team_workflow_reaches_only_its_model_and_its_target(tmp_pat
     assert {path.suffix for path in (work / "first").iterdir()} >= {".json", ".md", ".html", ".csv", ".sarif", ".xml"}
     martian("redteam", "report", first, "-f", "all", "-o", "again")
     martian("redteam", "compare", first, second, "-o", "compared")
+    martian("redteam", "rejudge", str(run_file), "--run", first, "-o", "rejudged", codes=(0, 1))
     martian("redteam", "pin", "add", first, "-o", "pins")
     # The pinned leak still reproduces, so the pins fail with 1.
     martian("redteam", "pin", "run", str(run_file), "--pins", "pins", "-o", "pinned", codes=(1,))
@@ -174,5 +175,30 @@ def test_a_local_red_team_workflow_reaches_only_its_model_and_its_target(tmp_pat
     assert models.requests and target.messages
     headers = [{name.lower(): value for name, value in request["headers"].items()} for request in models.requests]
     assert all(header.get("authorization") == f"Bearer {KEY}" for header in headers)
-    for command in (("redteam", "run"), ("redteam", "pin", "run"), ("redteam", "import"), ("ui",)):
+    for command in (
+        ("redteam", "run"),
+        ("redteam", "rejudge"),
+        ("redteam", "pin", "run"),
+        ("redteam", "import"),
+        ("ui",),
+    ):
         assert ran(folder, "-m", "martian", *command)
+
+
+def test_the_self_test_sends_nothing_out(tmp_path):
+    """The self-test's planted target sends its receipt to the run's own loopback listener."""
+    (tmp_path / "selftest").mkdir()
+    folder, environment = guarded(tmp_path / "selftest")
+    environment["MARTIAN_EVALS_HOME"] = str(tmp_path / "data")
+    done = subprocess.run(
+        [sys.executable, "-m", "martian", "redteam", "selftest"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=PROCESS_SECONDS,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert attempts(folder) == ""
+    assert all(host == "127.0.0.1" for host, _ in connected(folder))
+    assert ran(folder, "-m", "martian", "redteam", "selftest")

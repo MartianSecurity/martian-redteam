@@ -16,7 +16,7 @@ need not be installed. Every mapping is listed in [red team interop](redteam-int
 | A strategy, such as `base64` | An attack method, such as `Base64` |
 | `numTests`, `maxConcurrency` | `budget.attempts_per_probe`, `budget.max_concurrent`; the budget also caps target queries, model calls, tokens, cost and time |
 | `promptfoo redteam generate`, then `eval` of the generated `redteam.yaml` | One `martian redteam run`: plan, attack and verify, with the run kept after every attempt and resumable. No generated test file |
-| The plugin's grader, a model reading the reply | A `judge` check, which is evidence level 1, suspected. Checks stated in advance decide on evidence: `text` and `canary` (level 2) and `tool_call` (level 3), confirmed ([verdicts](redteam-verdicts.md)) |
+| The plugin's grader, a model reading the reply | A `judge` check, which is evidence level 1, suspected. Checks stated in advance decide on evidence: `text` and `canary` (level 2), `tool_call` (level 3) and `receipt` (level 4), confirmed ([verdicts](redteam-verdicts.md)) |
 | `graderExamples`, `graderGuidance` | Checks stated in advance, and a custom vulnerability's `criteria` |
 | Pass rate, `PROMPTFOO_PASS_RATE_THRESHOLD`, exit code 100 | The [gate](redteam-run-file.md#gate): fail or warn by evidence level and severity, and what undetermined attempts and errors do; exit codes 0, 1 and 2 |
 | The `retry` strategy | `martian redteam pin add` and `pin run`: confirmed findings re-run with no model |
