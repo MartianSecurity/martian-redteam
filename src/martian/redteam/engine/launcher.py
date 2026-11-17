@@ -8,7 +8,18 @@ attempts it finished.
 
 A run file's relative ``file`` is read from ``base_dir``. The service is chosen as for the command
 line (:func:`~martian.redteam.engine.service.select_service`) from ``environ``, the server's
-environment by default.
+environment by default, and ``${NAME}`` in the target's address and headers is read from it too.
+
+The local edition also starts a run against one of its local targets
+(:mod:`martian.evals.local_targets`), named by ``target_id``. The run file then reaches the target
+at the target's own address and names its key as ``${MARTIAN_TARGET_KEY}``, as a run file run from the
+command line does; the launcher fills it in from ``targets`` when it builds the target, in the
+server's process. Neither the run file nor the stored run holds the key.
+
+Each run keeps the run file it was started with, and the local target it names, in its provenance
+under ``launch``, so that :meth:`LocalLauncher.resume` can go on with it after a stop, a budget
+limit, a failure or a server that stopped: as ``martian redteam run FILE --resume RUN_ID`` does,
+each finished attempt whose fingerprint is unchanged is kept and the rest run again.
 """
 
 from __future__ import annotations
@@ -23,6 +34,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from martian.config import ConfigError
+from martian.evals.local_targets import KEY_REFERENCE, LocalTargets
 from martian.evals.server.principal import Principal
 from martian.redteam.engine.plan import PlanError
 from martian.redteam.engine.report import for_report
@@ -41,17 +53,51 @@ from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
 from martian.redteam.store import RedteamStore
 
+RESUMABLE = ("cancelled", "stopped", "failed")
+"""The states a run can be resumed from. A ``running`` run whose task is gone, because the server
+that ran it stopped, can be resumed too."""
+
 
 class LocalLauncher:
-    """Starts and stops red team runs in this process, kept in ``records``."""
+    """Starts, stops and resumes red team runs in this process, kept in ``records``. ``targets`` are
+    the local edition's targets, which a run can name by id."""
 
     def __init__(
-        self, records: Any, *, base_dir: str | Path | None = None, environ: Mapping[str, str] | None = None
+        self,
+        records: Any,
+        *,
+        base_dir: str | Path | None = None,
+        environ: Mapping[str, str] | None = None,
+        targets: LocalTargets | None = None,
     ) -> None:
         self.store = RedteamStore(records)
         self.base_dir = Path(base_dir) if base_dir is not None else Path.cwd()
         self.environ = environ
+        self.targets = targets
         self.tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+    def _environ(self, target_id: str | None, run_file: RunFile) -> Mapping[str, str]:
+        """Where ``${NAME}`` in the target is read from: the launcher's environment and, for a run
+        against a local target, that target's key as ``MARTIAN_TARGET_KEY`` and nothing else by that
+        name. The run file must reach the target at the target's own address, so the key goes
+        nowhere else."""
+        environ = dict(self.environ if self.environ is not None else os.environ)
+        if target_id is None:
+            return environ
+        local = self.targets.get(target_id) if self.targets is not None else None
+        if local is None or self.targets is None:
+            raise HTTPException(422, "target_id names no local target")
+        address = self.targets.model_target(local).url
+        if run_file.target.kind != "http" or run_file.target.url != address:
+            raise HTTPException(422, f"target.url must be the local target's address, {address}")
+        environ.pop(KEY_REFERENCE, None)
+        if (key := self.targets.key(target_id)) is not None:
+            environ[KEY_REFERENCE] = key
+        return environ
+
+    def _orphan(self, run: RedteamRun) -> bool:
+        """A run a launcher started that is still ``running`` with no task here: its server stopped."""
+        return run.state == "running" and "launch" in run.provenance and (run.project_id, run.id) not in self.tasks
 
     def _run_file(self, mapping: dict[str, Any]) -> RunFile:
         run_file = RunFile.model_validate(mapping)
@@ -60,7 +106,16 @@ class LocalLauncher:
             run_file = run_file.model_copy(update={"target": target})
         return run_file
 
-    async def start(self, principal: Principal, request: RunStart) -> RedteamRun:
+    async def start(
+        self,
+        principal: Principal,
+        request: RunStart,
+        *,
+        target_id: str | None = None,
+        earlier: RedteamRun | None = None,
+    ) -> RedteamRun:
+        """Start a run of ``request.run_file``, against the local target ``target_id`` if given, or
+        go on with ``earlier``, a run of the same file (:meth:`resume`)."""
         run_file = self._run_file(request.run_file)
         if missing := unsupported(run_file):
             raise HTTPException(422, "; ".join(missing))
@@ -69,15 +124,20 @@ class LocalLauncher:
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
-            target = build_target(run_file.target, base=self.base_dir)
+            target = build_target(run_file.target, base=self.base_dir, environ=self._environ(target_id, run_file))
             stack.push_async_callback(target.close)
             folder = Path(run_file.output_folder)
             target = await tool_boundary(
                 run_file, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
             )
 
+            # Kept beside the run, after redaction, which would hide a key's ${NAME} reference.
+            launch = {"run_file": self._kept_file(request.run_file), "target_id": target_id}
+
             async def keep(run: RedteamRun) -> None:
-                await self.store.save(for_report(run, policy=service.redaction_policy), principal=principal)
+                kept = for_report(run, policy=service.redaction_policy)
+                kept = kept.model_copy(update={"provenance": {**kept.provenance, "launch": launch}})
+                await self.store.save(kept, principal=principal)
 
             engine = Engine(
                 run_file,
@@ -87,7 +147,11 @@ class LocalLauncher:
                 project_id=request.project_id,
                 checkpoint=keep,
                 provenance=provenance,
+                resume=earlier,
             )
+        except HTTPException:
+            await stack.aclose()
+            raise
         except (
             ServiceSelectionError,
             TargetUnavailable,
@@ -101,8 +165,8 @@ class LocalLauncher:
         except (FileNotFoundError, ImportError, AttributeError):
             await stack.aclose()
             raise HTTPException(422, "Could not load the target: check its file and function") from None
-        if (request.project_id, engine.run_id) in self.tasks or await self.store.get(
-            request.project_id, engine.run_id, principal=principal
+        if (engine.project_id, engine.run_id) in self.tasks or (
+            earlier is None and await self.store.get(request.project_id, engine.run_id, principal=principal)
         ):
             await stack.aclose()
             raise HTTPException(409, "A red team run already has this id")
@@ -114,10 +178,17 @@ class LocalLauncher:
                 await engine.run()
 
         task = asyncio.create_task(go())
-        key = (request.project_id, engine.run_id)
+        key = (engine.project_id, engine.run_id)
         self.tasks[key] = task
         task.add_done_callback(lambda _: self.tasks.pop(key, None))
         return first
+
+    def _kept_file(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        """The run file as sent, with a relative ``file`` made absolute, so a resume reads the same."""
+        target = mapping.get("target")
+        if isinstance(target, dict) and isinstance(target.get("file"), str) and not Path(target["file"]).is_absolute():
+            return {**mapping, "target": {**target, "file": str((self.base_dir / target["file"]).resolve())}}
+        return mapping
 
     async def stop(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
         task = self.tasks.get((project_id, run_id))
@@ -127,7 +198,31 @@ class LocalLauncher:
         run = await self.store.get(project_id, run_id, principal=principal)
         if run is None:
             raise HTTPException(404, "Red team run not found")
+        if self._orphan(run):
+            run = run.model_copy(update={"state": "cancelled"})
+            await self.store.save(run, principal=principal)
         return run
+
+    async def resume(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
+        """Go on with a stopped, cancelled or failed run with the run file and local target it was
+        started with. Each finished attempt whose fingerprint is unchanged is kept, and the rest run
+        again; what the earlier session spent still counts against the budget."""
+        earlier = await self.store.get(project_id, run_id, principal=principal)
+        if earlier is None:
+            raise HTTPException(404, "Red team run not found")
+        launch = earlier.provenance.get("launch")
+        if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
+            raise HTTPException(
+                409,
+                "This run was not started here, so its run file is not kept: "
+                f"resume it with martian redteam run FILE --resume {run_id}",
+            )
+        if earlier.state not in RESUMABLE and not self._orphan(earlier):
+            raise HTTPException(
+                409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
+            )
+        request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
+        return await self.start(principal, request, target_id=launch.get("target_id"), earlier=earlier)
 
     async def close(self) -> None:
         """Cancel every run still going."""

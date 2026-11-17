@@ -6,7 +6,8 @@ is built, ``body`` is filled by :func:`martian.evals.runner.request_body`, the r
 text or the value at ``response_path``, and a failed call is a
 :class:`~martian.evals.runner.TargetCallError` that names the setting to check and never repeats the
 address, a header or the response. One request per message: no retry, no redirect, no proxy from the
-environment.
+environment. ``environ`` stands in for the environment when ``${NAME}`` is read, as the local
+edition's launcher passes one holding a local target's key.
 
 Each message is one turn of a conversation (:mod:`martian.redteam.targets.conversations`). The body's
 ``{{session_id}}`` is the conversation's id, ``{{history}}`` its earlier turns and ``{{messages}}``
@@ -61,15 +62,17 @@ class HttpTarget:
         session: SessionSettings | None = None,
         tool_calls_path: str | None = None,
         address_policy: AddressPolicy | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         if reference.url is None:
             raise ValueError("an HTTP target needs a url")
         self._reference = reference
         self._session = session or SessionSettings()
         self._policy = address_policy
-        self._url = _from_environment(reference.url, "target.url")
+        self._url = _from_environment(reference.url, "target.url", environ)
         self._headers = {
-            name: _from_environment(value, f"target.headers.{name}") for name, value in reference.headers.items()
+            name: _from_environment(value, f"target.headers.{name}", environ)
+            for name, value in reference.headers.items()
         }
         self._steps = _response_steps(reference.response_path, "target.response_path")
         self._session_steps = _response_steps(self._session.response_path, "target.session.response_path")

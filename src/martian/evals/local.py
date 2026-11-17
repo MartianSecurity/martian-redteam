@@ -32,7 +32,9 @@ running run that is not in the queue at all (:func:`~martian.evals.local_runs.fi
 
 The API is under ``/v1``: the core's ``/v1/evals`` routes, the red team core's ``/v1/redteam`` routes,
 which read the red team runs ``martian redteam run`` keeps in the same folder and start and stop
-runs in this process (:class:`~martian.redteam.engine.launcher.LocalLauncher`), its OpenTelemetry
+runs in this process (:class:`~martian.redteam.engine.launcher.LocalLauncher`), the local start of a
+red team run against a local target and its resume under ``/v1/local/redteam/runs``
+(:mod:`martian.redteam.server.local`), its OpenTelemetry
 ``POST /v1/traces``, which takes the fixed principal's traces without credentials, the client's session call,
 ``POST /v1/auth/refresh``, which answers with the fixed principal, the local targets under
 ``/v1/local/targets`` and the local launch and run again under ``/v1/local/runs``
@@ -250,10 +252,11 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     judge_settings = FileJudgeSettings(home / SETTINGS_FILE)
     worker = local_runs.LocalWorker(home, records, targets, judge_settings, concurrency=concurrency)
     from martian.redteam.engine.launcher import LocalLauncher
+    from martian.redteam.server import local as local_redteam
 
     # Red team runs started from the UI run in this process; a run file's relative file is read
-    # from the folder the server was started in.
-    launcher = LocalLauncher(records, base_dir=Path.cwd())
+    # from the folder the server was started in, and a run against a local target gets its key.
+    launcher = LocalLauncher(records, base_dir=Path.cwd(), targets=targets)
 
     async def principals() -> list[Principal]:
         return [SINGLE_USER]
@@ -282,6 +285,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     app.include_router(session_router)
     app.include_router(local_targets.router)
     app.include_router(local_runs.router)
+    app.include_router(local_redteam.router)
     app.mount("/", UiFiles(directory=ui, html=True), name="ui")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
     return app
