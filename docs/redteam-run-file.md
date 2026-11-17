@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). This release runs a `file` and `function` target; a `url` or `mcp` target, `tools.proxy` and `environment` stop the run before anything is called, with a message that says so.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. `environment` stops the run before anything is called, with a message that says so.
 
 ```yaml
 version: 2
@@ -159,7 +159,14 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 
 ## Tools
 
-`tools.proxy` lists the agent's own MCP tool servers. The agent reaches each one through the local recording proxy.
+`tools` takes two fields:
+
+| Field | Meaning |
+| --- | --- |
+| `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` |
+
+Each entry of `proxy` takes these fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -169,6 +176,8 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | `inject` | The text `inject` mode adds |
 | `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
 | `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
+
+`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
 
 The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
@@ -190,7 +199,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
-3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
+3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 
 The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
 

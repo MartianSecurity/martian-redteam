@@ -248,3 +248,22 @@ async def test_a_function_that_raises_keeps_only_the_exception_type(agent_file: 
     finally:
         await target.close()
     assert "KeyError" in str(raised.value) and "secret" not in str(raised.value)
+
+
+def test_a_session_name_bind_tools_cannot_send_as_an_action_id_gets_a_stable_safe_id():
+    from martian.redteam.targets.conversations import ACTION_ID, conversation_id
+
+    assert conversation_id("attempt-0001") == "attempt-0001"
+    engine_name = "prompt_leakage/instructions/prompt_injection#1"
+    safe = conversation_id(engine_name)
+    assert ACTION_ID.fullmatch(safe) and safe == conversation_id(engine_name) and safe != engine_name
+
+
+async def test_a_reply_says_whether_the_target_reports_its_tool_calls():
+    with json_server(StatefulChat()) as (url, _):
+        target = target_from_run_file(
+            block(url=url, body={"message": "{{input}}", "session": "{{session_id}}"}, response_path="reply")
+        )
+        reply = await target.send("hello")
+        await target.close()
+    assert reply.tool_calls_observed is False

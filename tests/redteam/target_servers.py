@@ -24,14 +24,15 @@ class Recorded:
 
 @contextmanager
 def json_server(handle: Handler) -> Iterator[tuple[str, Recorded]]:
-    """A JSON endpoint on 127.0.0.1 that answers each POST with ``handle(body, headers)``."""
+    """A JSON endpoint on 127.0.0.1 that answers each POST with ``handle(body, headers)``. The
+    headers hold the request's path too, under ``:path``."""
     recorded = Recorded()
 
     class Endpoint(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - the standard library's name
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
-            headers = {name.lower(): value for name, value in self.headers.items()}
+            headers = {name.lower(): value for name, value in self.headers.items()} | {":path": self.path}
             with recorded.lock:
                 recorded.bodies.append(body)
                 recorded.headers.append(headers)

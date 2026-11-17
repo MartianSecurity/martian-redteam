@@ -326,8 +326,21 @@ def test_martian_redteam_run_passes_its_gate_when_the_target_holds(tmp_path, mod
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"target": {"purpose": "x", "url": "http://localhost:1/chat", "body": {"m": "{{input}}"}}}, "function target"),
-        ({"tools": {"proxy": [{"name": "c", "upstream": "http://localhost:9/mcp"}]}}, "no tool proxy"),
+        (
+            {
+                "target": {
+                    "purpose": "x",
+                    "url": "http://localhost:1/chat",
+                    "headers": {"Authorization": "${RT_UNSET_TARGET_KEY}"},
+                    "body": {"m": "{{input}}"},
+                }
+            },
+            "needs the environment variable RT_UNSET_TARGET_KEY",
+        ),
+        (
+            {"tools": {"proxy": [{"name": "c", "upstream": "http://127.0.0.1:9/mcp"}]}},
+            "could not reach tools.proxy 'c'",
+        ),
         (
             {
                 "models": {"attacker": "openai:/a"},
@@ -337,7 +350,7 @@ def test_martian_redteam_run_passes_its_gate_when_the_target_holds(tmp_path, mod
         ),
     ],
 )
-def test_what_this_release_cannot_run_stops_before_anything_runs(tmp_path, models, fields, message):
+def test_a_run_that_cannot_be_set_up_stops_before_anything_runs(tmp_path, models, fields, message):
     result = CliRunner().invoke(app, ["redteam", "run", str(write_run(tmp_path, **fields)), "--no-store"])
     assert result.exit_code == 2 and message in result.output
     assert models.requests == []
@@ -402,7 +415,12 @@ def test_the_launcher_stops_a_run(tmp_path, served):
 
 def test_the_launcher_answers_422_for_a_target_it_cannot_call(tmp_path, served):
     mapping = run_mapping(tmp_path) | {
-        "target": {"purpose": "x", "url": "http://localhost:1/c", "body": {"m": "{{input}}"}}
+        "target": {
+            "purpose": "x",
+            "url": "http://localhost:1/c",
+            "headers": {"Authorization": "${RT_UNSET_TARGET_KEY}"},
+            "body": {"m": "{{input}}"},
+        }
     }
     answer = served.post("/v1/redteam/runs", json={"run_file": mapping})
-    assert answer.status_code == 422 and "function target" in answer.text
+    assert answer.status_code == 422 and "RT_UNSET_TARGET_KEY" in answer.text

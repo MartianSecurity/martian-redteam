@@ -61,6 +61,7 @@ from martian.redteam._mcp import HeldClient, LoopbackServer, every_tool
 from martian.redteam.model import Evidence, ToolCall
 from martian.redteam.runfile import ProxiedServer
 from martian.redteam.targets import Target, TargetReply
+from martian.redteam.targets.conversations import conversation_id
 from martian.redteam.targets.reply import with_observed
 from martian_redteam.integration import AssessmentSession, MCPConnection
 
@@ -424,8 +425,10 @@ async def _refuse(send: Any) -> None:
 
 class ProxiedTarget:
     """``target`` with the proxy's calls added to each reply: the calls whose action id is the
-    reply's session. The agent passes its conversation's id (the body's ``{{session_id}}``, a
-    function's ``session_id``) as ``action_id`` to :func:`martian_redteam.bind_tools`. A call the
+    reply's conversation id (:func:`~martian.redteam.targets.conversations.conversation_id`). Each
+    reply's ``tool_calls_observed`` is true: the proxy sees every call to the servers it fronts.
+    The agent passes its conversation's id (the body's ``{{session_id}}``, a function's
+    ``session_id``) as ``action_id`` to :func:`martian_redteam.bind_tools`. A call the
     target reported itself and the proxy recorded, by its ``call_id`` or by its name and arguments,
     is kept once, with what the proxy saw. Each reply carries the calls' evidence too."""
 
@@ -438,15 +441,20 @@ class ProxiedTarget:
     def kind(self) -> str:
         return self._target.kind
 
+    @property
+    def name(self) -> str:
+        return str(getattr(self._target, "name", ""))
+
     async def send(self, message: str, *, session: str | None = None) -> TargetReply:
         reply = await self._target.send(message, session=session)
-        if reply.session is None:
+        name = reply.session
+        if name is None:
             return reply
-        after = self._seen.get(reply.session, 0)
-        recorded = self._proxy.calls(action_id=reply.session, after=after)
+        recorded = self._proxy.calls(action_id=conversation_id(name), after=self._seen.get(name, 0))
+        reply = reply.model_copy(update={"tool_calls_observed": True})
         if not recorded:
             return reply
-        self._seen[reply.session] = recorded[-1].sequence
+        self._seen[name] = recorded[-1].sequence
         evidence = [item for call in recorded for item in call.evidence()]
         return with_observed(reply, [call.tool_call() for call in recorded], evidence)
 

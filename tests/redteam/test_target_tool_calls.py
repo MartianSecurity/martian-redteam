@@ -67,13 +67,17 @@ def test_a_tool_call_that_cannot_be_read_is_the_targets_error(value: Any, reason
 
 def test_a_function_or_callback_reply_in_each_form():
     structured = reply_from({"text": "done", "tool_calls": [{"name": "issue_refund", "arguments": {"amount": 5}}]})
-    assert structured == TargetReply(text="done", tool_calls=[ToolCall(name="issue_refund", arguments={"amount": 5})])
+    assert structured == TargetReply(
+        text="done", tool_calls=[ToolCall(name="issue_refund", arguments={"amount": 5})], tool_calls_observed=True
+    )
     legacy = reply_from(Turn(role="ai", content="done", tools_called=["issue_refund"]))
     assert legacy.tool_calls == [ToolCall(name="issue_refund")]
     record = ToolCallRecord(name="issue_refund", arguments={"amount": 5}, executed=True)
     assert reply_from(Turn(role="ai", content="done", tool_calls=[record])).tool_calls == [
         ToolCall(name="issue_refund", arguments={"amount": 5}, executed=True)
     ]
+    assert structured.tool_calls_observed is True and legacy.tool_calls_observed is True
+    assert reply_from({"text": "done"}).tool_calls_observed is False
     # Anything else is the reply's text, with no tool calls: an object with more keys stays data.
     assert reply_from({"text": "a", "other": 1}) == TargetReply(text='{"other": 1, "text": "a"}')
     assert reply_from("plain", session="s") == TargetReply(text="plain", session="s")
@@ -110,6 +114,7 @@ async def test_an_http_target_reads_the_tool_calls_at_its_path():
         await target.close()
     assert reply.text == "Refund issued."
     assert reply.tool_calls == [ToolCall(name="issue_refund", arguments={"amount": 80}, call_id="c1")]
+    assert reply.tool_calls_observed is True
 
 
 async def test_an_http_answer_without_the_tool_calls_path_has_no_calls():
@@ -126,6 +131,8 @@ async def test_an_http_answer_without_the_tool_calls_path_has_no_calls():
         reply = await target.send("refund order 7")
         await target.close()
     assert reply.tool_calls == []
+    # The answer reports its calls at the path, and named none: an observed empty list.
+    assert reply.tool_calls_observed is True
 
 
 def test_tool_calls_path_applies_to_a_url_target_only(tmp_path: Path):

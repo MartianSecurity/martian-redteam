@@ -104,7 +104,13 @@ class HttpTarget:
                 else []
             )
             conversation.answered(message, text)
-            return TargetReply(text=text, tool_calls=calls, session=conversation.session, latency_ms=latency)
+            return TargetReply(
+                text=text,
+                tool_calls=calls,
+                tool_calls_observed=bool(self._call_steps),
+                session=conversation.session,
+                latency_ms=latency,
+            )
 
     def end(self, session: str) -> None:
         """Forget a conversation; sending with its session again starts a new one."""

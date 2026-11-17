@@ -115,7 +115,8 @@ def tool_calls(value: Any, where: str = "tool_calls") -> list[ToolCall]:
 def reply_from(value: Any, *, session: str | None = None, latency_ms: float | None = None) -> TargetReply:
     """What a function or a callback returned, as a reply: text; an object with ``text`` and
     ``tool_calls`` and nothing else; a version 0.2 ``Turn``; or a ``TargetReply``. Any other value is
-    the text of its JSON, with no tool calls."""
+    the text of its JSON, with no tool calls. A ``Turn``, or an object with ``tool_calls`` (even an
+    empty list), reports its calls: ``tool_calls_observed`` is true."""
     from martian_redteam.types import Turn
 
     update: dict[str, Any] = {"session": session, "latency_ms": latency_ms}
@@ -125,9 +126,14 @@ def reply_from(value: Any, *, session: str | None = None, latency_ms: float | No
         calls = [ToolCall.model_validate(call.model_dump()) for call in value.tool_calls] or tool_calls(
             value.tools_called, "tools_called"
         )
-        return TargetReply(text=value.content, tool_calls=calls, **update)
+        return TargetReply(text=value.content, tool_calls=calls, tool_calls_observed=True, **update)
     if isinstance(value, Mapping) and isinstance(value.get("text"), str) and set(value) <= REPLY_KEYS:
-        return TargetReply(text=value["text"], tool_calls=tool_calls(value.get("tool_calls")), **update)
+        return TargetReply(
+            text=value["text"],
+            tool_calls=tool_calls(value.get("tool_calls")),
+            tool_calls_observed="tool_calls" in value,
+            **update,
+        )
     return TargetReply(text=reply_text(value), **update)
 
 
@@ -141,7 +147,8 @@ def with_observed(
     """``reply`` with the calls a boundary the harness trusts observed, and their evidence. A call
     the target reported itself is kept once, as observed: one with the same ``call_id``, or the same
     name and arguments. When the boundary did not capture a call's arguments (``captured``), the same
-    name is enough, and the reported arguments are kept on the observed call."""
+    name is enough, and the reported arguments are kept on the observed call. The reply's
+    ``tool_calls_observed`` becomes true."""
     remaining = list(reply.tool_calls)
     seen = []
     for index, call in enumerate(observed):
@@ -160,7 +167,13 @@ def with_observed(
             if not has_arguments:
                 call = call.model_copy(update={"arguments": reported.arguments})
         seen.append(call)
-    return reply.model_copy(update={"tool_calls": [*remaining, *seen], "evidence": [*reply.evidence, *evidence]})
+    return reply.model_copy(
+        update={
+            "tool_calls": [*remaining, *seen],
+            "tool_calls_observed": True,
+            "evidence": [*reply.evidence, *evidence],
+        }
+    )
 
 
 __all__ = ["REPLY_KEYS", "read_path", "reply_from", "reply_text", "tool_call", "tool_calls", "with_observed"]

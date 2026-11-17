@@ -1,9 +1,10 @@
 """The version 0.2 callback, and a function in a Python file, as a :class:`~martian.redteam.targets.Target`.
 
 :class:`CallbackTarget` adapts a callback as ``red_team()`` takes it (:mod:`martian_redteam.callback`):
-sync or async, returning ``str`` or a ``Turn``. A ``Turn`` reports the tools the target called, by name,
-so its reply's ``tool_calls_observed`` is true; a ``str`` reports none, so it is false and a tool-call
-check cannot be resisted on it. :func:`function_target` loads the run file's ``file`` and ``function``.
+sync or async, returning ``str`` or a ``Turn``. A ``Turn`` reports the tools the target called: with
+their arguments and whether they ran when it has ``tool_calls``, else by name. So its reply's
+``tool_calls_observed`` is true; a ``str`` reports none, so it is false and a tool-call check cannot
+be resisted on it. :func:`function_target` loads the run file's ``file`` and ``function``.
 
 A callback keeps no conversation of its own: each ``send`` is one call, and ``session`` is passed back
 on the reply.
@@ -47,7 +48,9 @@ class CallbackTarget:
         result: Any = await self._invoke(message, None)
         latency = (time.perf_counter() - started) * 1000
         if isinstance(result, Turn):
-            calls = [ToolCall(name=name) for name in result.tools_called]
+            calls = [ToolCall.model_validate(call.model_dump()) for call in result.tool_calls] or [
+                ToolCall(name=name) for name in result.tools_called
+            ]
             return TargetReply(
                 text=result.content, tool_calls=calls, tool_calls_observed=True, session=session, latency_ms=latency
             )

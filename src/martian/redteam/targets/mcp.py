@@ -123,7 +123,13 @@ class McpServerTarget:
                 latency = (time.perf_counter() - started) * 1000
                 text, calls = self._read(result)
                 conversation.answered(message, text)
-                return TargetReply(text=text, tool_calls=calls, session=conversation.session, latency_ms=latency)
+                return TargetReply(
+                    text=text,
+                    tool_calls=calls,
+                    tool_calls_observed=bool(self._calls),
+                    session=conversation.session,
+                    latency_ms=latency,
+                )
         except (TargetCallError, TargetChanged):
             raise
         except TimeoutError:

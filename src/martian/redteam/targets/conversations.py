@@ -5,8 +5,10 @@ session name the target has not seen) and continues it by sending with the sessi
 named. A new session is the reset signal: it has a new id and an empty history, so a server that
 keys its state on the id starts fresh. Every target kind keeps its conversations here:
 
-- ``id`` is what the target sends as the conversation's id: the session name itself, or, for a
-  server that issues its own ids, empty until its first reply names one.
+- ``id`` is what the target sends as the conversation's id: the session name itself
+  (:func:`conversation_id`), or, for a server that issues its own ids, empty until its first reply
+  names one. An agent passes it as the ``action_id`` of :func:`martian_redteam.bind_tools`, so the
+  recording proxy can tell this conversation's tool calls apart.
 - ``history`` holds the earlier turns as ``user`` and ``assistant`` messages, the shape the suite
   file's ``{{history}}`` and ``{{messages}}`` placeholders and a function target's ``history``
   parameter take. Whether the target resends it or sends only the newest turn is the target's
@@ -17,12 +19,26 @@ keys its state on the id starts fresh. Every target kind keeps its conversations
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from martian.evals.conversations import assistant, user
+
+ACTION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+"""What :func:`martian_redteam.bind_tools` sends as an action id; it drops any other value."""
+
+
+def conversation_id(session: str) -> str:
+    """The id a conversation named ``session`` sends: the name itself when ``bind_tools`` can send it
+    as an action id, else a stable digest of it (the engine names sessions by attempt, such as
+    ``probe/type/method#1``)."""
+    if ACTION_ID.fullmatch(session):
+        return session
+    return "s-" + hashlib.sha256(session.encode()).hexdigest()[:32]
 
 
 @dataclass
@@ -59,7 +75,7 @@ class Conversations:
         name = session or str(uuid.uuid4())
         conversation = self._open.get(name)
         if conversation is None:
-            conversation = Conversation(session=name, id="" if self._issued_by_server else name)
+            conversation = Conversation(session=name, id="" if self._issued_by_server else conversation_id(name))
             self._open[name] = conversation
         async with conversation.lock:
             yield conversation
@@ -72,4 +88,4 @@ class Conversations:
         self._open.clear()
 
 
-__all__ = ["Conversation", "Conversations"]
+__all__ = ["ACTION_ID", "Conversation", "Conversations", "conversation_id"]

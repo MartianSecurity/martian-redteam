@@ -271,13 +271,33 @@ class ProxiedServer(_Model):
 
 
 class Tools(_Model):
+    """The local recording proxy: the agent's own tool servers it fronts, and where the agent is
+    handed the session that binds them."""
+
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
+    session_api: str | None = None
+    """The agent's session API, as the cloud hands a session over: the run posts the session to
+    ``{session_api}/sessions`` before the first attack."""
+
+    @field_validator("session_api")
+    @classmethod
+    def _session_api(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("session_api is the http or https address of the agent's session API")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("session_api must not contain credentials")
+        return value
 
     @model_validator(mode="after")
     def _unique(self) -> Tools:
         names = [server.name for server in self.proxy]
         if len(set(names)) != len(names):
             raise ValueError("each proxied server has its own name")
+        if self.session_api is not None and not self.proxy:
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         return self
 
 

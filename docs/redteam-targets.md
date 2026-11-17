@@ -7,9 +7,9 @@ async def send(message: str, *, session: str | None = None) -> TargetReply
 async def close() -> None
 ```
 
-`TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, the `session` the message was sent in, `latency_ms`, and the `evidence` a boundary the harness trusts captured about the calls: the [recording proxy](#recording-proxy)'s ledger or a [trace](#tool-calls-from-traces)'s tool spans, each with its source.
+`TargetReply` holds the reply's `text`, the `tool_calls` the target made or asked for, `tool_calls_observed` (whether the target reports its tool calls at all, so that an empty list means none were made), the `session` the message was sent in, `latency_ms`, and the `evidence` a boundary the harness trusts captured about the calls: the [recording proxy](#recording-proxy)'s ledger or a [trace](#tool-calls-from-traces)'s tool spans, each with its source.
 
-`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
+`target_from_run_file(block)` builds the target a [run file](redteam-run-file.md)'s `target` block names: a `FunctionTarget`, an `HttpTarget` or an `McpServerTarget`. `martian redteam run` and the local edition's run routes build the `url` and `mcp` targets with it; they run a `file` target in process with the version 0.2 callback adapter (`targets/callback.py`), and put the target behind the [recording proxy](#recording-proxy) when the run file lists `tools.proxy`. Building one reads `${NAME}` from the environment and checks the settings; it calls nothing. The first message connects.
 
 ## Function and HTTP targets
 
@@ -38,6 +38,7 @@ Each attack is one conversation, and one conversation is one `session`:
 - `send(message)` with no session starts a new conversation. The reply's `session` names it.
 - `send(message, session=reply.session)` continues it.
 - `send(message, session="attempt-0001")` with a session the target has not seen starts a new conversation with that name. The engine can name each attempt's conversation this way.
+- The conversation's id is the session's name when `bind_tools` can send it as an action id (letters, digits, `_ . : -`, up to 128). Otherwise, as for the engine's attempt names such as `prompt_leakage/instructions/prompt_injection#1`, it is `s-` and a stable digest of the name.
 - A new session is the reset signal. It has a new id and an empty history, so a server that keeps state by the id starts fresh. `end(session)` forgets a conversation.
 
 What the target sends:
@@ -67,6 +68,8 @@ Each tool call is an object, or a tool's name as text (which says nothing about 
 | `id` or `call_id` | The call's id |
 | `executed` | `true` when the call ran, `false` when it was refused or blocked. Leave it out when the agent only asked for the call: a check that needs an executed call never counts one without it |
 | `result` | What the tool returned, as text or any JSON |
+
+A reply reports its calls, so `tool_calls_observed` is true, when the HTTP or MCP target has a `tool_calls_path`, when a function returns an object with `tool_calls` (an empty list included), and for a `Turn`; the proxy and traces set it too. A tool-call check on a reply that does not report its calls is undetermined, never held.
 
 A call the reply contract cannot read is the target's error, never an empty list: an item without a name, arguments that are not an object, or `executed` that is not `true` or `false`.
 
@@ -106,6 +109,8 @@ Each proxied server has a mode:
 `tools` limits `inject` and `block` to the tools it names. A call that fails on its way to the tool server is recorded with `executed` unknown, and the agent gets an error result that never repeats what the server sent.
 
 Each ledger entry (`ProxyCall`) holds the server, the tool, its arguments, the action id, the mode, whether it ran, the injected text, the start of the result, and when. `call.tool_call()` is the call as an attempt keeps it; `call.evidence()` is its evidence: the call at the tool boundary, and a payload's delivery (level 0) in inject mode.
+
+In a run, the session is handed to the agent as the cloud hands one over: posted to `tools.session_api` when the run file names one, and written to `tool-session.json` in the output folder for the length of the run ([run file](redteam-run-file.md#tools)).
 
 The proxy records each call with the `X-Martian-Action-Id` header that `bind_tools(..., action_id=...)` sends. An agent that passes its conversation's id (the HTTP body's `{{session_id}}`, a function's `session_id`) as the action id lets `ProxiedTarget(target, proxy)` add that conversation's calls and their evidence to each reply. A call the target reported itself and the proxy saw, by its id or by its name and arguments, is kept once, as the proxy saw it.
 

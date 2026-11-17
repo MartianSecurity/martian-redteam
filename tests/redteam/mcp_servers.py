@@ -3,8 +3,10 @@ another machine. Run as a script, it serves :func:`chat_server` over stdio."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import asyncio
+import threading
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from mcp.server.lowlevel import Server
@@ -93,6 +95,23 @@ class CommerceTools:
             return f"refunded {amount} on order {order}"
 
         self.server = server
+
+
+@contextmanager
+def served_in_thread(server: MCPServer | Server[Any]) -> Iterator[str]:
+    """``server`` over Streamable HTTP on 127.0.0.1, on an event loop of a thread of its own, for a
+    caller that runs its own loop, such as the command line; yields its address."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    loopback = LoopbackServer(server.streamable_http_app(host="127.0.0.1"))
+    asyncio.run_coroutine_threadsafe(loopback.start(), loop).result(10)
+    try:
+        yield f"http://127.0.0.1:{loopback.port}/mcp"
+    finally:
+        asyncio.run_coroutine_threadsafe(loopback.stop(), loop).result(10)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)
 
 
 if __name__ == "__main__":

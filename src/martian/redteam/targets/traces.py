@@ -217,7 +217,8 @@ class StoreTraces:
 class TracedTarget:
     """``target`` with the tool calls its traces record added to each reply: the calls of the
     traces of the reply's session that started since the message was sent. ``settle_seconds`` waits
-    that long after the reply first, since exporters send spans in batches."""
+    that long after the reply first, since exporters send spans in batches. A reply whose session has
+    traces has ``tool_calls_observed`` true: its traces record its calls."""
 
     def __init__(self, target: Target, source: TraceSource, *, settle_seconds: float = 0.0) -> None:
         self._target = target
@@ -240,7 +241,10 @@ class TracedTarget:
         if self._settle:
             await asyncio.sleep(max(0.0, self._settle - (time.monotonic() - started)))
         calls = []
-        for trace in await self._source.traces(session=reply.session, since=since):
+        traces = await self._source.traces(session=reply.session, since=since)
+        if traces:
+            reply = reply.model_copy(update={"tool_calls_observed": True})
+        for trace in traces:
             for traced in calls_in_trace(trace):
                 key = (traced.trace_id, traced.span_id)
                 if key not in self._read:
