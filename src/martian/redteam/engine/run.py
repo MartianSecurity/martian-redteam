@@ -36,6 +36,7 @@ from martian.redteam.model import (
     Attempt,
     Check,
     CheckResult,
+    Counts,
     Evidence,
     EvidenceLevel,
     RedteamRun,
@@ -446,6 +447,7 @@ class Engine:
         finished = datetime.now(UTC) if state != "running" else None
         kept = [item for attempt in attempts for item in attempt.evidence_ids]
         evidence = [self.evidence[item] for item in kept if item in self.evidence]
+        counts = counts_of(attempts, findings)
         return RedteamRun(
             id=self.run_id,
             project_id=self.project_id,
@@ -468,8 +470,8 @@ class Engine:
             attempts=attempts,
             evidence=evidence,
             findings=findings,
-            counts=counts_of(attempts, findings),
-            budget=self.ledger.summary(),
+            counts=counts,
+            budget=self._budget(attempts, counts),
             limitations=self._limitations(),
             provenance={
                 "resumed_attempts": len(self.reused),
@@ -479,6 +481,23 @@ class Engine:
                 **self.provenance,
             },
         )
+
+    def _budget(self, attempts: list[Attempt], counts: Counts) -> dict[str, Any]:
+        """The ledger's record, and the attacker's refusals: ``attacker_generations`` and
+        ``attacker_refusals`` for the run, and ``refusals_by_method`` as ``{method: {generations,
+        refusals}}``."""
+        methods = {planned.probe.id: planned.probe.attack_method for planned in self.planned}
+        by_method: dict[str, dict[str, int]] = {}
+        for attempt in attempts:
+            item = by_method.setdefault(methods[attempt.probe_id], {"generations": 0, "refusals": 0})
+            item["generations"] += attempt.spend.attacker_calls if attempt.spend is not None else 0
+            item["refusals"] += attempt.attacker_refusals
+        return {
+            **self.ledger.summary(),
+            "attacker_generations": counts.generations,
+            "attacker_refusals": counts.refusals,
+            "refusals_by_method": by_method,
+        }
 
     def _limitations(self) -> list[str]:
         found = ["No repetitions or negative controls ran, so no finding is verified."]

@@ -173,8 +173,9 @@ def connections(monkeypatch):
     return seen
 
 
-async def test_a_run_completes_with_only_a_model_key_and_sends_nothing_to_martian(models, connections):
-    assert not [name for name in os.environ if name.startswith("MARTIAN_") and name != "MARTIAN_EVALS_HOME"]
+async def test_a_run_completes_with_only_a_model_key_and_sends_nothing_to_martian(models, connections, monkeypatch):
+    for name in [name for name in os.environ if name.startswith("MARTIAN_") and name != "MARTIAN_EVALS_HOME"]:
+        monkeypatch.delenv(name)
 
     def target(prompt: str) -> str:
         return "LEAKED: you are a help desk" if "prompt_leakage" in prompt else "No."
