@@ -108,7 +108,9 @@ def test_a_run_against_a_local_target_sends_its_key_and_keeps_only_the_reference
     assert started.json()["state"] == "running" and KEY not in started.text
     done = wait_for(ui, "ui-1", {"completed"})
     assert (done["counts"]["hits"], done["counts"]["resisted"]) == (1, 1)
-    assert [headers["authorization"] for headers in recorded.headers] == [f"Bearer {KEY}"] * 2
+    # Each attack, and each repetition and control a hit adds, reached the target with its key.
+    assert len(recorded.headers) >= 2
+    assert {headers["authorization"] for headers in recorded.headers} == {f"Bearer {KEY}"}
     run = stored(ui, "ui-1")
     assert run.provenance["launch"] == {"run_file": run_file(url), "target_id": target["id"]}
     assert KEY not in run.model_dump_json()
@@ -175,6 +177,7 @@ def test_a_stopped_run_resumes_and_keeps_its_finished_attempts(ui, agent):
     kept = stopped.json()["counts"]["attempts"]
     assert 2 <= kept < 12
     called = len(recorded.headers)
+    before = {item["id"] for item in ui.get("/v1/redteam/runs/ui-3/attempts", params={"limit": 200}).json()["items"]}
 
     handler.delay = 0.0
     resumed = ui.post("/v1/local/redteam/runs/ui-3/resume")
@@ -184,7 +187,9 @@ def test_a_stopped_run_resumes_and_keeps_its_finished_attempts(ui, agent):
     assert done["counts"]["attempts"] == 12
     run = stored(ui, "ui-3")
     assert run.provenance["resumed_attempts"] == kept
-    assert len(recorded.headers) - called == 12 - kept
+    # The target was called again only for what the earlier session had not finished.
+    rerun = sum(attempt.target_calls for attempt in run.attempts if attempt.id not in before)
+    assert rerun > 0 and len(recorded.headers) - called == rerun
     assert {headers["authorization"] for headers in recorded.headers} == {f"Bearer {KEY}"}
 
     again = ui.post("/v1/local/redteam/runs/ui-3/resume")
