@@ -191,6 +191,19 @@ LEFT_OUT_TABLES = {
         "score is exported with the record store's scores, but its trace or review queue item is "
         "exported as the store holds it, so let the outbox deliver before exporting"
     ),
+    **{
+        table: (
+            "a red team run's probes, evidence, verifications or findings. Red team runs are not part of "
+            "the export format: the export lists eval runs only, so a red team run, its case results and "
+            "its scores stay out with these"
+        )
+        for table in (
+            "martian_redteam_probes",
+            "martian_redteam_evidence",
+            "martian_redteam_verifications",
+            "martian_redteam_findings",
+        )
+    },
 }
 """Each table of the record store that an export leaves out, and why."""
 
@@ -242,6 +255,7 @@ LEFT_OUT_KINDS = {
     "SuiteAudit": "a suite version's latest audit, derived from the suite version and a dataset "
     "(martian_suite_audits in LEFT_OUT_TABLES)",
     "Delivery": "a store write on its way from the record store to the store (the outbox, left out)",
+    "RedteamRecords": "a red team run's own records; red team runs are not part of the export format",
 }
 """Each model class the two interfaces take or return that is not a kind of object an export
 carries, and why."""
