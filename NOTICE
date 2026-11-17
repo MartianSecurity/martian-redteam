@@ -10,6 +10,15 @@ and templates in martian/redteam/methods/prompts/ (listed with their sources in
 its register.json), are authored by Martian Security and are not copies of
 DeepTeam template corpora or of any other project's prompts.
 
+The red team interop maps name the plugin and strategy identifiers of promptfoo
+(https://github.com/promptfoo/promptfoo, MIT License) and read the report
+format of garak (https://github.com/NVIDIA/garak, Apache License, Version 2.0).
+No promptfoo or garak code, prompt or probe is included, and garak is not
+bundled.
+
+martian/redteam/catalog/licences.json lists every red team content file in
+this package with its source and licence.
+
 The Evals UI in martian/ui/ is a build of the @martian/evals, @martian/redteam,
 @martian/design-system and @martian/client packages of MartianSecurity/MartianFrontend,
 Copyright 2026 Martian Security, licensed under the Apache License,

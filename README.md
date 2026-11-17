@@ -103,6 +103,12 @@ pull request with the last result of `main` and name the cases that went from pa
   with human labels beside people's agreement with each other, and its saved calibration,
   re-checked on request after its model or rubric changes, pinned datasets, Backend-scored
   regression gates and recorded CI sessions.
+- `martian redteam run`: a red team run of a version 2 run file with your own model and no
+  account, its report in `martian ui`; see the
+  [red team quickstart](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-quickstart.md).
+  `martian redteam convert promptfoo`, `import promptfoo` and `garak` bring promptfoo red team
+  configs and results and garak's probes; see
+  [red team interop](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-interop.md).
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside

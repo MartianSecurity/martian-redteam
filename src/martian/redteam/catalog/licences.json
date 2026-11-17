@@ -1,0 +1,82 @@
+{
+  "$comment": "The red team content register: every prompt set, catalogue file, dataset and attack algorithm the open package ships, with its source and licence, and the sources it does not ship. scripts/content_licences.py checks it in CI: a content file (content.globs, less content.not_content) with no entry, an entry for a file that is gone, a licence outside permitted or an entry that does not allow commercial use fails the build. An entry's kind is one of catalogue, prompts, phrases, algorithm, dataset, test-vectors, interop or register; a dataset that ships is an entry of kind dataset, and one that is downloaded or left out is a source. See docs/security-and-data.md#red-team-content-licences.",
+  "version": 1,
+  "permitted": ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "CC0-1.0", "CC-BY-4.0", "Unlicense"],
+  "content": {
+    "globs": [
+      "src/martian/redteam/catalog/*",
+      "src/martian_redteam/catalog/*",
+      "src/martian/redteam/methods/*",
+      "src/martian/redteam/interop/*",
+      "src/martian/redteam/verify/vectors.json",
+      "src/martian/redteam/engine/refusal.py",
+      "src/martian/redteam/verify/canary.py",
+      "src/martian/redteam/verify/selftest.py",
+      "src/martian_redteam/encoding.py",
+      "src/martian/redteam/*.json",
+      "src/martian/redteam/*.jsonl",
+      "src/martian/redteam/*.csv",
+      "src/martian/redteam/*.txt",
+      "src/martian/redteam/*.yaml",
+      "src/martian/redteam/*.yml",
+      "src/martian/redteam/*.parquet",
+      "src/martian_redteam/*.json",
+      "src/martian_redteam/*.jsonl",
+      "src/martian_redteam/*.csv",
+      "src/martian_redteam/*.txt",
+      "src/martian_redteam/*.yaml",
+      "src/martian_redteam/*.yml",
+      "src/martian_redteam/*.parquet"
+    ],
+    "delegated": [
+      {"glob": "src/martian/redteam/methods/prompts/*", "register": "src/martian/redteam/methods/prompts/register.json", "reason": "The attack methods' prompt files have their own register (files: licence, source, references), which tests/redteam/test_method_prompts.py also checks; a file listed there with a permitted licence and a source is covered here."}
+    ],
+    "not_content": [
+      {"glob": "src/martian/redteam/server/contract/*.json", "reason": "The /v1/redteam API contract: a schema, not attack content."}
+    ]
+  },
+  "entries": [
+    {"path": "src/martian/redteam/catalog/__init__.py", "kind": "catalogue", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Re-exports catalogue 0.2 from martian_redteam.catalog."},
+    {"path": "src/martian/redteam/catalog/prompts.py", "kind": "prompts", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The generator and judge prompts: methods, goals and rubrics, written by Martian Security and moved here from the private engine, which imports them. Not copies of DeepTeam templates."},
+    {"path": "src/martian/redteam/catalog/licences.json", "kind": "register", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "This register."},
+    {"path": "src/martian_redteam/catalog/__init__.py", "kind": "catalogue", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Catalogue 0.2 lookups."},
+    {"path": "src/martian_redteam/catalog/vulnerabilities.py", "kind": "catalogue", "licence": "Apache-2.0", "source": "Martian Security; vulnerability identifiers and labels derived from DeepTeam (Apache-2.0)", "commercial_use": true, "notes": "Identifiers, types and gate flags. NOTICE attributes DeepTeam."},
+    {"path": "src/martian_redteam/catalog/attacks.py", "kind": "catalogue", "licence": "Apache-2.0", "source": "Martian Security; attack identifiers and labels derived from DeepTeam (Apache-2.0)", "commercial_use": true, "notes": "Identifiers only. NOTICE attributes DeepTeam."},
+    {"path": "src/martian_redteam/catalog/frameworks.py", "kind": "catalogue", "licence": "Apache-2.0", "source": "Martian Security; framework identifiers of OWASP, NIST and MITRE ATLAS", "commercial_use": true, "notes": "Subset maps from framework identifiers to vulnerability ids. No framework text is copied."},
+    {"path": "src/martian_redteam/encoding.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "ROT13, Base64 and leetspeak transforms, written here from the standard definitions."},
+    {"path": "src/martian/redteam/engine/refusal.py", "kind": "phrases", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The refusal phrases that detect an attacker's refusal, and the defensive-assessment re-ask."},
+    {"path": "src/martian/redteam/verify/canary.py", "kind": "phrases", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The confidential note a context canary is planted in."},
+    {"path": "src/martian/redteam/verify/selftest.py", "kind": "test-vectors", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The self-test's deliberately vulnerable target and its scripted attacks."},
+    {"path": "src/martian/redteam/verify/vectors.json", "kind": "test-vectors", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The verdict rules' test vectors."},
+    {"path": "src/martian/redteam/methods/__init__.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack methods package."},
+    {"path": "src/martian/redteam/methods/base.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack method interface and its budget."},
+    {"path": "src/martian/redteam/methods/delivery.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Delivery of an attack: direct, or planted for the agent to read."},
+    {"path": "src/martian/redteam/methods/escalation.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Multi-turn escalation with backtracking, written here; modelled on the published Crescendo idea, no code copied."},
+    {"path": "src/martian/redteam/methods/library.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Loads the prompt files and their register."},
+    {"path": "src/martian/redteam/methods/mutation.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Mutation of templates, written here."},
+    {"path": "src/martian/redteam/methods/registry.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack method registry and aliases."},
+    {"path": "src/martian/redteam/methods/rewrites.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Model-written rewrites of an attack."},
+    {"path": "src/martian/redteam/methods/reviewed.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Asks a connected Martian server for attacks written from its reviewed cases. Holds no case or skill content; that stays on the server."},
+    {"path": "src/martian/redteam/methods/search.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "PAIR-style refinement and TAP-style tree search, written here; the reference code of both is MIT and was not copied."},
+    {"path": "src/martian/redteam/methods/templates.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Fixed templates, the control arm."},
+    {"path": "src/martian/redteam/methods/transforms.py", "kind": "algorithm", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "Static transforms (encodings and the like), written here from their definitions."},
+    {"path": "src/martian/redteam/methods/prompts/register.json", "kind": "register", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "The attack methods' prompt register, delegated to from this one."},
+    {"path": "src/martian/redteam/interop/__init__.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "No content."},
+    {"path": "src/martian/redteam/interop/cli.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security", "commercial_use": true, "notes": "No content."},
+    {"path": "src/martian/redteam/interop/promptfoo.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security; promptfoo plugin and strategy identifiers (MIT)", "commercial_use": true, "notes": "Names promptfoo's identifiers to map them onto the catalogue. No promptfoo code, prompt or grader rubric is included."},
+    {"path": "src/martian/redteam/interop/garak.py", "kind": "interop", "licence": "Apache-2.0", "source": "Martian Security; garak's report and generator interface (Apache-2.0)", "commercial_use": true, "notes": "Reads garak's report format and serves its function generator. No garak code or probe is included; garak is not bundled."}
+  ],
+  "sources": [
+    {"name": "DeepTeam", "url": "https://github.com/confident-ai/deepteam", "licence": "Apache-2.0", "commercial_use": true, "shipped": true, "use": "Vulnerability and attack identifiers and labels of catalogue 0.2, attributed in NOTICE."},
+    {"name": "promptfoo", "url": "https://github.com/promptfoo/promptfoo", "licence": "MIT", "commercial_use": true, "shipped": true, "use": "Plugin and strategy identifiers, named in the converter's maps."},
+    {"name": "garak", "url": "https://github.com/NVIDIA/garak", "licence": "Apache-2.0", "commercial_use": true, "shipped": false, "use": "Run beside the SDK through its function generator; installed by the user, never bundled."},
+    {"name": "BeaverTails", "url": "https://github.com/PKU-Alignment/beavertails", "licence": "CC-BY-NC-4.0", "commercial_use": false, "shipped": false, "use": "Not shipped. A source card in a private guidance skill states it; nothing derived from it may enter this package."},
+    {"name": "OWASP Machine Learning Security Top 10", "url": "https://owasp.org/www-project-machine-learning-security-top-10/", "licence": "CC-BY-SA-4.0", "commercial_use": true, "shipped": false, "use": "Not shipped. A source card in a private guidance skill states it; its share-alike terms would bind derived text, so none may enter this package."},
+    {"name": "Do-Not-Answer", "url": "https://github.com/Libr-AI/do-not-answer", "licence": "CC-BY-NC-SA-4.0", "commercial_use": false, "shipped": false, "use": "Not shipped. Its repository states a non-commercial licence and its dataset card Apache-2.0; treated as non-commercial."}
+  ],
+  "not_opened": [
+    {"repository": "MartianSecurity/martian-agents", "finding": "No licence file. Holds the hosted campaign engine.", "status": "not opened", "action": "Nothing from it may enter this package until it has a licence and its content is registered here."},
+    {"repository": "MartianSecurity/martian-skills", "finding": "No licence file. Some guidance skills derive from sources with non-commercial or share-alike terms (BeaverTails, CC BY-NC 4.0; OWASP ML, CC BY-SA 4.0).", "status": "not opened", "action": "Nothing from it may enter this package until it has a licence, each skill's sources are reviewed and its content is registered here."},
+    {"repository": "MartianSecurity/martian-wiki", "finding": "No licence file. Holds reviewed attack cases.", "status": "not opened", "action": "Nothing from it may enter this package until it has a licence and its content is registered here."}
+  ]
+}
