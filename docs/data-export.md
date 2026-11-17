@@ -98,8 +98,9 @@ describe, and what the two stores do not hold:
 `martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
 store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store
 and the record store take or return to its files; `LEFT_OUT_TABLES` and `LEFT_OUT_KINDS` give
-the rest, each with why. Every table but the worker's queue, the outbox and the suite audits is
-exported, and every kind of object but the outbox's deliveries and a suite audit; the other model
+the rest, each with why. Every table but the worker's queue, the outbox, the suite audits and the
+red team tables is exported, and every kind of object but the outbox's deliveries, a suite audit and a
+red team run's own records; the other model
 classes left out are not data of their own (the store's status, a trace search and the sessions it
 groups, a page of a listing, a run's counts). The webhook secret is a column, not an object, and
 no file carries it. The judges' agreement with people and the reviewers' agreement with each other
@@ -107,6 +108,10 @@ are computed from the runs, scores, reviews and traces when they are read, so th
 and come back with those. A table or a kind added to
 either store fails `tests/evals/test_data_export.py` until the export carries it, in a new file
 of a new format version, or names it as left out and why.
+
+Red team runs are not part of the format: the export lists eval runs only, so a red team run
+(an eval run of kind `redteam`, [red team model](redteam-model.md#where-a-run-is-stored)) and its
+case results, scores and red team records stay in the data folder.
 
 ## The format
 

@@ -1,0 +1,677 @@
+{
+  "components": {
+    "schemas": {
+      "EvaluateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "attack": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Attack",
+            "type": "string"
+          },
+          "catalog_version": {
+            "const": "0.2.0",
+            "title": "Catalog Version",
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/EvaluatorContextDto"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "target_output": {
+            "maxLength": 20000,
+            "title": "Target Output",
+            "type": "string"
+          },
+          "tools_called": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Tools Called",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operation_id",
+          "catalog_version",
+          "context",
+          "attack",
+          "target_output"
+        ],
+        "title": "EvaluateRequest",
+        "type": "object"
+      },
+      "EvaluatorContextDto": {
+        "additionalProperties": false,
+        "properties": {
+          "attack_method": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Attack Method",
+            "type": "string"
+          },
+          "criteria": {
+            "anyOf": [
+              {
+                "maxLength": 8192,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Criteria"
+          },
+          "vulnerability": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Vulnerability",
+            "type": "string"
+          },
+          "vulnerability_type": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Vulnerability Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vulnerability",
+          "vulnerability_type",
+          "attack_method"
+        ],
+        "title": "EvaluatorContextDto",
+        "type": "object"
+      },
+      "EvaluatorResult": {
+        "additionalProperties": false,
+        "properties": {
+          "graph_revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Graph Revision",
+            "type": "string"
+          },
+          "policy_revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Policy Revision",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "score": {
+            "enum": [
+              0,
+              1
+            ],
+            "title": "Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "score",
+          "reason",
+          "graph_revision",
+          "policy_revision"
+        ],
+        "title": "EvaluatorResult",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "OperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deadline_at": {
+            "format": "date-time",
+            "title": "Deadline At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SafeOperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "enum": [
+              "simulate",
+              "evaluate"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "poll_after_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poll After Ms"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimulatorResult"
+              },
+              {
+                "$ref": "#/components/schemas/EvaluatorResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "result_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Expires At"
+          },
+          "state": {
+            "enum": [
+              "admitted",
+              "dispatching",
+              "running",
+              "cancel_requested",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "uncertain",
+              "purged"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "kind",
+          "state",
+          "deadline_at"
+        ],
+        "title": "OperationResponse",
+        "type": "object"
+      },
+      "SafeOperationError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "execution_state": {
+            "enum": [
+              "admitted",
+              "dispatching",
+              "running",
+              "cancel_requested",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "uncertain",
+              "purged"
+            ],
+            "title": "Execution State",
+            "type": "string"
+          },
+          "retryable": {
+            "const": false,
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "execution_state"
+        ],
+        "title": "SafeOperationError",
+        "type": "object"
+      },
+      "SimulateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "catalog_version": {
+            "const": "0.2.0",
+            "title": "Catalog Version",
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/SimulatorContextDto"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "maxLength": 20000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "catalog_version",
+          "context"
+        ],
+        "title": "SimulateRequest",
+        "type": "object"
+      },
+      "SimulatorContextDto": {
+        "additionalProperties": false,
+        "properties": {
+          "attack_method": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Attack Method",
+            "type": "string"
+          },
+          "mode": {
+            "default": "baseline",
+            "enum": [
+              "baseline",
+              "enhance"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "purpose": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Purpose",
+            "type": "string"
+          },
+          "vulnerability": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Vulnerability",
+            "type": "string"
+          },
+          "vulnerability_type": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Vulnerability Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vulnerability",
+          "vulnerability_type",
+          "purpose",
+          "attack_method"
+        ],
+        "title": "SimulatorContextDto",
+        "type": "object"
+      },
+      "SimulatorResult": {
+        "additionalProperties": false,
+        "properties": {
+          "attack": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Attack",
+            "type": "string"
+          },
+          "attack_method": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Attack Method",
+            "type": "string"
+          },
+          "graph_revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Graph Revision",
+            "type": "string"
+          },
+          "policy_revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Policy Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attack",
+          "attack_method",
+          "graph_revision",
+          "policy_revision"
+        ],
+        "title": "SimulatorResult",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The SDK red team operation routes of the hosted backend. Generated by scripts/redteam-contract.py; do not edit by hand.",
+    "title": "Martian red team operations API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/redteam/evaluate": {
+      "post": {
+        "operationId": "evaluate_v1_redteam_evaluate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "MartianApiKey": []
+          }
+        ],
+        "summary": "Evaluate",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    },
+    "/v1/redteam/operations/{operation_id}": {
+      "get": {
+        "operationId": "operation_status_v1_redteam_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "MartianApiKey": []
+          }
+        ],
+        "summary": "Operation Status",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    },
+    "/v1/redteam/operations/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_v1_redteam_operations__operation_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "MartianApiKey": []
+          }
+        ],
+        "summary": "Cancel",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    },
+    "/v1/redteam/simulate": {
+      "post": {
+        "operationId": "simulate_v1_redteam_simulate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "MartianApiKey": []
+          }
+        ],
+        "summary": "Simulate",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    }
+  }
+}

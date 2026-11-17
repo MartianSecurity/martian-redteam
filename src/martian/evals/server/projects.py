@@ -58,7 +58,7 @@ async def archive_project(
     key = str(project_id)
     if await store.get_project(principal, key) is None:
         raise HTTPException(404, "Not found")
-    if (await records.list_runs(principal, key, states=list(ACTIVE), limit=1)).items:
+    if (await records.list_runs(principal, key, states=list(ACTIVE), limit=1, kind=None)).items:
         raise HTTPException(409, "Wait for the project's active evaluation before archiving")
     for run in await project_runs(records, principal, key):
         if any(j.state in ACTIVE for j in await records.list_scoring_jobs(principal, key, run.id)):

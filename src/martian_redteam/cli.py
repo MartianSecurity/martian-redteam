@@ -10,6 +10,7 @@ from typing import Annotated
 from uuid import uuid4
 
 import typer
+import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
@@ -155,9 +156,17 @@ def run_command(
         Path | None,
         typer.Option("-o", "--output", help="Output folder path (overrides system_config.output_folder)."),
     ] = None,
+    store: Annotated[
+        bool,
+        typer.Option(
+            "--store/--no-store",
+            help="Keep the run in the local store that martian ui reads (needs martian-sdk[evals]).",
+        ),
+    ] = True,
 ) -> None:
     """Run a YAML assessment and apply the CI gate."""
     destination = output or Path("results")
+    _refuse_version_2(config_path, "run")
     try:
         config = _apply_run_overrides(
             RunConfig.from_yaml(config_path),
@@ -183,6 +192,8 @@ def run_command(
         written = assessment.save(destination)
         _print_assessment(assessment.for_report())
         console.print(f"Wrote {written}")
+        if store:
+            _keep_locally(assessment)
     except Exception as error:
         code, detail = _setup_error(error)
         identifier = str(uuid4())
@@ -223,12 +234,74 @@ def run_command(
         raise typer.Exit(code=1) from None
 
 
+def _refuse_version_2(config_path: Path, command: str) -> None:
+    """Stop before anything runs when a version 2 file reaches a command that does not run one yet."""
+    from martian.redteam.runfile import read_yaml
+
+    try:
+        version = read_yaml(config_path).get("version")
+    except (OSError, ValueError, yaml.YAMLError):
+        return
+    if version is not None and command == "run":
+        errors.print(
+            "A version 2 run file runs with the local red team engine, which this release does not include "
+            "yet. Check it with 'martian redteam validate'.",
+            markup=False,
+        )
+        raise typer.Exit(code=2)
+
+
+def _keep_locally(assessment: RiskAssessment) -> None:
+    """Record the run in the local store, where martian ui lists it."""
+    try:
+        from martian.redteam.model.maps import from_risk_assessment
+        from martian.redteam.store import RedteamStore
+    except ImportError:
+        console.print("Not kept in the local store: install martian-sdk[evals] for that.")
+        return
+    run = from_risk_assessment(assessment.for_report())
+    local = RedteamStore.local()
+    try:
+        asyncio.run(local.save(run))
+    finally:
+        local.close()
+    console.print(f"Kept in the local store as {run.id}")
+
+
+def _validate_version_2(config_path: Path) -> None:
+    from martian.redteam.runfile import RunFile, problems
+
+    found = problems(config_path)
+    if found:
+        console.print(f"[red]Validation failed:[/red] {len(found)} problem(s)")
+        for line in found:
+            console.print("  " + safe_text(line), markup=False, no_wrap=True, overflow="ignore", crop=False)
+        raise typer.Exit(code=1)
+    run_file = RunFile.from_yaml(config_path)
+    console.print(
+        f"OK: version 2, {len(run_file.vulnerabilities)} vulnerabilities, {len(run_file.attacks)} attacks, "
+        f"{run_file.target.kind} target",
+        no_wrap=True,
+        overflow="ignore",
+        crop=False,
+    )
+
+
 @app.command("validate")
 def validate_command(
     ctx: typer.Context,
     config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
 ) -> None:
-    """Lint a YAML config without contacting Martian Agents."""
+    """Lint a YAML config without contacting Martian Agents. Version 2 files list every problem."""
+    from martian.redteam.runfile import read_yaml
+
+    try:
+        is_version_2 = "version" in read_yaml(config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        is_version_2 = False
+    if is_version_2:
+        _validate_version_2(config_path)
+        return
     stage = "configuration"
     try:
         config = RunConfig.from_yaml(config_path)
