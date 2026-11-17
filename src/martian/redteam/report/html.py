@@ -241,7 +241,7 @@ def render_html(run: RedteamRun, report: RedteamReport | None = None) -> str:
                 ["Name", "Attempts", "Decided", "Confirmed", "Suspected", "Undetermined", "Stopped", "Errors"],
                 [
                     [
-                        group.name,
+                        f"{group.name} ({group.arm})" if group.arm else group.name,
                         group.attempts,
                         group.decided,
                         _rate(group.confirmed),

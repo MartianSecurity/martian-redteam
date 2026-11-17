@@ -2009,8 +2009,19 @@
       },
       "Group": {
         "additionalProperties": false,
-        "description": "The attack attempts of one attack method or one vulnerability.",
+        "description": "The attack attempts of one attack method or one vulnerability. A method's group also has its\n``kind`` and ``arm`` (``control``, ``static`` or ``adaptive``), so the control arm's results read\nbeside the adaptive methods', the ``target_queries`` its attempts made and the median of its\nprobes' ``queries_to_first_hit``.",
         "properties": {
+          "arm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm"
+          },
           "attempts": {
             "default": 0,
             "title": "Attempts",
@@ -2029,6 +2040,17 @@
             "title": "Errors",
             "type": "integer"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2038,6 +2060,17 @@
             "title": "Probes",
             "type": "integer"
           },
+          "queries_to_first_hit_median": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queries To First Hit Median"
+          },
           "stopped": {
             "default": 0,
             "title": "Stopped",
@@ -2045,6 +2078,11 @@
           },
           "suspected": {
             "$ref": "#/components/schemas/Rate"
+          },
+          "target_queries": {
+            "default": 0,
+            "title": "Target Queries",
+            "type": "integer"
           },
           "undetermined": {
             "default": 0,

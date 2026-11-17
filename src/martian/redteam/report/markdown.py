@@ -215,10 +215,23 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
         )
     lines += ["", "## By attack method", ""]
     lines += table(
-        ["Attack method", "Attempts", "Decided", "Confirmed", "Suspected", "Undetermined", "Stopped", "Errors"],
+        [
+            "Attack method",
+            "Arm",
+            "Attempts",
+            "Decided",
+            "Confirmed",
+            "Suspected",
+            "Undetermined",
+            "Stopped",
+            "Errors",
+            "Target queries",
+            "Median queries to first hit",
+        ],
         [
             [
                 group.name,
+                group.arm,
                 group.attempts,
                 group.decided,
                 group.confirmed.display,
@@ -226,10 +239,19 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
                 group.undetermined,
                 group.stopped,
                 group.errors,
+                group.target_queries,
+                group.queries_to_first_hit_median,
             ]
             for group in report.by_method
         ],
     )
+    if any(group.arm == "control" for group in report.by_method) and any(
+        group.arm == "adaptive" for group in report.by_method
+    ):
+        lines += [
+            "",
+            "The control arm sends the same fixed templates every run; read each adaptive method beside it.",
+        ]
     lines += ["", "## Probes", ""]
     lines += table(
         ["Vulnerability", "Type", "Attack", "Checks", "Vulnerable", "Held", "Undetermined", "Stopped", "Errors"],

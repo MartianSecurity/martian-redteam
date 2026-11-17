@@ -7,7 +7,9 @@ its arguments and whether it ran. Each proxied server has a mode:
 
 - ``record``: forward the call and record it.
 - ``inject``: forward the call, add the ``inject`` text to the result the agent reads, and record the
-  delivery. This is how an indirect prompt injection reaches the agent.
+  delivery. This is how an indirect prompt injection reaches the agent. An attack method's
+  ``tool_result`` route stages its own text for one conversation (:meth:`ToolProxy.stage`), which
+  that conversation's calls get in place of ``inject``.
 - ``block``: answer with ``block_reply`` and do not forward: the call never reaches the tool server,
   so the agent's real tool cannot carry out an attacker's goal. Its result is not a tool error.
 
@@ -193,6 +195,18 @@ class ToolProxy:
         self._reserved = 0
         self._started = False
         self._sessions: dict[str, _Open] = {}
+        self._staged: dict[tuple[str, str], str] = {}
+
+    def stage(self, action_id: str, server: str, text: str) -> None:
+        """Add ``text`` to the results of ``server``'s calls with action id ``action_id`` (one
+        conversation), in place of its ``inject`` text. ``server`` must be in inject mode."""
+        proxied = self._servers.get(server)
+        if proxied is None or proxied.config.mode != "inject":
+            raise ValueError(f"tools.proxy {server!r} is not a server in inject mode")
+        self._staged[(action_id, server)] = text
+
+    def unstage(self, action_id: str, server: str) -> None:
+        self._staged.pop((action_id, server), None)
 
     def _upstream(self, server: ProxiedServer) -> Any:
         @asynccontextmanager
@@ -324,11 +338,12 @@ class ToolProxy:
                     content=[TextContent(type="text", text="The tool server could not complete this call.")],
                     is_error=True,
                 )
-            if record["mode"] == "inject" and record["executed"] and config.inject:
+            injected = self._staged.get((record["action_id"] or "", config.name), config.inject)
+            if record["mode"] == "inject" and record["executed"] and injected:
                 result = result.model_copy(
-                    update={"content": [*result.content, TextContent(type="text", text=config.inject)]}
+                    update={"content": [*result.content, TextContent(type="text", text=injected)]}
                 )
-                record["injected"] = config.inject
+                record["injected"] = injected
         record.update(
             result=_result_text(result),
             is_error=bool(result.is_error),
@@ -446,6 +461,11 @@ class ProxiedTarget:
     @property
     def name(self) -> str:
         return str(getattr(self._target, "name", ""))
+
+    @property
+    def proxy(self) -> ToolProxy:
+        """The proxy the target's tools go through, where a ``tool_result`` route stages its text."""
+        return self._proxy
 
     async def send(self, message: str, *, session: str | None = None) -> TargetReply:
         reply = await self._target.send(message, session=session)

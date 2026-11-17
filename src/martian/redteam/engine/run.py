@@ -1,9 +1,11 @@
 """The plan, attack, verify loop of a version 2 run, producing a :class:`~martian.redteam.model.RedteamRun`.
 
 - **Plan** (:mod:`martian.redteam.engine.plan`): the probes and their checks, before anything runs.
-- **Attack**: the attack method drives the target. Today every catalogue method is one turn: the
-  service writes the attack (an encoding method rewrites a generated injection), and the target is
-  called once, in a session of its own per attempt.
+- **Attack**: the attack method (:mod:`martian.redteam.methods`) drives the target through an
+  :class:`~martian.redteam.engine.attempt.AttemptRun`: it writes attacks (the service's attacker, a
+  template, a change of a seed), sends them after its transform layers and delivery route, and reads
+  the checks' feedback. A version 0.2 method writes one attack and sends it once, in a session of its
+  own per attempt. A repetition and a negative control send what they are given, once.
 - **Verify**: the run's verifiers (:mod:`martian.redteam.verify.verifiers`) decide each check with the
   verdict rules (:mod:`martian.redteam.verify.rules`): text, canary and tool-call checks first, by
   code; the judge last. The attempt's outcome is
@@ -35,16 +37,21 @@ import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from martian.redteam.catalog.prompts import PROMPTS_REVISION
+from martian.redteam.engine.attempt import AttemptRun
 from martian.redteam.engine.budget import BudgetExhausted, CallKind, Ledger
 from martian.redteam.engine.fingerprint import attempt_fingerprint
 from martian.redteam.engine.local import EmptyGeneration
 from martian.redteam.engine.plan import PlannedProbe, plan, skipped
 from martian.redteam.engine.refusal import DEFENSIVE_FRAMING, classify
+from martian.redteam.methods import GenerationMode
+from martian.redteam.methods.delivery import Deliverer, PageServer
+from martian.redteam.methods.library import METHODS_REVISION
 from martian.redteam.model import (
     Attempt,
     Check,
@@ -75,7 +82,6 @@ from martian.redteam.verify.verifiers import Decided, Observation, VerifierFaile
 from martian_redteam.catalog.entries import EARLIER_USER_NOTE, POISON_NOTE
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
-from martian_redteam.encoding import apply_encoding
 from martian_redteam.orchestrator import DEFAULT_TARGET_TIMEOUT_SECONDS
 from martian_redteam.types import ModelUsage, RedteamService, SimulatorContext
 
@@ -144,6 +150,17 @@ def memory_digest(store: str | None) -> str | None:
         digest.update(str(item.relative_to(path) if path.is_dir() else item.name).encode() + b"\0")
         digest.update(item.read_bytes() + b"\0")
     return digest.hexdigest()
+
+
+@dataclass
+class Delivered:
+    """What :meth:`Engine._deliver` sent and got back: the reply of the conversation checked, the
+    message it received, the turns of a first conversation before it, and what the probe planted."""
+
+    reply: TargetReply
+    sent: str
+    setup: list[Turn]
+    planted: str | None
 
 
 class AttemptFailed(Exception):
@@ -228,6 +245,7 @@ class Engine:
         self.listener: ReceiptListener | None = None
         self.listened = False
         """Re-judging: whether the stored run had a receipt listener."""
+        self.deliverer = Deliverer(proxy=getattr(target, "proxy", None))
         if resume is not None:
             self._resume(resume)
 
@@ -263,12 +281,17 @@ class Engine:
     # --- the run --------------------------------------------------------------------------------
 
     async def run(self) -> RedteamRun:
-        """Run every planned attempt. A run with a receipt check starts the receipt listener first
-        and stops it when the run ends, however it ends."""
+        """Run every planned attempt. A run with a receipt check starts the receipt listener first,
+        and one with a ``web_page`` route the page server; both stop when the run ends, however it
+        ends."""
         listens = any(check.kind == "receipt" for planned in self.planned for check in planned.probe.checks)
+        routes = {p.attack_method.delivery.route for p in self.planned if p.attack_method.delivery is not None}
         try:
             if listens:
                 self.listener = await ReceiptListener().start()
+            if "web_page" in routes:
+                self.deliverer.pages = PageServer()
+                await self.deliverer.pages.start()
             await self._calibrate()
             await self._load_datasets()
             await self._attacks()
@@ -440,6 +463,8 @@ class Engine:
     async def _close_listener(self) -> None:
         if self.listener is not None:
             await self.listener.close()
+        if self.deliverer.pages is not None:
+            await self.deliverer.pages.stop()
 
     async def _attacks(self) -> None:
         semaphore = asyncio.Semaphore(self._concurrency())
@@ -484,6 +509,9 @@ class Engine:
             "fingerprint": self.fingerprint(planned, number) if role == "attack" else None,
         }
 
+        if role == "attack" and self.world is None:
+            return await self._method_attempt(planned, number, fields, spending)
+
         def done(**update: Any) -> Attempt:
             return Attempt(
                 **fields,
@@ -501,52 +529,30 @@ class Engine:
             self.ledger.check()
             payload = attack
             if role == "attack" and "dataset" in probe.metadata:
-                # A dataset prompt is the attack: the attacker writes nothing, an encoding still applies.
-                row = self._dataset_row(probe, number)
-                payload = apply_encoding(row, planned.attack.id) if planned.attack.kind == "encoding" else row
+                # A dataset prompt is the attack: the attacker writes nothing; the layers still apply.
+                payload = self._dataset_row(probe, number)
+                for layer in planned.attack_method.layers:
+                    payload = layer(payload)
             elif role == "attack":
+                # In an environment, only the six version 0.2 methods run: one attack, written once.
                 payload, generated = await self._generate(planned, spending, attempt_id)
+                for layer in planned.attack_method.layers:
+                    payload = layer(payload)
                 fields["policy_revision"] = generated.get("policy_revision")
-            planted = context_of(probe, self.canary)
             opening = plant["trigger"] if plant else CONTROL_MESSAGE
             await self._prepare(
                 attempt_id, implant=(plant["profile"], payload) if plant and role != "control" else None
             )
-            if probe.metadata.get("protocol") == "memory":
-                memory = self.run_file.target.memory
-                assert memory is not None  # the plan skips a memory probe without it
-                planted = planted or str(plant_canary(POISON_NOTE, self.canary))
-                first = "\n\n".join(part for part in [planted, payload] if part)
-                async with self._memory:
-                    before = memory_digest(memory.store)
-                    setup = await self._first_conversation(
-                        attempt_id, first if role != "control" else CONTROL_MESSAGE, spending, protocol="memory"
-                    )
-                    self._memory_written[attempt_id] = before != memory_digest(memory.store) if memory.store else None
-                    if memory.start == "message" and memory.message is not None:
-                        opened = await self._send(attempt_id, memory.message, spending)
-                        setup += [
-                            Turn(role="attacker", content=memory.message),
-                            Turn(role="target", content=opened.text, tool_calls=opened.tool_calls),
-                        ]
-                parts: list[str | None] = [probe.task, memory.trigger]
-            elif probe.metadata.get("protocol") == "cross_session":
-                planted = planted or str(plant_canary(EARLIER_USER_NOTE, self.canary))
-                setup = await self._first_conversation(attempt_id, planted, spending, protocol="cross_session")
-                parts = [probe.task, payload] if role != "control" else [probe.task or CONTROL_MESSAGE]
-            elif probe.metadata.get("protocol") == "planted":
-                parts = [probe.task, _trigger(probe)]
-            else:
-                message = plant["trigger"] if plant else payload
-                parts = [planted, probe.task, message] if role != "control" else [planted, probe.task or opening]
-            sent = "\n\n".join(part for part in parts if part)
+            delivered = await self._deliver(
+                probe,
+                attempt_id,
+                plant["trigger"] if plant else payload,
+                spending,
+                control=role == "control",
+                opening=opening,
+            )
+            reply, sent, setup, planted = delivered.reply, delivered.sent, delivered.setup, delivered.planted
             fields.update(input=payload or None, planted=planted)
-            if probe.metadata.get("protocol") == "planted":
-                reply, fields["planted"] = await self._planted_send(
-                    probe, attempt_id, payload if role != "control" else None, sent, spending
-                )
-            else:
-                reply = await self._send(attempt_id, sent, spending)
             seen = await self._outcome(attempt_id)
         except BudgetExhausted as exhausted:
             return done(outcome="stopped", stopped_by=exhausted.limit)
@@ -603,6 +609,55 @@ class Engine:
         return done(
             outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
         )
+
+    async def _deliver(
+        self,
+        probe: Probe,
+        session: str,
+        message: str,
+        spending: _Spending,
+        *,
+        control: bool = False,
+        opening: str = CONTROL_MESSAGE,
+    ) -> Delivered:
+        """Send ``message`` (an attack, or what a method made of one) in ``session`` as the probe's
+        protocol says (:data:`martian_redteam.catalog.entries.Protocol`), with what the probe plants
+        and its benign task. A negative control (``control``) sends no attack: ``opening``, or the
+        protocol's ordinary message. The conversation checked is always ``session``; a first
+        conversation, when the protocol has one, is a session of its own that then ends."""
+        planted = context_of(probe, self.canary)
+        protocol = probe.metadata.get("protocol")
+        if protocol == "memory":
+            memory = self.run_file.target.memory
+            assert memory is not None  # the plan skips a memory probe without it
+            planted = planted or str(plant_canary(POISON_NOTE, self.canary))
+            first = "\n\n".join(part for part in [planted, message] if part) if not control else CONTROL_MESSAGE
+            async with self._memory:
+                before = memory_digest(memory.store)
+                setup = await self._first_conversation(session, first, spending, protocol="memory")
+                if memory.store is not None:
+                    self._memory_written[session.split("~", 1)[0]] = before != memory_digest(memory.store)
+                if memory.start == "message" and memory.message is not None:
+                    opened = await self._send(session, memory.message, spending)
+                    setup += [
+                        Turn(role="attacker", content=memory.message),
+                        Turn(role="target", content=opened.text, tool_calls=opened.tool_calls),
+                    ]
+                sent = "\n\n".join(part for part in [probe.task, memory.trigger] if part)
+                return Delivered(await self._send(session, sent, spending), sent, setup, planted)
+        if protocol == "cross_session":
+            planted = planted or str(plant_canary(EARLIER_USER_NOTE, self.canary))
+            setup = await self._first_conversation(session, planted, spending, protocol="cross_session")
+            alone: list[str | None] = [probe.task, message] if not control else [probe.task or CONTROL_MESSAGE]
+            sent = "\n\n".join(part for part in alone if part)
+            return Delivered(await self._send(session, sent, spending), sent, setup, planted)
+        if protocol == "planted":
+            sent = "\n\n".join(part for part in [probe.task, _trigger(probe)] if part)
+            reply, text = await self._planted_send(probe, session, None if control else message, sent, spending)
+            return Delivered(reply, sent, [], text)
+        parts = [planted, probe.task, message] if not control else [planted, probe.task or opening]
+        sent = "\n\n".join(part for part in parts if part)
+        return Delivered(await self._send(session, sent, spending), sent, [], planted)
 
     async def _planted_send(
         self, probe: Probe, attempt_id: str, attack: str | None, sent: str, spending: _Spending
@@ -662,6 +717,101 @@ class Engine:
             Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             Turn(role="system", content="Conversation 2 of 2: a new conversation. Only its reply is checked."),
         ]
+
+    async def _method_attempt(
+        self, planned: PlannedProbe, number: int, fields: dict[str, Any], spending: _Spending
+    ) -> Attempt:
+        """An attack attempt, run by its method (:mod:`martian.redteam.methods`). It is decided, as
+        any attempt, on the exchange the method ends with; every query is in its turns."""
+        probe, method = planned.probe, planned.attack_method
+        attempt_id = fields["id"]
+        context = AttemptRun(self, planned, attempt_id, spending, method)
+
+        def done(**update: Any) -> Attempt:
+            if not method.legacy:
+                trace = self._keep_trace(attempt_id, context, update["outcome"])
+                fields["evidence_ids"] = [*fields.get("evidence_ids", []), trace.id]
+            return Attempt(
+                **fields,
+                **update,
+                spend=spending.spend,
+                attacker_refusals=spending.refusals,
+                finished_at=datetime.now(UTC),
+            )
+
+        def so_far() -> None:
+            """What an attempt that ended early had sent: its last attack, and every turn when it
+            sent more than one."""
+            fields["policy_revision"] = context.policy_revision
+            if context.last_attack is not None:
+                fields.update(input=context.last_attack or None, planted=context.planted)
+            if context.queries > 1 or (context.exchanges and not method.legacy):
+                observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
+                fields.update(
+                    target_calls=context.queries, turns=context.turns, evidence_ids=[*observed, *context.delivery_ids]
+                )
+
+        try:
+            self.ledger.check()
+            final = await method.run(context)
+        except BudgetExhausted as exhausted:
+            so_far()
+            return done(outcome="stopped", stopped_by=exhausted.limit)
+        except AttemptFailed as failed:
+            so_far()
+            return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
+        fields.update(input=final.attack or None, planted=context.planted, policy_revision=context.policy_revision)
+        reply = final.reply
+        evidence = self._keep_reply(attempt_id, reply)
+        observed = [item for exchange in context.exchanges for item in self._keep_observed(exchange.reply)]
+        await self._render(probe, attempt_id, reply.text)
+        receipts = self._keep_receipts(attempt_id)
+        observed += [item.id for item in self._keep_memory(attempt_id)]
+        fields.update(
+            output=reply.text,
+            # A first conversation (a cross-session or memory probe) is a target call too.
+            target_calls=sum(turn.role == "target" for turn in context.turns),
+            evidence_ids=[evidence.id, *observed, *(item.id for item in receipts), *context.delivery_ids],
+            turns=context.turns,
+        )
+        kept = [evidence, *reply.evidence, *receipts]
+        if probe.task_checks:
+            task = await self._verify(
+                planned, probe.task_checks, probe.task, final.sent, reply, spending, kept, attempt_id
+            )
+            fields.update(task_results=task.results, task_completed=completed(task.results))
+        decided = final.verified or await self._verify(
+            planned, probe.checks, final.attack, final.sent, reply, spending, kept, attempt_id
+        )
+        results, failure, stop = decided.results, decided.failure, decided.stop
+        outcome, level = attempt_outcome(results)
+        if outcome != "hit" and isinstance(stop, BudgetExhausted):
+            return done(outcome="stopped", stopped_by=stop.limit, check_results=results, level=EvidenceLevel.DELIVERED)
+        if outcome != "hit" and failure is not None:
+            return done(
+                outcome="error",
+                error=str(failure),
+                error_kind=failure.kind,
+                error_code=failure.code,
+                check_results=results,
+                level=EvidenceLevel.DELIVERED,
+            )
+        # The attack reached the target: an attempt that did not hit is at level 0, delivered.
+        return done(
+            outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
+        )
+
+    def _keep_trace(self, attempt_id: str, context: AttemptRun, outcome: str) -> Evidence:
+        """The method's record of an attempt: what it sent, what it was told and what ended it."""
+        evidence = Evidence(
+            id=f"{attempt_id}/method",
+            kind="trace",
+            source=f"method:{context.method.id}",
+            captured_at=datetime.now(UTC),
+            metadata=context.trace(outcome),
+        )
+        self.evidence[evidence.id] = evidence
+        return evidence
 
     # --- the world -----------------------------------------------------------------------------
 
@@ -807,22 +957,37 @@ class Engine:
         return ", and ".join(goals)
 
     async def _generate(
-        self, planned: PlannedProbe, spending: _Spending, attempt_id: str
+        self,
+        planned: PlannedProbe,
+        spending: _Spending,
+        attempt_id: str,
+        *,
+        method: str | None = None,
+        request: str | None = None,
+        mode: GenerationMode = "baseline",
     ) -> tuple[str, dict[str, Any]]:
+        """One attack in the style of attack method ``method``. ``request`` is the method's own
+        instruction; without one, the attacker is asked for the probe's goal. A refused or empty
+        generation is asked for once more, with the defensive framing."""
         attack, probe = planned.attack, planned.probe
         context = SimulatorContext(
             vulnerability=probe.vulnerability,
             vulnerability_type=probe.vulnerability_type,
             purpose=self.run_file.target.purpose,
-            attack_method=attack.id if attack.kind == "llm" else "prompt_injection",
+            attack_method=method or (attack.id if attack.kind == "llm" else "prompt_injection"),
+            mode=mode,
         )
         found: str | None = None
-        goal = goal_request(self._goal(probe, attempt_id))
+        if request is None:
+            goal = goal_request(self._goal(probe, attempt_id))
+            asked = (goal, DEFENSIVE_FRAMING if goal is None else f"{DEFENSIVE_FRAMING} {goal}")
+        else:
+            asked = (request, f"{request}\n\n{DEFENSIVE_FRAMING}")
         # A refusal or an empty generation is asked once more, with the defensive framing.
-        for request in (goal, DEFENSIVE_FRAMING if goal is None else f"{DEFENSIVE_FRAMING} {goal}"):
+        for prompt in asked:
             spending.reserve("attacker")
             try:
-                output = await self.service.simulate(context, prompt=request)
+                output = await self.service.simulate(context, prompt=prompt)
             except EmptyGeneration:
                 found = "empty"
             except ClientError as error:
@@ -831,8 +996,7 @@ class Engine:
                 spending.record(output.usage)
                 found = classify(output.attack)
                 if found is None:
-                    payload = apply_encoding(output.attack, attack.id) if attack.kind == "encoding" else output.attack
-                    return payload, {"policy_revision": output.policy_revision}
+                    return output.attack, {"policy_revision": output.policy_revision}
             spending.refusals += 1
         raise AttemptFailed(
             "attacker",
@@ -1041,6 +1205,7 @@ class Engine:
                 "engine_version": ENGINE_VERSION,
                 "rules_version": RULES_VERSION,
                 "prompts_revision": PROMPTS_REVISION,
+                "methods_revision": METHODS_REVISION,
                 "verifiers": self.verifiers.versions(),
                 **({"canary": self.canary} if any(uses_canary(p.probe) for p in self.planned) else {}),
                 **({"skipped": self.skipped} if self.skipped else {}),
