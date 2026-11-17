@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -61,13 +61,15 @@ class McpServerTarget:
         *,
         timeout_seconds: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
         base: str | Path | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self._config = config
         self._timeout = timeout_seconds
         self._base = base
-        self._url = _from_environment(config.url, "target.mcp.url") if config.url is not None else None
+        self._url = _from_environment(config.url, "target.mcp.url", environ) if config.url is not None else None
         self._headers = {
-            name: _from_environment(value, f"target.mcp.headers.{name}") for name, value in config.headers.items()
+            name: _from_environment(value, f"target.mcp.headers.{name}", environ)
+            for name, value in config.headers.items()
         }
         self._response = _steps(config.response_path)
         self._calls = _steps(config.tool_calls_path)

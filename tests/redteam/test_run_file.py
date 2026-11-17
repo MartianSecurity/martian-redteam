@@ -99,7 +99,6 @@ def test_each_error_is_explained_with_where_it_is(tmp_path):
         "target.purpose: String should have at least 1 character",
         "vulnerabilities[0].checks[0].all_of: Field required",
         "vulnerabilities[1].goal: a goal names a tool or describes the goal in text",
-        "tools.proxy[0]: inject mode needs the text to inject",
         "budget.target_queries: Input should be greater than or equal to 1",
         "surprise: Extra inputs are not permitted",
     ]
@@ -110,9 +109,13 @@ def test_cross_field_rules(tmp_path):
     assert problems(write(tmp_path, state)) == [
         "(file): vulnerabilities[0]: a state check reads an environment; set environment"
     ]
-    assert problems(write(tmp_path, {**state, "environment": "refund-desk"})) == []
+    assert problems(write(tmp_path, {**state, "environment": "refund-desk", "tools": {}})) == []
     no_judge = {**VALID, "models": {"attacker": "openai:/a"}}
     assert "needs models.judge" in problems(write(tmp_path, no_judge))[0]
+    inject = {**VALID, "tools": {"proxy": [{"name": "c", "upstream": "http://x", "mode": "inject"}]}}
+    assert problems(write(tmp_path, inject)) == [
+        "(file): tools.proxy 'c': inject mode needs the text to inject, or an attack whose tool_result route names it"
+    ]
 
 
 def test_unknown_versions_and_fields_are_refused(tmp_path):
@@ -168,6 +171,8 @@ def test_the_guide_documents_every_field():
         runfile.Tools,
         runfile.Budget,
         runfile.Gate,
+        runfile.VerificationSettings,
+        runfile.Benign,
     ]
     for model in models:
         for name in model.model_fields:

@@ -308,26 +308,41 @@ def _run_version_2(
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
 
+    from martian.redteam.engine.memory import StrategyLibraryError
     from martian.redteam.engine.plan import PlanError, plan
-    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.report import for_report, write_reports
     from martian.redteam.engine.runs import (
+        SESSION_FILE,
         SessionHandoverError,
         TargetUnavailable,
         build_service,
         build_target,
+        environment_boundary,
         execute,
+        run_canary,
         tool_boundary,
         unsupported,
     )
-    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.engine.service import (
+        EnvironmentNeedsServer,
+        ServiceSelectionError,
+        require_environment_connection,
+    )
+    from martian.redteam.environment import EnvironmentRunError
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
     from martian.redteam.targets import TargetChanged
+    from martian.redteam.verify.canary import planted_run_file
 
     found = problems(config_path)
     if found:
         _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
     run_file = RunFile.from_yaml(config_path)
+    try:
+        # An environment is a Martian server's: stop here, before anything is built or called.
+        require_environment_connection(run_file)
+    except EnvironmentNeedsServer as error:
+        _stop(safe_text(error))
     budget = run_file.budget.model_copy(
         update={
             key: value
@@ -336,7 +351,9 @@ def _run_version_2(
         }
     )
     run_file = run_file.model_copy(update={"budget": budget})
-    if missing := unsupported(run_file):
+    if run_file.environment is not None and resume is not None:
+        _stop("--resume continues a local run; a run in an environment starts again in a reset world.")
+    if missing := unsupported(run_file, environments=True):
         _stop("This run file asks for what this release cannot do: " + "; ".join(missing))
     try:
         plan(run_file)
@@ -360,15 +377,46 @@ def _run_version_2(
             keeper.close()
             _stop(f"No red team run {resume} is in the local store.")
 
+    canary = run_canary(earlier)
+    run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
+    admitted: Any = None
+
     async def go() -> Any:
+        nonlocal admitted
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
-            target = build_target(run_file.target, base=config_path.resolve().parent)
+            planted = planted_run_file(run_file, canary)
+            target = build_target(planted.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
-            target = await tool_boundary(run_file, target, stack, folder=destination)
+            if run_file.environment is not None:
+                admitted = await environment_boundary(run_file, stack, folder=destination, label=run_id)
+                console.print(
+                    f"Admitted in environment {admitted.run.environment} as {admitted.run.run_code}; "
+                    f"the agent's tool session is in {destination / SESSION_FILE}",
+                    markup=False,
+                )
+                provenance = {
+                    **provenance,
+                    "environment": {
+                        "name": admitted.run.environment,
+                        "run_id": admitted.run.id,
+                        "run_code": admitted.run.run_code,
+                    },
+                }
+            target = await tool_boundary(planted, target, stack, folder=destination)
             run = await execute(
-                run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
+                run_file,
+                service=service,
+                target=target,
+                provenance=provenance,
+                store=keeper,
+                resume=earlier,
+                canary=canary,
+                run_id=run_id,
+                world=admitted.world() if admitted is not None else None,
             )
+            if admitted is not None:
+                admitted.ended(run.state)
             return run, service
 
     try:
@@ -380,6 +428,8 @@ def _run_version_2(
         SessionHandoverError,
         ConnectionError,
         TargetChanged,
+        EnvironmentRunError,
+        StrategyLibraryError,
     ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
@@ -400,6 +450,16 @@ def _run_version_2(
     console.print(f"Wrote {written} and {markdown}")
     if keeper is not None:
         console.print(f"Kept in the local store as {run.id}")
+    if admitted is not None and admitted.finish_error:
+        errors.print(
+            "Warning: " + safe_text(admitted.finish_error) + "; the server ends the run at its time limit.",
+            style="yellow",
+            markup=False,
+            soft_wrap=True,
+        )
+    if admitted is not None:
+        # A run in an environment is the server's too: its records go there, as martian redteam push sends them.
+        _push(for_report(run, policy=service.redaction_policy), warn=True)
     if reused := run.provenance.get("resumed_attempts"):
         console.print(f"Reused {reused} finished attempt(s) of the earlier session; no model was called for them.")
     for warning in decided.warnings:
@@ -503,6 +563,116 @@ def _stored_run(run_id: str) -> Any:
     if found is None:
         _stop(f"{safe_text(run_id)} is neither a file nor a red team run in the local store.")
     return found
+
+
+def _push(run: Any, *, warn: bool = False) -> None:
+    """Push ``run`` to the Martian server of ``MARTIAN_API_URL`` and say what the server did. A
+    failure stops with exit code 2, or with ``warn`` is only reported."""
+    from martian.redteam.push import PushError, push_run
+
+    try:
+        pushed = asyncio.run(push_run(run, MartianConfig.from_env()))
+    except (PushError, ConfigError) as error:
+        if not warn:
+            _stop("Not pushed: " + safe_text(error))
+        errors.print("Warning: not pushed: " + safe_text(error), style="yellow", markup=False, soft_wrap=True)
+        return
+    state = "pushed to" if pushed.created else "already on"
+    console.print(f"Red team run {pushed.run_id} {state} the Martian server.", markup=False)
+
+
+@app.command("push")
+def push_command(
+    run: Annotated[str, typer.Argument(help="A redteam-run.json, or the id of a run in the local store.")],
+) -> None:
+    """Push a finished version 2 run to the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), where
+    the console lists it. Pushing it again changes nothing."""
+    found, _ = _load_run(run)
+    if found.state in ("queued", "running"):
+        _stop(f"{safe_text(found.id)} has not finished: only a finished red team run is pushed.")
+    _push(found)
+
+
+@app.command("campaign")
+def campaign_command(
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="The registered agent's id. Default: the agent the API key is bound to."),
+    ] = None,
+    depth: Annotated[str, typer.Option("--depth", help="quick, standard or deep.")] = "standard",
+    objective: Annotated[str | None, typer.Option("--objective", help="What the campaign assesses, in words.")] = None,
+    outcomes: Annotated[
+        list[str] | None, typer.Option("--outcome", help="money, persist, data or control. Repeat it.")
+    ] = None,
+    environment: Annotated[
+        str | None, typer.Option("--environment", help="Run the campaign in this environment.")
+    ] = None,
+    output: Annotated[Path, typer.Option("-o", "--output", help="Folder for redteam-run.json and the reports.")] = Path(
+        "results"
+    ),
+    wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Follow the campaign until it finishes.")] = True,
+    poll: Annotated[float, typer.Option("--poll", min=1, help="Seconds between readings.")] = 15.0,
+    timeout: Annotated[float, typer.Option("--timeout", min=1, help="Seconds to follow it at most.")] = 7200.0,
+    allow_conditional: Annotated[
+        bool, typer.Option("--allow-conditional", help="Exit 0 on a CONDITIONAL release decision, with a warning.")
+    ] = False,
+) -> None:
+    """Start a planned campaign on the Martian server (MARTIAN_API_URL, MARTIAN_API_TOKEN), follow it and
+    write its result. Exits 0 on an APPROVED release decision, 1 on BLOCKED or CONDITIONAL, 2 without one."""
+    from martian.redteam.campaign import CampaignClient, CampaignError, exit_code
+
+    if depth not in ("quick", "standard", "deep"):
+        _stop("--depth is quick, standard or deep.")
+    try:
+        config = MartianConfig.from_env()
+    except ConfigError as error:
+        _stop("A campaign runs on a Martian server: " + safe_text(error))
+
+    async def go() -> Any:
+        client = CampaignClient(config)
+        try:
+            started = await client.start(
+                agent=agent, depth=depth, objective=objective, outcomes=outcomes or [], environment=environment
+            )
+            console.print(
+                f"Started campaign {started.run_code} ({started.id}); the console shows it at {started.console_path}",
+                markup=False,
+            )
+            if not wait:
+                return started
+            return await client.follow(started, every=poll, within=timeout)
+        finally:
+            await client.aclose()
+
+    try:
+        found = asyncio.run(go())
+    except CampaignError as error:
+        _stop("The campaign: " + safe_text(error))
+    if not wait:
+        return
+    console.print(
+        f"Campaign {found.run_code}: {found.state}; release decision {found.decision}"
+        + (f" ({', '.join(found.reasons)})" if found.reasons else ""),
+        markup=False,
+    )
+    if found.redteam_run is not None:
+        from martian.redteam.engine.report import JSON_NAME, MARKDOWN_NAME, REPORT_NAME
+        from martian.redteam.model import RedteamRun
+        from martian.redteam.report import build_report, render_markdown
+
+        run = RedteamRun.model_validate(found.redteam_run)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / JSON_NAME).write_text(run.model_dump_json(indent=2), encoding="utf-8")
+        standard = build_report(run)
+        (output / REPORT_NAME).write_text(standard.model_dump_json(indent=2), encoding="utf-8")
+        (output / MARKDOWN_NAME).write_text(render_markdown(run, standard), encoding="utf-8")
+        console.print(f"Wrote {output / JSON_NAME}, {REPORT_NAME} and {MARKDOWN_NAME}", markup=False)
+    code = exit_code(found, allow_conditional=allow_conditional)
+    if not found.finished:
+        errors.print(f"The campaign did not finish within {timeout:g} seconds.", style="red", markup=False)
+    elif found.decision == "CONDITIONAL" and code == 0:
+        errors.print("Warning: the release decision is CONDITIONAL.", style="yellow", markup=False)
+    raise typer.Exit(code=code)
 
 
 @app.command("compare")
@@ -644,6 +814,147 @@ def _validate_version_2(config_path: Path) -> None:
     )
 
 
+@app.command("rejudge")
+def rejudge_command(
+    config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    run: Annotated[
+        str, typer.Option("--run", help="A run id in the local store, or a redteam-run.json file to re-judge.")
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Output folder. Default: rejudged-<run id> in the file's output_folder."),
+    ] = None,
+    store: Annotated[
+        bool, typer.Option("--store/--no-store", help="Keep the re-judged run in the local store.")
+    ] = True,
+) -> None:
+    """Decide a stored version 2 run again with this run file's checks, without calling the target."""
+    from contextlib import AsyncExitStack
+
+    from martian.redteam.engine.gate import gate_failures
+    from martian.redteam.engine.plan import PlanError, plan
+    from martian.redteam.engine.rejudge import rejudge
+    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.runs import build_service
+    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.model import RedteamRun
+    from martian.redteam.runfile import RunFile, problems
+
+    if not _is_version_2(config_path):
+        _stop("rejudge reads a version 2 run file.")
+    found = problems(config_path)
+    if found:
+        _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
+    run_file = RunFile.from_yaml(config_path)
+    try:
+        planned = plan(run_file)
+    except PlanError as error:
+        _stop(f"The run cannot be planned: {error}")
+    keeper: Any = None
+    if store or not Path(run).is_file():
+        try:
+            from martian.redteam.store import RedteamStore
+
+            keeper = RedteamStore.local()
+        except ImportError:
+            _stop("rejudge keeps runs in the local store: install martian-sdk[evals], or pass a file and --no-store.")
+    try:
+        if Path(run).is_file():
+            stored = RedteamRun.model_validate_json(Path(run).read_text(encoding="utf-8"))
+        else:
+            stored = asyncio.run(keeper.get("default", run))
+            if stored is None:
+                _stop(f"No red team run {run} is in the local store.")
+        number = 1
+        while keeper is not None and asyncio.run(keeper.get(stored.project_id, f"{stored.id}-rejudged-{number}")):
+            number += 1
+        judged = any(check.kind == "judge" for item in planned for check in item.probe.checks)
+
+        async def go() -> Any:
+            async with AsyncExitStack() as stack:
+                service = build_service(run_file, stack)[0] if judged else None
+                return await rejudge(stored, run_file, service=service, number=number), service
+
+        again, service = asyncio.run(go())
+        if keeper is not None and store:
+            from martian.redteam.engine.report import for_report
+
+            policy = service.redaction_policy if service is not None else None
+            asyncio.run(keeper.save(for_report(again, policy=policy)))
+    except (ServiceSelectionError, ConfigError) as error:
+        _stop(safe_text(error))
+    except ValueError as error:
+        _stop(f"Could not read the run: {safe_text(error)}")
+    finally:
+        if keeper is not None:
+            keeper.close()
+    destination = output or Path(run_file.output_folder) / f"rejudged-{stored.id}"
+    written, markdown, report = write_reports(again, destination)
+    _print_run(report)
+    before = {attempt.id: attempt for attempt in stored.attempts}
+    table = Table(title=f"Re-judged {stored.id} as {again.id}; the target was not called")
+    for column in ("Attempt", "Before", "After"):
+        table.add_column(column)
+    for attempt in again.attempts:
+        earlier = before[attempt.id]
+        if (earlier.outcome, earlier.level) != (attempt.outcome, attempt.level):
+            table.add_row(attempt.id, f"{earlier.outcome} {earlier.level}", f"{attempt.outcome} {attempt.level}")
+    console.print(table)
+    console.print(f"Wrote {written} and {markdown}")
+    if keeper is not None and store:
+        console.print(f"Kept in the local store as {again.id}; {stored.id} is unchanged.")
+    failures = gate_failures(again, run_file.gate)
+    if failures:
+        errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("selftest")
+def selftest_command(
+    disable: Annotated[
+        list[str] | None,
+        typer.Option("--disable", help="Run without this check kind's verifier, to see its level fail."),
+    ] = None,
+) -> None:
+    """Run each evidence level against a planted vulnerable target; exit 1 when one misses its hit."""
+    from martian.redteam.verify.judge import ServiceJudge
+    from martian.redteam.verify.selftest import ScriptedService, selftest
+    from martian.redteam.verify.verifiers import Verifiers
+
+    verifiers = Verifiers(ServiceJudge(ScriptedService()))
+    for kind in disable or []:
+        if kind not in ("judge", "text", "canary", "tool_call", "receipt"):
+            _stop(f"--disable takes judge, text, canary, tool_call or receipt, not {safe_text(kind)}.")
+        verifiers = verifiers.without(kind)  # type: ignore[arg-type]
+    outcomes, _ = asyncio.run(selftest(verifiers))
+    table = Table(title="Martian red team self-test: a planted vulnerable target")
+    for column in ("Case", "Shows", "Expected", "Found", "Result"):
+        table.add_column(column)
+
+    def shown(level: Any, counted: Any) -> str:
+        return "no finding" if level is None else f"level {int(level)}, {counted}"
+
+    for outcome in outcomes:
+        table.add_row(
+            outcome.case.name,
+            outcome.case.what,
+            shown(outcome.case.level, outcome.case.counted_as),
+            shown(outcome.level, outcome.counted_as),
+            "pass" if outcome.passed else "FAIL",
+        )
+    console.print(table)
+    failed = [outcome.case.name for outcome in outcomes if not outcome.passed]
+    if failed:
+        errors.print(
+            "Self-test failed: " + ", ".join(failed) + " did not detect the planted hit as expected.",
+            style="red",
+            markup=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1)
+    console.print("Every evidence level detected its planted hit.")
+
+
 @app.command("validate")
 def validate_command(
     ctx: typer.Context,
@@ -688,21 +999,52 @@ def validate_command(
 
 @app.command("catalog")
 def catalog_command() -> None:
-    """Print built-in vulnerability, attack, and framework ids."""
-    vulns = Table(title="Vulnerabilities")
-    vulns.add_column("YAML name")
-    vulns.add_column("Id")
-    vulns.add_column("Gated")
-    vulns.add_column("Types")
-    for vuln_name, vuln_factory in VULNERABILITIES.items():
-        vulnerability = vuln_factory()
-        vulns.add_row(
-            vuln_name,
-            vulnerability.id,
-            "yes" if vulnerability.gated else "no",
-            ", ".join(vulnerability.allowed_types),
-        )
+    """Print the catalogue: each vulnerability with its objective, forms and checks, default severity,
+    framework tags, source and licence; the attacks; and the framework maps."""
+    from martian_redteam.catalog.entries import CATALOG_VERSION, ENTRIES
+
+    # Three narrow tables, so a terminal 80 columns wide shows every name in full.
+    vulns = Table(title=f"Vulnerabilities (catalogue {CATALOG_VERSION})", pad_edge=False)
+    vulns.add_column("YAML name", no_wrap=True)
+    vulns.add_column("Id", overflow="fold")
+    vulns.add_column("Objective", min_width=11)
+    vulns.add_column("Severity", min_width=8)
+    vulns.add_column("Gated", min_width=5)
+    for vuln_name in VULNERABILITIES:
+        item = ENTRIES[vuln_name]
+        vulns.add_row(vuln_name, item.id, item.objective, item.severity, "yes" if item.gated else "no")
     console.print(vulns)
+
+    types = Table(title="Types (a run file's types; all by default)")
+    types.add_column("YAML name", no_wrap=True)
+    types.add_column("Types", overflow="fold")
+    for vuln_name in VULNERABILITIES:
+        types.add_row(vuln_name, ", ".join(ENTRIES[vuln_name].types))
+    console.print(types)
+
+    forms = Table(title="Forms: how each vulnerability is decided (default first)")
+    forms.add_column("YAML name", no_wrap=True)
+    forms.add_column("Form", no_wrap=True)
+    forms.add_column("Checks", overflow="fold")
+    forms.add_column("Level")
+    for vuln_name in VULNERABILITIES:
+        for index, form in enumerate(ENTRIES[vuln_name].forms):
+            forms.add_row(
+                vuln_name if index == 0 else "",
+                form.id + (" (default)" if index == 0 else ""),
+                _form_checks(form),
+                str(form.level),
+            )
+    console.print(forms)
+
+    sources = Table(title="Frameworks, source and licence")
+    sources.add_column("YAML name", no_wrap=True)
+    sources.add_column("Frameworks", overflow="fold")
+    sources.add_column("Source and licence", overflow="fold")
+    for vuln_name in VULNERABILITIES:
+        item = ENTRIES[vuln_name]
+        sources.add_row(vuln_name, ", ".join(item.frameworks) or "unmapped", f"{item.source} ({item.licence})")
+    console.print(sources)
 
     attacks = Table(title="Attacks")
     attacks.add_column("YAML name")
@@ -713,14 +1055,50 @@ def catalog_command() -> None:
         attacks.add_row(attack_name, attack.id, attack.kind)
     console.print(attacks)
 
-    frameworks = Table(title="Framework maps (subsets)")
-    frameworks.add_column("Id")
-    frameworks.add_column("Coverage")
-    frameworks.add_column("Vulnerability ids")
-    for framework in FRAMEWORKS.values():
-        frameworks.add_row(framework.id, framework.coverage, ", ".join(framework.vulnerability_ids))
-    console.print(frameworks)
+    from martian_redteam.catalog.frameworks import DISCLAIMER
 
+    for framework in FRAMEWORKS.values():
+        counts = framework.counts()
+        console.print(
+            f"{framework.label} ({framework.id}, {framework.source_revision}): {counts['covered']} covered, "
+            f"{counts['partly']} partly, {counts['not_covered']} not covered",
+            soft_wrap=True,
+        )
+        frameworks = Table()
+        frameworks.add_column("Item", no_wrap=True)
+        frameworks.add_column("Title", overflow="fold")
+        frameworks.add_column("Coverage", no_wrap=True)
+        frameworks.add_column("Vulnerability ids", overflow="fold")
+        frameworks.add_column("Note", overflow="fold")
+        for row in framework.items:
+            frameworks.add_row(
+                row.id,
+                row.title,
+                row.coverage.replace("_", " "),
+                ", ".join(framework.vulnerabilities_of(row.id)) or "none",
+                row.note,
+            )
+        console.print(frameworks)
+    console.print(DISCLAIMER, soft_wrap=True)
+
+
+def _form_checks(form: Any) -> str:
+    """A form's checks in a few words: each check's type, and the goal's tool call when it uses one."""
+    kinds = [str(check["type"]) for check in form.checks]
+    if form.goal == "tool":
+        kinds.append("goal tool call")
+    elif form.goal == "tool_with_canary":
+        kinds.append("goal tool call carrying the canary")
+    return " + ".join(kinds)
+
+
+def _register_interop() -> None:
+    from martian.redteam.interop.cli import register
+
+    register(app)
+
+
+_register_interop()
 
 if __name__ == "__main__":
     app()

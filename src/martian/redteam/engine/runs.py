@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.runfile import Target as TargetBlock
 from martian.redteam.targets import Target
+from martian.redteam.verify.canary import new_canary
 from martian_redteam.types import RedteamService
 
 
@@ -44,9 +46,12 @@ SESSION_FILE = "tool-session.json"
 folder, readable by its user only, for as long as the run lasts."""
 
 
-def build_target(block: TargetBlock, *, base: str | Path | None = None) -> Target:
+def build_target(
+    block: TargetBlock, *, base: str | Path | None = None, environ: Mapping[str, str] | None = None
+) -> Target:
     """The target a run file's ``target`` block names. ``base`` is where an MCP target's stdio server
-    starts: the run file's folder."""
+    starts: the run file's folder. ``environ`` stands in for the environment when ``${NAME}`` in an
+    HTTP or MCP target is read; by default it is the process's."""
     if block.kind == "function":
         from martian.redteam.targets.callback import function_target
 
@@ -54,7 +59,7 @@ def build_target(block: TargetBlock, *, base: str | Path | None = None) -> Targe
         return function_target(block.file, block.function or "target")
     from martian.redteam.targets.factory import target_from_run_file
 
-    return target_from_run_file(block, base=base if base is not None else ".")
+    return target_from_run_file(block, base=base if base is not None else ".", environ=environ)
 
 
 async def tool_boundary(
@@ -65,25 +70,99 @@ async def tool_boundary(
     session is written to ``folder``/:data:`SESSION_FILE`, mode ``0600``, removed when the run ends,
     and posted to ``tools.session_api``'s ``/sessions`` when the run file names one, as the cloud
     hands a session to the agent's session API. The reply of each attempt then carries the calls the
-    proxy saw, attributed by the conversation id the agent passes as ``bind_tools``' action id."""
-    if not run_file.tools.proxy:
+    proxy saw, attributed by the conversation id the agent passes as ``bind_tools``' action id. With
+    ``tools.decoy``, the run also serves the inert test MCP server
+    (:class:`~martian.redteam.poisoning.DecoyServer`) behind the proxy, and the returned target's
+    ``decoy`` is it."""
+    if not run_file.tools.proxy and run_file.tools.decoy is None:
         return target
     from martian.redteam.proxy import ProxiedTarget, ToolProxy, session_payload
+    from martian.redteam.runfile import ProxiedServer
 
-    proxy = ToolProxy(run_file.tools.proxy)
+    servers = list(run_file.tools.proxy)
+    decoy = None
+    if run_file.tools.decoy is not None:
+        from martian.redteam.poisoning import DecoyServer
+
+        decoy = DecoyServer()
+        upstream = await decoy.start()
+        stack.push_async_callback(decoy.stop)
+        servers.append(ProxiedServer(name=run_file.tools.decoy.name, upstream=upstream))
+    proxy = ToolProxy(servers)
     await proxy.start()
     stack.push_async_callback(proxy.stop)
     session = await proxy.issue_session(target_id="local", campaign_id=run_id)
-    payload = session_payload(session)
+    await hand_session(session_payload(session), stack, folder=folder, session_api=run_file.tools.session_api)
+    proxied = ProxiedTarget(target, proxy)
+    proxied.decoy = decoy
+    return proxied
+
+
+async def hand_session(
+    payload: dict[str, Any], stack: AsyncExitStack, *, folder: Path, session_api: str | None
+) -> None:
+    """Give the agent its tool session: write it to ``folder``/:data:`SESSION_FILE`, mode ``0600``,
+    removed when ``stack`` closes, and post it to ``session_api``'s ``/sessions`` when one is named."""
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / SESSION_FILE
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
     stack.callback(path.unlink, missing_ok=True)
-    if run_file.tools.session_api is not None:
-        await hand_over(run_file.tools.session_api, payload)
-    return ProxiedTarget(target, proxy)
+    if session_api is not None:
+        await hand_over(session_api, payload)
+
+
+@dataclass
+class Admitted:
+    """A run the Martian server admitted in an environment, and the state it is finished with when
+    the run's stack closes: ``failed`` until the run sets it (:meth:`ended`)."""
+
+    run: Any
+    client: Any
+    state: str = "failed"
+    finish_error: str | None = None
+    """Why the server did not take the end of the run, when it did not: the run's records stand, and
+    the server ends it at its ``max_seconds``."""
+
+    def world(self) -> Any:
+        """The run's world: the server's world operations, with the run key."""
+        from martian.redteam.environment import ServerWorld
+
+        return ServerWorld(self.client, self.run)
+
+    def ended(self, state: str) -> None:
+        from martian.redteam.environment import FINISHED
+
+        self.state = FINISHED.get(state, "failed")
+
+
+async def environment_boundary(
+    run_file: RunFile, stack: AsyncExitStack, *, folder: Path, label: str, client: Any = None
+) -> Admitted:
+    """Admit the run file's run in its environment on the Martian server, and give the agent the
+    session the server issued: its tools then reach the environment's sandboxes through the
+    server's run-scoped gateway, as :func:`tool_boundary` gives it the proxy's. The run is finished
+    on the server when ``stack`` closes, with the state :meth:`Admitted.ended` set."""
+    from martian.config import MartianConfig
+    from martian.redteam.environment import EnvironmentClient
+
+    if client is None:
+        client = EnvironmentClient(MartianConfig.from_env())
+        stack.push_async_callback(client.aclose)
+    admitted = Admitted(await client.admit(run_file, label=label), client)
+
+    async def finish() -> None:
+        from martian.redteam.environment import EnvironmentRunError
+
+        try:
+            await client.finish(admitted.run, admitted.state)
+        except EnvironmentRunError as error:
+            admitted.finish_error = str(error)
+
+    stack.push_async_callback(finish)
+    await hand_session(admitted.run.session, stack, folder=folder, session_api=run_file.tools.session_api)
+    return admitted
 
 
 async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
@@ -113,9 +192,20 @@ async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
         )
 
 
-def unsupported(run_file: RunFile) -> list[str]:
-    """What the run file asks for that this release cannot do. A run stops on any of it, rather than
-    run without it. Every target kind and the tool proxy run, so nothing is listed today."""
+def run_canary(earlier: RedteamRun | None = None) -> str:
+    """The canary a run plants: the earlier session's when it is resumed, else a new one. The target
+    is built from :func:`~martian.redteam.verify.canary.planted_run_file` with it, and the engine is
+    given it."""
+    kept = earlier.provenance.get("canary") if earlier is not None else None
+    return kept if isinstance(kept, str) and kept else new_canary()
+
+
+def unsupported(run_file: RunFile, *, environments: bool = False) -> list[str]:
+    """What the run file asks for that this caller cannot do. A run stops on any of it, rather than
+    run without it. Every target kind and the tool proxy run. A run in an environment starts only
+    from ``martian redteam run`` (``environments``), connected to a Martian server."""
+    if run_file.environment is not None and not environments:
+        return ["environment: a run in a Martian environment starts from martian redteam run, not here"]
     return []
 
 
@@ -123,7 +213,7 @@ def redaction_for(run_file: RunFile, environ: Mapping[str, str] | None = None) -
     """The values a report must never show: the models' header values, as sent."""
     environ = os.environ if environ is None else environ
     values: list[str] = []
-    for model in (run_file.models.attacker, run_file.models.judge):
+    for model in (*run_file.models.pool, run_file.models.judge):
         if model is None:
             continue
         for value in model.headers.values():
@@ -141,7 +231,16 @@ def build_service(
     kind = select_service(run_file, environ)
     policy = redaction_for(run_file, environ)
     if kind == "local":
-        assert run_file.models.attacker is not None
+        if len(run_file.models.pool) > 1:
+            from martian.redteam.engine.local import PooledService
+
+            pooled = PooledService(
+                [
+                    LocalService(attacker=attacker, judge=run_file.models.judge, redaction_policy=policy)
+                    for attacker in run_file.models.pool
+                ]
+            )
+            return pooled, pooled.describe()
         local = LocalService(attacker=run_file.models.attacker, judge=run_file.models.judge, redaction_policy=policy)
         return local, local.describe()
     from martian.config import MartianConfig
@@ -164,10 +263,13 @@ async def execute(
     principal: Any = None,
     include_content: bool = False,
     resume: RedteamRun | None = None,
+    canary: str | None = None,
+    world: Any = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
     kept after each attempt and at the end, as the reports hold it. With ``resume``, an earlier
-    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run."""
+    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run. With
+    ``world`` (a run in a Martian environment), each attempt runs in a world reset for it."""
 
     async def keep(run: RedteamRun) -> None:
         copy = for_report(run, include_content=include_content, policy=service.redaction_policy)
@@ -185,19 +287,25 @@ async def execute(
         checkpoint=keep if store is not None else None,
         provenance=provenance,
         resume=resume,
+        canary=canary,
+        world=world,
     )
     return await engine.run()
 
 
 __all__ = [
     "SESSION_FILE",
+    "Admitted",
     "SessionHandoverError",
     "TargetUnavailable",
     "build_service",
     "build_target",
+    "environment_boundary",
     "execute",
     "hand_over",
+    "hand_session",
     "redaction_for",
+    "run_canary",
     "tool_boundary",
     "unsupported",
 ]

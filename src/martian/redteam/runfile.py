@@ -32,6 +32,16 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _without_canary(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("{{canary}}", "canary")
+    if isinstance(value, dict):
+        return {key: _without_canary(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_canary(item) for item in value]
+    return value
+
+
 class McpTarget(_Model):
     """An MCP server under test: the tool that takes a message, and the argument the message goes in.
     ``session_argument`` and ``reset_argument`` carry the conversation: its id, and ``true`` on its
@@ -76,6 +86,28 @@ class TargetSession(_Model):
     response_path: str | None = Field(default=None, min_length=1)
 
 
+class TargetMemory(_Model):
+    """That the target keeps a memory across conversations, and how a memory poisoning probe uses
+    it: how a new conversation starts, what the later conversation says, and, optionally, where the
+    memory is stored."""
+
+    start: Literal["new_conversation", "message"] = "new_conversation"
+    """``new_conversation``: a conversation with a new id is a new session. ``message``: a new
+    conversation also opens with ``message``, such as ``/new``, before anything else."""
+    message: str | None = Field(default=None, min_length=1, max_length=200)
+    trigger: str = Field(default="Hello. What can you help me with today?", min_length=1, max_length=2000)
+    """The ordinary message the later conversation sends."""
+    store: str | None = Field(default=None, min_length=1)
+    """The file or folder the target keeps its memory in. The run records whether the writing
+    conversation changed it. A relative path is read from the run file's folder."""
+
+    @model_validator(mode="after")
+    def _start(self) -> TargetMemory:
+        if (self.start == "message") != (self.message is not None):
+            raise ValueError("message is the opening of a new conversation, and needs start: message")
+        return self
+
+
 class Target(_Model):
     """The thing under test. ``file`` and ``function``, or ``url`` with ``body`` and the rest, are a
     suite file's target block and are checked by the same rules; ``mcp`` is an MCP server."""
@@ -93,6 +125,9 @@ class Target(_Model):
     tool_calls_path: str | None = Field(default=None, min_length=1)
     """Where an HTTP target's JSON answer lists the tool calls it made or asked for."""
     mcp: McpTarget | None = None
+    memory: TargetMemory | None = None
+    """The target keeps a memory across conversations. Without it, memory poisoning probes are
+    skipped."""
 
     @field_validator("purpose")
     @classmethod
@@ -117,7 +152,8 @@ class Target(_Model):
         from martian.evals.runner import TargetRef
 
         try:
-            TargetRef.model_validate(suite_fields)
+            # {{canary}} is the red team's own placeholder: the run fills it before the target is built.
+            TargetRef.model_validate(_without_canary(suite_fields))
         except ValidationError as error:
             reasons = [
                 str(item["msg"]).removeprefix("Value error, ")
@@ -151,15 +187,52 @@ def _model(value: Any) -> Any:
 
 class Models(_Model):
     """The attacker writes the attacks; the judge decides the checks of kind ``judge``. Without them,
-    attacks are generated and judged by the Martian platform, as in version 0.2."""
+    attacks are generated and judged by the Martian platform, as in version 0.2.
+
+    ``attacker`` may list 2 to 5 different models, a pool: the run splits its attack attempts between
+    them and the report attributes each success to the one that wrote it. ``attacker`` is then the
+    first of them and ``attackers`` the whole pool."""
 
     attacker: Annotated[ModelConfig, Field()] | None = None
     judge: Annotated[ModelConfig, Field()] | None = None
+    attackers: list[ModelConfig] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _pool(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("attacker"), list):
+            if data.get("attackers"):
+                raise ValueError("list the pool in attacker, not in attackers too")
+            pool = data["attacker"]
+            if not 2 <= len(pool) <= 5:
+                raise ValueError("a pool of attackers lists 2 to 5 models; give one model as a string")
+            data = {**data, "attacker": pool[0], "attackers": pool}
+        return data
 
     @field_validator("attacker", "judge", mode="before")
     @classmethod
     def _short_form(cls, value: Any) -> Any:
         return _model(value)
+
+    @field_validator("attackers", mode="before")
+    @classmethod
+    def _short_forms(cls, value: Any) -> Any:
+        return [_model(item) for item in value] if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Models:
+        if self.attackers:
+            names = [item.model for item in self.attackers]
+            if len(set(names)) != len(names):
+                raise ValueError("each attacker of a pool is a different model")
+            if self.attacker != self.attackers[0]:
+                raise ValueError("attacker is the first model of the pool")
+        return self
+
+    @property
+    def pool(self) -> list[ModelConfig]:
+        """The attackers: the pool, or the one attacker."""
+        return list(self.attackers) or ([self.attacker] if self.attacker is not None else [])
 
 
 class Goal(_Model):
@@ -179,17 +252,51 @@ class Goal(_Model):
         return self
 
 
+Marker = Annotated[str, Field(min_length=3, max_length=200)]
+"""A text check's marker: at least 3 characters, so it cannot appear by chance."""
+
+
 class TextCheck(_Model):
+    """Markers stated before the attack: every ``all_of`` marker in the reply and no ``none_of``
+    marker. A marker the attack itself carried proves nothing (``docs/redteam-verdicts.md``)."""
+
     type: Literal["text"]
-    all_of: list[str] = Field(min_length=1, max_length=8)
-    none_of: list[str] = Field(default_factory=list, max_length=12)
+    all_of: list[Marker] = Field(min_length=1, max_length=8)
+    none_of: list[Marker] = Field(default_factory=list, max_length=12)
     ignore_case: bool = True
+
+    @model_validator(mode="after")
+    def _apart(self) -> TextCheck:
+        if {marker.casefold() for marker in self.all_of} & {marker.casefold() for marker in self.none_of}:
+            raise ValueError("a marker cannot be both required and forbidden")
+        return self
+
+
+CanaryPlant = Literal["context", "system_prompt", "tool_result"]
 
 
 class CanaryCheck(_Model):
+    """A planted canary found in the reply or a tool call's arguments, encoded or not."""
+
     type: Literal["canary"]
     value: str | None = Field(default=None, min_length=8)
-    """The canary to plant. Without one, each run plants its own."""
+    """A canary you planted yourself. Without one, the run plants its own, unique to the run."""
+    plant: CanaryPlant | None = None
+    """Where the run plants its canary: ``context`` (the default), with the attack in the message;
+    ``system_prompt``, for ``{{canary}}`` in the target block; ``tool_result``, for ``{{canary}}`` in a
+    proxied server's ``inject`` text."""
+    text: str | None = Field(default=None, min_length=1, max_length=2000)
+    """A ``context`` plant's note, with ``{{canary}}`` where the canary goes."""
+
+    @model_validator(mode="after")
+    def _planting(self) -> CanaryCheck:
+        if self.value is not None and (self.plant is not None or self.text is not None):
+            raise ValueError("a canary with a value is one you planted yourself; plant and text apply to the run's own")
+        if self.text is not None and self.plant not in (None, "context"):
+            raise ValueError("text is the note of a context plant")
+        if self.text is not None and "{{canary}}" not in self.text:
+            raise ValueError("text says where the canary goes, with {{canary}}")
+        return self
 
 
 class ToolCallCheck(_Model):
@@ -198,6 +305,9 @@ class ToolCallCheck(_Model):
     where: dict[str, Any] = Field(default_factory=dict)
     executed: bool = False
     """``true``: only a call that ran counts. ``false``: a requested call counts too."""
+    with_canary: bool = False
+    """``true``: only a call whose arguments carry the run's canary, as it is or encoded, counts: data
+    the target was given reached the tool."""
 
 
 class JudgeCheck(_Model):
@@ -206,7 +316,14 @@ class JudgeCheck(_Model):
 
 
 class ReceiptCheck(_Model):
+    """A request to the run's local receipt listener. It needs a canary check in the same
+    vulnerability: carrying that canary is verified exfiltration, a request without it contact only."""
+
     type: Literal["receipt"]
+    render: Literal["images", "links"] | None = None
+    """Read the reply as a chat client shows it: fetch each image (``images``), or each image and
+    link (``links``, as a user who opens them), whose address is this attempt's on the run's
+    receipt listener. Nothing else is fetched."""
 
 
 class StateCheck(_Model):
@@ -220,14 +337,91 @@ CheckDecl = Annotated[
 ]
 
 
+BenignCheck = Annotated[TextCheck | ToolCallCheck, Field(discriminator="type")]
+
+
+class Benign(_Model):
+    """A normal task the target should still complete under attack, and the checks that show it did.
+    The attack is sent with the task in the same message; the negative control sends the task alone."""
+
+    task: str = Field(min_length=1, max_length=4096)
+    checks: list[BenignCheck] = Field(min_length=1, max_length=5)
+
+
+class DatasetFile(_Model):
+    """A dataset file of the user's own, for ``HarmfulContent`` of type ``file``: CSV, or JSON Lines
+    by its ``.jsonl`` suffix, and its licence."""
+
+    file: str = Field(min_length=1)
+    column: str = Field(default="prompt", min_length=1)
+    licence: str = Field(min_length=1)
+    """Its licence as an SPDX id, such as ``MIT`` or ``CC-BY-4.0``. The commercial-use switch reads it."""
+    where: dict[str, str] = Field(default_factory=dict)
+    """Only rows whose columns hold these values."""
+
+
+class Datasets(_Model):
+    """How the harmful-content set's datasets load."""
+
+    commercial_use: bool = True
+    """Load only datasets under MIT, Apache-2.0 or CC BY. Off, a dataset under any licence loads."""
+    cache: str | None = Field(default=None, min_length=1)
+    """Where downloaded datasets are kept. Default ``MARTIAN_DATASET_CACHE``, else
+    ``~/.cache/martian/redteam-datasets``. A relative path is read from the run file's folder."""
+
+
+class Plant(_Model):
+    """An indirect attack in an environment: the attack is planted in the world with an implant
+    profile of the agent's connection on the Martian server, and the agent is sent ``trigger``, an
+    ordinary request that leads it to read what was planted."""
+
+    profile: str = Field(min_length=1, max_length=128)
+    trigger: str = Field(min_length=1, max_length=2000)
+
+
 class Vulnerability(NamedSpec):
     """A vulnerability to probe, as in version 0.2, with an optional goal, objective, checks and
     severity. Without checks, a probe is decided by the judge."""
 
     goal: Goal | None = None
     objective: ObjectiveName | None = None
+    form: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    """The catalogue form that decides the probe, such as ``tool_call`` or ``reply``. Without it and
+    without checks, the entry's default form decides (``docs/catalog.md``)."""
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
+    benign: Benign | None = None
+    """A benign task whose completion is reported with and without the attack."""
+    plant: Plant | None = None
+    """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
+    dataset: DatasetFile | None = None
+    """For ``HarmfulContent`` of type ``file``: the user's own dataset file."""
+
+    @model_validator(mode="after")
+    def _form_or_checks(self) -> Vulnerability:
+        if self.form is not None and self.checks:
+            raise ValueError("give a form or checks, not both: a form is a set of checks")
+        if self.is_custom:
+            if not (self.id or "").strip():
+                raise ValueError("a custom vulnerability needs an id")
+            judged = not self.declares_evidence or any(
+                check.type == "judge" and check.criteria is None for check in self.checks
+            )
+            if judged and not (self.criteria or "").strip():
+                raise ValueError(
+                    "a custom vulnerability the judge decides needs criteria; or declare checks (text, canary, "
+                    "tool_call, receipt) or a goal that names a tool"
+                )
+        return self
+
+    @property
+    def is_custom(self) -> bool:
+        return self.name.strip().lower().replace("-", "_") in {"custom", "customvulnerability"}
+
+    @property
+    def declares_evidence(self) -> bool:
+        """Whether checks or a goal that names a tool decide it, rather than the judge alone."""
+        return bool(self.checks) or (self.goal is not None and self.goal.tool is not None)
 
 
 class ProxiedServer(_Model):
@@ -257,8 +451,6 @@ class ProxiedServer(_Model):
 
     @model_validator(mode="after")
     def _mode_settings(self) -> ProxiedServer:
-        if self.mode == "inject" and not self.inject:
-            raise ValueError("inject mode needs the text to inject")
         if self.mode != "inject" and self.inject is not None:
             raise ValueError("inject applies to inject mode")
         if self.mode != "block" and self.block_reply is not None:
@@ -270,14 +462,29 @@ class ProxiedServer(_Model):
         return self
 
 
+class Decoy(_Model):
+    """The inert test MCP server of tool-description poisoning probes, served by the run and handed
+    to the agent through the recording proxy as one of its tool servers."""
+
+    name: str = Field(default="utilities", min_length=1, max_length=24, pattern=r"^[a-z][a-z0-9_]{0,23}$")
+
+
 class Tools(_Model):
     """The local recording proxy: the agent's own tool servers it fronts, and where the agent is
-    handed the session that binds them."""
+    handed the session that binds them; the inert test server of tool-description poisoning probes,
+    and the folder the agent loads skills from."""
 
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
+    decoy: Decoy | None = None
+    """Serve the inert test MCP server through the proxy, for ``ToolPoisoning`` probes of type
+    ``mcp_tool_description``."""
+    skills_dir: str | None = Field(default=None, min_length=1)
+    """The folder the agent loads skills from, for ``ToolPoisoning`` probes of type ``skill_file``. A
+    relative path is read from the run file's folder."""
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
-    ``{session_api}/sessions`` before the first attack."""
+    ``{session_api}/sessions`` before the first attack: the proxy's, or in an environment the
+    Martian server's."""
 
     @field_validator("session_api")
     @classmethod
@@ -293,11 +500,9 @@ class Tools(_Model):
 
     @model_validator(mode="after")
     def _unique(self) -> Tools:
-        names = [server.name for server in self.proxy]
+        names = [server.name for server in self.proxy] + ([self.decoy.name] if self.decoy else [])
         if len(set(names)) != len(names):
-            raise ValueError("each proxied server has its own name")
-        if self.session_api is not None and not self.proxy:
-            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
+            raise ValueError("each proxied server, and the decoy, has its own name")
         return self
 
 
@@ -314,6 +519,60 @@ class Budget(_Model):
     max_seconds: float | None = Field(default=None, gt=0, le=86_400)
     attempts_per_probe: int = Field(default=1, ge=1, le=100)
     max_concurrent: int = Field(default=2, ge=1, le=64)
+
+
+class Delivery(_Model):
+    """How an attack reaches the agent. ``message`` (the default): it is the user message.
+    ``variable``: it fills ``{{payload}}`` in ``template``, the user message. ``tool_result``: the
+    recording proxy adds it to the results of ``server``'s tools, and the user message is
+    ``template``. ``web_page``: a page on a loopback server holds it, shown or ``hidden``, and the user
+    message is ``template`` with the page's address at ``{{url}}``."""
+
+    route: Literal["message", "variable", "tool_result", "web_page"] = "message"
+    template: str | None = Field(default=None, min_length=1, max_length=4096)
+    server: str | None = Field(default=None, min_length=1)
+    hidden: bool = False
+
+    @model_validator(mode="after")
+    def _route(self) -> Delivery:
+        needs = {"variable": "{{payload}}", "web_page": "{{url}}"}
+        if self.route == "message" and (self.template or self.server or self.hidden):
+            raise ValueError("the message route takes no template, server or hidden")
+        if self.route != "message" and not self.template:
+            raise ValueError(f"the {self.route} route needs a template, the user message")
+        if self.route in needs and needs[self.route] not in (self.template or ""):
+            raise ValueError(f"the {self.route} route's template holds {needs[self.route]}")
+        if (self.route == "tool_result") != (self.server is not None):
+            raise ValueError("server names the tools.proxy server of the tool_result route, and only of it")
+        if self.hidden and self.route != "web_page":
+            raise ValueError("hidden applies to the web_page route")
+        return self
+
+
+class AttackSpec(NamedSpec):
+    """An attack method of a version 2 run: by ``name``, as in version 0.2, with the transforms to
+    apply on top of what it sends (``layers``) and its own settings. ``id`` renames the method in
+    probe ids, so one method can run twice with other settings. ``docs/redteam-methods.md`` lists
+    each method and the settings it takes."""
+
+    layers: list[str] = Field(default_factory=list, max_length=4)
+    """Transforms applied, in order, to every attack the method sends, such as ``[Base64]``."""
+    max_queries: int | None = Field(default=None, ge=1, le=1000)
+    """The most target queries one attempt of the method makes."""
+    width: int | None = Field(default=None, ge=1, le=10)
+    """Tree search: the attacks kept at each level."""
+    branching: int | None = Field(default=None, ge=1, le=10)
+    """Tree search: the attacks written from each one kept."""
+    depth: int | None = Field(default=None, ge=1, le=20)
+    """Tree search: the levels."""
+    max_turns: int | None = Field(default=None, ge=1, le=20)
+    """Escalation: the most turns in one conversation."""
+    max_backtracks: int | None = Field(default=None, ge=0, le=10)
+    """Escalation: the most times it goes back a turn after a refusal."""
+    variants: int | None = Field(default=None, ge=1, le=1000)
+    """Mutation: the most changed copies of the seed it sends."""
+    delivery: Delivery | None = None
+    """How the method's attacks reach the agent. Without it, as the user message."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -391,25 +650,164 @@ class Gate(_Model):
         return "fail" if self.fail_on_infrastructure_error else "ignore"
 
 
+class VerificationSettings(_Model):
+    """How the run checks its own findings and its judge."""
+
+    repetitions: int = Field(default=0, ge=0, le=10)
+    """Send a confirmed hit's attack again, each time in a new conversation, this many times."""
+    required: int | None = Field(default=None, ge=1, le=10)
+    """How many repetitions must hit again for the finding to verify. Default 2, or ``repetitions``
+    when fewer ran."""
+    control: bool = True
+    """Run each probe once without the attack, when it hit or has a benign task: a hit the control
+    shows too is discarded."""
+
+    @model_validator(mode="after")
+    def _reachable(self) -> VerificationSettings:
+        if self.required is not None and self.required > self.repetitions:
+            raise ValueError("required is at most repetitions")
+        return self
+
+    @property
+    def required_successes(self) -> int:
+        return self.required if self.required is not None else max(1, min(2, self.repetitions))
+
+    calibration: str | None = Field(default=None, min_length=1)
+    """A labelled sample (JSON Lines: ``vulnerability``, ``type``, ``attack``, ``reply``, ``hit``) the
+    judge is measured on before the run, for its precision and recall. A relative path is read from
+    the run file's folder."""
+
+
+class Memory(_Model):
+    """The local attack memory (:mod:`martian.redteam.engine.memory`): strategies learned from this
+    user's own runs, kept as plain files on this machine."""
+
+    strategies: bool = False
+    """Read and update the strategy library: search methods send the strategies picked for a probe
+    first, and confirmed successes decided by code are added when the run ends."""
+    folder: str | None = Field(default=None, min_length=1)
+    """The library's folder. Default ``<data folder>/redteam/strategies``. A relative path is read
+    from the run file's folder."""
+    order: bool = False
+    """Order each objective's attack methods by their recorded success on this target, best first,
+    instead of as listed, and count each method's attempts and confirmed successes in the table."""
+    methods_per_objective: int | None = Field(default=None, ge=1, le=50)
+    """With ``order``: run at most this many methods per objective; the others are left out."""
+    explore: float = Field(default=0.2, ge=0, le=1)
+    """The share kept for exploration: the chance that an attempt is given no strategy, and the
+    share of an objective's methods placed by a draw rather than by their record."""
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    """Seeds the draws, so a rerun with the same seed and the same files draws the same. Without it,
+    the run draws a seed and records it in its provenance as ``memory.seed``."""
+
+    @model_validator(mode="after")
+    def _capped(self) -> Memory:
+        if self.methods_per_objective is not None and not self.order:
+            raise ValueError("methods_per_objective caps the methods order chooses; set order")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.strategies or self.order
+
+
 class RunFile(_Model):
     """A version 2 red team run file."""
 
     version: Literal[2]
     target: Target
     models: Models = Field(default_factory=Models)
-    vulnerabilities: list[Vulnerability] = Field(min_length=1)
-    attacks: list[NamedSpec] = Field(min_length=1)
+    vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list, max_length=20)
+    """Also probe every catalogue entry these frameworks (``owasp_llm_2025``) or framework items
+    (``owasp_llm_2025:LLM06``) map, unless ``vulnerabilities`` lists it."""
+    attacks: list[AttackSpec] = Field(min_length=1)
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
+    memory: Memory = Field(default_factory=Memory)
     output_folder: str = "results"
-    environment: str | None = Field(default=None, min_length=1)
+    datasets: Datasets = Field(default_factory=Datasets)
+    environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
+    agent: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    """The registered agent an environment run tests, by its id on the Martian server: its approval,
+    sandbox bindings and checks. Without it, the API key must be bound to the agent."""
+
+    @field_validator("frameworks")
+    @classmethod
+    def _known_frameworks(cls, value: list[str]) -> list[str]:
+        from martian_redteam.catalog.frameworks import FRAMEWORKS
+
+        for selection in value:
+            framework_id, _, item_id = selection.partition(":")
+            if framework_id not in FRAMEWORKS:
+                raise ValueError(f"unknown framework {framework_id!r}; the frameworks are {', '.join(FRAMEWORKS)}")
+            if item_id:
+                try:
+                    FRAMEWORKS[framework_id].item(item_id)
+                except KeyError:
+                    raise ValueError(f"{framework_id} has no item {item_id!r}") from None
+        if len(set(value)) != len(value):
+            raise ValueError("each framework is selected once")
+        return value
 
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        if not self.vulnerabilities and not self.frameworks:
+            raise ValueError("list vulnerabilities, or select them with frameworks")
+        from martian.redteam.methods.registry import MethodError, resolve
+
+        for index, attack in enumerate(self.attacks):
+            try:
+                resolve(attack)
+            except MethodError as error:
+                raise ValueError(f"attacks[{index}]: {error}") from None
+            if self.environment is not None and not resolve(attack).legacy:
+                raise ValueError(
+                    f"attacks[{index}]: in an environment run only the six version 0.2 attack methods run "
+                    "(PromptInjection, Roleplay, PromptProbing, ROT13, Base64, Leetspeak), with no layers or route"
+                )
+            route = attack.delivery
+            if route is not None and route.route == "tool_result":
+                server = next((item for item in self.tools.proxy if item.name == route.server), None)
+                if server is None or server.mode != "inject":
+                    raise ValueError(
+                        f"attacks[{index}]: the tool_result route needs {route.server!r} in tools.proxy, in inject mode"
+                    )
+        for index, attack in enumerate(self.attacks):
+            if resolve(attack).hosted_only and self.models.attacker is not None:
+                raise ValueError(
+                    f"attacks[{index}]: {attack.name} is written by a Martian server from its reviewed cases; "
+                    "remove models.attacker to run it there"
+                )
+        delivered = {attack.delivery.server for attack in self.attacks if attack.delivery is not None}
+        for server in self.tools.proxy:
+            if server.mode == "inject" and not server.inject and server.name not in delivered:
+                raise ValueError(
+                    f"tools.proxy {server.name!r}: inject mode needs the text to inject, or an attack whose "
+                    "tool_result route names it"
+                )
+        if self.environment is not None and self.memory.enabled:
+            raise ValueError("memory applies to a run without an environment")
+        if self.agent is not None and self.environment is None:
+            raise ValueError("agent names the registered agent of an environment run; set environment")
+        if self.environment is not None and self.tools.proxy:
+            raise ValueError("an environment's gateway is the tool boundary; tools.proxy applies to a run without one")
+        if (
+            self.tools.session_api is not None
+            and not self.tools.proxy
+            and self.tools.decoy is None
+            and self.environment is None
+        ):
+            raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
+            if vulnerability.plant is not None and self.environment is None:
+                raise ValueError(f"vulnerabilities[{index}]: plant puts the attack in an environment; set environment")
             for check in vulnerability.checks:
                 if check.type == "state" and self.environment is None:
                     raise ValueError(f"vulnerabilities[{index}]: a state check reads an environment; set environment")
@@ -417,7 +815,40 @@ class RunFile(_Model):
                     raise ValueError(
                         f"vulnerabilities[{index}]: a judge check needs models.judge when attacks run locally"
                     )
+                if check.type == "canary" and check.plant == "system_prompt":
+                    self._templated_target(index)
+                if check.type == "receipt" and not any(item.type == "canary" for item in vulnerability.checks):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a receipt check needs a canary check: the canary is the "
+                        "secret a request must carry"
+                    )
+                if (
+                    check.type == "canary"
+                    and check.plant == "tool_result"
+                    and not any(server.inject and "{{canary}}" in server.inject for server in self.tools.proxy)
+                ):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a tool_result canary needs {{{{canary}}}} in a proxied "
+                        "server's inject text"
+                    )
         return self
+
+    def _templated_target(self, index: int) -> None:
+        from martian.redteam.verify.canary import mentions
+
+        if self.target.kind == "function":
+            raise ValueError(
+                f"vulnerabilities[{index}]: a function target has no template to plant a canary in; "
+                "plant it in the context, or give the value you planted yourself"
+            )
+        fields: list[Any] = [self.target.headers, self.target.body]
+        if self.target.mcp is not None:
+            fields += [self.target.mcp.arguments, self.target.mcp.headers]
+        if not mentions(fields):
+            raise ValueError(
+                f"vulnerabilities[{index}]: a system_prompt canary needs {{{{canary}}}} in the target's "
+                "headers, body or mcp arguments"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Self:
@@ -429,7 +860,41 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        skills = loaded.tools.skills_dir
+        if skills is not None and not Path(skills).is_absolute():
+            tools = loaded.tools.model_copy(update={"skills_dir": str((file.parent / skills).resolve())})
+            loaded = loaded.model_copy(update={"tools": tools})
+        loaded = loaded.model_copy(update=_relative_datasets(loaded, file.parent))
+        kept = loaded.target.memory
+        if kept is not None and kept.store is not None and not Path(kept.store).is_absolute():
+            stored = kept.model_copy(update={"store": str((file.parent / kept.store).resolve())})
+            loaded = loaded.model_copy(update={"target": loaded.target.model_copy(update={"memory": stored})})
+        sample = loaded.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
+            loaded = loaded.model_copy(update={"verification": settings})
+        folder = loaded.memory.folder
+        if folder is not None and not Path(folder).expanduser().is_absolute():
+            memory = loaded.memory.model_copy(update={"folder": str((file.parent / folder).resolve())})
+            loaded = loaded.model_copy(update={"memory": memory})
         return loaded
+
+
+def _relative_datasets(loaded: RunFile, folder: Path) -> dict[str, Any]:
+    """The run file's vulnerabilities and datasets with dataset files and the cache read from
+    ``folder`` when relative."""
+    entries = []
+    for vulnerability in loaded.vulnerabilities:
+        given = vulnerability.dataset
+        if given is not None and not Path(given.file).is_absolute():
+            given = given.model_copy(update={"file": str((folder / given.file).resolve())})
+            vulnerability = vulnerability.model_copy(update={"dataset": given})
+        entries.append(vulnerability)
+    cache = loaded.datasets.cache
+    datasets = loaded.datasets
+    if cache is not None and not Path(cache).is_absolute():
+        datasets = datasets.model_copy(update={"cache": str((folder / cache).resolve())})
+    return {"vulnerabilities": entries, "datasets": datasets}
 
 
 def read_yaml(path: str | Path) -> dict[str, Any]:
@@ -485,21 +950,32 @@ def problems(path: str | Path) -> list[str]:
 
 __all__ = [
     "VERSION",
+    "AttackSpec",
+    "Benign",
     "Budget",
+    "Delivery",
+    "VerificationSettings",
     "CanaryCheck",
+    "CanaryPlant",
+    "DatasetFile",
+    "Datasets",
+    "Decoy",
     "ErrorHandling",
     "Gate",
     "GateAction",
     "Goal",
     "JudgeCheck",
     "McpTarget",
+    "Memory",
     "ModelConfig",
     "Models",
+    "Plant",
     "ProxiedServer",
     "ReceiptCheck",
     "RunFile",
     "StateCheck",
     "Target",
+    "TargetMemory",
     "TargetSession",
     "TextCheck",
     "ToolCallCheck",

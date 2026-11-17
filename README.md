@@ -86,8 +86,9 @@ pull request with the last result of `main` and name the cases that went from pa
   see
   [the local edition](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#the-local-edition-martian-ui).
   Its Red Team pages show the red team runs kept in the same data folder: each run's report,
-  attempts, findings (which you can annotate), the catalogue and framework coverage. They cannot
-  start a red team run yet. It also shows the traces an application records into it with
+  attempts, findings (which you can annotate), the catalogue and framework coverage. They also
+  start a red team run against one of those endpoints with your own models, and stop and resume
+  it. It also shows the traces an application records into it with
   [MLflow tracing](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/evals-core.md#traces-from-an-application).
   The repository's `Dockerfile` builds it as an image for one user on a small server; it has no
   login, so never expose it publicly
@@ -103,6 +104,12 @@ pull request with the last result of `main` and name the cases that went from pa
   with human labels beside people's agreement with each other, and its saved calibration,
   re-checked on request after its model or rubric changes, pinned datasets, Backend-scored
   regression gates and recorded CI sessions.
+- `martian redteam run`: a red team run of a version 2 run file with your own model and no
+  account, its report in `martian ui`; see the
+  [red team quickstart](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-quickstart.md).
+  `martian redteam convert promptfoo`, `import promptfoo` and `garak` bring promptfoo red team
+  configs and results and garak's probes; see
+  [red team interop](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/redteam-interop.md).
 - `martian.redteam`: adversarial probes against a customer callback, with
   simulation and judging through the Martian Backend API.
 - `assert_redteam(...)`: record saved adversarial probe results alongside
@@ -120,7 +127,12 @@ What runs where:
 - **Red team** probes run in your process and call your agent through a local
   callback or function. A version 2 run file that names `models` generates and
   judges the attacks with your own models and sends nothing to Martian
-  ([run file](docs/redteam-run-file.md)). Without `models`, the Martian platform
+  ([run file](docs/redteam-run-file.md)), with fixed templates as a control arm beside
+  adaptive attack methods that refine attacks from the target's replies within a
+  stated budget ([attack methods](docs/redteam-methods.md)); templates and mutation
+  need no attacker model. With `memory`, it keeps the attacks that worked as a local
+  strategy library and tries them first on the next run, and runs the methods that
+  worked first ([memory](docs/redteam-run-file.md#memory)). Without `models`, the Martian platform
   generates and judges them, which needs a platform connection and a token with
   `redteam:run`.
 - Hosted features also need the SDK APIs enabled for your organisation.

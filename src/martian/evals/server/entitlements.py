@@ -30,6 +30,9 @@ FEATURES: Mapping[str, str] = MappingProxyType(
     {
         "review_queues": "review queues",
         "monitoring": "monitoring",
+        "redteam_environments": "red team environments",
+        "redteam_campaigns": "red team campaigns",
+        "redteam_hosted_generation": "hosted red team generation",
     }
 )
 """Every feature key, with the name a refusal uses.
@@ -39,12 +42,21 @@ FEATURES: Mapping[str, str] = MappingProxyType(
   monitors that score a project's live traces (:mod:`martian.evals.server.monitors`), and the
   thresholds on their scores, which send alerts (:mod:`martian.evals.server.thresholds`), and the
   schedules that run a saved suite against a target unattended (:mod:`martian.evals.server.schedules`).
+- ``redteam_environments``: a red team run in a Martian environment, whose verdicts can rest on the
+  world's state. ``POST /v1/redteam/runs`` refuses a run file that names an ``environment`` without
+  it; a hosted server refuses its own environment runs too. Built only in the hosted product.
+- ``redteam_campaigns``: planned red team campaigns from the hosted console. The key is enforced
+  by the hosted server, which runs them; the core has no campaign route.
+- ``redteam_hosted_generation``: attack generation and judging by Martian's engine for SDK red team
+  runs (the hosted ``/v1/redteam/simulate`` and ``/evaluate`` operations). Enforced by the hosted
+  server. A local run generates and judges with the user's own model and needs no key.
 """
 
 LIMITS: Mapping[str, str] = MappingProxyType(
     {
         "concurrent_runs": "eval runs",
         "concurrent_scoring_jobs": "scoring jobs",
+        "concurrent_redteam_operations": "hosted red team operations",
     }
 )
 """Every limit key, with the name of what it counts. A limit key is added with the code that
@@ -54,6 +66,9 @@ enforces it; an edition that sets no value for a key has no limit there.
   launch, a run again or a resume beyond it is refused with ``409``.
 - ``concurrent_scoring_jobs``: how many of an organisation's scoring jobs of completed runs may be
   queued or running at once. A scoring request or a resume beyond it is refused with ``409``.
+- ``concurrent_redteam_operations``: how many of an organisation's hosted red team generation and
+  judging operations may be in flight at once. Enforced by the hosted server where it admits an
+  operation (``429``); per-minute and per-day rate windows stay the server's own settings.
 """
 
 
@@ -79,7 +94,10 @@ class Entitlements:
         return self.limits.get(key)
 
 
-PAID = frozenset({"review_queues", "monitoring"})
+REDTEAM_PAID = frozenset({"redteam_environments", "redteam_campaigns", "redteam_hosted_generation"})
+"""Red Team's paid keys: an environment, a planned campaign and Martian's engine are hosted only."""
+
+PAID = frozenset({"review_queues", "monitoring"}) | REDTEAM_PAID
 
 COMMUNITY = Entitlements(
     edition="community",
@@ -88,7 +106,7 @@ COMMUNITY = Entitlements(
 ENTERPRISE = Entitlements(
     edition="enterprise",
     features=PAID,
-    limits=MappingProxyType({"concurrent_runs": 5, "concurrent_scoring_jobs": 5}),
+    limits=MappingProxyType({"concurrent_runs": 5, "concurrent_scoring_jobs": 5, "concurrent_redteam_operations": 2}),
 )
 ON_PREMISES = Entitlements(edition="on_premises", features=PAID)
 """An on-premises installation sets no limit: its own workers bound what runs at once."""

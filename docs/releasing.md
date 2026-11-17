@@ -33,7 +33,7 @@ uv run --all-extras python scripts/sbom.py image --image ghcr.io/martiansecurity
 The two `sbom.py` commands write the [bills of materials](#bills-of-materials-and-the-licence-check)
 into `release-sbom/` and stop on a licence outside the allowed list. `docker build` and
 `check_image.py` build [the local edition's image](#the-local-editions-image) from the wheel in
-`dist/` and check it. `check_release.py` requires one wheel and one sdist, matching versions, Apache-2.0
+`dist/` and check it. `check_release.py` refuses a wheel that holds a data file (`.csv`, `.tsv`, `.jsonl`, `.parquet`, `.arrow`, or anything in the red team datasets folder but its module and licence register): the harmful-content datasets are downloaded on use ([catalog](catalog.md#harmful-content)). It requires one wheel and one sdist, matching versions, Apache-2.0
 metadata and license files, Python 3.12+, both modules, typed markers, CLI
 entry points, the documented extras and the pinned Evals UI
 ([below](#the-evals-ui-in-the-wheel)). It rejects repository/direct-URL
@@ -178,6 +178,10 @@ file (`concluded`, with the declared text in the `martian:declared-licence` prop
 `martian:licence-policy` property records how the check treated it. A Debian package lists the
 `License:` names of its machine-readable copyright file, which are Debian's names, not SPDX. The
 lists cover the `evals` extra only; the `mcp` and `postgres` extras are not in either.
+
+The licences of the red team content inside the SDK (prompts, catalogue, attack methods, datasets) are
+not package metadata: `scripts/content_licences.py` checks them against their own register in CI
+([red team content licences](security-and-data.md#red-team-content-licences)).
 
 **The check.** Both commands hold every third-party component to `scripts/licence-policy.json` and
 exit with code 1 after writing the file when one fails. In the release workflow the wheel's check

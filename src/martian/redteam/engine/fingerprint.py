@@ -3,7 +3,9 @@
 An attempt's fingerprint is a sha256 over everything that decides it: the catalogue version, the
 prompt and verdict rule revisions, the engine version, its probe (vulnerability, type, attack method,
 objective, goal, criteria and checks), its number, the target (its kind, its block of the run file and
-its purpose) and the service (local with its models and their settings, or hosted). Changing one of
+its purpose) and the service (local with its models and their settings, or hosted), in a pool of
+attackers the attacker the attempt is given, and, for any method but the six
+version 0.2 ones, the method's configuration and the revision of its prompt files. Changing one of
 these invalidates exactly the attempts it reaches: a check, only its vulnerability's attempts; the
 catalogue version or a model, every attempt.
 """
@@ -25,7 +27,13 @@ _REVISIONS = {"prompts_revision", "policy_revision", "rules_version", "engine_ve
 
 
 def attempt_fingerprint(
-    planned: PlannedProbe, number: int, *, run_file: RunFile, service: dict[str, Any], engine_version: str
+    planned: PlannedProbe,
+    number: int,
+    *,
+    run_file: RunFile,
+    service: dict[str, Any],
+    engine_version: str,
+    attacker: str | None = None,
 ) -> str:
     probe = planned.probe
     material = {
@@ -39,6 +47,14 @@ def attempt_fingerprint(
         "target": run_file.target.model_dump(mode="json"),
         "service": {key: value for key, value in service.items() if key not in _REVISIONS},
     }
+    if attacker is not None:
+        material["attacker"] = attacker
+    method = planned.attack_method
+    if not method.legacy:
+        from martian.redteam.methods.library import METHODS_REVISION
+
+        material["method"] = method.describe()
+        material["methods_revision"] = METHODS_REVISION
     text = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(text.encode()).hexdigest()
 

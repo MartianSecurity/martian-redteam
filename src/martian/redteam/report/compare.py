@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from martian.evals.stats import compare_outcomes
 from martian.redteam.model import Attempt, Finding, RedteamRun
-from martian.redteam.verify.rules import confirmed
+from martian.redteam.verify.rules import counted_as
 
 COMPARISON_VERSION: Literal["martian-redteam-comparison-v1"] = "martian-redteam-comparison-v1"
 
@@ -41,7 +41,7 @@ class FindingChange(_Out):
     candidate_level: int | None = None
     baseline_label: str | None = None
     candidate_label: str | None = None
-    counted_as: Literal["confirmed", "suspected"]
+    counted_as: Literal["confirmed", "attempted", "suspected"]
 
 
 class PairedTest(_Out):
@@ -77,6 +77,10 @@ class Comparison(_Out):
     undecided: list[FindingChange] = Field(default_factory=list)
     paired: PairedTest = PairedTest()
     changed: bool = False
+
+
+def _confirmed(attempt: Attempt) -> bool:
+    return attempt.outcome == "hit" and counted_as(attempt.check_results, attempt.level) == "confirmed"
 
 
 def _model(run: RedteamRun, role: str) -> Any:
@@ -142,7 +146,7 @@ def _change(
         candidate_level=None if after is None else int(after.evidence_level),
         baseline_label=None if before is None else before.label,
         candidate_label=None if after is None else after.label,
-        counted_as="confirmed" if confirmed(shown.evidence_level) else "suspected",
+        counted_as=shown.counted_as,
     )
 
 
@@ -180,8 +184,8 @@ def compare_runs(baseline: RedteamRun, candidate: RedteamRun) -> Comparison:
         and second[key].outcome in ("hit", "resisted")
     ]
     tested = compare_outcomes(
-        [attempt.outcome == "hit" and confirmed(attempt.level) for attempt, _ in pairs],
-        [attempt.outcome == "hit" and confirmed(attempt.level) for _, attempt in pairs],
+        [_confirmed(attempt) for attempt, _ in pairs],
+        [_confirmed(attempt) for _, attempt in pairs],
         higher_is_better=False,
     )
     paired = (

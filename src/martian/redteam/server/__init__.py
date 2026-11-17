@@ -21,7 +21,7 @@ from typing import Annotated, Any, Protocol
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.evals.server.dependencies import PrincipalDep, RecordsDep
+from martian.evals.server.dependencies import EntitlementsDep, PrincipalDep, RecordsDep
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT
 from martian.redteam.model import (
@@ -43,6 +43,8 @@ from martian.redteam.store import RedteamStore
 
 PREFIX = "/v1/redteam"
 MAX_PAGE = 200
+ENVIRONMENTS = "redteam_environments"
+"""The feature key a run in an environment needs (:mod:`martian.evals.server.entitlements`)."""
 
 router = APIRouter(prefix=PREFIX, tags=["redteam"])
 
@@ -94,13 +96,38 @@ class FindingList(_Out):
     items: list[Finding]
 
 
+class CatalogForm(_Out):
+    """One way to decide a probe of a catalogue entry: its checks, and what a hit proves."""
+
+    id: str
+    label: str
+    checks: list[dict[str, Any]]
+    goal: str | None = None
+    """``tool``: the run file's goal tool call is a check of this form; ``tool_with_canary``: and it
+    must carry the run's canary."""
+    level: int
+    """The highest evidence level a hit of this form reaches."""
+    deterministic: bool
+    proves: str
+    needs: str = ""
+
+
 class CatalogVulnerability(_Out):
     name: str
     id: str
     label: str
+    group: str
     objective_class: str
+    severity: str
+    """The default severity of its findings."""
     gated: bool
     types: list[str]
+    forms: list[CatalogForm]
+    """The first is the default."""
+    frameworks: list[str]
+    """Framework items, as ``<framework id>:<item id>``."""
+    source: str
+    licence: str
 
 
 class CatalogAttack(_Out):
@@ -110,10 +137,26 @@ class CatalogAttack(_Out):
     kind: str
 
 
+class CatalogFrameworkItem(_Out):
+    id: str
+    title: str
+    coverage: str
+    """``covered``, ``partly`` or ``not_covered``: what the catalogue tests, never compliance."""
+    note: str
+    vulnerability_ids: list[str]
+
+
 class CatalogFramework(_Out):
     id: str
+    label: str
+    source_revision: str
+    source: str
     coverage: str
+    """``subset``, always: no framework is fully covered."""
     vulnerability_ids: list[str]
+    items: list[CatalogFrameworkItem]
+    notes: str
+    disclaimer: str
 
 
 class CatalogOut(_Out):
@@ -279,47 +322,82 @@ async def annotate_redteam_finding(
 
 @router.get("/catalog", response_model=CatalogOut)
 async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
-    from martian.redteam.catalog import ATTACKS, CATALOG_VERSION, FRAMEWORKS, VULNERABILITIES
-    from martian.redteam.model.maps import objective_of
+    from martian.redteam.catalog import ATTACKS, CATALOG_VERSION, ENTRIES, FRAMEWORKS
 
-    vulnerabilities = []
-    for name, factory in VULNERABILITIES.items():
-        item = factory()
-        vulnerabilities.append(
-            CatalogVulnerability(
-                name=name,
-                id=item.id,
-                label=item.label,
-                objective_class=objective_of(item.id),
-                gated=item.gated,
-                types=list(item.allowed_types),
-            )
+    vulnerabilities = [
+        CatalogVulnerability(
+            name=name,
+            id=item.id,
+            label=item.label,
+            group=item.group,
+            objective_class=item.objective,
+            severity=item.severity,
+            gated=item.gated,
+            types=list(item.types),
+            forms=[CatalogForm.model_validate(form.describe()) for form in item.forms],
+            frameworks=list(item.frameworks),
+            source=item.source,
+            licence=item.licence,
         )
+        for name, item in ENTRIES.items()
+    ]
     attacks = [
         CatalogAttack(name=name, id=attack.id, label=attack.label, kind=attack.kind)
         for name, attack in ((name, make()) for name, make in ATTACKS.items())
     ]
+    from martian_redteam.catalog.frameworks import DISCLAIMER
+
     frameworks = [
-        CatalogFramework(id=item.id, coverage=item.coverage, vulnerability_ids=list(item.vulnerability_ids))
-        for item in FRAMEWORKS.values()
+        CatalogFramework(
+            id=framework.id,
+            label=framework.label,
+            source_revision=framework.source_revision,
+            source=framework.source,
+            coverage=framework.coverage,
+            vulnerability_ids=list(framework.vulnerability_ids),
+            items=[
+                CatalogFrameworkItem(
+                    id=item.id,
+                    title=item.title,
+                    coverage=item.coverage,
+                    note=item.note,
+                    vulnerability_ids=list(framework.vulnerabilities_of(item.id)),
+                )
+                for item in framework.items
+            ],
+            notes=framework.notes,
+            disclaimer=DISCLAIMER,
+        )
+        for framework in FRAMEWORKS.values()
     ]
     return CatalogOut(version=CATALOG_VERSION, vulnerabilities=vulnerabilities, attacks=attacks, frameworks=frameworks)
 
 
-@router.post("/runs", response_model=RunSummary, status_code=202)
-async def start_redteam_run(body: RunStart, request: Request, principal: PrincipalDep) -> RunSummary:
+def check_run_file(mapping: dict[str, Any], entitlements: Any) -> None:
+    """Refuse a run file that is not valid (``422``, naming each problem) or that names an
+    environment the edition does not include (``403``), before any launcher runs."""
     from pydantic import ValidationError
 
+    from martian.evals.server.dependencies import ensure_entitled
     from martian.redteam.runfile import RunFile
 
     try:
-        RunFile.model_validate(body.run_file)
+        run_file = RunFile.model_validate(mapping)
     except ValidationError as error:
         reasons = [
             ".".join(str(part) for part in item["loc"]) + ": " + str(item["msg"]).removeprefix("Value error, ")
             for item in error.errors(include_input=False, include_context=False, include_url=False)
         ]
         raise HTTPException(422, "; ".join(reasons)) from None
+    if run_file.environment is not None:
+        ensure_entitled(entitlements, ENVIRONMENTS)
+
+
+@router.post("/runs", response_model=RunSummary, status_code=202)
+async def start_redteam_run(
+    body: RunStart, request: Request, principal: PrincipalDep, entitlements: EntitlementsDep
+) -> RunSummary:
+    check_run_file(body.run_file, entitlements)
     run = await _launcher(request).start(principal, body)
     return _summary(run)
 
@@ -333,10 +411,14 @@ async def stop_redteam_run(
 
 
 __all__ = [
+    "ENVIRONMENTS",
     "MAX_PAGE",
     "PREFIX",
     "AnnotationIn",
     "AttemptPage",
+    "CatalogForm",
+    "CatalogFramework",
+    "CatalogFrameworkItem",
     "CatalogOut",
     "FindingList",
     "Launcher",
@@ -344,5 +426,6 @@ __all__ = [
     "RunPage",
     "RunStart",
     "RunSummary",
+    "check_run_file",
     "router",
 ]

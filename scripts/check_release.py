@@ -103,6 +103,26 @@ def sdist_ui(archive: tarfile.TarFile) -> tuple[dict[str, bytes], bytes]:
     return files, read(pyproject)
 
 
+DATASET_SUFFIXES = (".csv", ".tsv", ".jsonl", ".parquet", ".arrow")
+DATASET_FOLDER = "martian/redteam/catalog/datasets/"
+DATASET_FOLDER_FILES = {f"{DATASET_FOLDER}__init__.py", f"{DATASET_FOLDER}register.json"}
+
+
+def dataset_rows(names: list[str]) -> list[str]:
+    """Files of the wheel that could hold dataset rows: any file with a tabular data suffix, and any
+    file in the datasets folder but its module and its licence register. The harmful-content
+    datasets are downloaded on use and never shipped (docs/catalog.md#harmful-content)."""
+    return sorted(
+        name
+        for name in names
+        if not name.endswith("/")
+        and (
+            name.lower().endswith(DATASET_SUFFIXES)
+            or (name.startswith(DATASET_FOLDER) and name not in DATASET_FOLDER_FILES)
+        )
+    )
+
+
 def validate(directory: Path) -> tuple[list[Path], dict[str, str]]:
     """Check both distributions; return them and the Evals UI pin they share."""
     wheels, sources = list(directory.glob("*.whl")), list(directory.glob("*.tar.gz"))
@@ -121,6 +141,8 @@ def validate(directory: Path) -> tuple[list[Path], dict[str, str]]:
         names = archive.namelist()
         if not required.issubset(names):
             raise ValueError("wheel is missing a public module or typed marker")
+        if shipped := dataset_rows(names):
+            raise ValueError(f"the wheel holds dataset files, which are downloaded on use: {', '.join(shipped)}")
         metadata.append(
             BytesParser().parsebytes(archive.read(next(n for n in names if n.endswith(".dist-info/METADATA"))))
         )

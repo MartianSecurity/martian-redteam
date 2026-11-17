@@ -16,9 +16,10 @@ the judge. So every report states all three, and keeps confirmed and suspected r
 - **Decided attempts are the denominator.** An attempt is decided when it was a hit or the target
   resisted. Undetermined, stopped and errored attempts are not in any rate; they are counted beside
   it, as outcomes of their own.
-- **Confirmed and suspected stay apart.** A hit at evidence level 2 or above is confirmed; a hit at
-  level 1, which a model judged only, is suspected ([verdicts](redteam-verdicts.md)). Each has its own
-  rate, and they are never added together.
+- **Confirmed, attempted and suspected stay apart.** A hit at evidence level 2 or above is confirmed,
+  except one whose strongest evidence is a tool call that was asked for and is not known to have run:
+  that is an attempted action. A hit at level 1, which a model judged only, is suspected
+  ([verdicts](redteam-verdicts.md)). They are never added together.
 - **A refused generation is never a resisted attack.** When the attacker refuses twice, the attempt
   is an `attacker` error, and the target is not called.
 - **Intervals.** Every rate has a two-sided 95% Wilson score interval (`martian.evals.stats.wilson`).
@@ -59,6 +60,7 @@ Every rate in the report is an object with these fields:
 | --- | --- |
 | `service` | `local` (your models) or `hosted` (the Martian platform) |
 | `attacker`, `judge` | Each model's `model` (provider and name) and `inference_params`. `null` when the run did not record one, as with the hosted service |
+| `attackers` | With a pool of attackers ([models](redteam-run-file.md#models)), each of them, in the pool's order; `attacker` is then the first. Empty with one attacker |
 | `judge_used` | Whether any probe had a judge check |
 | `methods` | The attack methods, in plan order |
 | `budget` | `limits` (the run file's budget), `spent` (target queries, attacker and judge calls, tokens and cost), `stopped_by` (the limit that stopped the run, or `null`) and `attempts_per_probe` (the most attempts a probe planned) |
@@ -72,10 +74,12 @@ Every rate in the report is an object with these fields:
 | `attempts` | Every attack attempt |
 | `decided` | `hits` plus `resisted` |
 | `hits` | Attempts a check found vulnerable |
-| `confirmed_hits` | Hits at level 2 or above |
+| `confirmed_hits` | Hits at level 2 or above, attempted actions excepted |
+| `attempted_hits` | Hits whose strongest evidence is a tool call not known to have run |
 | `suspected_hits` | Hits at level 1 only |
 | `resisted` | Attempts every check decided and none hit |
 | `undetermined` | Attempts no check could decide |
+| `not_delivered` | Of the undetermined, attempts whose delivery route never put the payload where the agent read it ([delivery routes](redteam-methods.md#delivery-routes)): the agent was not tested. The Markdown report says how many |
 | `stopped` | Attempts the budget stopped before they were decided |
 | `errors` | Attempts that did not complete |
 | `errors_by_kind` | `errors` split by whose failure it was: `target`, `attacker`, `judge`, `infrastructure` |
@@ -88,6 +92,7 @@ Every rate in the report is an object with these fields:
 | --- | --- |
 | `per_attempt_confirmed` | Confirmed hits over decided attempts |
 | `per_attempt_suspected` | Suspected hits over decided attempts |
+| `per_attempt_attempted` | Attempted actions over decided attempts: hits whose best evidence is a tool call of the goal that was asked for and not known to run (level 3). Never added to the confirmed rate |
 | `within_k` | Success within k target queries, one point per k (below) |
 | `queries_to_first_confirmed_median`, `queries_to_first_confirmed_max` | For each probe with a confirmed hit, how many target queries it took to reach the first one, as their median and their largest value. `null` without a confirmed hit |
 
@@ -102,6 +107,9 @@ point of `within_k` has:
 | `undecided` | The other probes: every attempt within k queries was undetermined, stopped or an error |
 | `confirmed` | Probes with a confirmed hit within k queries, over `probes` |
 | `suspected` | Probes with a suspected hit and no confirmed hit within k queries, over `probes` |
+| `attempted` | Probes with an attempted action and no confirmed hit within k queries, over `probes`. Counted apart from `suspected`: a probe can be in both, and neither is added to `confirmed` |
+
+The Markdown and HTML reports add an attempted-action column when the run has one.
 
 Up to 20 queries per probe, there is a point for every k. Beyond that, points are at 1, 2, 3, 5, 10,
 20, 50, 100 and so on, and at the largest k. A run that did not record target queries, such as a
@@ -115,17 +123,19 @@ attack method with its `method`, `generations`, `refusals` and `rate`.
 
 ### Findings
 
-`findings` has `confirmed` and `suspected` (findings at level 2 and above, and at level 1),
+`findings` has `confirmed`, `attempted` and `suspected` (findings counted as each),
 `by_level` (for each level 1 to 5, its `level`, `label`, whether it is `counted_as` confirmed or
-suspected, and how many `findings` reached it) and `items`, one per finding:
+suspected, and how many `findings` reached it; level 3 holds attempted actions too) and `items`, one
+per finding. A probe whose negative control showed the same signal has no finding.
 
 | Field | Meaning |
 | --- | --- |
 | `id`, `probe_id` | The finding and its probe |
 | `vulnerability`, `vulnerability_type`, `attack_method`, `objective_class` | What the probe tested |
-| `evidence_level`, `label`, `counted_as` | The highest level its hits reached, its label, and `confirmed` or `suspected` |
+| `evidence_level`, `label`, `counted_as` | The highest level its hits reached, its label, and `confirmed`, `attempted` or `suspected` |
 | `severity`, `status` | The run file's severity, and the finding's status (`open`, `accepted`, `fixed`, `false_positive`) |
 | `hits`, `attempts` | The probe's hits and attack attempts |
+| `attackers` | With a pool of attackers, the attackers whose attempts hit, in order of their first hit; empty with one attacker |
 | `verification` | The verification outcome (`verified`, `consistent`, `not_reproducible`, `unverifiable`), or `not evaluated` |
 | `reproductions` | `r of n`: repetitions that reproduced the hit at level 2 or above, of those that ran, or `not evaluated` |
 | `negative_control` | `passed`, `failed`, `undetermined`, or `not evaluated` when no control ran for the probe |
@@ -139,19 +149,42 @@ and `note` then says so.
 `controls` counts negative controls, the probe run without the attack: `ran`, `passed` (the target
 held), `failed` (it showed the signal) and `undetermined`. They come from the run's control attempts,
 or, when it has none, from its verifications. `evaluated` is false when no control ran, and `note`
-then says so.
+then says so. The local engine fills both: its repetitions, negative controls and verifications are
+described in the [run file guide](redteam-run-file.md#verification).
+
+`judge_calibration` is the judge measured on the run file's labelled sample, or `null` without one:
+the `judge` version, the `sample` size, `true_positive`, `false_positive`, `false_negative`,
+`true_negative` and `undetermined` answers, `precision` (true positives over the hits it called) and
+`recall` (true positives over the sample's hits) as rates, and `error` when it could not be measured.
+It describes the judge; it never raises a judged hit above suspected.
 
 ### Groups and probes
 
 `by_method` and `by_vulnerability` have one entry per attack method and per vulnerability, each with
-its `name`, `probes`, `attempts`, `decided`, `undetermined`, `stopped` and `errors`, and its
-`confirmed` and `suspected` rates over decided attempts.
+its `name`, `probes`, `attempts`, `decided`, `undetermined`, `stopped` and `errors`, its
+`confirmed` and `suspected` rates over decided attempts, the `target_queries` its attempts made and
+`queries_to_first_hit_median`, the median of its probes' `queries_to_first_hit` (or `null`). A
+method's entry also has its `kind` and its `arm` ([attack methods](redteam-methods.md#kinds-and-arms)):
+`control` for the fixed templates, which send the same attacks every run, `static` for one written
+attack, and `adaptive` for a method that reads the replies or the checks. Reading the control arm's
+row beside each adaptive method's, over the same probes, is the static-versus-adaptive comparison;
+the Markdown and HTML reports show the arm beside each method. A version 0.2 method is `static`, a
+transform or a rewrite; a probe of a hosted campaign has neither.
+
+`by_attacker`, with a pool of attackers, has one entry per attacker, in the pool's order: the same
+fields over the attack attempts it wrote, its `attacker_calls`, the generations it refused or left
+empty (`refusals`) and their `refusal_rate`. Each attempt names its attacker (`attacker`), and a
+repetition names the attacker of the hit it repeats. The Markdown and HTML reports show the table, and
+the Markdown findings table names each finding's attackers. With one attacker `by_attacker` is empty:
+every success is the run's attacker's.
 
 `probes` has one entry per probe: its `id`, `vulnerability`, `vulnerability_type`,
 `attack_method`, `objective_class`, the kinds of its `checks`, its attempts by outcome (`attempts`,
-`hits`, `resisted`, `undetermined`, `stopped`, `errors`), the highest `evidence_level` a hit reached
-(or `null`), the `target_queries` it made, and `queries_to_first_hit`, the target queries up to its
-first hit of any level (or `null`).
+`hits`, `resisted`, `undetermined`, `not_delivered`, `stopped`, `errors`), the highest `evidence_level` a hit reached
+(or `null`), the `target_queries` it made, `queries_to_first_hit`, the target queries up to its
+first hit of any level (or `null`), and its benign task: `task_with_attack`, `k of n` attack attempts
+in which it completed, and `task_without_attack`, `completed`, `not completed` or `undetermined` in
+the negative control, each `not evaluated` when the probe has no benign task.
 
 ## Output formats
 
@@ -201,11 +234,11 @@ between them may be the change of attacker or budget, not of the target.
 
 ## Pinned findings
 
-A confirmed finding can be kept as a regression test, so that after a fix CI checks it stays fixed.
+A confirmed finding, or an attempted action, can be kept as a regression test, so that after a fix CI checks it stays fixed. A suspected finding cannot: it rests on a judge.
 
 ```bash
 MARTIAN_REPORT_INCLUDE_CONTENT=1 martian redteam run redteam.yaml   # a run that keeps the attack text
-martian redteam pin add results/redteam-run.json -o pins            # every confirmed finding, or --finding ID
+martian redteam pin add results/redteam-run.json -o pins            # every finding but suspected ones, or --finding ID
 martian redteam pin run redteam.yaml --pins pins                    # in CI: no attacker or judge model
 ```
 
@@ -241,6 +274,23 @@ calls no attacker or judge model and needs no model key or Martian connection. E
 It writes `redteam-pins.json` (each pin's status, its check results and the counts by status, with
 `passed`) and `redteam-pins.md` to `-o` or the run file's `output_folder`, and exits 0 when every pin
 is `not_reproduced`, 1 otherwise, and 2 when it could not start.
+
+## Pushing a run to a Martian server
+
+`martian redteam push RUN` sends a finished version 2 run (a `redteam-run.json`, or the id of a run in the local store) to the Martian server `MARTIAN_API_URL` names, with `MARTIAN_API_TOKEN`: an API key with `redteam:run`, bound to no agent. The console then lists it with the runs the server ran. It goes to `PUT /v1/push/redteam/runs/{run_id}` ([red team API](redteam-api.md#pushed-runs)) as the run the local store keeps, so content the report leaves out stays out. The server labels it as executed by the client (`provenance.execution` is `client_executed`). Pushing it again changes nothing and says it is already there; a run with the same id and other content is refused. A run that has not finished is not pushed, and a refusal stops with exit code 2. A run in an environment is pushed this way when it ends ([environments](redteam-run-file.md#environments)); a failed push there is a warning.
+
+## A planned campaign on a Martian server
+
+`martian redteam campaign` starts the console's planned campaign on the Martian server `MARTIAN_API_URL` names, with `MARTIAN_API_TOKEN` (an API key with `redteam:run`, acting as the member who created it). The server's engine plans and runs it against a registered agent the organisation approved; nothing runs here. `--agent` names the agent (default: the one the key is bound to), `--depth` is `quick`, `standard` (the default) or `deep`, and `--objective`, `--outcome` and `--environment` narrow it as the console's wizard does. The console lists the campaign as soon as it starts, and the command prints where.
+
+The command reads the campaign every `--poll` seconds (15) until it finishes, for at most `--timeout` seconds (7200); `--no-wait` only starts it. When it finished it writes the campaign as a run of the shared model to `redteam-run.json`, with `redteam-report.json` and `.md`, in `--output` (`results`). The exit code follows the backend's release decision:
+
+| Release decision | Exit code |
+| --- | --- |
+| `APPROVED` | 0 |
+| `CONDITIONAL` | 1, or 0 with a warning under `--allow-conditional` |
+| `BLOCKED` | 1 |
+| none: `PENDING`, a campaign that failed or did not finish in time, or a refused start | 2 |
 
 ## What a report holds of the target's content
 

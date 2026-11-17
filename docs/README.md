@@ -19,13 +19,18 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Trace store limits](trace-store-limits.md) — measured write and search latency and database growth of the in-process store's traces on Postgres, and the trace volume it holds
 4. [Agent Protocol](agent-protocol.md) — typed Backend operations and explicit legacy graph adapter
 5. [Orchestration](orchestration.md) — probe loop, encodings, callbacks, concurrency
+   - [Red team quickstart](redteam-quickstart.md) — install to a first local run and its report in the UI with your own model and no account, and the Red Team rows of the edition comparison
    - [Red team data model](redteam-model.md) — the objects SDK runs, the local edition and hosted campaigns have in common, how each format maps onto them, and how a run is stored as an eval run
    - [Red team verdicts](redteam-verdicts.md) — evidence levels 0 to 5, the rules that turn checks into a verdict, and their test vectors
-   - [Red team run file](redteam-run-file.md) — version 2: targets shared with suite files, models and the local or hosted service, goals and checks, the tool proxy, budget and gate, and how `martian redteam run` runs it
+   - [Red team run file](redteam-run-file.md) — version 2: targets shared with suite files, models (one attacker or a pool) and the local or hosted service, goals and checks, canaries and the receipt listener, the tool proxy, controls, repetitions and judge calibration, the local strategy library, budget and gate, how `martian redteam run` runs it, re-judging a stored run and the self-test
+   - [Red team attack methods](redteam-methods.md) — the method interface, kinds and arms, transform layers, and each method with what it tries and what it spends
    - [Red team targets](redteam-targets.md) — the function, HTTP and MCP server targets, how each keeps a conversation, the reply contract for tool calls, the recording MCP proxy and its local sessions, tool calls read from traces, and worked examples for four agent frameworks
    - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs; two runs compared; confirmed findings pinned as regression tests
+   - [Red team benchmark results](redteam-benchmarks.md) — the open red team on InjecAgent with the report standard, and the script that reproduces it
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
-6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
+   - [Moving from promptfoo red team](redteam-from-promptfoo.md) — promptfoo's concepts in Martian's terms, what imports and what does not, and a walk-through of a sample project
+   - [Red team interop](redteam-interop.md) — a promptfoo red team config as a run file, promptfoo red team results as runs in the local store, and garak's probes against a run file's target
+6. [Catalog](catalog.md) — catalogue 1.0: each vulnerability's objective, forms and what each proves, default severity, framework tags, source and licence; the version rule; attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment with red team results, WAF
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off

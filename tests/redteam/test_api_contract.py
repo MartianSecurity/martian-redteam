@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 
 from martian.evals.records.sql import SqlRecordStore
 from martian.evals.server.dependencies import current_principal
+from martian.evals.server.entitlements import COMMUNITY, ENTERPRISE
 from martian.evals.server.principal import SINGLE_USER
 from martian.redteam.model.maps import from_risk_assessment
 from martian.redteam.server import router
@@ -28,6 +29,7 @@ from martian.redteam.server.contract import (
     undeclared_change,
 )
 from martian.redteam.store import RedteamStore
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.types import EvaluatorContext, RiskAssessment, SimulatorContext
 
@@ -41,6 +43,11 @@ OPERATION_ROUTES = {
     "/v1/redteam/evaluate",
     "/v1/redteam/operations/{operation_id}",
     "/v1/redteam/operations/{operation_id}/cancel",
+    "/v1/redteam/environment-runs",
+    "/v1/redteam/environment-runs/{run_id}/finish",
+    "/v1/redteam/environment-runs/{run_id}/world",
+    "/v1/redteam/campaigns",
+    "/v1/redteam/campaigns/{run_id}",
 }
 
 
@@ -127,7 +134,7 @@ async def test_existing_sdk_clients_send_and_read_what_the_contract_allows():
         )
     _validate("SimulateRequest", sent[0])
     _validate("EvaluateRequest", sent[1])
-    assert sent[0]["catalog_version"] == CATALOG_VERSION
+    assert sent[0]["catalog_version"] == HOSTED_CATALOG_VERSION == "0.2.0"
 
 
 @pytest.fixture
@@ -135,6 +142,7 @@ def served(tmp_path):
     records = SqlRecordStore(f"sqlite:///{tmp_path / 'martian.db'}")
     app = FastAPI()
     app.state.martian_evals_records = records
+    app.state.martian_evals_entitlements = lambda principal: COMMUNITY
     app.dependency_overrides[current_principal] = lambda: SINGLE_USER
     app.include_router(router)
     report = RiskAssessment.model_validate_json((FIXTURES / "risk-assessment-0.2.json").read_text("utf-8"))
@@ -170,6 +178,10 @@ def test_a_stored_run_is_served_in_the_shapes_the_contract_names(served):
     catalog = client.get("/v1/redteam/catalog")
     _response("get", "/v1/redteam/catalog", "200", catalog.json())
     assert catalog.json()["version"] == CATALOG_VERSION
+    leakage = next(item for item in catalog.json()["vulnerabilities"] if item["id"] == "prompt_leakage")
+    assert (leakage["objective_class"], leakage["severity"], leakage["licence"]) == ("disclosure", "high", "Apache-2.0")
+    assert leakage["forms"][0]["id"] == "reply" and leakage["forms"][0]["level"] == 1
+    assert "owasp_llm_2025:LLM07" in leakage["frameworks"]
     assert client.get("/v1/redteam/runs/missing").status_code == 404
     assert client.get(f"/v1/redteam/runs/rt-1/evidence/{uuid4()}").status_code == 404
 
@@ -198,3 +210,42 @@ def test_an_installation_without_a_launcher_cannot_start_or_stop_runs(served):
     assert client.post("/v1/redteam/runs", json={"run_file": run_file}).status_code == 501
     assert client.post("/v1/redteam/runs", json={"run_file": {"version": 2}}).status_code == 422
     assert client.post("/v1/redteam/runs/rt-1/stop").status_code == 501
+
+
+class _Started:
+    """A launcher that records what it was asked to start."""
+
+    def __init__(self, run):
+        self.run, self.started = run, []
+
+    async def start(self, principal, request):
+        self.started.append(request.run_file)
+        return self.run
+
+    async def stop(self, principal, project_id, run_id):
+        return self.run
+
+
+def test_a_run_in_an_environment_needs_the_environments_key(served):
+    client, run = served
+    launcher = _Started(run)
+    client.app.state.martian_redteam_launcher = launcher
+    run_file = {
+        "version": 2,
+        "target": {"purpose": "Refund assistant", "file": "agent.py", "function": "answer"},
+        "vulnerabilities": [{"name": "PromptLeakage"}],
+        "attacks": [{"name": "PromptInjection"}],
+    }
+    # Community: a run without an environment starts; one that names an environment is refused.
+    assert client.post("/v1/redteam/runs", json={"run_file": run_file}).status_code == 202
+    refused = client.post("/v1/redteam/runs", json={"run_file": {**run_file, "environment": "refund-desk"}})
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "The Community edition does not include red team environments"
+    assert len(launcher.started) == 1
+    # An edition with the key starts it.
+    client.app.state.martian_evals_entitlements = lambda principal: ENTERPRISE
+    assert (
+        client.post("/v1/redteam/runs", json={"run_file": {**run_file, "environment": "refund-desk"}}).status_code
+        == 202
+    )
+    assert launcher.started[-1]["environment"] == "refund-desk"
