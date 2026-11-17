@@ -22,11 +22,19 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from martian.config import ConfigError
 from martian.evals.server.principal import Principal
 from martian.redteam.engine.plan import PlanError
 from martian.redteam.engine.report import for_report
 from martian.redteam.engine.run import Engine
-from martian.redteam.engine.runs import TargetUnavailable, build_service, build_target, unsupported
+from martian.redteam.engine.runs import (
+    SessionHandoverError,
+    TargetUnavailable,
+    build_service,
+    build_target,
+    tool_boundary,
+    unsupported,
+)
 from martian.redteam.engine.service import ServiceSelectionError
 from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
@@ -61,8 +69,12 @@ class LocalLauncher:
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
-            target = build_target(run_file.target)
+            target = build_target(run_file.target, base=self.base_dir)
             stack.push_async_callback(target.close)
+            folder = Path(run_file.output_folder)
+            target = await tool_boundary(
+                run_file, target, stack, folder=folder if folder.is_absolute() else self.base_dir / folder
+            )
 
             async def keep(run: RedteamRun) -> None:
                 await self.store.save(for_report(run, policy=service.redaction_policy), principal=principal)
@@ -76,7 +88,14 @@ class LocalLauncher:
                 checkpoint=keep,
                 provenance=provenance,
             )
-        except (ServiceSelectionError, TargetUnavailable, PlanError) as error:
+        except (
+            ServiceSelectionError,
+            TargetUnavailable,
+            PlanError,
+            ConfigError,
+            SessionHandoverError,
+            ConnectionError,
+        ) as error:
             await stack.aclose()
             raise HTTPException(422, str(error)) from None
         except (FileNotFoundError, ImportError, AttributeError):

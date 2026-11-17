@@ -53,7 +53,7 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
 - Async callables run on the event loop; synchronous callables run in worker threads so they cannot prevent deadlines or sibling probes from progressing.
 - Await if the result is awaitable.
 - `str` → `Turn(role="ai", content=str)`.
-- `Turn` → returned as-is.
+- `Turn` → returned as-is. Its `tool_calls` hold each call's `name`, `arguments`, `call_id`, `executed` and `result`; its `tools_called`, the older names-only form, still works alone and is filled in from `tool_calls` when only those are given. The hosted evaluate step receives the names. The report keeps the calls; their arguments and results are target content and are hidden unless the report includes target content, and the Markdown report lists the calls of failed or errored probes.
 - Anything else → `TypeError`, recorded as a target error if it happens inside `_probe`.
 
 Synchronous callbacks need their own network/I/O timeouts. Cancelling an await

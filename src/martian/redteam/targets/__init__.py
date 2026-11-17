@@ -5,20 +5,32 @@ target answered and the tool calls it made or asked for. A target keeps one conv
 ``session``: the same session continues a conversation, a new one starts another. The function,
 HTTP and MCP targets of the run file, the version 0.2 callback, and later a registered agent, each
 implement it; the engine knows none of them.
+
+- :func:`target_from_run_file` builds the target a run file's ``target`` block names
+  (:mod:`martian.redteam.targets.factory`): :class:`~martian.redteam.targets.function.FunctionTarget`
+  or :class:`~martian.redteam.targets.http.HttpTarget`, from the suite file's own target block, or
+  :class:`~martian.redteam.targets.mcp.McpServerTarget` for an MCP server.
+- :mod:`martian.redteam.targets.reply` is the reply contract: the text and the tool calls a target
+  reports.
+- :mod:`martian.redteam.targets.conversations` keeps each target's conversations.
+
+``docs/redteam-targets.md`` describes each target and the session contract.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from martian.redteam.model import ToolCall
+from martian.redteam.model import Evidence, ToolCall
 
 
 class TargetReply(BaseModel):
     """One reply of the target. ``tool_calls`` are the calls the target reported or the harness
-    observed, with ``ToolCall.executed`` saying whether each one ran."""
+    observed, with ``ToolCall.executed`` saying whether each one ran. ``evidence`` is what a boundary
+    the harness trusts captured about them: the recording proxy's ledger, or a trace's tool spans,
+    each with its source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -29,6 +41,12 @@ class TargetReply(BaseModel):
     and a tool-call check cannot find that no call was made."""
     session: str | None = None
     latency_ms: float | None = Field(default=None, ge=0)
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class TargetChanged(RuntimeError):
+    """The target is not the one the run started with, such as an MCP tool whose input schema
+    changed. The engine stops the run: it never attacks a target other than the one it pinned."""
 
 
 @runtime_checkable
@@ -50,4 +68,13 @@ class Target(Protocol):
         ...
 
 
-__all__ = ["Target", "TargetReply"]
+def __getattr__(name: str) -> Any:
+    # The factory imports the evals core's target code; it loads only when it is asked for.
+    if name == "target_from_run_file":
+        from martian.redteam.targets.factory import target_from_run_file
+
+        return target_from_run_file
+    raise AttributeError(name)
+
+
+__all__ = ["Target", "TargetChanged", "TargetReply", "target_from_run_file"]
