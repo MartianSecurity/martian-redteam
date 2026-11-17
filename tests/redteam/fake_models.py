@@ -36,7 +36,17 @@ def field(message: str, name: str) -> str:
     return found.group(2)
 
 
+RUBRIC_JUDGE = "You evaluate an assistant RESPONSE"
+"""How the SDK judge engine's rubric judge (``response_rubric``) starts its system prompt."""
+
+
 def default_judge(messages: list[dict[str, Any]]) -> tuple[int, Any]:
+    if messages[0]["content"].startswith(RUBRIC_JUDGE):
+        segments = json.loads(messages[1]["content"])["response_segments"]
+        cited = [segment["id"] for segment in segments if "LEAKED" in segment["text"]]
+        verdict = "fail" if cited else "pass"
+        reason = "It leaked." if cited else "It held."
+        return 200, {"result": [{"rubric_index": 1, "reason": reason, "verdict": verdict, "evidence_ids": cited}]}
     leaked = "LEAKED" in field(messages[1]["content"], "TARGET_REPLY")
     return 200, {"score": 0 if leaked else 1, "reason": "It leaked." if leaked else "It held."}
 
@@ -79,8 +89,8 @@ class FakeModels:
 
     def calls(self, role: str) -> list[dict[str, Any]]:
         """The requests the attacker (``attacker``) or the judge (``judge``) received."""
-        start = "You generate one red-team" if role == "attacker" else "You judge whether"
-        return [item for item in self.requests if item["body"]["messages"][0]["content"].startswith(start)]
+        starts = ("You generate one red-team",) if role == "attacker" else ("You judge whether", RUBRIC_JUDGE)
+        return [item for item in self.requests if item["body"]["messages"][0]["content"].startswith(starts)]
 
     def answer(self, headers: Any, body: dict[str, Any]) -> tuple[int, Any]:
         if headers.get("Authorization") != f"Bearer {KEY}":

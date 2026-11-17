@@ -32,6 +32,16 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _without_canary(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("{{canary}}", "canary")
+    if isinstance(value, dict):
+        return {key: _without_canary(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_canary(item) for item in value]
+    return value
+
+
 class McpTarget(_Model):
     """An MCP server under test: the tool that takes a message, and the argument the message goes in.
     ``session_argument`` and ``reset_argument`` carry the conversation: its id, and ``true`` on its
@@ -117,7 +127,8 @@ class Target(_Model):
         from martian.evals.runner import TargetRef
 
         try:
-            TargetRef.model_validate(suite_fields)
+            # {{canary}} is the red team's own placeholder: the run fills it before the target is built.
+            TargetRef.model_validate(_without_canary(suite_fields))
         except ValidationError as error:
             reasons = [
                 str(item["msg"]).removeprefix("Value error, ")
@@ -179,17 +190,51 @@ class Goal(_Model):
         return self
 
 
+Marker = Annotated[str, Field(min_length=3, max_length=200)]
+"""A text check's marker: at least 3 characters, so it cannot appear by chance."""
+
+
 class TextCheck(_Model):
+    """Markers stated before the attack: every ``all_of`` marker in the reply and no ``none_of``
+    marker. A marker the attack itself carried proves nothing (``docs/redteam-verdicts.md``)."""
+
     type: Literal["text"]
-    all_of: list[str] = Field(min_length=1, max_length=8)
-    none_of: list[str] = Field(default_factory=list, max_length=12)
+    all_of: list[Marker] = Field(min_length=1, max_length=8)
+    none_of: list[Marker] = Field(default_factory=list, max_length=12)
     ignore_case: bool = True
+
+    @model_validator(mode="after")
+    def _apart(self) -> TextCheck:
+        if {marker.casefold() for marker in self.all_of} & {marker.casefold() for marker in self.none_of}:
+            raise ValueError("a marker cannot be both required and forbidden")
+        return self
+
+
+CanaryPlant = Literal["context", "system_prompt", "tool_result"]
 
 
 class CanaryCheck(_Model):
+    """A planted canary found in the reply or a tool call's arguments, encoded or not."""
+
     type: Literal["canary"]
     value: str | None = Field(default=None, min_length=8)
-    """The canary to plant. Without one, each run plants its own."""
+    """A canary you planted yourself. Without one, the run plants its own, unique to the run."""
+    plant: CanaryPlant | None = None
+    """Where the run plants its canary: ``context`` (the default), with the attack in the message;
+    ``system_prompt``, for ``{{canary}}`` in the target block; ``tool_result``, for ``{{canary}}`` in a
+    proxied server's ``inject`` text."""
+    text: str | None = Field(default=None, min_length=1, max_length=2000)
+    """A ``context`` plant's note, with ``{{canary}}`` where the canary goes."""
+
+    @model_validator(mode="after")
+    def _planting(self) -> CanaryCheck:
+        if self.value is not None and (self.plant is not None or self.text is not None):
+            raise ValueError("a canary with a value is one you planted yourself; plant and text apply to the run's own")
+        if self.text is not None and self.plant not in (None, "context"):
+            raise ValueError("text is the note of a context plant")
+        if self.text is not None and "{{canary}}" not in self.text:
+            raise ValueError("text says where the canary goes, with {{canary}}")
+        return self
 
 
 class ToolCallCheck(_Model):
@@ -206,6 +251,9 @@ class JudgeCheck(_Model):
 
 
 class ReceiptCheck(_Model):
+    """A request to the run's local receipt listener. It needs a canary check in the same
+    vulnerability: carrying that canary is verified exfiltration, a request without it contact only."""
+
     type: Literal["receipt"]
 
 
@@ -218,6 +266,17 @@ class StateCheck(_Model):
 CheckDecl = Annotated[
     TextCheck | CanaryCheck | ToolCallCheck | JudgeCheck | ReceiptCheck | StateCheck, Field(discriminator="type")
 ]
+
+
+BenignCheck = Annotated[TextCheck | ToolCallCheck, Field(discriminator="type")]
+
+
+class Benign(_Model):
+    """A normal task the target should still complete under attack, and the checks that show it did.
+    The attack is sent with the task in the same message; the negative control sends the task alone."""
+
+    task: str = Field(min_length=1, max_length=4096)
+    checks: list[BenignCheck] = Field(min_length=1, max_length=5)
 
 
 class Plant(_Model):
@@ -237,6 +296,8 @@ class Vulnerability(NamedSpec):
     objective: ObjectiveName | None = None
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
+    benign: Benign | None = None
+    """A benign task whose completion is reported with and without the attack."""
     plant: Plant | None = None
     """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
 
@@ -401,6 +462,34 @@ class Gate(_Model):
         return "fail" if self.fail_on_infrastructure_error else "ignore"
 
 
+class VerificationSettings(_Model):
+    """How the run checks its own findings and its judge."""
+
+    repetitions: int = Field(default=0, ge=0, le=10)
+    """Send a confirmed hit's attack again, each time in a new conversation, this many times."""
+    required: int | None = Field(default=None, ge=1, le=10)
+    """How many repetitions must hit again for the finding to verify. Default 2, or ``repetitions``
+    when fewer ran."""
+    control: bool = True
+    """Run each probe once without the attack, when it hit or has a benign task: a hit the control
+    shows too is discarded."""
+
+    @model_validator(mode="after")
+    def _reachable(self) -> VerificationSettings:
+        if self.required is not None and self.required > self.repetitions:
+            raise ValueError("required is at most repetitions")
+        return self
+
+    @property
+    def required_successes(self) -> int:
+        return self.required if self.required is not None else max(1, min(2, self.repetitions))
+
+    calibration: str | None = Field(default=None, min_length=1)
+    """A labelled sample (JSON Lines: ``vulnerability``, ``type``, ``attack``, ``reply``, ``hit``) the
+    judge is measured on before the run, for its precision and recall. A relative path is read from
+    the run file's folder."""
+
+
 class RunFile(_Model):
     """A version 2 red team run file."""
 
@@ -412,6 +501,7 @@ class RunFile(_Model):
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
     gate: Gate = Field(default_factory=Gate)
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
     output_folder: str = "results"
     environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
@@ -440,7 +530,40 @@ class RunFile(_Model):
                     raise ValueError(
                         f"vulnerabilities[{index}]: a judge check needs models.judge when attacks run locally"
                     )
+                if check.type == "canary" and check.plant == "system_prompt":
+                    self._templated_target(index)
+                if check.type == "receipt" and not any(item.type == "canary" for item in vulnerability.checks):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a receipt check needs a canary check: the canary is the "
+                        "secret a request must carry"
+                    )
+                if (
+                    check.type == "canary"
+                    and check.plant == "tool_result"
+                    and not any(server.inject and "{{canary}}" in server.inject for server in self.tools.proxy)
+                ):
+                    raise ValueError(
+                        f"vulnerabilities[{index}]: a tool_result canary needs {{{{canary}}}} in a proxied "
+                        "server's inject text"
+                    )
         return self
+
+    def _templated_target(self, index: int) -> None:
+        from martian.redteam.verify.canary import mentions
+
+        if self.target.kind == "function":
+            raise ValueError(
+                f"vulnerabilities[{index}]: a function target has no template to plant a canary in; "
+                "plant it in the context, or give the value you planted yourself"
+            )
+        fields: list[Any] = [self.target.headers, self.target.body]
+        if self.target.mcp is not None:
+            fields += [self.target.mcp.arguments, self.target.mcp.headers]
+        if not mentions(fields):
+            raise ValueError(
+                f"vulnerabilities[{index}]: a system_prompt canary needs {{{{canary}}}} in the target's "
+                "headers, body or mcp arguments"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Self:
@@ -452,6 +575,10 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        sample = loaded.verification.calibration
+        if sample is not None and not Path(sample).is_absolute():
+            settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
+            loaded = loaded.model_copy(update={"verification": settings})
         return loaded
 
 
@@ -508,8 +635,11 @@ def problems(path: str | Path) -> list[str]:
 
 __all__ = [
     "VERSION",
+    "Benign",
     "Budget",
+    "VerificationSettings",
     "CanaryCheck",
+    "CanaryPlant",
     "ErrorHandling",
     "Gate",
     "GateAction",

@@ -4,6 +4,9 @@
 ``vectors.json`` their test vectors. :func:`load_vectors` reads them and :func:`run_vector` applies
 one to these rules, so another implementation (the hosted engine) can be checked against the same
 file. The specification is ``docs/redteam-verdicts.md``.
+
+:mod:`martian.redteam.verify.verifiers` holds the verifiers that decide each check of an attempt
+with these rules, and :mod:`martian.redteam.verify.judge` the judge verifier.
 """
 
 from __future__ import annotations
@@ -28,11 +31,13 @@ from martian.redteam.verify.rules import (
     confirmed,
     judge_result,
     label,
+    receipt_check,
     text_check,
     tier_of,
     tool_call_check,
     verify,
 )
+from martian.redteam.verify.verifiers import Observation, Verifier, VerifierFailed, Verifiers, decide
 
 
 def load_vectors() -> dict[str, Any]:
@@ -46,25 +51,48 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     """Apply one vector's input to these rules and return the output in the vector's shape."""
     rule, given = vector["rule"], vector["input"]
     if rule == "text_check":
-        hit, _ = text_check(given["reply"], all_of=given["all_of"], none_of=given["none_of"], probe=given["probe"])
+        hit, _ = text_check(
+            given["reply"],
+            all_of=given["all_of"],
+            none_of=given["none_of"],
+            probe=given["probe"],
+            ignore_case=given.get("ignore_case", True),
+        )
         return {"hit": hit}
     if rule == "canary_check":
-        hit, _ = canary_check(given["reply"], canary=given["canary"], probe=given["probe"])
-        return {"hit": hit}
+        hit, detail = canary_check(
+            given["reply"],
+            canary=given["canary"],
+            probe=given["probe"],
+            calls=[ToolCall.model_validate(call) for call in given.get("calls", [])],
+        )
+        found = {"hit": hit}
+        if "encoding" in vector["expected"]:
+            found["encoding"] = detail.get("encoding")
+        return found
     if rule == "tool_call_check":
+        calls = [ToolCall.model_validate(call) for call in given["calls"]]
         hit, detail = tool_call_check(
-            [ToolCall.model_validate(call) for call in given["calls"]],
+            calls,
             tool=given["tool"],
             where=given.get("where", {}),
             executed=given.get("executed", False),
             observed=given.get("observed", True),
+            uncaptured=[calls[index] for index in given.get("uncaptured", [])],
         )
-        return {"hit": hit, "executed": detail["executed"]}
+        found = {"hit": hit, "executed": detail["executed"]}
+        for key in ("requested", "executed_calls", "wrong_arguments"):
+            if key in vector["expected"]:
+                found[key] = detail[key]
+        return found
+    if rule == "receipt_check":
+        hit, detail = receipt_check(given["requests"], canary=given["canary"], listening=given.get("listening", True))
+        return {"hit": hit, "level": detail.get("level"), "contact": detail.get("contact", False)}
     if rule == "judge_result":
         return {"hit": judge_result(given["verdict"])}
     if rule == "attempt_outcome":
         results = [
-            CheckResult(check_id=f"c{index}", kind=item["kind"], hit=item["hit"])
+            CheckResult(check_id=f"c{index}", kind=item["kind"], hit=item["hit"], level=item.get("level"))
             for index, item in enumerate(given["results"])
         ]
         outcome, level = attempt_outcome(results)
@@ -95,13 +123,20 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
         return {"outcome": best, "level": int(top)}
     if rule == "label":
         level = EvidenceLevel(given["level"])
-        words = label(level, executed=given.get("executed"), objective=given.get("objective"))
-        return {"label": words, "confirmed": confirmed(level)}
+        words = label(
+            level, executed=given.get("executed"), objective=given.get("objective"), contact=given.get("contact", False)
+        )
+        return {"label": words, "confirmed": confirmed(level, given.get("executed"))}
     raise ValueError(f"unknown rule {rule!r}")
 
 
 __all__ = [
     "DETERMINISTIC",
+    "Observation",
+    "Verifier",
+    "VerifierFailed",
+    "Verifiers",
+    "decide",
     "LEVEL_OF_KIND",
     "REQUIRED_TIER",
     "RULES_VERSION",

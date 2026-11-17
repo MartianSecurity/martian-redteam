@@ -29,6 +29,7 @@ from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.runfile import Target as TargetBlock
 from martian.redteam.targets import Target
+from martian.redteam.verify.canary import new_canary
 from martian_redteam.types import RedteamService
 
 
@@ -173,6 +174,14 @@ async def hand_over(session_api: str, payload: dict[str, Any]) -> None:
         )
 
 
+def run_canary(earlier: RedteamRun | None = None) -> str:
+    """The canary a run plants: the earlier session's when it is resumed, else a new one. The target
+    is built from :func:`~martian.redteam.verify.canary.planted_run_file` with it, and the engine is
+    given it."""
+    kept = earlier.provenance.get("canary") if earlier is not None else None
+    return kept if isinstance(kept, str) and kept else new_canary()
+
+
 def unsupported(run_file: RunFile, *, environments: bool = False) -> list[str]:
     """What the run file asks for that this caller cannot do. A run stops on any of it, rather than
     run without it. Every target kind and the tool proxy run. A run in an environment starts only
@@ -227,6 +236,7 @@ async def execute(
     principal: Any = None,
     include_content: bool = False,
     resume: RedteamRun | None = None,
+    canary: str | None = None,
     world: Any = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
@@ -250,6 +260,7 @@ async def execute(
         checkpoint=keep if store is not None else None,
         provenance=provenance,
         resume=resume,
+        canary=canary,
         world=world,
     )
     return await engine.run()
@@ -267,6 +278,7 @@ __all__ = [
     "hand_over",
     "hand_session",
     "redaction_for",
+    "run_canary",
     "tool_boundary",
     "unsupported",
 ]

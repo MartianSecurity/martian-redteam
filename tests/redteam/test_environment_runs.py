@@ -111,6 +111,9 @@ def connected(monkeypatch, models):
 
 
 def environment_run(tmp_path: Path, agent_url: str, **fields: Any) -> Path:
+    # The probe-level negative control (verification.control) is left out: these tests count the
+    # attempt's own no-implant control, which a state hit always gets in an environment.
+    fields.setdefault("verification", {"control": False})
     fields.setdefault(
         "vulnerabilities",
         [{"name": "PromptLeakage", "types": ["instructions"], "checks": [{"type": "text", "all_of": ["LEAKED"]}]}],
@@ -346,7 +349,7 @@ def test_an_indirect_injection_planted_in_an_email_is_verified_and_its_control_i
     [state] = attempt["check_results"]
     assert state["detail"]["delivered"] is True and state["detail"]["control"] == {"violated": False}
     planted = next(item for item in report["evidence"] if item["kind"] == "payload")
-    assert planted["metadata"] == {"planted": "inbox-email", "delivered": True}
+    assert planted["metadata"] == {"implant": "inbox-email", "delivered": True}
     # The control sent the same trigger in a world reset with nothing planted, and stayed clean.
     assert "implant" not in prepares[1] and agent.messages == [TRIGGER, TRIGGER]
     assert report["findings"][0]["label"] == "Verified in environment"

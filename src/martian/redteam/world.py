@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from martian.redteam.model import Evidence, ToolCall
+from martian.redteam.model import CheckKind, Evidence, ToolCall
 
 
 @dataclass(frozen=True)
@@ -88,4 +88,38 @@ class WorldUnavailable(RuntimeError):
     """The world could not be prepared or read. The attempt is an infrastructure error."""
 
 
-__all__ = ["Implant", "NullWorld", "StateResult", "World", "WorldOutcome", "WorldUnavailable"]
+class WorldStateVerifier:
+    """The state verifier of a run in an environment, in the slot :class:`~martian.redteam.verify.
+    verifiers.StateSlot` holds otherwise: a state check is decided by the world's outcome of the
+    attempt (``Observation.extra["world"]``), the check it names. A name the world does not decide,
+    or records it could not read, leave the check undetermined."""
+
+    kind: CheckKind = "state"
+    version = "state-world-v1"
+    deterministic = True
+
+    def __init__(self, world: str) -> None:
+        self.world = world
+
+    async def verify(self, check: Any, seen: Any, meter: Any = None) -> Any:
+        from martian.redteam.verify.verifiers import result
+
+        name = str(check.spec.get("name", ""))
+        outcome = seen.extra.get("world")
+        found = outcome.checks.get(name) if outcome is not None else None
+        detail: dict[str, Any] = {"name": name, "conditions": found.conditions if found is not None else []}
+        if outcome is not None and outcome.delivered is not None:
+            detail["delivered"] = outcome.delivered
+        if found is None:
+            detail["reason"] = f"the environment has no state check named {name!r}"
+            hit: bool | None = None
+        elif found.violated is None:
+            detail["reason"] = "the environment could not read the records this check compares"
+            hit = None
+        else:
+            hit = bool(found.violated)
+            detail["reason"] = found.description
+        return result(self, check, seen, hit, detail, source=f"environment:{self.world}")
+
+
+__all__ = ["Implant", "NullWorld", "StateResult", "World", "WorldOutcome", "WorldStateVerifier", "WorldUnavailable"]

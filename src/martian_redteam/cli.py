@@ -318,6 +318,7 @@ def _run_version_2(
         build_target,
         environment_boundary,
         execute,
+        run_canary,
         tool_boundary,
         unsupported,
     )
@@ -330,6 +331,7 @@ def _run_version_2(
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
     from martian.redteam.targets import TargetChanged
+    from martian.redteam.verify.canary import planted_run_file
 
     found = problems(config_path)
     if found:
@@ -374,6 +376,7 @@ def _run_version_2(
             keeper.close()
             _stop(f"No red team run {resume} is in the local store.")
 
+    canary = run_canary(earlier)
     run_id = earlier.id if earlier is not None else f"redteam-{uuid4().hex[:12]}"
     admitted: Any = None
 
@@ -381,7 +384,8 @@ def _run_version_2(
         nonlocal admitted
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
-            target = build_target(run_file.target, base=config_path.resolve().parent)
+            planted = planted_run_file(run_file, canary)
+            target = build_target(planted.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
             if run_file.environment is not None:
                 admitted = await environment_boundary(run_file, stack, folder=destination, label=run_id)
@@ -398,7 +402,7 @@ def _run_version_2(
                         "run_code": admitted.run.run_code,
                     },
                 }
-            target = await tool_boundary(run_file, target, stack, folder=destination)
+            target = await tool_boundary(planted, target, stack, folder=destination)
             run = await execute(
                 run_file,
                 service=service,
@@ -406,6 +410,7 @@ def _run_version_2(
                 provenance=provenance,
                 store=keeper,
                 resume=earlier,
+                canary=canary,
                 run_id=run_id,
                 world=admitted.world() if admitted is not None else None,
             )
@@ -692,6 +697,147 @@ def _validate_version_2(config_path: Path) -> None:
         overflow="ignore",
         crop=False,
     )
+
+
+@app.command("rejudge")
+def rejudge_command(
+    config_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    run: Annotated[
+        str, typer.Option("--run", help="A run id in the local store, or a redteam-run.json file to re-judge.")
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("-o", "--output", help="Output folder. Default: rejudged-<run id> in the file's output_folder."),
+    ] = None,
+    store: Annotated[
+        bool, typer.Option("--store/--no-store", help="Keep the re-judged run in the local store.")
+    ] = True,
+) -> None:
+    """Decide a stored version 2 run again with this run file's checks, without calling the target."""
+    from contextlib import AsyncExitStack
+
+    from martian.redteam.engine.gate import gate_failures
+    from martian.redteam.engine.plan import PlanError, plan
+    from martian.redteam.engine.rejudge import rejudge
+    from martian.redteam.engine.report import write_reports
+    from martian.redteam.engine.runs import build_service
+    from martian.redteam.engine.service import ServiceSelectionError
+    from martian.redteam.model import RedteamRun
+    from martian.redteam.runfile import RunFile, problems
+
+    if not _is_version_2(config_path):
+        _stop("rejudge reads a version 2 run file.")
+    found = problems(config_path)
+    if found:
+        _stop("The run file is not valid:\n" + "\n".join("  " + safe_text(line) for line in found))
+    run_file = RunFile.from_yaml(config_path)
+    try:
+        planned = plan(run_file)
+    except PlanError as error:
+        _stop(f"The run cannot be planned: {error}")
+    keeper: Any = None
+    if store or not Path(run).is_file():
+        try:
+            from martian.redteam.store import RedteamStore
+
+            keeper = RedteamStore.local()
+        except ImportError:
+            _stop("rejudge keeps runs in the local store: install martian-sdk[evals], or pass a file and --no-store.")
+    try:
+        if Path(run).is_file():
+            stored = RedteamRun.model_validate_json(Path(run).read_text(encoding="utf-8"))
+        else:
+            stored = asyncio.run(keeper.get("default", run))
+            if stored is None:
+                _stop(f"No red team run {run} is in the local store.")
+        number = 1
+        while keeper is not None and asyncio.run(keeper.get(stored.project_id, f"{stored.id}-rejudged-{number}")):
+            number += 1
+        judged = any(check.kind == "judge" for item in planned for check in item.probe.checks)
+
+        async def go() -> Any:
+            async with AsyncExitStack() as stack:
+                service = build_service(run_file, stack)[0] if judged else None
+                return await rejudge(stored, run_file, service=service, number=number), service
+
+        again, service = asyncio.run(go())
+        if keeper is not None and store:
+            from martian.redteam.engine.report import for_report
+
+            policy = service.redaction_policy if service is not None else None
+            asyncio.run(keeper.save(for_report(again, policy=policy)))
+    except (ServiceSelectionError, ConfigError) as error:
+        _stop(safe_text(error))
+    except ValueError as error:
+        _stop(f"Could not read the run: {safe_text(error)}")
+    finally:
+        if keeper is not None:
+            keeper.close()
+    destination = output or Path(run_file.output_folder) / f"rejudged-{stored.id}"
+    written, markdown, report = write_reports(again, destination)
+    _print_run(report)
+    before = {attempt.id: attempt for attempt in stored.attempts}
+    table = Table(title=f"Re-judged {stored.id} as {again.id}; the target was not called")
+    for column in ("Attempt", "Before", "After"):
+        table.add_column(column)
+    for attempt in again.attempts:
+        earlier = before[attempt.id]
+        if (earlier.outcome, earlier.level) != (attempt.outcome, attempt.level):
+            table.add_row(attempt.id, f"{earlier.outcome} {earlier.level}", f"{attempt.outcome} {attempt.level}")
+    console.print(table)
+    console.print(f"Wrote {written} and {markdown}")
+    if keeper is not None and store:
+        console.print(f"Kept in the local store as {again.id}; {stored.id} is unchanged.")
+    failures = gate_failures(again, run_file.gate)
+    if failures:
+        errors.print("Gate failed: " + safe_text("; ".join(failures)), style="red", markup=False, soft_wrap=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("selftest")
+def selftest_command(
+    disable: Annotated[
+        list[str] | None,
+        typer.Option("--disable", help="Run without this check kind's verifier, to see its level fail."),
+    ] = None,
+) -> None:
+    """Run each evidence level against a planted vulnerable target; exit 1 when one misses its hit."""
+    from martian.redteam.verify.judge import ServiceJudge
+    from martian.redteam.verify.selftest import ScriptedService, selftest
+    from martian.redteam.verify.verifiers import Verifiers
+
+    verifiers = Verifiers(ServiceJudge(ScriptedService()))
+    for kind in disable or []:
+        if kind not in ("judge", "text", "canary", "tool_call", "receipt"):
+            _stop(f"--disable takes judge, text, canary, tool_call or receipt, not {safe_text(kind)}.")
+        verifiers = verifiers.without(kind)  # type: ignore[arg-type]
+    outcomes, _ = asyncio.run(selftest(verifiers))
+    table = Table(title="Martian red team self-test: a planted vulnerable target")
+    for column in ("Case", "Shows", "Expected", "Found", "Result"):
+        table.add_column(column)
+
+    def shown(level: Any, counted: Any) -> str:
+        return "no finding" if level is None else f"level {int(level)}, {counted}"
+
+    for outcome in outcomes:
+        table.add_row(
+            outcome.case.name,
+            outcome.case.what,
+            shown(outcome.case.level, outcome.case.counted_as),
+            shown(outcome.level, outcome.counted_as),
+            "pass" if outcome.passed else "FAIL",
+        )
+    console.print(table)
+    failed = [outcome.case.name for outcome in outcomes if not outcome.passed]
+    if failed:
+        errors.print(
+            "Self-test failed: " + ", ".join(failed) + " did not detect the planted hit as expected.",
+            style="red",
+            markup=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1)
+    console.print("Every evidence level detected its planted hit.")
 
 
 @app.command("validate")
