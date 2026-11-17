@@ -226,7 +226,7 @@ A pin is written only when its checks still hit its recorded reply. A run that h
 be pinned, since a pin needs the attack's text: run it with `MARTIAN_REPORT_INCLUDE_CONTENT=1`. A
 pin holds the attack and the reply in clear text, so review it before committing it.
 
-`pin run` builds the run file's target, and for each pin first checks that its checks still hit its
+`pin run` builds the run file's target ([targets](redteam-targets.md)), behind the recording proxy when the run file lists `tools.proxy`, and for each pin first checks that its checks still hit its
 recorded reply, then sends its attack once, in a session of its own, and applies its checks. It
 calls no attacker or judge model and needs no model key or Martian connection. Each pin is:
 

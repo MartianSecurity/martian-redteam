@@ -9,7 +9,7 @@ Both refuse fields they do not know.
 
 `martian redteam validate FILE` checks either version without calling a model or loading the target's code. For a version 2 file it lists every problem with where it is, for example `vulnerabilities[1].goal: a goal names a tool or describes the goal in text`. Rules that compare several fields, such as a state check needing an environment, are checked once every field is valid.
 
-`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). This release runs a `file` and `function` target; a `url` or `mcp` target, `tools.proxy` and `environment` stop the run before anything is called, with a message that says so.
+`martian redteam run FILE` runs a version 2 file with the red team engine ([how a run works](#how-a-run-works)). It runs a `file` and `function` target, a `url` target and an `mcp` target ([red team targets](redteam-targets.md)), and puts the target behind the recording proxy when the file lists `tools.proxy`. `environment` stops the run before anything is called, with a message that says so.
 
 ```yaml
 version: 2
@@ -61,7 +61,7 @@ gate: { fail_on: confirmed, severity: high }
 
 ## Target
 
-The target block is a suite file's target block (see [evals](evals.md)), plus `purpose` and `mcp`. Give exactly one of `file`, `url` or `mcp`.
+The target block is a suite file's target block (see [evals](evals.md)), plus `purpose`, `session`, `tool_calls_path` and `mcp`. Give exactly one of `file`, `url` or `mcp`. The same `file` or `url` block works in a suite file and in a run file. [Red team targets](redteam-targets.md) says how each kind is called and how a conversation is kept.
 
 | Field | Meaning |
 | --- | --- |
@@ -72,19 +72,37 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `headers` | Headers of each request to `url`. `${NAME}` is read from the environment |
 | `body` | The JSON body sent to `url`, with `{{input}}` where the attack goes |
 | `response_path` | Where the reply is in the JSON answer, such as `reply` or `choices.0.message.content` |
-| `timeout_seconds` | The longest one call of the target may take, 1 to 600 |
+| `timeout_seconds` | The longest one call of the target may take, 1 to 600. Default 120 |
+| `session` | For a `url` target: how the conversation's id travels besides `{{session_id}}` in `body`. See below |
+| `tool_calls_path` | For a `url` target: where the JSON answer lists the tool calls the target made or asked for, such as `choices.0.message.tool_calls`. Read by the [reply contract](redteam-targets.md#reply-contract) |
 | `mcp` | An MCP server as the target. See below |
+
+Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` that takes `session_id` or `history` parameters is given them.
+
+`session` takes these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `header` | Also send the conversation's id in this request header |
+| `response_path` | The server issues the id. The first turn sends an empty id, and each reply has the id at this path |
 
 `mcp` takes these fields:
 
 | Field | Meaning |
 | --- | --- |
-| `url` | The server's Streamable HTTP address. Give `url` or `command` |
-| `command` | The program and arguments that start a stdio server |
+| `url` | The server's Streamable HTTP address. Give `url` or `command`. `${NAME}` is read from the environment |
+| `command` | The program and arguments that start a stdio server, in the run file's folder |
 | `tool` | The tool that takes a message |
 | `message_argument` | The tool argument the attack goes in. Default `message` |
-| `arguments` | Other arguments sent with every call |
-| `headers` | Headers of each request to `url` |
+| `session_argument` | The tool argument that carries the conversation's id |
+| `reset_argument` | The tool argument that is `true` on a conversation's first turn and `false` after |
+| `arguments` | Other arguments sent with every call. They must not set the three above |
+| `headers` | Headers of each request to `url`. `${NAME}` is read from the environment |
+| `response_path` | Where the reply is in the tool's structured result, or in its text read as JSON. Without it, the reply is the result's text |
+| `tool_calls_path` | Where the tool calls are, read the same way and by the [reply contract](redteam-targets.md#reply-contract) |
+| `schema_sha256` | The SHA-256 of the tool's input schema as canonical JSON. Without it, the run pins the schema its first message sees. A different schema stops the run |
+
+`timeout_seconds` applies to an `mcp` target too.
 
 ## Models
 
@@ -141,17 +159,27 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 
 ## Tools
 
-`tools.proxy` lists the agent's own MCP tool servers. The agent reaches each one through the local recording proxy.
+`tools` takes two fields:
 
 | Field | Meaning |
 | --- | --- |
-| `name` | A short name, lower case, with digits, `_` and `-` |
-| `upstream` | The server's address |
+| `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` |
+
+Each entry of `proxy` takes these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | A short name: a lower-case letter, then up to 23 lower-case letters, digits or `_`. It names the server's connection in the agent's session, so it follows the rule of an `MCPConnection` name |
+| `upstream` | The server's Streamable HTTP address, `http` or `https` |
 | `mode` | `record` (the default) records each call. `inject` adds text to tool results. `block` stops calls and answers with a set reply |
 | `inject` | The text `inject` mode adds |
-| `block_reply` | What a call answers in `block` mode |
+| `block_reply` | What a call answers in `block` mode. Default `This tool call was not run.` |
+| `tools` | The tools `inject` or `block` applies to. Without it, every tool of the server |
 
-The proxy is not an environment. It simulates no application and holds no data.
+`tools.session_api` is the agent's session API, as a cloud agent has one: before the first attack the run posts the proxy's session to `{session_api}/sessions` and expects its `session_id` back. Either way the run writes the session to `tool-session.json` in `output_folder`, readable by its user only, and removes it when the run ends; after that the proxy refuses it. The agent binds its tools with `bind_tools(session, action_id=...)`, passing the conversation's id (the body's `{{session_id}}`) as the action id, so each attempt's calls are its own.
+
+The proxy is not an environment. It simulates no application and holds no data. [Red team targets](redteam-targets.md#recording-proxy) describes it.
 
 ## Budget
 
@@ -171,7 +199,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a vulnerability without checks is decided by the judge.
 2. **Attack.** The attacker writes the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and the target is called once, in a session of its own for each attempt. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). Templates and mutation, which need no attacker, are not in this release.
-3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tools_called`; one that returns text reports none, so the check is undetermined.
+3. **Verify.** Text, canary and tool-call checks are decided by code ([verdicts](redteam-verdicts.md)); the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A canary check without `value` and a `receipt` check are undetermined in this release, which plants no canary and has no listener. A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 
 The command writes `redteam-run.json` (the run in the [red team model](redteam-model.md)), `redteam-report.json` (the [report standard](redteam-reports.md)) and `redteam-report.md` to `output_folder` (or `-o`), appends the Markdown to `GITHUB_STEP_SUMMARY` when it is set, and keeps the run in the local store unless given `--no-store`. `-f html,csv,sarif,junit` (or `-f all`) also writes those [formats](redteam-reports.md#output-formats). As in version 0.2, the reports and the stored run hold digests of the attacks and replies unless `MARTIAN_REPORT_INCLUDE_CONTENT=1`. `-c` sets `budget.max_concurrent` and `-a` sets `budget.attempts_per_probe`.
 

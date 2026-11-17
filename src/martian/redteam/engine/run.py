@@ -46,7 +46,7 @@ from martian.redteam.model import (
 )
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
-from martian.redteam.targets import Target, TargetReply
+from martian.redteam.targets import Target, TargetChanged, TargetReply
 from martian.redteam.verify.rules import (
     LEVEL_OF_KIND,
     RULES_VERSION,
@@ -235,10 +235,11 @@ class Engine:
         except AttemptFailed as failed:
             return done(outcome="error", error=str(failed), error_kind=failed.kind, error_code=failed.code)
         evidence = self._keep_reply(fields["id"], reply)
+        observed = self._keep_observed(reply)
         fields.update(
             output=reply.text,
             target_calls=1,
-            evidence_ids=[evidence.id],
+            evidence_ids=[evidence.id, *observed],
             turns=[
                 Turn(role="attacker", content=payload),
                 Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
@@ -296,6 +297,8 @@ class Engine:
         try:
             async with asyncio.timeout(self.timeout) as deadline:
                 return await self.target.send(payload, session=session)
+        except TargetChanged:
+            raise  # the target is not the one the run started with: the run stops
         except TimeoutError as error:
             if deadline.expired():
                 raise AttemptFailed(
@@ -318,6 +321,13 @@ class Engine:
         )
         self.evidence[evidence.id] = evidence
         return evidence
+
+    def _keep_observed(self, reply: TargetReply) -> list[str]:
+        """The evidence a boundary the harness trusts captured about the reply's tool calls (the
+        recording proxy, a trace), kept with the run, by id."""
+        for item in reply.evidence:
+            self.evidence[item.id] = item
+        return [item.id for item in reply.evidence]
 
     # --- verify ---------------------------------------------------------------------------------
 

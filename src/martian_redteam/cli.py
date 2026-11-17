@@ -310,10 +310,19 @@ def _run_version_2(
 
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import write_reports
-    from martian.redteam.engine.runs import TargetUnavailable, build_service, build_target, execute, unsupported
+    from martian.redteam.engine.runs import (
+        SessionHandoverError,
+        TargetUnavailable,
+        build_service,
+        build_target,
+        execute,
+        tool_boundary,
+        unsupported,
+    )
     from martian.redteam.engine.service import ServiceSelectionError
     from martian.redteam.gate import evaluate
     from martian.redteam.runfile import RunFile, problems
+    from martian.redteam.targets import TargetChanged
 
     found = problems(config_path)
     if found:
@@ -354,8 +363,9 @@ def _run_version_2(
     async def go() -> Any:
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
-            target = build_target(run_file.target)
+            target = build_target(run_file.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
+            target = await tool_boundary(run_file, target, stack, folder=destination)
             run = await execute(
                 run_file, service=service, target=target, provenance=provenance, store=keeper, resume=earlier
             )
@@ -363,7 +373,14 @@ def _run_version_2(
 
     try:
         run, service = asyncio.run(go())
-    except (ServiceSelectionError, TargetUnavailable, ConfigError) as error:
+    except (
+        ServiceSelectionError,
+        TargetUnavailable,
+        ConfigError,
+        SessionHandoverError,
+        ConnectionError,
+        TargetChanged,
+    ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
         _stop("Could not load the target. Check its file, dependencies and function name.")
@@ -547,7 +564,7 @@ def pin_run_command(
     """Re-run pinned findings against the run file's target, with no attacker or judge model."""
     from contextlib import AsyncExitStack
 
-    from martian.redteam.engine.runs import TargetUnavailable, build_target
+    from martian.redteam.engine.runs import SessionHandoverError, TargetUnavailable, build_target, tool_boundary
     from martian.redteam.pins import STATUS_WORDS, load, render_markdown, replay
     from martian.redteam.runfile import RunFile, problems
 
@@ -561,19 +578,21 @@ def pin_run_command(
     if not loaded:
         _stop(f"No pin file in {safe_text(pins)}: pin a finding with martian redteam pin add.")
 
+    destination = output or Path(run_file.output_folder)
+
     async def go() -> Any:
         async with AsyncExitStack() as stack:
-            target = build_target(run_file.target)
+            target = build_target(run_file.target, base=config_path.resolve().parent)
             stack.push_async_callback(target.close)
+            target = await tool_boundary(run_file, target, stack, folder=destination)
             return await replay(loaded, target, timeout=run_file.target.timeout_seconds or 120.0)
 
     try:
         report = asyncio.run(go())
-    except TargetUnavailable as error:
+    except (TargetUnavailable, SessionHandoverError, ConnectionError) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):
         _stop("Could not load the target. Check its file, dependencies and function name.")
-    destination = output or Path(run_file.output_folder)
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "redteam-pins.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
     (destination / "redteam-pins.md").write_text(render_markdown(report), encoding="utf-8")
