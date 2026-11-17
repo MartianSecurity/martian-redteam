@@ -59,7 +59,11 @@ def test_the_package_holds_the_register_and_no_rows():
     ]
     text = (folder / "register.json").read_text()
     assert "SAMPLE" not in text and "harmful_behaviors.csv" in text  # an address, not its rows
-    packaged = [str(path.relative_to(ROOT / "src")) for path in (ROOT / "src").rglob("*") if path.is_file()]
+    packaged = [
+        str(path.relative_to(ROOT / "src"))
+        for path in (ROOT / "src").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    ]
     assert check_release().dataset_rows(packaged) == []
 
 
