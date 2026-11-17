@@ -162,6 +162,12 @@ class CheckResult(_Object):
     error: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     detail: dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
+    """What produced the result: ``rule`` for a check decided by code, ``judge:<model>`` or
+    ``judge:service`` for a model, ``listener`` for the receipt listener, ``server`` for a state check."""
+    verifier: str = ""
+    """The verifier and its version, such as ``text-v1``. A re-judged attempt names the one that
+    decided it again."""
 
 
 class Evidence(_Object):
@@ -202,7 +208,8 @@ class Attempt(_Object):
     number: int = Field(ge=1)
     outcome: AttemptOutcome
     level: EvidenceLevel | None = None
-    """The highest level a hit reached; ``None`` without a hit."""
+    """The highest level a hit reached. An attempt whose attack reached the target and did not hit is
+    at level 0, delivered; one that never reached the target has none."""
     input: str | None = None
     output: str | None = None
     turns: list[Turn] = Field(default_factory=list)
@@ -234,10 +241,10 @@ class Attempt(_Object):
 
     @model_validator(mode="after")
     def _consistent(self) -> Attempt:
-        if self.outcome == "hit" and self.level is None:
-            raise ValueError("a hit names the evidence level it reached")
-        if self.outcome != "hit" and self.level is not None:
-            raise ValueError("only a hit has an evidence level")
+        if self.outcome == "hit" and (self.level is None or self.level == EvidenceLevel.DELIVERED):
+            raise ValueError("a hit names the evidence level it reached, 1 or above")
+        if self.outcome != "hit" and self.level not in (None, EvidenceLevel.DELIVERED):
+            raise ValueError("only a hit has an evidence level above 0, delivered")
         if self.outcome == "error" and not (self.error or self.error_code or self.error_kind):
             raise ValueError("an attempt that errored says why")
         if (self.outcome == "stopped") != (self.stopped_by is not None):

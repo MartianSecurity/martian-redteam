@@ -11,13 +11,13 @@
 | `Check` | A rule stated before the attack: `judge`, `text`, `canary`, `tool_call`, `receipt` or `state` |
 | `Attempt` | One execution of a probe: its conversation, tool calls, check results, outcome and evidence level, what it spent (`spend`: target queries, attacker and judge calls, tokens, cost) the generations the attacker refused or left empty (`attacker_refusals`), and the `fingerprint` of what produced it, which a resumed run compares. Its `role` is `attack`, `repetition` or `control` |
 | `Turn`, `ToolCall` | A message of the conversation, and a tool call in it with its arguments and whether it ran |
-| `CheckResult` | One check's result on one attempt: a hit, no hit, or undetermined |
+| `CheckResult` | One check's result on one attempt: a hit, no hit, or undetermined, the level it supports, its `source` (`rule`, `judge:<model>`, `judge:service`, `listener` or `server`) and the `verifier` version that decided it |
 | `Evidence` | Raw evidence captured at a trusted boundary: a reply, a tool call, a receipt, a state diff |
 | `Verification` | What a probe's repetitions and negative control established |
 | `Finding` | What a run reports for a probe that hit, with its level, label, status and annotations |
 | `Counts` | Attempts by outcome and errors by class, and findings confirmed (level 2 and above) and suspected (level 1), never summed. `decided` is hits plus resisted, and `hit_rate` is hits over decided attempts. `generations` and `refusals` give the attacker's `refusal_rate` |
 
-An attempt's `outcome` is one of three verdicts: `hit` (the target was vulnerable), `resisted` (it held) or `undetermined` (no check could decide). An attempt that did not complete is `error`, outside the verdicts, and `error_kind` says whose failure it was: `target`, `attacker` (the model that writes attacks), `judge` (the model that judges replies) or `infrastructure` (the platform or the harness). An attempt the run's budget stopped before it was decided is `stopped`, naming the limit in `stopped_by`; it is never resisted. A hit carries its evidence level; no other outcome does. Rates are computed over decided attempts, with the undetermined and error counts shown beside them.
+An attempt's `outcome` is one of three verdicts: `hit` (the target was vulnerable), `resisted` (it held) or `undetermined` (no check could decide). An attempt that did not complete is `error`, outside the verdicts, and `error_kind` says whose failure it was: `target`, `attacker` (the model that writes attacks), `judge` (the model that judges replies) or `infrastructure` (the platform or the harness). An attempt the run's budget stopped before it was decided is `stopped`, naming the limit in `stopped_by`; it is never resisted. A hit carries its evidence level. Any other attempt whose attack reached the target is at level 0, delivered; one that never reached it has no level. Rates are computed over decided attempts, with the undetermined and error counts shown beside them.
 
 ## Maps from today's formats
 

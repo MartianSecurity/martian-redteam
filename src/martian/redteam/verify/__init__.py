@@ -4,6 +4,9 @@
 ``vectors.json`` their test vectors. :func:`load_vectors` reads them and :func:`run_vector` applies
 one to these rules, so another implementation (the hosted engine) can be checked against the same
 file. The specification is ``docs/redteam-verdicts.md``.
+
+:mod:`martian.redteam.verify.verifiers` holds the verifiers that decide each check of an attempt
+with these rules, and :mod:`martian.redteam.verify.judge` the judge verifier.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from martian.redteam.verify.rules import (
     tool_call_check,
     verify,
 )
+from martian.redteam.verify.verifiers import Observation, Verifier, VerifierFailed, Verifiers, decide
 
 
 def load_vectors() -> dict[str, Any]:
@@ -64,7 +68,7 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
         return {"hit": judge_result(given["verdict"])}
     if rule == "attempt_outcome":
         results = [
-            CheckResult(check_id=f"c{index}", kind=item["kind"], hit=item["hit"])
+            CheckResult(check_id=f"c{index}", kind=item["kind"], hit=item["hit"], level=item.get("level"))
             for index, item in enumerate(given["results"])
         ]
         outcome, level = attempt_outcome(results)
@@ -102,6 +106,11 @@ def run_vector(vector: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "DETERMINISTIC",
+    "Observation",
+    "Verifier",
+    "VerifierFailed",
+    "Verifiers",
+    "decide",
     "LEVEL_OF_KIND",
     "REQUIRED_TIER",
     "RULES_VERSION",
