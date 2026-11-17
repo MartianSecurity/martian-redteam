@@ -146,14 +146,7 @@ integration extras with their own credentials. They are not a Martian product li
 
 ## Development
 
-```bash
-uv sync --locked --extra evals
-uv run --extra evals ruff format --check src tests examples
-uv run --extra evals ruff check src tests examples
-uv run --extra mcp --extra evals mypy src
-uv run --extra evals pytest -q -n auto
-uv build
-```
+Use [development checks](docs/development.md#commands) for the canonical locked setup, Ruff, type and test commands; start with affected checks and preserve the required CI gates. `uv build` builds the package. Release artifact validation follows [release preparation](docs/releasing.md).
 
 The existing eval regression suite has moved into this SDK's CI. Tests use
 local MLflow and loopback service fixtures; hosted/paid execution is a separate

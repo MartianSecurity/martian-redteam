@@ -50,15 +50,15 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 ## Commands
 
 ```bash
-uv sync --locked
-uv run ruff format src tests examples scripts
-uv run ruff check src tests examples scripts
-uv run --extra mcp mypy src
+uv sync --locked --extra evals
+uv run --extra evals ruff format --check src tests examples scripts
+uv run --extra evals ruff check src tests examples scripts
+uv run --extra mcp --extra evals mypy src
 uv run --extra evals pytest -q -n auto
-uv run python -m compileall -q src
+uv run --extra evals python -m compileall -q src
 ```
 
-`-n auto` runs the suite on one pytest-xdist worker per CPU; see [Parallel runs](#parallel-runs).
+This is the canonical local Python check block; keep it aligned with `.github/workflows/ci.yml`. Start with affected tests and use the full required gates before publication. Ruff formatting above is read-only; use write mode only for task files. `-n auto` runs the suite on one pytest-xdist worker per CPU; see [Parallel runs](#parallel-runs).
 
 Optional local coverage (CI always produces XML + JUnit; pytest-cov combines the workers' data):
 
@@ -74,9 +74,9 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 
 | Job | Command | Python |
 | --- | --- | --- |
-| `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
-| `test` | `uv sync --locked`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
+| `lint` | `uv sync --locked --extra evals`, Ruff format/check with Evals extras and `scripts` | 3.12 |
+| `types` | `uv sync --locked --extra evals`, `uv run --extra mcp --extra evals mypy src`, compileall | 3.12 |
+| `test` | `uv sync --locked --extra evals`, pytest `-n auto` with coverage + JUnit | **3.12 and 3.13** (matrix) |
 | `evals-core` | The evals core's tests with `-n auto`, with the stores on Postgres too | 3.12 |
 | `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
 | `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), `scripts/sbom.py wheel` (the wheel's bill of materials and the licence check), throwaway venv install, `validate examples/config.yaml` | 3.12 |
