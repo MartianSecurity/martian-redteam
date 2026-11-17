@@ -80,6 +80,8 @@ def run_file(**fields: Any) -> RunFile:
         "target": {"purpose": PURPOSE, "file": "agent.py"},
         "vulnerabilities": [{"name": "PromptLeakage", "types": ["system_prompt", "instructions"]}],
         "attacks": [{"name": "PromptInjection"}],
+        # The engine's own tests count calls exactly; the negative control has its own tests.
+        "verification": {"control": False},
     }
     base.update(fields)
     return RunFile.model_validate(base)

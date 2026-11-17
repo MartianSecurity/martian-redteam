@@ -37,6 +37,9 @@ def write_run(tmp_path: Path, target: dict[str, Any], **fields: Any) -> Path:
         ],
         "attacks": [{"name": "PromptInjection"}],
         "output_folder": str(tmp_path / "results"),
+        # These agents act whatever they are sent, so a negative control would discard their hits;
+        # the controls have their own tests (test_controls.py).
+        "verification": {"control": False},
         **fields,
     }
     path = tmp_path / "redteam.yaml"

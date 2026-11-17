@@ -130,7 +130,7 @@ A routed method is named with its route in probe ids, such as `templates@tool_re
 
 ## What an attempt keeps
 
-Every query is kept in the attempt's `turns`, as an attacker turn (the message as sent, after the layers) and a target turn. A new conversation after the first is marked with a `system` turn. The attempt is decided on the exchange the method ends with, and `target_calls` counts every query.
+Every query is kept in the attempt's `turns`, as an attacker turn (the message as the target received it) and a target turn. What the probe plants (a canary note) and its benign task go with every message, as with any attempt ([run file](redteam-run-file.md#canaries)). A new conversation after the first is marked with a `system` turn. The attempt is decided on the exchange the method ends with, and `target_calls` counts every query. Its `input` is the attack of that exchange after the layers, before the delivery route. A repetition of a hit and a negative control ([run file](redteam-run-file.md#verification)) send that `input` once, in a new conversation, not through the method or its route.
 
 For every method but the six version 0.2 ones, the attempt has a `trace` evidence item, `{attempt}/method`, whose `metadata` is the method's record: its id, kind, arm, layers and settings, the queries it made and its cap, `queries_to_first_success` (the query at which a check first found the attack succeeded, or `null`), the conversations it used and the feedback each query got (`signals`). The fingerprint of such an attempt includes the method's configuration, so a resumed run reruns attempts whose method changed.
 

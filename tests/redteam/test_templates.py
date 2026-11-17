@@ -58,7 +58,7 @@ async def test_the_templates_stop_at_the_first_hit_each_in_its_own_conversation(
 
 
 async def test_max_queries_caps_the_templates_sent():
-    target = CountingTarget()
+    target = CountingTarget(observed=True)
     file = run_file(attacks=[{"name": "Templates", "max_queries": 3}], vulnerabilities=[REFUND])
     run = await Engine(file, service=StubService(), target=target).run()
     assert len(target.calls) == 3 and run.attempts[0].outcome == "resisted"

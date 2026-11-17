@@ -112,6 +112,8 @@ def as_score(run_id: str, attempt: Attempt, position: int, result: CheckResult) 
             "executed": result.executed,
             "evidence_ids": result.evidence_ids,
             "detail": result.detail,
+            "source": result.source,
+            "verifier": result.verifier,
         },
     )
 
@@ -128,6 +130,8 @@ def _check_result(score: Score) -> CheckResult:
         error=score.error,
         evidence_ids=list(meta.get("evidence_ids", [])),
         detail=dict(meta.get("detail", {})),
+        source=meta.get("source", ""),
+        verifier=meta.get("verifier", ""),
     )
 
 

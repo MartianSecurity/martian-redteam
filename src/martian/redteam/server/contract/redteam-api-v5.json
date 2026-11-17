@@ -231,6 +231,17 @@
             ],
             "title": "Output"
           },
+          "planted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planted"
+          },
           "policy_revision": {
             "anyOf": [
               {
@@ -303,6 +314,24 @@
             "minimum": 0.0,
             "title": "Target Calls",
             "type": "integer"
+          },
+          "task_completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Completed"
+          },
+          "task_results": {
+            "items": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "title": "Task Results",
+            "type": "array"
           },
           "trace_id": {
             "anyOf": [
@@ -646,6 +675,16 @@
             "default": "",
             "title": "Rationale",
             "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "verifier": {
+            "default": "",
+            "title": "Verifier",
+            "type": "string"
           }
         },
         "required": [
@@ -695,12 +734,18 @@
       },
       "Counts": {
         "additionalProperties": false,
-        "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above; ``suspected`` those a model judged only. They are never added together.",
+        "description": "A run's attempts by outcome, and its findings by strength. ``confirmed`` counts findings at\nlevel 2 and above, ``attempted`` those whose strongest evidence is a tool call that did not run,\n``suspected`` those a model judged only. They are never added together.",
         "properties": {
           "attacker_errors": {
             "default": 0,
             "minimum": 0.0,
             "title": "Attacker Errors",
+            "type": "integer"
+          },
+          "attempted": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attempted",
             "type": "integer"
           },
           "attempts": {
@@ -1074,6 +1119,15 @@
             "title": "Attempt Ids",
             "type": "array"
           },
+          "counted_as": {
+            "enum": [
+              "confirmed",
+              "attempted",
+              "suspected"
+            ],
+            "title": "Counted As",
+            "type": "string"
+          },
           "evidence_level": {
             "$ref": "#/components/schemas/EvidenceLevel"
           },
@@ -1174,7 +1228,8 @@
           "vulnerability_type",
           "objective_class",
           "evidence_level",
-          "label"
+          "label",
+          "counted_as"
         ],
         "title": "Finding",
         "type": "object"
@@ -1212,6 +1267,7 @@
           "counted_as": {
             "enum": [
               "confirmed",
+              "attempted",
               "suspected"
             ],
             "title": "Counted As",
@@ -1299,6 +1355,11 @@
       "Findings": {
         "additionalProperties": false,
         "properties": {
+          "attempted": {
+            "default": 0,
+            "title": "Attempted",
+            "type": "integer"
+          },
           "by_level": {
             "items": {
               "$ref": "#/components/schemas/LevelCount"
@@ -1463,6 +1524,82 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JudgeCalibration": {
+        "additionalProperties": false,
+        "description": "The judge measured on a labelled sample before the run. ``precision`` is its true positives\nover all it called hits; ``recall`` its true positives over the sample's real hits. ``error`` says\nwhy it could not be measured.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "false_negative": {
+            "default": 0,
+            "title": "False Negative",
+            "type": "integer"
+          },
+          "false_positive": {
+            "default": 0,
+            "title": "False Positive",
+            "type": "integer"
+          },
+          "judge": {
+            "title": "Judge",
+            "type": "string"
+          },
+          "precision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sample": {
+            "default": 0,
+            "title": "Sample",
+            "type": "integer"
+          },
+          "true_negative": {
+            "default": 0,
+            "title": "True Negative",
+            "type": "integer"
+          },
+          "true_positive": {
+            "default": 0,
+            "title": "True Positive",
+            "type": "integer"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "judge"
+        ],
+        "title": "JudgeCalibration",
         "type": "object"
       },
       "LevelCount": {
@@ -1644,8 +1781,13 @@
       },
       "Outcomes": {
         "additionalProperties": false,
-        "description": "The attack attempts by outcome. ``decided`` is hits plus resisted; every rate is over it.\n``confirmed_hits`` reached level 2 or above, ``suspected_hits`` level 1 only.",
+        "description": "The attack attempts by outcome. ``decided`` is hits plus resisted; every rate is over it.\n``confirmed_hits`` reached level 2 or above (a tool call that only was asked for excepted),\n``attempted_hits`` only a tool call that was asked for and not known to run, ``suspected_hits``\nlevel 1 only.",
         "properties": {
+          "attempted_hits": {
+            "default": 0,
+            "title": "Attempted Hits",
+            "type": "integer"
+          },
           "attempts": {
             "default": 0,
             "title": "Attempts",
@@ -1769,6 +1911,18 @@
             "title": "Planned Attempts",
             "type": "integer"
           },
+          "task": {
+            "default": "",
+            "title": "Task",
+            "type": "string"
+          },
+          "task_checks": {
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            },
+            "title": "Task Checks",
+            "type": "array"
+          },
           "vulnerability": {
             "maxLength": 200,
             "minLength": 1,
@@ -1865,6 +2019,16 @@
             "default": 0,
             "title": "Target Queries",
             "type": "integer"
+          },
+          "task_with_attack": {
+            "default": "not evaluated",
+            "title": "Task With Attack",
+            "type": "string"
+          },
+          "task_without_attack": {
+            "default": "not evaluated",
+            "title": "Task Without Attack",
+            "type": "string"
           },
           "undetermined": {
             "default": 0,
@@ -2030,6 +2194,7 @@
           "findings": {
             "$ref": "#/components/schemas/Findings",
             "default": {
+              "attempted": 0,
               "by_level": [],
               "confirmed": 0,
               "items": [],
@@ -2068,6 +2233,16 @@
               }
             ]
           },
+          "judge_calibration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeCalibration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "judge_used": {
             "default": false,
             "title": "Judge Used",
@@ -2090,6 +2265,7 @@
           "outcomes": {
             "$ref": "#/components/schemas/Outcomes",
             "default": {
+              "attempted_hits": 0,
               "attempts": 0,
               "confirmed_hits": 0,
               "decided": 0,
@@ -2878,6 +3054,37 @@
         "title": "TargetRef",
         "type": "object"
       },
+      "TaskCompletion": {
+        "additionalProperties": false,
+        "description": "A probe's benign task, completed with and without the attack.",
+        "properties": {
+          "with_attack": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "With Attack",
+            "type": "integer"
+          },
+          "with_attack_decided": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "With Attack Decided",
+            "type": "integer"
+          },
+          "without_attack": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Without Attack"
+          }
+        },
+        "title": "TaskCompletion",
+        "type": "object"
+      },
       "ToolCall": {
         "additionalProperties": false,
         "description": "One tool call the target made or asked for. ``executed`` is ``True`` when something that runs\nthe tool (a proxy, the agent's own dispatcher, a trace) saw it run, ``False`` when it was known\nnot to run (blocked), and ``None`` when only the request is known.",
@@ -3026,6 +3233,17 @@
             "title": "Ceiling Applied",
             "type": "boolean"
           },
+          "control_attempt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control Attempt Id"
+          },
           "evidence_ids": {
             "items": {
               "type": "string"
@@ -3113,6 +3331,16 @@
             "default": "",
             "title": "Summary",
             "type": "string"
+          },
+          "task_completion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskCompletion"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -3199,7 +3427,7 @@
   "info": {
     "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 1). Generated by scripts/redteam_contract.py; do not edit by hand.",
     "title": "Martian red team API",
-    "version": "4"
+    "version": "5"
   },
   "openapi": "3.1.0",
   "paths": {

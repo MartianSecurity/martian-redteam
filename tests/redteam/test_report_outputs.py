@@ -40,7 +40,7 @@ FILE = {
             "severity": "high",
         },
         {"name": "Toxicity", "types": ["insults"]},
-        {"name": "PIILeakage", "types": ["direct_disclosure"], "checks": [{"type": "canary"}]},
+        {"name": "PIILeakage", "types": ["direct_disclosure"], "checks": [{"type": "tool_call", "tool": "export"}]},
     ],
     "attacks": [{"name": "PromptInjection"}],
 }
@@ -48,7 +48,7 @@ FILE = {
 
 async def _run(reply: str = SECRET):
     """A confirmed finding (a text check), a suspected one (judge only) and an undetermined probe (a
-    canary check with no value)."""
+    tool-call check of a target that does not report its calls)."""
     run = await Engine(run_file(**FILE), service=StubService(), target=CountingTarget(reply)).run()
     copy = for_report(run)
     return run, copy, build_report(copy)

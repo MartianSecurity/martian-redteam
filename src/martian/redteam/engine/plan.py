@@ -1,8 +1,9 @@
 """Plan: expand a version 2 run file into probes, each with its checks fixed before the attack runs.
 
 One probe per vulnerability, type and attack method, with ``budget.attempts_per_probe`` attempts. Each
-``attacks`` entry is resolved to its configured method (:mod:`martian.redteam.methods`). A
-vulnerability without checks is decided by the judge. The plan calls no model and loads no target.
+``attacks`` entry is resolved to its configured method (:mod:`martian.redteam.methods`). A goal that
+names a tool is checked as a tool call. A vulnerability with neither checks nor such a goal is decided
+by the judge. The plan calls no model and loads no target.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 from martian.redteam.methods import AttackMethod, MethodError, needs_attacker, resolve
 from martian.redteam.model import Check, Probe
 from martian.redteam.model.maps import objective_of, probe_id
-from martian.redteam.runfile import AttackSpec, CheckDecl, RunFile, Vulnerability
+from martian.redteam.runfile import AttackSpec, CheckDecl, Goal, RunFile, Vulnerability
 from martian_redteam.catalog.attacks import Attack, get_attack
 from martian_redteam.catalog.vulnerabilities import Vulnerability as CatalogVulnerability
 from martian_redteam.catalog.vulnerabilities import get_vulnerability
@@ -52,15 +53,32 @@ def _check_spec(check: CheckDecl) -> dict[str, Any]:
     return {key: value for key, value in spec.items() if value is not None}
 
 
-def _checks(declared: list[CheckDecl]) -> list[Check]:
-    if not declared:
-        return [Check(id="judge", kind="judge")]
-    kinds = [check.type for check in declared]
+def _checks(declared: list[CheckDecl], goal: Goal | None = None) -> list[Check]:
+    """The probe's checks. A goal that names a tool is checked as a tool call (the ``goal`` check)
+    unless a declared tool-call check already names that tool. Without any check, the judge decides."""
     checks = []
+    kinds = [check.type for check in declared]
     for index, check in enumerate(declared, start=1):
         identifier = check.type if kinds.count(check.type) == 1 else f"{check.type}-{index}"
         checks.append(Check(id=identifier, kind=check.type, spec=_check_spec(check)))
-    return checks
+    if (
+        goal is not None
+        and goal.tool is not None
+        and not any(check.kind == "tool_call" and check.spec.get("tool") == goal.tool for check in checks)
+    ):
+        checks.append(
+            Check(id="goal", kind="tool_call", spec={"tool": goal.tool, "where": goal.where, "executed": False})
+        )
+    return checks or [Check(id="judge", kind="judge")]
+
+
+def _task_checks(spec: Vulnerability) -> list[Check]:
+    if spec.benign is None:
+        return []
+    return [
+        Check(id=f"task-{index}", kind=check.type, spec=_check_spec(check))
+        for index, check in enumerate(spec.benign.checks, start=1)
+    ]
 
 
 def _goal(spec: Vulnerability) -> str:
@@ -92,7 +110,7 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
     planned: list[PlannedProbe] = []
     for index, spec in enumerate(run_file.vulnerabilities):
         vulnerability = get_vulnerability(spec.name, spec.types, id=spec.id, criteria=spec.criteria, gated=spec.gated)
-        checks = _checks(list(spec.checks))
+        checks = _checks(list(spec.checks), spec.goal)
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
             raise PlanError(f"vulnerabilities[{index}] {reason}: set models.judge")
@@ -112,6 +130,8 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     criteria=vulnerability.criteria,
                     checks=checks,
                     planned_attempts=run_file.budget.attempts_per_probe,
+                    task=spec.benign.task if spec.benign else "",
+                    task_checks=_task_checks(spec),
                     metadata=_metadata(spec.severity, attack, method),
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, spec.severity, method))

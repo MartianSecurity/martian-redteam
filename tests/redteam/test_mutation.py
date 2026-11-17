@@ -73,7 +73,7 @@ async def test_every_copy_is_a_target_query_on_the_run_s_budget():
     [attempt] = run.attempts
     assert attempt.outcome == "stopped" and attempt.stopped_by == "target_queries"
     assert len(target.calls) == 7 == attempt.spend.target_queries == run.budget["spent"]["target_queries"]
-    capped = CountingTarget("Sorry?")
+    capped = CountingTarget("Sorry?", observed=True)
     file = run_file(attacks=[{"name": "Mutation", "variants": 4}], vulnerabilities=[REFUND])
     run = await Engine(file, service=StubService(), target=capped).run()
     assert len(capped.calls) == 4 and run.attempts[0].outcome == "resisted"

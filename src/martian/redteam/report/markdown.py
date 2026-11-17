@@ -118,7 +118,10 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
 
     findings = report.findings
     lines += ["", "## Findings", ""]
-    lines.append(f"{findings.confirmed} confirmed (level 2 and above), {findings.suspected} suspected (judge only).")
+    lines.append(
+        f"{findings.confirmed} confirmed (level 2 and above), {findings.attempted} attempted actions (a matching "
+        f"tool call that is not known to have run), {findings.suspected} suspected (judge only)."
+    )
     lines.append("")
     lines += table(
         ["Level", "Label", "Counted as", "Findings"],
@@ -171,6 +174,38 @@ def render_markdown(run: RedteamRun, report: RedteamReport | None = None) -> str
         )
     else:
         lines.append(f"- Negative controls: {controls.note}")
+    tasks = [row for row in report.probes if run.probe(row.id).task_checks]
+    if tasks:
+        lines += ["", "Benign task completed, with the attack and without it (the negative control):", ""]
+        lines += table(
+            ["Probe", "With the attack", "Without it"],
+            [[row.id, row.task_with_attack, row.task_without_attack] for row in tasks],
+        )
+    calibration = report.judge_calibration
+    if calibration is not None:
+        lines += ["", "## Judge calibration", ""]
+        if calibration.error:
+            lines.append(f"The judge `{calibration.judge}` could not be measured: {calibration.error}")
+        else:
+            precision = calibration.precision.display if calibration.precision else "-"
+            recall = calibration.recall.display if calibration.recall else "-"
+            lines.append(
+                f"The judge `{calibration.judge}` on {calibration.sample} labelled items: precision {precision}, "
+                f"recall {recall}. Its hits stay suspected whatever these are."
+            )
+            lines.append("")
+            lines += table(
+                ["True positive", "False positive", "False negative", "True negative", "Undetermined"],
+                [
+                    [
+                        calibration.true_positive,
+                        calibration.false_positive,
+                        calibration.false_negative,
+                        calibration.true_negative,
+                        calibration.undetermined,
+                    ]
+                ],
+            )
 
     if any(item.generations for item in refusals.by_method):
         lines += ["", "## Attacker refusals by method", ""]

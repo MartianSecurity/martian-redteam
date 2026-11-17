@@ -144,13 +144,12 @@ async def test_a_tool_call_check_on_a_target_that_reports_no_calls_is_undetermin
     assert observed.attempts[0].outcome == "resisted"
 
 
-async def test_a_canary_without_a_value_is_undetermined_and_the_run_says_why():
+async def test_a_canary_without_a_value_is_the_run_s_own_and_one_with_a_value_is_yours():
     file = run_file(
         vulnerabilities=[{"name": "PromptLeakage", "types": ["system_prompt"], "checks": [{"type": "canary"}]}]
     )
     result = await run(file, CountingTarget("No."))
-    assert result.attempts[0].outcome == "undetermined"
-    assert any("plants no canary" in item for item in result.limitations)
+    assert result.attempts[0].outcome == "resisted" and result.provenance["canary"].startswith("MRTC-")
     planted = run_file(
         vulnerabilities=[
             {
@@ -400,7 +399,8 @@ def test_the_launcher_starts_a_run_from_the_api_and_keeps_it(tmp_path, served):
     assert started.json()["state"] == "running"
     done = wait_for(served, started.json()["id"], {"completed"})
     assert done["counts"]["hits"] == 1 and done["counts"]["attempts"] == 2
-    assert done["budget"]["spent"]["target_queries"] == 2
+    # Two attacks, and the negative control of the probe that hit.
+    assert done["budget"]["spent"]["target_queries"] == 3
 
 
 def test_the_launcher_stops_a_run(tmp_path, served):

@@ -136,7 +136,9 @@ def test_findings_by_level_say_not_evaluated_without_verification_or_controls():
     probe = _probe("system_prompt")
     report = build_report(_run([probe], [_attempt(probe, 1, "hit", EvidenceLevel.TOOL_CALL)]))
     [finding] = report.findings.items
-    assert (finding.label, finding.counted_as, finding.evidence_level) == ("Attempted action", "confirmed", 3)
+    # A tool call not known to have run is an attempted action, counted apart (martian-notes#253).
+    assert (finding.label, finding.counted_as, finding.evidence_level) == ("Attempted action", "attempted", 3)
+    assert (report.findings.confirmed, report.findings.attempted) == (0, 1)
     assert (finding.verification, finding.reproductions, finding.negative_control) == (NOT_EVALUATED,) * 3
     assert not report.verification.evaluated and "Not evaluated" in report.verification.note
     assert not report.controls.evaluated and "Not evaluated" in report.controls.note
@@ -172,7 +174,8 @@ def test_verifications_and_controls_the_run_carries_are_reported():
         "2 of 2",
         "passed",
     )
-    assert (rows[other.id].verification, rows[other.id].negative_control) == ("not_reproducible", "failed")
+    # A probe whose control showed the same signal has no finding (martian-notes#256).
+    assert other.id not in rows
     assert report.verification.evaluated and (report.verification.verified, report.verification.not_reproducible) == (
         1,
         1,
@@ -212,7 +215,8 @@ def test_martian_redteam_run_writes_every_field_in_the_json_report(tmp_path, mod
     assert report.attacker is not None and report.attacker.model == "openai:/attacker-model"
     assert report.judge is not None and report.judge.model == "openai:/judge-model" and report.judge_used
     assert report.methods == ["prompt_injection"]
-    assert report.budget.spent["target_queries"] == 2 and report.budget.attempts_per_probe == 1
+    # Two attacks, and the negative control of the probe that hit.
+    assert report.budget.spent["target_queries"] == 3 and report.budget.attempts_per_probe == 1
     assert (report.findings.confirmed, report.success.per_attempt_confirmed.successes) == (1, 1)
     assert [point.k for point in report.success.within_k] == [1]
     markdown = (tmp_path / "results" / "redteam-report.md").read_text()

@@ -16,9 +16,10 @@ the judge. So every report states all three, and keeps confirmed and suspected r
 - **Decided attempts are the denominator.** An attempt is decided when it was a hit or the target
   resisted. Undetermined, stopped and errored attempts are not in any rate; they are counted beside
   it, as outcomes of their own.
-- **Confirmed and suspected stay apart.** A hit at evidence level 2 or above is confirmed; a hit at
-  level 1, which a model judged only, is suspected ([verdicts](redteam-verdicts.md)). Each has its own
-  rate, and they are never added together.
+- **Confirmed, attempted and suspected stay apart.** A hit at evidence level 2 or above is confirmed,
+  except one whose strongest evidence is a tool call that was asked for and is not known to have run:
+  that is an attempted action. A hit at level 1, which a model judged only, is suspected
+  ([verdicts](redteam-verdicts.md)). They are never added together.
 - **A refused generation is never a resisted attack.** When the attacker refuses twice, the attempt
   is an `attacker` error, and the target is not called.
 - **Intervals.** Every rate has a two-sided 95% Wilson score interval (`martian.evals.stats.wilson`).
@@ -72,7 +73,8 @@ Every rate in the report is an object with these fields:
 | `attempts` | Every attack attempt |
 | `decided` | `hits` plus `resisted` |
 | `hits` | Attempts a check found vulnerable |
-| `confirmed_hits` | Hits at level 2 or above |
+| `confirmed_hits` | Hits at level 2 or above, attempted actions excepted |
+| `attempted_hits` | Hits whose strongest evidence is a tool call not known to have run |
 | `suspected_hits` | Hits at level 1 only |
 | `resisted` | Attempts every check decided and none hit |
 | `undetermined` | Attempts no check could decide |
@@ -115,15 +117,16 @@ attack method with its `method`, `generations`, `refusals` and `rate`.
 
 ### Findings
 
-`findings` has `confirmed` and `suspected` (findings at level 2 and above, and at level 1),
+`findings` has `confirmed`, `attempted` and `suspected` (findings counted as each),
 `by_level` (for each level 1 to 5, its `level`, `label`, whether it is `counted_as` confirmed or
-suspected, and how many `findings` reached it) and `items`, one per finding:
+suspected, and how many `findings` reached it; level 3 holds attempted actions too) and `items`, one
+per finding. A probe whose negative control showed the same signal has no finding.
 
 | Field | Meaning |
 | --- | --- |
 | `id`, `probe_id` | The finding and its probe |
 | `vulnerability`, `vulnerability_type`, `attack_method`, `objective_class` | What the probe tested |
-| `evidence_level`, `label`, `counted_as` | The highest level its hits reached, its label, and `confirmed` or `suspected` |
+| `evidence_level`, `label`, `counted_as` | The highest level its hits reached, its label, and `confirmed`, `attempted` or `suspected` |
 | `severity`, `status` | The run file's severity, and the finding's status (`open`, `accepted`, `fixed`, `false_positive`) |
 | `hits`, `attempts` | The probe's hits and attack attempts |
 | `verification` | The verification outcome (`verified`, `consistent`, `not_reproducible`, `unverifiable`), or `not evaluated` |
@@ -139,7 +142,14 @@ and `note` then says so.
 `controls` counts negative controls, the probe run without the attack: `ran`, `passed` (the target
 held), `failed` (it showed the signal) and `undetermined`. They come from the run's control attempts,
 or, when it has none, from its verifications. `evaluated` is false when no control ran, and `note`
-then says so.
+then says so. The local engine fills both: its repetitions, negative controls and verifications are
+described in the [run file guide](redteam-run-file.md#verification).
+
+`judge_calibration` is the judge measured on the run file's labelled sample, or `null` without one:
+the `judge` version, the `sample` size, `true_positive`, `false_positive`, `false_negative`,
+`true_negative` and `undetermined` answers, `precision` (true positives over the hits it called) and
+`recall` (true positives over the sample's hits) as rates, and `error` when it could not be measured.
+It describes the judge; it never raises a judged hit above suspected.
 
 ### Groups and probes
 
@@ -157,8 +167,10 @@ transform or a rewrite; a probe of a hosted campaign has neither.
 `probes` has one entry per probe: its `id`, `vulnerability`, `vulnerability_type`,
 `attack_method`, `objective_class`, the kinds of its `checks`, its attempts by outcome (`attempts`,
 `hits`, `resisted`, `undetermined`, `stopped`, `errors`), the highest `evidence_level` a hit reached
-(or `null`), the `target_queries` it made, and `queries_to_first_hit`, the target queries up to its
-first hit of any level (or `null`).
+(or `null`), the `target_queries` it made, `queries_to_first_hit`, the target queries up to its
+first hit of any level (or `null`), and its benign task: `task_with_attack`, `k of n` attack attempts
+in which it completed, and `task_without_attack`, `completed`, `not completed` or `undetermined` in
+the negative control, each `not evaluated` when the probe has no benign task.
 
 ## Output formats
 
@@ -208,11 +220,11 @@ between them may be the change of attacker or budget, not of the target.
 
 ## Pinned findings
 
-A confirmed finding can be kept as a regression test, so that after a fix CI checks it stays fixed.
+A confirmed finding, or an attempted action, can be kept as a regression test, so that after a fix CI checks it stays fixed. A suspected finding cannot: it rests on a judge.
 
 ```bash
 MARTIAN_REPORT_INCLUDE_CONTENT=1 martian redteam run redteam.yaml   # a run that keeps the attack text
-martian redteam pin add results/redteam-run.json -o pins            # every confirmed finding, or --finding ID
+martian redteam pin add results/redteam-run.json -o pins            # every finding but suspected ones, or --finding ID
 martian redteam pin run redteam.yaml --pins pins                    # in CI: no attacker or judge model
 ```
 

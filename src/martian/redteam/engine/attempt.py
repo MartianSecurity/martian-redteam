@@ -24,15 +24,13 @@ from typing import TYPE_CHECKING, Any
 from martian.redteam.engine.hostile import scrub_secrets, secret_values
 from martian.redteam.engine.refusal import classify
 from martian.redteam.methods.base import AttackMethod, Exchange, Feedback, GenerationMode, Rung
-from martian.redteam.model import CheckResult, Evidence, ToolCall, Turn
+from martian.redteam.model import Check, CheckResult, Evidence, ToolCall, Turn
 from martian.redteam.targets.conversations import conversation_id
+from martian.redteam.verify.canary import context_of
 
 if TYPE_CHECKING:
     from martian.redteam.engine.plan import PlannedProbe
     from martian.redteam.engine.run import Engine, _Spending
-
-DETERMINISTIC = frozenset({"text", "canary", "tool_call"})
-"""The checks a method's feedback is read from when the probe has any: decided by code, at no cost."""
 
 
 def tool_rung(calls: list[ToolCall], *, tool: str, hit: bool | None) -> Rung:
@@ -74,6 +72,8 @@ class AttemptRun:
         self.first_success: int | None = None
         self.policy_revision: str | None = None
         self.last_message: str | None = None
+        self.last_attack: str | None = None
+        self.planted = context_of(planned.probe, engine.canary)
         self.delivery_ids: list[str] = []
         self.deliveries: list[bool] = []
         self.values: dict[str, Any] = {}
@@ -95,7 +95,8 @@ class AttemptRun:
     def goal(self) -> str:
         from martian.redteam.catalog.prompts import GENERIC_GOAL, VULNERABILITY_GOALS
 
-        return self.probe.goal or VULNERABILITY_GOALS.get(self.probe.vulnerability, GENERIC_GOAL)
+        stated = self.engine._goal(self.probe, self.attempt_id)
+        return stated or VULNERABILITY_GOALS.get(self.probe.vulnerability, GENERIC_GOAL)
 
     @property
     def seed(self) -> int:
@@ -113,7 +114,7 @@ class AttemptRun:
         if request is not None:
             request = scrub_secrets(request, self._hidden)
         payload, generated = await self.engine._generate(
-            self.planned, self.spending, method=method or self.method.id, request=request, mode=mode
+            self.planned, self.spending, self.attempt_id, method=method or self.method.id, request=request, mode=mode
         )
         self.policy_revision = generated.get("policy_revision") or self.policy_revision
         return payload
@@ -137,19 +138,30 @@ class AttemptRun:
         if self.method.delivery is not None:
             prepared = self.engine.deliverer.prepare(self.method.delivery, attack, action_id=conversation_id(session))
             message = prepared.message
-        self.last_message = message
+        # What the probe plants (a canary note) and its benign task go with every message, as with
+        # any attempt.
+        sent = "\n\n".join(part for part in (self.planted, self.probe.task, message) if part)
+        self.last_message, self.last_attack = sent, attack
         try:
-            reply = await self.engine._send(session, message, self.spending)
+            reply = await self.engine._send(session, sent, self.spending)
         except BaseException:
             if prepared is not None:
                 self.engine.deliverer.release(prepared)
             raise
-        exchange = Exchange(number=self.queries + 1, payload=payload, message=message, reply=reply, session=session)
+        exchange = Exchange(
+            number=self.queries + 1,
+            payload=payload,
+            message=message,
+            reply=reply,
+            session=session,
+            attack=attack,
+            sent=sent,
+        )
         self.exchanges.append(exchange)
         if prepared is not None:
             self._keep_delivery(exchange, attack, self.engine.deliverer.confirm(prepared, attack))
         self.turns += [
-            Turn(role="attacker", content=message),
+            Turn(role="attacker", content=sent),
             Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
         ]
         return exchange
@@ -157,17 +169,33 @@ class AttemptRun:
     async def check(self, exchange: Exchange) -> Feedback:
         checks = self.probe.checks
         refused = classify(exchange.reply.text) == "refused"
-        decided = [check for check in checks if check.kind in DETERMINISTIC]
+        decided = self._by_code()
+        kept = [*exchange.reply.evidence, *self.engine._keep_receipts(self.attempt_id)]
         if decided:
-            evidence_id = f"{self.attempt_id}/reply"
-            results = [self.engine._decide(check, exchange.message, exchange.reply, evidence_id) for check in decided]
-            feedback = self._graded(exchange, results, refused)
+            found = await self.engine._verify(
+                self.planned,
+                decided,
+                exchange.attack,
+                exchange.sent,
+                exchange.reply,
+                self.spending,
+                kept,
+                self.attempt_id,
+            )
+            feedback = self._graded(exchange, decided, found.results, refused)
         elif checks and all(check.kind == "judge" for check in checks):
             verified = await self.engine._verify(
-                self.planned, exchange.message, exchange.reply, self.spending, f"{self.attempt_id}/reply"
+                self.planned,
+                checks,
+                exchange.attack,
+                exchange.sent,
+                exchange.reply,
+                self.spending,
+                kept,
+                self.attempt_id,
             )
             exchange.verified = verified
-            results, failure, stop = verified
+            results, failure, stop = verified.results, verified.failure, verified.stop
             hit = any(result.hit is True for result in results)
             rung: Rung = "matched" if hit else ("undetermined" if failure or stop else "no_match")
             feedback = Feedback(
@@ -185,11 +213,18 @@ class AttemptRun:
             self.first_success = exchange.number
         return feedback
 
-    def _graded(self, exchange: Exchange, results: list[CheckResult], refused: bool) -> Feedback:
+    def _by_code(self) -> list[Check]:
+        """The probe's checks its verifiers decide by code, at no cost."""
+        found = []
+        for check in self.probe.checks:
+            verifier = self.engine.verifiers.get(check.kind)
+            if verifier is not None and verifier.deterministic:
+                found.append(check)
+        return found
+
+    def _graded(self, exchange: Exchange, checks: list[Check], results: list[CheckResult], refused: bool) -> Feedback:
         best: Rung = "undetermined"
-        for check, result in zip(
-            [check for check in self.probe.checks if check.kind in DETERMINISTIC], results, strict=True
-        ):
+        for check, result in zip(checks, results, strict=True):
             if check.kind == "tool_call":
                 rung = tool_rung(exchange.reply.tool_calls, tool=check.spec["tool"], hit=result.hit)
             else:
@@ -246,4 +281,4 @@ def _rank(rung: Rung) -> int:
     return order.index(rung)
 
 
-__all__ = ["DETERMINISTIC", "SUMMARIES", "AttemptRun", "tool_rung"]
+__all__ = ["SUMMARIES", "AttemptRun", "tool_rung"]

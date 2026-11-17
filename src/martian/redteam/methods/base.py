@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Protocol
 
-from martian.redteam.model import CheckResult, Probe
+from martian.redteam.model import Probe
 from martian.redteam.targets import TargetReply
 
 MethodKind = Literal["transform", "rewrite", "conversation", "search"]
@@ -75,7 +75,8 @@ class Exchange:
     """One query of the target in an attempt: the attack as the method wrote it (``payload``), the
     message the target was sent after the layers and the delivery route (``message``), its reply,
     the conversation it was sent in, and the checks' feedback once asked for. ``verified`` holds the
-    full verification when the feedback already ran every check, so it is not run twice."""
+    full verification (a :class:`~martian.redteam.verify.verifiers.Decided`) when the feedback already
+    ran every check, so it is not run twice."""
 
     number: int
     payload: str
@@ -83,7 +84,11 @@ class Exchange:
     reply: TargetReply
     session: str
     feedback: Feedback | None = None
-    verified: tuple[list[CheckResult], Any, Any] | None = None
+    verified: Any = None
+    attack: str = ""
+    """The payload after the method's layers: what the attempt keeps as its ``input``."""
+    sent: str = ""
+    """What the target received: ``message`` with what the probe plants and its benign task."""
 
 
 class AttackContext(Protocol):
