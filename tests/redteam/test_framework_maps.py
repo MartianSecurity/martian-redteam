@@ -110,7 +110,7 @@ def test_vulnerabilities_for_takes_a_framework_or_an_item():
 
 
 def test_the_catalog_command_prints_each_item_and_its_coverage():
-    printed = CliRunner().invoke(app, ["catalog"], env={"COLUMNS": "400"})
+    printed = CliRunner().invoke(app, ["catalog"])
     assert printed.exit_code == 0, printed.output
     assert (
         "OWASP Top 10 for Agentic Applications 2026 (owasp_agentic_2026, 2026): 1 covered, 5 partly, 4 not covered"

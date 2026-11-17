@@ -1,6 +1,7 @@
 """Catalogue 1.0: every entry states its objective, forms and checks, severity, framework tags, source
 and licence, and every 0.2 name still resolves as it did (martian-notes#261)."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -90,10 +91,10 @@ def test_the_entry_gives_the_default_severity_and_the_run_file_overrides_it():
 
 
 def test_the_catalog_command_prints_the_new_fields():
-    printed = CliRunner().invoke(app, ["catalog"], env={"COLUMNS": "400"})
+    printed = CliRunner().invoke(app, ["catalog"])
     assert printed.exit_code == 0, printed.output
     assert f"catalogue {CATALOG_VERSION}" in printed.output
     for words in ("Objective", "Severity", "Forms", "Frameworks", "Source and licence"):
         assert words in printed.output
-    assert "reply: judge, level 1 (default)" in printed.output
+    assert re.search(r"PromptLeakage\s+│\s+reply \(default\)\s+│\s+judge\s+│\s+1", printed.output)
     assert "owasp_llm_2025:LLM07" in printed.output and "Apache-2.0" in printed.output
