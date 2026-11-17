@@ -1,5 +1,5 @@
-"""The ``/v1/redteam`` routes of the red team core: read a run, its attempts, evidence and findings
-and the catalogue; start and stop a run; annotate a finding.
+"""The ``/v1/redteam`` routes of the red team core: read a run, its attempts, evidence, findings and
+report and the catalogue; start and stop a run; annotate a finding.
 
 Every edition serves the same routes: the local edition through ``martian ui`` and the hosted
 backend by mounting this router. Their shapes are frozen in ``contract/redteam-api-v<N>.json``, with
@@ -38,6 +38,7 @@ from martian.redteam.model import (
     TargetRef,
     Verification,
 )
+from martian.redteam.report import RedteamReport, build_report
 from martian.redteam.store import RedteamStore
 
 PREFIX = "/v1/redteam"
@@ -244,6 +245,14 @@ async def list_redteam_findings(
 ) -> FindingList:
     run = await _run(records, principal, project_id, run_id)
     return FindingList(items=run.findings)
+
+
+@router.get("/runs/{run_id}/report", response_model=RedteamReport)
+async def get_redteam_report(
+    run_id: str, principal: PrincipalDep, records: RecordsDep, project_id: ProjectQuery = DEFAULT_PROJECT
+) -> RedteamReport:
+    run = await _run(records, principal, project_id, run_id)
+    return build_report(run)
 
 
 @router.post("/runs/{run_id}/findings/{finding_id}/annotations", response_model=Finding)
