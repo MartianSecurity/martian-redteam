@@ -308,6 +308,7 @@ def _run_version_2(
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
 
+    from martian.redteam.engine.memory import StrategyLibraryError
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import for_report, write_reports
     from martian.redteam.engine.runs import (
@@ -428,6 +429,7 @@ def _run_version_2(
         ConnectionError,
         TargetChanged,
         EnvironmentRunError,
+        StrategyLibraryError,
     ) as error:
         _stop(safe_text(error))
     except (FileNotFoundError, ImportError, AttributeError):

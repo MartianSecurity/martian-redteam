@@ -198,7 +198,7 @@ def redaction_for(run_file: RunFile, environ: Mapping[str, str] | None = None) -
     """The values a report must never show: the models' header values, as sent."""
     environ = os.environ if environ is None else environ
     values: list[str] = []
-    for model in (run_file.models.attacker, run_file.models.judge):
+    for model in (*run_file.models.pool, run_file.models.judge):
         if model is None:
             continue
         for value in model.headers.values():
@@ -216,6 +216,16 @@ def build_service(
     kind = select_service(run_file, environ)
     policy = redaction_for(run_file, environ)
     if kind == "local":
+        if len(run_file.models.pool) > 1:
+            from martian.redteam.engine.local import PooledService
+
+            pooled = PooledService(
+                [
+                    LocalService(attacker=attacker, judge=run_file.models.judge, redaction_policy=policy)
+                    for attacker in run_file.models.pool
+                ]
+            )
+            return pooled, pooled.describe()
         local = LocalService(attacker=run_file.models.attacker, judge=run_file.models.judge, redaction_policy=policy)
         return local, local.describe()
     from martian.config import MartianConfig

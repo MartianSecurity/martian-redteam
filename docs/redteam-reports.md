@@ -60,6 +60,7 @@ Every rate in the report is an object with these fields:
 | --- | --- |
 | `service` | `local` (your models) or `hosted` (the Martian platform) |
 | `attacker`, `judge` | Each model's `model` (provider and name) and `inference_params`. `null` when the run did not record one, as with the hosted service |
+| `attackers` | With a pool of attackers ([models](redteam-run-file.md#models)), each of them, in the pool's order; `attacker` is then the first. Empty with one attacker |
 | `judge_used` | Whether any probe had a judge check |
 | `methods` | The attack methods, in plan order |
 | `budget` | `limits` (the run file's budget), `spent` (target queries, attacker and judge calls, tokens and cost), `stopped_by` (the limit that stopped the run, or `null`) and `attempts_per_probe` (the most attempts a probe planned) |
@@ -90,6 +91,7 @@ Every rate in the report is an object with these fields:
 | --- | --- |
 | `per_attempt_confirmed` | Confirmed hits over decided attempts |
 | `per_attempt_suspected` | Suspected hits over decided attempts |
+| `per_attempt_attempted` | Attempted actions over decided attempts: hits whose best evidence is a tool call of the goal that was asked for and not known to run (level 3). Never added to the confirmed rate |
 | `within_k` | Success within k target queries, one point per k (below) |
 | `queries_to_first_confirmed_median`, `queries_to_first_confirmed_max` | For each probe with a confirmed hit, how many target queries it took to reach the first one, as their median and their largest value. `null` without a confirmed hit |
 
@@ -104,6 +106,9 @@ point of `within_k` has:
 | `undecided` | The other probes: every attempt within k queries was undetermined, stopped or an error |
 | `confirmed` | Probes with a confirmed hit within k queries, over `probes` |
 | `suspected` | Probes with a suspected hit and no confirmed hit within k queries, over `probes` |
+| `attempted` | Probes with an attempted action and no confirmed hit within k queries, over `probes`. Counted apart from `suspected`: a probe can be in both, and neither is added to `confirmed` |
+
+The Markdown and HTML reports add an attempted-action column when the run has one.
 
 Up to 20 queries per probe, there is a point for every k. Beyond that, points are at 1, 2, 3, 5, 10,
 20, 50, 100 and so on, and at the largest k. A run that did not record target queries, such as a
@@ -129,6 +134,7 @@ per finding. A probe whose negative control showed the same signal has no findin
 | `evidence_level`, `label`, `counted_as` | The highest level its hits reached, its label, and `confirmed`, `attempted` or `suspected` |
 | `severity`, `status` | The run file's severity, and the finding's status (`open`, `accepted`, `fixed`, `false_positive`) |
 | `hits`, `attempts` | The probe's hits and attack attempts |
+| `attackers` | With a pool of attackers, the attackers whose attempts hit, in order of their first hit; empty with one attacker |
 | `verification` | The verification outcome (`verified`, `consistent`, `not_reproducible`, `unverifiable`), or `not evaluated` |
 | `reproductions` | `r of n`: repetitions that reproduced the hit at level 2 or above, of those that ran, or `not evaluated` |
 | `negative_control` | `passed`, `failed`, `undetermined`, or `not evaluated` when no control ran for the probe |
@@ -163,6 +169,13 @@ attack, and `adaptive` for a method that reads the replies or the checks. Readin
 row beside each adaptive method's, over the same probes, is the static-versus-adaptive comparison;
 the Markdown and HTML reports show the arm beside each method. A version 0.2 method is `static`, a
 transform or a rewrite; a probe of a hosted campaign has neither.
+
+`by_attacker`, with a pool of attackers, has one entry per attacker, in the pool's order: the same
+fields over the attack attempts it wrote, its `attacker_calls`, the generations it refused or left
+empty (`refusals`) and their `refusal_rate`. Each attempt names its attacker (`attacker`), and a
+repetition names the attacker of the hit it repeats. The Markdown and HTML reports show the table, and
+the Markdown findings table names each finding's attackers. With one attacker `by_attacker` is empty:
+every success is the run's attacker's.
 
 `probes` has one entry per probe: its `id`, `vulnerability`, `vulnerability_type`,
 `attack_method`, `objective_class`, the kinds of its `checks`, its attempts by outcome (`attempts`,

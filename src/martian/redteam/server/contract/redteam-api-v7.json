@@ -78,10 +78,132 @@
         "title": "AnnotationIn",
         "type": "object"
       },
+      "AttackerGroup": {
+        "additionalProperties": false,
+        "description": "The attack attempts one attacker of a pool wrote: its success rates, the target queries its\nattempts made, its calls (``attacker_calls``) and the generations it refused or left empty.",
+        "properties": {
+          "arm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm"
+          },
+          "attacker_calls": {
+            "default": 0,
+            "title": "Attacker Calls",
+            "type": "integer"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "confirmed": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "decided": {
+            "default": 0,
+            "title": "Decided",
+            "type": "integer"
+          },
+          "errors": {
+            "default": 0,
+            "title": "Errors",
+            "type": "integer"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "probes": {
+            "default": 0,
+            "title": "Probes",
+            "type": "integer"
+          },
+          "queries_to_first_hit_median": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queries To First Hit Median"
+          },
+          "refusal_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refusals": {
+            "default": 0,
+            "title": "Refusals",
+            "type": "integer"
+          },
+          "stopped": {
+            "default": 0,
+            "title": "Stopped",
+            "type": "integer"
+          },
+          "suspected": {
+            "$ref": "#/components/schemas/Rate"
+          },
+          "target_queries": {
+            "default": 0,
+            "title": "Target Queries",
+            "type": "integer"
+          },
+          "undetermined": {
+            "default": 0,
+            "title": "Undetermined",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "confirmed",
+          "suspected"
+        ],
+        "title": "AttackerGroup",
+        "type": "object"
+      },
       "Attempt": {
         "additionalProperties": false,
         "description": "One execution of a probe against the target.",
         "properties": {
+          "attacker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attacker"
+          },
           "attacker_refusals": {
             "default": 0,
             "minimum": 0.0,
@@ -1601,6 +1723,13 @@
             "title": "Attack Method",
             "type": "string"
           },
+          "attackers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Attackers",
+            "type": "array"
+          },
           "attempts": {
             "default": 0,
             "title": "Attempts",
@@ -2616,12 +2745,26 @@
               }
             ]
           },
+          "attackers": {
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "title": "Attackers",
+            "type": "array"
+          },
           "budget": {
             "$ref": "#/components/schemas/Budget",
             "default": {
               "limits": {},
               "spent": {}
             }
+          },
+          "by_attacker": {
+            "items": {
+              "$ref": "#/components/schemas/AttackerGroup"
+            },
+            "title": "By Attacker",
+            "type": "array"
           },
           "by_method": {
             "items": {
@@ -3316,6 +3459,18 @@
               }
             ],
             "title": "Prompt"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "const": "reviewed_cases",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
           }
         },
         "required": [
@@ -3490,6 +3645,16 @@
         "additionalProperties": false,
         "description": "``per_attempt``: hits over decided attempts. ``within_k``: probes that hit within k target\nqueries over probes decided within them. ``queries_to_first_confirmed``: for each probe with a\nconfirmed hit, the target queries it took, as their median and largest value.",
         "properties": {
+          "per_attempt_attempted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "per_attempt_confirmed": {
             "$ref": "#/components/schemas/Rate"
           },
@@ -3923,6 +4088,16 @@
         "additionalProperties": false,
         "description": "Success within ``k`` target queries per probe. ``probes`` counts the probes an attempt\ndecided within those queries; ``undecided`` the rest.",
         "properties": {
+          "attempted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "confirmed": {
             "$ref": "#/components/schemas/Rate"
           },
@@ -4096,9 +4271,9 @@
     }
   },
   "info": {
-    "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 2). Generated by scripts/redteam_contract.py; do not edit by hand.",
+    "description": "Every /v1/redteam route: the red team core's, and the hosted backend's SDK operation routes (operations contract version 3). Generated by scripts/redteam_contract.py; do not edit by hand.",
     "title": "Martian red team API",
-    "version": "6"
+    "version": "7"
   },
   "openapi": "3.1.0",
   "paths": {

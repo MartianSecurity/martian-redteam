@@ -35,7 +35,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -70,7 +71,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -105,7 +107,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -140,7 +143,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -175,7 +179,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -210,7 +215,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -245,7 +251,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -280,7 +287,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -315,7 +323,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -350,7 +359,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -385,7 +395,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -420,7 +431,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    }
   ],
   "counts": {
@@ -985,7 +997,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1049,7 +1062,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1113,7 +1127,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1177,7 +1192,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1241,7 +1257,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1305,7 +1322,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1392,7 +1410,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1479,7 +1498,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1566,7 +1586,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1653,7 +1674,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1740,7 +1762,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    },
    {
     "attacker_refusals": 0,
@@ -1827,7 +1850,8 @@
       "role": "target",
       "tool_calls": []
      }
-    ]
+    ],
+    "attacker": null
    }
   ],
   "counts": {
@@ -2557,7 +2581,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2592,7 +2617,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2627,7 +2653,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2662,7 +2689,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2697,7 +2725,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2732,7 +2761,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2767,7 +2797,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2802,7 +2833,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2837,7 +2869,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2872,7 +2905,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2907,7 +2941,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    },
    {
     "attacker_refusals": 2,
@@ -2942,7 +2977,8 @@
     "task_completed": null,
     "task_results": [],
     "trace_id": null,
-    "turns": []
+    "turns": [],
+    "attacker": null
    }
   ],
   "counts": {
