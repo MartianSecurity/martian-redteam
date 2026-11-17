@@ -10,6 +10,8 @@ process starts with its environment. With ``EVALS_TEST_OUTBOUND_DIR`` naming a f
   an audit hook, and appends each to ``attempts.log`` there with the stack that made it. The
   refusal is the ``OSError`` a network with no route out raises, so an attempt is recorded even
   when the library that made it swallows the error, as MLflow's telemetry does;
+- appends the address of every connection to loopback to ``connections.log`` there, one ``host port``
+  a line, so a test can tell which local servers a process reached;
 - appends to ``attempts.log``, when the process exits, that MLflow's telemetry client started, if
   it did. MLflow starts the client when it is imported unless its telemetry is off, and sends from
   a background thread that a short process can end before, so the client itself is the evidence.
@@ -34,6 +36,7 @@ FOLDER_ENV = "EVALS_TEST_OUTBOUND_DIR"
 """Not a ``MARTIAN_*`` name: a function target's process does not inherit those
 (``martian.evals.isolation``), and it runs under the guard too."""
 ATTEMPTS = "attempts.log"
+CONNECTIONS = "connections.log"
 TELEMETRY_STARTED = "MLflow's telemetry client started"
 
 _SENDS = frozenset({"socket.connect", "socket.sendto", "socket.sendmsg"})
@@ -76,6 +79,9 @@ def _guard(folder: Path) -> None:
             if internet and address is not None and not is_loopback(address[0]):
                 _record(folder, f"{event} {address!r}")
                 raise OSError(errno.ENETUNREACH, f"outbound network blocked by the test: {address!r}")
+            if internet and address is not None and event == "socket.connect":
+                with (folder / CONNECTIONS).open("a", encoding="utf-8") as log:
+                    log.write(f"{address[0]} {address[1]}\n")
         elif event in _LOOKUPS:
             host = args[0][0] if event == "socket.getnameinfo" else args[0]
             if not is_loopback(host):
