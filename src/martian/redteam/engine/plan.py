@@ -136,6 +136,13 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
         entry = _entry_of(spec)
         form = _form_of(index, spec, entry)
         checks = _checks(list(spec.checks), spec.goal, form, chosen=spec.form is not None)
+        if not spec.checks and any(
+            check.kind == "canary" and check.spec.get("plant") == "system_prompt" for check in checks
+        ):
+            try:
+                run_file._templated_target(index)
+            except ValueError as error:
+                raise PlanError(str(error)) from None
         severity = spec.severity or (entry.severity if entry is not None else None)
         if local and run_file.models.judge is None and any(check.kind == "judge" for check in checks):
             reason = "has no checks, so the judge decides it" if not spec.checks else "has a judge check"
@@ -158,7 +165,11 @@ def plan(run_file: RunFile) -> list[PlannedProbe]:
                     planned_attempts=run_file.budget.attempts_per_probe,
                     task=spec.benign.task if spec.benign else "",
                     task_checks=_task_checks(spec),
-                    metadata={"severity": severity, "attack_kind": attack.kind},
+                    metadata={
+                        "severity": severity,
+                        "attack_kind": attack.kind,
+                        **({"protocol": entry.protocol} if entry is not None and entry.protocol != "message" else {}),
+                    },
                 )
                 planned.append(PlannedProbe(probe, vulnerability, attack, severity))
     return planned

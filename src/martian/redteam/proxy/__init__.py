@@ -458,6 +458,12 @@ class ProxiedTarget:
         evidence = [item for call in recorded for item in call.evidence()]
         return with_observed(reply, [call.tool_call() for call in recorded], evidence)
 
+    def end(self, session: str) -> None:
+        """End the target's conversation ``session``, when the target keeps its conversations."""
+        end = getattr(self._target, "end", None)
+        if callable(end):
+            end(session)
+
     async def close(self) -> None:
         await self._target.close()
 

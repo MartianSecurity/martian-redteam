@@ -53,11 +53,12 @@ from martian.redteam.model import (
 from martian.redteam.model.maps import counts_of, findings_of
 from martian.redteam.runfile import RunFile
 from martian.redteam.targets import Target, TargetChanged, TargetReply
-from martian.redteam.verify.canary import context_of, new_canary, uses_canary
+from martian.redteam.verify.canary import context_of, new_canary, plant, uses_canary
 from martian.redteam.verify.judge import calibrate, failure_code, failure_kind, judge_for, read_sample
 from martian.redteam.verify.listener import ReceiptListener
 from martian.redteam.verify.rules import RULES_VERSION, Repetition, attempt_outcome, verify
 from martian.redteam.verify.verifiers import Decided, Observation, VerifierFailed, Verifiers, decide
+from martian_redteam.catalog.entries import EARLIER_USER_NOTE
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.encoding import apply_encoding
@@ -366,6 +367,7 @@ class Engine:
                 finished_at=datetime.now(UTC),
             )
 
+        setup: list[Turn] = []
         try:
             self.ledger.check()
             payload = attack
@@ -373,7 +375,16 @@ class Engine:
                 payload, generated = await self._generate(planned, spending, attempt_id)
                 fields["policy_revision"] = generated.get("policy_revision")
             planted = context_of(probe, self.canary)
-            parts = [planted, probe.task, payload] if role != "control" else [planted, probe.task or CONTROL_MESSAGE]
+            if probe.metadata.get("protocol") == "cross_session":
+                planted = planted or str(plant(EARLIER_USER_NOTE, self.canary))
+                setup = await self._earlier_conversation(attempt_id, planted, spending)
+                parts: list[str | None] = (
+                    [probe.task, payload] if role != "control" else [probe.task or CONTROL_MESSAGE]
+                )
+            else:
+                parts = (
+                    [planted, probe.task, payload] if role != "control" else [planted, probe.task or CONTROL_MESSAGE]
+                )
             sent = "\n\n".join(part for part in parts if part)
             fields.update(input=payload or None, planted=planted)
             reply = await self._send(attempt_id, sent, spending)
@@ -386,9 +397,10 @@ class Engine:
         receipts = self._keep_receipts(attempt_id)
         fields.update(
             output=reply.text,
-            target_calls=1,
+            target_calls=1 + sum(turn.role == "target" for turn in setup),
             evidence_ids=[evidence.id, *observed, *(item.id for item in receipts)],
             turns=[
+                *setup,
                 Turn(role="attacker", content=sent),
                 Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
             ],
@@ -416,6 +428,22 @@ class Engine:
         return done(
             outcome=outcome, level=level if outcome == "hit" else EvidenceLevel.DELIVERED, check_results=results
         )
+
+    async def _earlier_conversation(self, attempt_id: str, message: str, spending: _Spending) -> list[Turn]:
+        """A cross-session probe's first conversation: ``message``, what the probe plants, sent alone
+        as another user's, in a conversation of its own that then ends. The attack follows in a new
+        conversation; only its reply is checked. Its turns, with a note before each conversation."""
+        session = f"{attempt_id}~earlier"
+        reply = await self._send(session, message, spending)
+        end = getattr(self.target, "end", None)
+        if callable(end):
+            end(session)
+        return [
+            Turn(role="system", content="Conversation 1 of 2: another user, in a conversation of its own."),
+            Turn(role="attacker", content=message),
+            Turn(role="target", content=reply.text, tool_calls=reply.tool_calls),
+            Turn(role="system", content="Conversation 2 of 2: a new conversation. Only its reply is checked."),
+        ]
 
     def _control_checks(self, probe: Probe) -> list[Check]:
         """The checks a negative control runs: the probe's deterministic ones, or the judge when the
