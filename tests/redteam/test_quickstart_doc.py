@@ -31,6 +31,7 @@ def test_the_quickstart_reaches_a_report_and_the_ui_with_no_martian_account(tmp_
     assert set(files) == {"agent.py", "redteam.yaml"}
     for name, text in files.items():
         (tmp_path / name).write_text(text)
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "data"))  # its own local store
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     codes = []

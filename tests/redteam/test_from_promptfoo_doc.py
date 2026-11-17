@@ -27,6 +27,7 @@ def commands() -> list[list[str]]:
 
 def test_the_guides_commands_work_on_the_sample_project(tmp_path, models, monkeypatch):
     shutil.copytree(ROOT / "examples" / "promptfoo-redteam", tmp_path / "sample")
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "data"))  # its own local store
     monkeypatch.chdir(tmp_path / "sample")
     runner = CliRunner()
     outputs = []
