@@ -326,19 +326,79 @@ class AttackSpec(NamedSpec):
     """Transforms applied, in order, to every attack the method sends, such as ``[Base64]``."""
 
 
-class Gate(_Model):
-    """When the run fails. ``fail_on: confirmed`` fails on a finding at level 2 or above;
-    ``suspected`` also fails on a finding a model judged only."""
+Severity = Literal["critical", "high", "medium", "low", "info"]
+GateAction = Literal["fail", "warn", "ignore"]
+LevelThreshold = Literal["confirmed", "suspected"] | Annotated[int, Field(ge=1, le=5)]
+"""An evidence level: ``suspected`` is level 1, ``confirmed`` level 2, or a level from 1 to 5."""
 
-    fail_on: Literal["confirmed", "suspected"] = "confirmed"
-    severity: Literal["critical", "high", "medium", "low", "info"] | None = None
+
+def threshold_level(value: LevelThreshold) -> int:
+    """The evidence level a ``fail_on`` or ``warn_on`` value names."""
+    if value == "suspected":
+        return 1
+    if value == "confirmed":
+        return 2
+    return int(value)
+
+
+class ErrorHandling(_Model):
+    """What an attempt that did not complete does to the gate, by whose failure it was. A kind left
+    out follows ``fail_on_infrastructure_error`` (attacker, judge, infrastructure) or
+    ``ignore_target_errors`` (target)."""
+
+    target: GateAction | None = None
+    attacker: GateAction | None = None
+    judge: GateAction | None = None
+    infrastructure: GateAction | None = None
+
+
+class Gate(_Model):
+    """When the run fails, and what it only warns about. A finding fails the gate when it reached the
+    level ``fail_on`` names and its vulnerability is at or above ``severity``; ``warn_on`` warns about
+    any other finding at or above its level. Undetermined attempts and errors each fail, warn or are
+    ignored. Warnings never change the exit code."""
+
+    fail_on: LevelThreshold = "confirmed"
+    """``confirmed`` (level 2), ``suspected`` (level 1) or a level from 1 to 5."""
+    severity: Severity | None = None
     """Only findings of probes at this severity or above fail the gate."""
+    warn_on: LevelThreshold | None = None
+    """Warn about a finding at this level or above that does not fail the gate: one below ``fail_on``
+    or below ``severity``. ``suspected`` with the default ``fail_on`` warns about a run whose results
+    are only suspected."""
     fail_on_infrastructure_error: bool = True
     """Fail when the attacker, the judge, the platform or the harness failed."""
     ignore_target_errors: bool = False
-    undetermined: Literal["fail", "ignore"] = "fail"
-    """What an attempt no check could decide does to the gate. ``fail`` (the default) fails the run:
-    an undetermined attempt is never a pass. ``ignore`` leaves it out, and the report still counts it."""
+    errors: ErrorHandling = Field(default_factory=ErrorHandling)
+    """Per kind of error: ``fail``, ``warn`` or ``ignore``. Overrides the two settings above."""
+    undetermined: GateAction = "fail"
+    """What an attempt no check could decide, or one the budget stopped, does to the gate. ``fail``
+    (the default) fails the run: an undetermined attempt is never a pass. ``warn`` passes with a
+    warning; ``ignore`` leaves it out. The report counts them whatever this says."""
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Gate:
+        if self.warn_on is not None and threshold_level(self.warn_on) > threshold_level(self.fail_on):
+            raise ValueError("warn_on names a level at or below fail_on's; a higher one would warn about nothing")
+        set_here = self.errors.model_fields_set
+        if "fail_on_infrastructure_error" in self.model_fields_set and set_here & {
+            "attacker",
+            "judge",
+            "infrastructure",
+        }:
+            raise ValueError("give fail_on_infrastructure_error or errors.attacker, judge and infrastructure, not both")
+        if "ignore_target_errors" in self.model_fields_set and "target" in set_here:
+            raise ValueError("give ignore_target_errors or errors.target, not both")
+        return self
+
+    def error_action(self, kind: str) -> GateAction:
+        """``fail``, ``warn`` or ``ignore`` for an error of ``kind``."""
+        chosen: GateAction | None = getattr(self.errors, kind)
+        if chosen is not None:
+            return chosen
+        if kind == "target":
+            return "ignore" if self.ignore_target_errors else "fail"
+        return "fail" if self.fail_on_infrastructure_error else "ignore"
 
 
 class RunFile(_Model):
@@ -445,7 +505,9 @@ __all__ = [
     "AttackSpec",
     "Budget",
     "CanaryCheck",
+    "ErrorHandling",
     "Gate",
+    "GateAction",
     "Goal",
     "JudgeCheck",
     "McpTarget",
@@ -463,4 +525,5 @@ __all__ = [
     "Vulnerability",
     "load",
     "problems",
+    "threshold_level",
 ]

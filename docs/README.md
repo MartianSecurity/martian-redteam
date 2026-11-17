@@ -24,10 +24,11 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team run file](redteam-run-file.md) — version 2: targets shared with suite files, models and the local or hosted service, goals and checks, the tool proxy, budget and gate, and how `martian redteam run` runs it
    - [Red team attack methods](redteam-methods.md) — the method interface, kinds and arms, transform layers, and each method with what it tries and what it spends
    - [Red team targets](redteam-targets.md) — the function, HTTP and MCP server targets, how each keeps a conversation, the reply contract for tool calls, the recording MCP proxy and its local sessions, tool calls read from traces, and worked examples for four agent frameworks
+   - [Red team reports](redteam-reports.md) — the report standard: what attacked, the budget, success per attempt and within k target queries with intervals, refusals, findings by evidence level, verification and controls, and every number defined; HTML, CSV, SARIF and JUnit outputs; two runs compared; confirmed findings pinned as regression tests
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
 6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
-8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment, WAF
+8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment with red team results, WAF
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off
 10. [Development](development.md) — layout, tests, coverage artifacts, Dependabot, the Contributor License Agreement check
 11. [Customer MCP integration](customer-integration.md) — runtime-provided MCP connections, tool binding, bounded local traces and optional outbound runtime metadata. These are integration extras, not a product line

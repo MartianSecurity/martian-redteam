@@ -1,4 +1,5 @@
-"""Report a `martian evals run` result on its pull request, in one comment kept up to date.
+"""Report a `martian evals run` result, a `martian redteam run` result or both on their pull request,
+in one comment kept up to date.
 
 The evals composite action (.github/actions/evals) runs this after the suite. It reads the
 output folder, writes the report to the job summary, and on a pull request edits the comment
@@ -15,10 +16,16 @@ says that there is no baseline yet. A suite with a matrix gets one row per combi
 (matrix.json), each compared with the same combination of the baseline, then the cases of each
 combination that went from pass to fail, failed or have no verdict. A run with the cache of
 model calls on says so under the headline, with how many replies came from the cache.
+
+When the action also ran a red team run file, the comment has a red team section
+(scripts/redteam_comment.py, read from redteam-report.json): the gate's result, the attacker, the
+budget, the confirmed findings, the suspected count and the success rates. A job may run either or
+both; the comment key is then the suite path, else the run file's.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import os
@@ -736,19 +743,66 @@ def upsert(github: GitHub, number: int, body: str, *, key: str, author: str) -> 
     return "created", github.create(number, body)
 
 
+def _redteam() -> Any:
+    """``scripts/redteam_comment.py``, beside this script, which renders the red team section."""
+    spec = importlib.util.spec_from_file_location("redteam_comment", Path(__file__).with_name("redteam_comment.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def with_redteam(
+    body: str | None,
+    *,
+    key: str,
+    run_file: str,
+    folder: Path,
+    exit_code: int,
+    sha: str | None = None,
+    run_url: str | None = None,
+) -> str:
+    """``body`` (the evals comment, or None when the action ran no suite) with the red team section of
+    the run in ``folder`` added before its footer."""
+    redteam = _redteam()
+    section = redteam.render(redteam.load(folder), exit_code=exit_code, run_file=run_file, code=code)
+    if body is None:
+        lines, footer = [marker(key)], _footer(sha, run_url)
+    else:
+        lines = body.rstrip("\n").split("\n")
+        footer = lines.pop()
+        if lines[-1] != "":
+            lines.append("")
+    return "\n".join([*lines, *section, footer]) + "\n"
+
+
 def main(environ: Mapping[str, str] = os.environ) -> int:
-    suite = environ["MARTIAN_EVALS_SUITE"]
-    exit_code = int(environ["MARTIAN_EVALS_EXIT_CODE"])
-    key = environ.get("MARTIAN_EVALS_COMMENT_KEY") or suite
+    suite = environ.get("MARTIAN_EVALS_SUITE", "")
+    run_file = environ.get("MARTIAN_REDTEAM_RUN_FILE", "")
+    key = environ.get("MARTIAN_EVALS_COMMENT_KEY") or suite or run_file
     run = [environ.get(name, "") for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")]
     run_url = "{}/{}/actions/runs/{}".format(*run) if all(run) else None
-    outcome = load_outcome(Path(environ["MARTIAN_EVALS_OUTPUT"]), exit_code)
-    # Set by the action when it compares a pull request with the baseline branch's last result.
-    branch = environ.get("MARTIAN_EVALS_BASELINE_BRANCH", "")
-    baseline = Baseline(branch, environ.get("MARTIAN_EVALS_BASELINE_SHA") or None) if branch else None
-    body = render(
-        outcome, suite=suite, key=key, sha=environ.get("MARTIAN_EVALS_SHA"), run_url=run_url, baseline=baseline
-    )
+    sha = environ.get("MARTIAN_EVALS_SHA")
+    body = None
+    if suite:
+        outcome = load_outcome(Path(environ["MARTIAN_EVALS_OUTPUT"]), int(environ["MARTIAN_EVALS_EXIT_CODE"]))
+        # Set by the action when it compares a pull request with the baseline branch's last result.
+        branch = environ.get("MARTIAN_EVALS_BASELINE_BRANCH", "")
+        baseline = Baseline(branch, environ.get("MARTIAN_EVALS_BASELINE_SHA") or None) if branch else None
+        body = render(outcome, suite=suite, key=key, sha=sha, run_url=run_url, baseline=baseline)
+    if run_file:
+        body = with_redteam(
+            body,
+            key=key,
+            run_file=run_file,
+            folder=Path(environ["MARTIAN_REDTEAM_OUTPUT"]),
+            exit_code=int(environ.get("MARTIAN_REDTEAM_EXIT_CODE") or 2),
+            sha=sha,
+            run_url=run_url,
+        )
+    if body is None:
+        print("::error title=Martian evals comment::The action ran neither a suite nor a red team run file.")
+        return 1
     if environ.get("GITHUB_STEP_SUMMARY"):
         with open(environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
             handle.write(body + "\n")
