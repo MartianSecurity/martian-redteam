@@ -407,6 +407,7 @@ def _run_version_2(
                 store=keeper,
                 resume=earlier,
                 run_id=run_id,
+                world=admitted.world() if admitted is not None else None,
             )
             if admitted is not None:
                 admitted.ended(run.state)

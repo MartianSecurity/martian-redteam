@@ -1544,6 +1544,63 @@
         "title": "GateOutcome",
         "type": "object"
       },
+      "GatewayCallOut": {
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          },
+          "call_id": {
+            "title": "Call Id",
+            "type": "string"
+          },
+          "executed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executed"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "world_epoch": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "World Epoch"
+          }
+        },
+        "required": [
+          "call_id",
+          "system",
+          "tool",
+          "arguments",
+          "outcome",
+          "executed"
+        ],
+        "title": "GatewayCallOut",
+        "type": "object"
+      },
       "Group": {
         "additionalProperties": false,
         "description": "The attack attempts of one attack method or one vulnerability.",
@@ -2958,6 +3015,39 @@
         "title": "Spend",
         "type": "object"
       },
+      "StateCheckOut": {
+        "properties": {
+          "conditions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Conditions",
+            "type": "array"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "violated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Violated"
+          }
+        },
+        "required": [
+          "violated"
+        ],
+        "title": "StateCheckOut",
+        "type": "object"
+      },
       "Success": {
         "additionalProperties": false,
         "description": "``per_attempt``: hits over decided attempts. ``within_k``: probes that hit within k target\nqueries over probes decided within them. ``queries_to_first_confirmed``: for each probe with a\nconfirmed hit, the target queries it took, as their median and largest value.",
@@ -3373,6 +3463,87 @@
         "title": "WithinK",
         "type": "object"
       },
+      "WorldOut": {
+        "properties": {
+          "action_id": {
+            "title": "Action Id",
+            "type": "string"
+          },
+          "attempt": {
+            "title": "Attempt",
+            "type": "string"
+          },
+          "checks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/StateCheckOut"
+            },
+            "title": "Checks",
+            "type": "object"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayCallOut"
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          },
+          "world": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "World"
+          }
+        },
+        "required": [
+          "operation",
+          "attempt",
+          "action_id"
+        ],
+        "title": "WorldOut",
+        "type": "object"
+      },
+      "WorldRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action_id": {
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "attempt": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Attempt",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "prepare",
+              "observe",
+              "outcome"
+            ],
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "attempt",
+          "action_id"
+        ],
+        "title": "WorldRequest",
+        "type": "object"
+      },
       "app__redteam_environment_runs__SessionOut": {
         "description": "What an agent binds its tools with: ``AssessmentSession`` in the SDK.",
         "properties": {
@@ -3535,6 +3706,59 @@
           }
         },
         "summary": "Finish Environment Run",
+        "tags": [
+          "sdk-redteam"
+        ]
+      }
+    },
+    "/v1/redteam/environment-runs/{run_id}/world": {
+      "post": {
+        "operationId": "environment_run_world_v1_redteam_environment_runs__run_id__world_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Environment Run World",
         "tags": [
           "sdk-redteam"
         ]

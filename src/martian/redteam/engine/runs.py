@@ -106,6 +106,12 @@ class Admitted:
     """Why the server did not take the end of the run, when it did not: the run's records stand, and
     the server ends it at its ``max_seconds``."""
 
+    def world(self) -> Any:
+        """The run's world: the server's world operations, with the run key."""
+        from martian.redteam.environment import ServerWorld
+
+        return ServerWorld(self.client, self.run)
+
     def ended(self, state: str) -> None:
         from martian.redteam.environment import FINISHED
 
@@ -221,10 +227,12 @@ async def execute(
     principal: Any = None,
     include_content: bool = False,
     resume: RedteamRun | None = None,
+    world: Any = None,
 ) -> RedteamRun:
     """Run the engine. With ``store`` (a :class:`~martian.redteam.store.RedteamStore`), the run is
     kept after each attempt and at the end, as the reports hold it. With ``resume``, an earlier
-    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run."""
+    session of the run, its finished attempts whose fingerprint is unchanged are kept, not run. With
+    ``world`` (a run in a Martian environment), each attempt runs in a world reset for it."""
 
     async def keep(run: RedteamRun) -> None:
         copy = for_report(run, include_content=include_content, policy=service.redaction_policy)
@@ -242,6 +250,7 @@ async def execute(
         checkpoint=keep if store is not None else None,
         provenance=provenance,
         resume=resume,
+        world=world,
     )
     return await engine.run()
 

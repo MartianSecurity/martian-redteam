@@ -9,6 +9,9 @@ for that and nothing else; the engine still runs here, against the user's agent.
   token (``MARTIAN_API_TOKEN``). The answer is an :class:`EnvironmentRun`: the server's run, the
   session (:class:`martian_redteam.AssessmentSession`, the shape :func:`martian_redteam.bind_tools`
   takes) and a run key, a token for this run alone.
+- :class:`ServerWorld`: the run's :class:`~martian.redteam.world.World`, the server's world
+  operations (``POST /v1/redteam/environment-runs/{id}/world`` with the run key): prepare, observe
+  and outcome of each attempt, in a world the server resets.
 - :meth:`EnvironmentClient.finish`: ``POST /v1/redteam/environment-runs/{id}/finish`` with the run
   key. The server releases the session and the instances.
 
@@ -160,6 +163,92 @@ class EnvironmentClient:
         )
 
 
+class ServerWorld:
+    """The world of a run the server admitted: each operation is one request with the run key. A
+    failed one raises :class:`~martian.redteam.world.WorldUnavailable` with the server's reason."""
+
+    def __init__(self, client: EnvironmentClient, run: EnvironmentRun) -> None:
+        self.client = client
+        self.run = run
+
+    @property
+    def name(self) -> str:
+        return self.run.environment
+
+    async def _call(self, operation: str, attempt: str, action_id: str, **extra: Any) -> dict[str, Any]:
+        from martian.redteam.world import WorldUnavailable
+
+        body = {"operation": operation, "attempt": attempt, "action_id": action_id, **extra}
+        try:
+            return await self.client._post(
+                f"{ADMIT}/{self.run.id}/world", body, bearer=self.run.run_key, what=f"The world could not {operation}"
+            )
+        except EnvironmentRunError as error:
+            raise WorldUnavailable(str(error)) from None
+
+    async def prepare(self, attempt: str, action_id: str, *, implant: Any = None) -> dict[str, Any]:
+        found = await self._call("prepare", attempt, action_id)
+        world = found.get("world")
+        return dict(world) if isinstance(world, dict) else {}
+
+    async def observe(self, attempt: str, action_id: str) -> Any:
+        return self._read(await self._call("observe", attempt, action_id), attempt)
+
+    async def outcome(self, attempt: str, action_id: str) -> Any:
+        return self._read(await self._call("outcome", attempt, action_id), attempt)
+
+    def _read(self, found: dict[str, Any], attempt: str) -> Any:
+        """The server's answer as a :class:`~martian.redteam.world.WorldOutcome`: its state checks,
+        and each call the gateway recorded as an executed tool call with its evidence."""
+        import hashlib
+        import json as jsonlib
+
+        from martian.redteam.model import Evidence, ToolCall
+        from martian.redteam.world import StateResult, WorldOutcome, WorldUnavailable
+
+        try:
+            checks = {
+                str(name): StateResult(
+                    violated=item.get("violated"),
+                    description=str(item.get("description") or ""),
+                    conditions=list(item.get("conditions") or []),
+                )
+                for name, item in dict(found.get("checks") or {}).items()
+            }
+            calls, evidence = [], []
+            for item in found.get("tool_calls") or []:
+                call_id = f"gateway-{item['call_id']}"
+                calls.append(
+                    ToolCall(
+                        name=str(item["tool"]),
+                        arguments=dict(item.get("arguments") or {}),
+                        call_id=call_id,
+                        executed=item.get("executed"),
+                    )
+                )
+                content = jsonlib.dumps(item, sort_keys=True, default=str)
+                evidence.append(
+                    Evidence(
+                        id=f"{attempt}/{call_id}",
+                        kind="tool_call",
+                        tier="tool",
+                        source=f"gateway:{item.get('system', '')}",
+                        sha256=hashlib.sha256(content.encode()).hexdigest(),
+                        content=content,
+                        metadata={
+                            "tool": item["tool"],
+                            "call_id": call_id,
+                            "executed": item.get("executed"),
+                            "outcome": item.get("outcome"),
+                            "world_epoch": item.get("world_epoch"),
+                        },
+                    )
+                )
+        except (KeyError, TypeError, ValueError):
+            raise WorldUnavailable("The Martian server's world answer is not one this SDK reads") from None
+        return WorldOutcome(checks=checks, tool_calls=calls, evidence=evidence, receipt=found)
+
+
 FINISHED = {"completed": "completed", "stopped": "stopped", "failed": "failed", "cancelled": "cancelled"}
 """A red team run's state as the server's finish takes it; a run that ended otherwise is ``failed``."""
 
@@ -171,5 +260,6 @@ __all__ = [
     "EnvironmentClient",
     "EnvironmentRun",
     "EnvironmentRunError",
+    "ServerWorld",
     "admission",
 ]

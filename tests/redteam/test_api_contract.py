@@ -44,6 +44,7 @@ OPERATION_ROUTES = {
     "/v1/redteam/operations/{operation_id}/cancel",
     "/v1/redteam/environment-runs",
     "/v1/redteam/environment-runs/{run_id}/finish",
+    "/v1/redteam/environment-runs/{run_id}/world",
 }
 
 
