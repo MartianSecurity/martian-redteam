@@ -70,17 +70,32 @@ async def tool_boundary(
     session is written to ``folder``/:data:`SESSION_FILE`, mode ``0600``, removed when the run ends,
     and posted to ``tools.session_api``'s ``/sessions`` when the run file names one, as the cloud
     hands a session to the agent's session API. The reply of each attempt then carries the calls the
-    proxy saw, attributed by the conversation id the agent passes as ``bind_tools``' action id."""
-    if not run_file.tools.proxy:
+    proxy saw, attributed by the conversation id the agent passes as ``bind_tools``' action id. With
+    ``tools.decoy``, the run also serves the inert test MCP server
+    (:class:`~martian.redteam.poisoning.DecoyServer`) behind the proxy, and the returned target's
+    ``decoy`` is it."""
+    if not run_file.tools.proxy and run_file.tools.decoy is None:
         return target
     from martian.redteam.proxy import ProxiedTarget, ToolProxy, session_payload
+    from martian.redteam.runfile import ProxiedServer
 
-    proxy = ToolProxy(run_file.tools.proxy)
+    servers = list(run_file.tools.proxy)
+    decoy = None
+    if run_file.tools.decoy is not None:
+        from martian.redteam.poisoning import DecoyServer
+
+        decoy = DecoyServer()
+        upstream = await decoy.start()
+        stack.push_async_callback(decoy.stop)
+        servers.append(ProxiedServer(name=run_file.tools.decoy.name, upstream=upstream))
+    proxy = ToolProxy(servers)
     await proxy.start()
     stack.push_async_callback(proxy.stop)
     session = await proxy.issue_session(target_id="local", campaign_id=run_id)
     await hand_session(session_payload(session), stack, folder=folder, session_api=run_file.tools.session_api)
-    return ProxiedTarget(target, proxy)
+    proxied = ProxiedTarget(target, proxy)
+    proxied.decoy = decoy
+    return proxied
 
 
 async def hand_session(

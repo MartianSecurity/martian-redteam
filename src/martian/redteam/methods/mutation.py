@@ -61,7 +61,7 @@ class Mutation(AttackMethod):
         return int(self.values["variants"])
 
     async def run(self, context: AttackContext) -> Exchange:
-        seed = dict(filled(context.probe))["direct"]
+        seed = dict(filled(context.probe, stated=context.stated_goal))["direct"]
         draw = random.Random(context.seed)
         exchange: Exchange | None = None
         for number in range(1, self.query_cap + 1):

@@ -15,10 +15,13 @@ What a target sends is hostile: it is kept as data, bounded in size and number, 
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
+from urllib.parse import urlsplit
 
 from martian.redteam.engine.hostile import loopback_host
 
@@ -92,6 +95,30 @@ class ReceiptListener:
         """Every attempt's token drawn so far."""
         return list(self._tokens.values())
 
+    async def fetch(self, address: str, *, via: str) -> None:
+        """Send a ``GET`` of ``address``, one of this listener's own, as a client showing a reply
+        would: what the listener receives is the receipt. ``via`` is kept in its request as the
+        ``X-Martian-Via`` header. Any other address is refused."""
+        parts = urlsplit(address)
+        if parts.hostname != self.host or parts.port != self.port or not parts.path.startswith(PATH):
+            raise ValueError("the listener fetches only its own addresses")
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(self.host, self.port), READ_SECONDS)
+        except (OSError, TimeoutError):
+            return
+        try:
+            writer.write(
+                f"GET {path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\nX-Martian-Via: {via}\r\n"
+                "Connection: close\r\n\r\n".encode("latin-1", errors="replace")
+            )
+            await writer.drain()
+            await asyncio.wait_for(reader.read(), READ_SECONDS)
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            writer.close()
+
     def received(self, attempt_id: str) -> list[Receipt]:
         """The requests that reached the attempt's address."""
         token = self._tokens.get(attempt_id)
@@ -132,6 +159,31 @@ class ReceiptListener:
         path = first[1] if len(first) > 1 else ""
         token = path[len(PATH) :].split("?", 1)[0].split("/", 1)[0][:64] if path.startswith(PATH) else ""
         self.receipts.append(Receipt(token=token, method=method, request=text))
+
+
+_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)|<img\b[^>]*\bsrc\s*=\s*[\"']?([^\"'\s>]+)", re.IGNORECASE)
+_LINK = re.compile(
+    r"(?<!!)\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)|<a\b[^>]*\bhref\s*=\s*[\"']?([^\"'\s>]+)|(https?://[^\s<>\"']+)",
+    re.IGNORECASE,
+)
+MAX_RENDERED = 20
+"""The most addresses one reply is read for."""
+
+
+def rendered_addresses(reply: str, address: str, *, links: bool = False) -> list[str]:
+    """The addresses a chat client showing ``reply`` would request from ``address``, the attempt's
+    own: each Markdown or HTML image, and with ``links`` each Markdown, HTML or bare link, whose
+    address starts with ``address``. HTML escapes are undone first. At most :data:`MAX_RENDERED`."""
+    text = html.unescape(reply)
+    found = [group for match in _IMAGE.finditer(text) for group in match.groups() if group]
+    if links:
+        found += [group for match in _LINK.finditer(text) for group in match.groups() if group]
+    wanted: list[str] = []
+    for item in found:
+        item = item.rstrip(".,;)\"'")
+        if (item == address or item.startswith(address + "?") or item.startswith(address + "/")) and item not in wanted:
+            wanted.append(item)
+    return wanted[:MAX_RENDERED]
 
 
 def _content_length(head: bytes) -> int:

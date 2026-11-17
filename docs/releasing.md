@@ -33,7 +33,7 @@ uv run --all-extras python scripts/sbom.py image --image ghcr.io/martiansecurity
 The two `sbom.py` commands write the [bills of materials](#bills-of-materials-and-the-licence-check)
 into `release-sbom/` and stop on a licence outside the allowed list. `docker build` and
 `check_image.py` build [the local edition's image](#the-local-editions-image) from the wheel in
-`dist/` and check it. `check_release.py` requires one wheel and one sdist, matching versions, Apache-2.0
+`dist/` and check it. `check_release.py` refuses a wheel that holds a data file (`.csv`, `.tsv`, `.jsonl`, `.parquet`, `.arrow`, or anything in the red team datasets folder but its module and licence register): the harmful-content datasets are downloaded on use ([catalog](catalog.md#harmful-content)). It requires one wheel and one sdist, matching versions, Apache-2.0
 metadata and license files, Python 3.12+, both modules, typed markers, CLI
 entry points, the documented extras and the pinned Evals UI
 ([below](#the-evals-ui-in-the-wheel)). It rejects repository/direct-URL

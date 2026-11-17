@@ -999,21 +999,52 @@ def validate_command(
 
 @app.command("catalog")
 def catalog_command() -> None:
-    """Print built-in vulnerability, attack, and framework ids."""
-    vulns = Table(title="Vulnerabilities")
-    vulns.add_column("YAML name")
-    vulns.add_column("Id")
-    vulns.add_column("Gated")
-    vulns.add_column("Types")
-    for vuln_name, vuln_factory in VULNERABILITIES.items():
-        vulnerability = vuln_factory()
-        vulns.add_row(
-            vuln_name,
-            vulnerability.id,
-            "yes" if vulnerability.gated else "no",
-            ", ".join(vulnerability.allowed_types),
-        )
+    """Print the catalogue: each vulnerability with its objective, forms and checks, default severity,
+    framework tags, source and licence; the attacks; and the framework maps."""
+    from martian_redteam.catalog.entries import CATALOG_VERSION, ENTRIES
+
+    # Three narrow tables, so a terminal 80 columns wide shows every name in full.
+    vulns = Table(title=f"Vulnerabilities (catalogue {CATALOG_VERSION})", pad_edge=False)
+    vulns.add_column("YAML name", no_wrap=True)
+    vulns.add_column("Id", overflow="fold")
+    vulns.add_column("Objective", min_width=11)
+    vulns.add_column("Severity", min_width=8)
+    vulns.add_column("Gated", min_width=5)
+    for vuln_name in VULNERABILITIES:
+        item = ENTRIES[vuln_name]
+        vulns.add_row(vuln_name, item.id, item.objective, item.severity, "yes" if item.gated else "no")
     console.print(vulns)
+
+    types = Table(title="Types (a run file's types; all by default)")
+    types.add_column("YAML name", no_wrap=True)
+    types.add_column("Types", overflow="fold")
+    for vuln_name in VULNERABILITIES:
+        types.add_row(vuln_name, ", ".join(ENTRIES[vuln_name].types))
+    console.print(types)
+
+    forms = Table(title="Forms: how each vulnerability is decided (default first)")
+    forms.add_column("YAML name", no_wrap=True)
+    forms.add_column("Form", no_wrap=True)
+    forms.add_column("Checks", overflow="fold")
+    forms.add_column("Level")
+    for vuln_name in VULNERABILITIES:
+        for index, form in enumerate(ENTRIES[vuln_name].forms):
+            forms.add_row(
+                vuln_name if index == 0 else "",
+                form.id + (" (default)" if index == 0 else ""),
+                _form_checks(form),
+                str(form.level),
+            )
+    console.print(forms)
+
+    sources = Table(title="Frameworks, source and licence")
+    sources.add_column("YAML name", no_wrap=True)
+    sources.add_column("Frameworks", overflow="fold")
+    sources.add_column("Source and licence", overflow="fold")
+    for vuln_name in VULNERABILITIES:
+        item = ENTRIES[vuln_name]
+        sources.add_row(vuln_name, ", ".join(item.frameworks) or "unmapped", f"{item.source} ({item.licence})")
+    console.print(sources)
 
     attacks = Table(title="Attacks")
     attacks.add_column("YAML name")
@@ -1024,13 +1055,41 @@ def catalog_command() -> None:
         attacks.add_row(attack_name, attack.id, attack.kind)
     console.print(attacks)
 
-    frameworks = Table(title="Framework maps (subsets)")
-    frameworks.add_column("Id")
-    frameworks.add_column("Coverage")
-    frameworks.add_column("Vulnerability ids")
+    from martian_redteam.catalog.frameworks import DISCLAIMER
+
     for framework in FRAMEWORKS.values():
-        frameworks.add_row(framework.id, framework.coverage, ", ".join(framework.vulnerability_ids))
-    console.print(frameworks)
+        counts = framework.counts()
+        console.print(
+            f"{framework.label} ({framework.id}, {framework.source_revision}): {counts['covered']} covered, "
+            f"{counts['partly']} partly, {counts['not_covered']} not covered",
+            soft_wrap=True,
+        )
+        frameworks = Table()
+        frameworks.add_column("Item", no_wrap=True)
+        frameworks.add_column("Title", overflow="fold")
+        frameworks.add_column("Coverage", no_wrap=True)
+        frameworks.add_column("Vulnerability ids", overflow="fold")
+        frameworks.add_column("Note", overflow="fold")
+        for row in framework.items:
+            frameworks.add_row(
+                row.id,
+                row.title,
+                row.coverage.replace("_", " "),
+                ", ".join(framework.vulnerabilities_of(row.id)) or "none",
+                row.note,
+            )
+        console.print(frameworks)
+    console.print(DISCLAIMER, soft_wrap=True)
+
+
+def _form_checks(form: Any) -> str:
+    """A form's checks in a few words: each check's type, and the goal's tool call when it uses one."""
+    kinds = [str(check["type"]) for check in form.checks]
+    if form.goal == "tool":
+        kinds.append("goal tool call")
+    elif form.goal == "tool_with_canary":
+        kinds.append("goal tool call carrying the canary")
+    return " + ".join(kinds)
 
 
 def _register_interop() -> None:

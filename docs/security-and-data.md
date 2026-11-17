@@ -399,6 +399,12 @@ The core's other outbound calls are not pinned: a URL target (`martian evals run
 HTTP targets) and a webhook of a [threshold alert](#threshold-alerts), whose address check resolves
 the name once and the HTTP client again.
 
+A red team run that sends a [harmful-content dataset](catalog.md#harmful-content) downloads it once,
+from the address its licence register pins (`raw.githubusercontent.com`), with no redirect followed,
+and keeps it in the user's cache; it sends nothing but the `GET`. No other red team probe reaches
+past `127.0.0.1` on its own: canaries, receipts, rendered images and the decoy MCP server stay on
+the run's own loopback listeners.
+
 `tests/evals/test_no_outbound.py` (a judged call reaches only its endpoint),
 `tests/evals/test_worker_judges.py` (the price) and `tests/evals/test_judge_address_pin.py` (the
 address) prove both.
@@ -629,7 +635,7 @@ BSD-3-Clause, CC0-1.0, CC-BY-4.0 or the Unlicense, and only when commercial use 
 A content file is a file Git tracks that matches the register's `content.globs`: the catalogue
 (`martian.redteam.catalog`, `martian_redteam.catalog`), attack methods (`martian.redteam.methods`),
 the interop maps, the verdict test vectors, the self-test, the canary note, the attacker refusal
-phrases, the encodings, and any data
+phrases, the encodings, the planted content of poisoning probes (`martian.redteam.poisoning`), and any data
 file (`.json`, `.jsonl`, `.csv`, `.txt`, `.yaml`, `.parquet`) under `martian/redteam` or
 `martian_redteam`, less the API contract. `scripts/content_licences.py` fails when a content file has
 no entry, an entry names a file that is gone, or an entry's licence is not permitted or does not allow
@@ -638,8 +644,10 @@ in the same change. The attack methods' prompt files keep their own register
 (`martian/redteam/methods/prompts/register.json`, with each file's references), which the content
 register delegates to (`content.delegated`): a file listed there is covered on the same terms.
 
-The register also lists sources that do not ship. BeaverTails (CC BY-NC 4.0) and Do-Not-Answer
-(non-commercial) may not enter the package, and neither may text derived from the OWASP Machine
+The register also lists sources that do not ship. The harmful-content datasets (AdvBench and HarmBench,
+MIT; XSTest, CC BY 4.0) are downloaded on use from the addresses `catalog/datasets/register.json`
+pins, and no row ships ([catalog](catalog.md#harmful-content)). BeaverTails and ToxicChat (CC BY-NC
+4.0) and Do-Not-Answer (non-commercial) may not enter the package and are not registered datasets, and neither may text derived from the OWASP Machine
 Learning Security Top 10 (CC BY-SA 4.0). `MartianSecurity/martian-agents`, `martian-skills` and
 `martian-wiki` have no licence file, and some guidance skills are built from those restrictive
 sources; they are recorded as not opened, and nothing from them enters this package until they have a

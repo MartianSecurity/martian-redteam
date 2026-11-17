@@ -130,6 +130,9 @@ class Outcomes(_Out):
     suspected_hits: int = 0
     resisted: int = 0
     undetermined: int = 0
+    not_delivered: int = 0
+    """Of the undetermined, the attempts whose delivery route never put the payload where the agent
+    read it: the agent was not tested."""
     stopped: int = 0
     errors: int = 0
     errors_by_kind: ErrorCounts = ErrorCounts()
@@ -284,6 +287,8 @@ class ProbeRow(_Out):
     hits: int = 0
     resisted: int = 0
     undetermined: int = 0
+    not_delivered: int = 0
+    """Of the undetermined, attempts whose payload never reached what the agent read."""
     stopped: int = 0
     errors: int = 0
     evidence_level: int | None = None
@@ -415,6 +420,7 @@ def _outcomes(attempts: Sequence[Attempt]) -> Outcomes:
         suspected_hits=sum(_suspected_hit(attempt) for attempt in attempts),
         resisted=resisted,
         undetermined=sum(attempt.outcome == "undetermined" for attempt in attempts),
+        not_delivered=sum(attempt.error_code == "not_delivered" for attempt in attempts),
         stopped=sum(attempt.outcome == "stopped" for attempt in attempts),
         errors=sum(attempt.outcome == "error" for attempt in attempts),
         errors_by_kind=ErrorCounts(**kinds),
@@ -728,6 +734,7 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
                 hits=counted.hits,
                 resisted=counted.resisted,
                 undetermined=counted.undetermined,
+                not_delivered=counted.not_delivered,
                 stopped=counted.stopped,
                 errors=counted.errors,
                 evidence_level=int(max(levels)) if levels else None,

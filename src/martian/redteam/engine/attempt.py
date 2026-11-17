@@ -104,6 +104,10 @@ class AttemptRun:
         return stated or VULNERABILITY_GOALS.get(self.probe.vulnerability, GENERIC_GOAL)
 
     @property
+    def stated_goal(self) -> str:
+        return self.engine._goal(self.probe, self.attempt_id)
+
+    @property
     def seed(self) -> int:
         return int(hashlib.sha256(self.attempt_id.encode()).hexdigest()[:12], 16)
 
@@ -121,6 +125,9 @@ class AttemptRun:
         mode: GenerationMode = "baseline",
         source: str | None = None,
     ) -> str:
+        if "dataset" in self.probe.metadata:
+            # A harmful-content probe sends its dataset's prompt: the attacker writes nothing.
+            return self.engine._dataset_row(self.probe, int(self.attempt_id.rsplit("#", 1)[1]))
         if mode == "baseline" and self._strategies:
             # A picked strategy is the next fresh attack: no attacker call.
             strategy = self._strategies.pop(0)
@@ -161,15 +168,18 @@ class AttemptRun:
             prepared = self.engine.deliverer.prepare(self.method.delivery, attack, action_id=conversation_id(session))
             message = prepared.message
         # What the probe plants (a canary note) and its benign task go with every message, as with
-        # any attempt.
-        sent = "\n\n".join(part for part in (self.planted, self.probe.task, message) if part)
-        self.last_message, self.last_attack = sent, attack
+        # any attempt, by the probe's protocol: one conversation, or a first one before it.
+        self.last_message, self.last_attack = message, attack
         try:
-            reply = await self.engine._send(session, sent, self.spending)
+            delivered = await self.engine._deliver(self.probe, session, message, self.spending)
         except BaseException:
             if prepared is not None:
                 self.engine.deliverer.release(prepared)
             raise
+        reply, sent = delivered.reply, delivered.sent
+        self.planted = delivered.planted
+        self.last_message = sent
+        self.turns += delivered.setup
         exchange = Exchange(
             number=self.queries + 1,
             payload=payload,

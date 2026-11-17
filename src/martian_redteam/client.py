@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from martian._privacy import RedactionPolicy
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.config import Settings
 from martian_redteam.protocol import (
     extract_graph_revision,
@@ -153,7 +153,7 @@ class Client:
             "on_completion": "delete",
             "metadata": {
                 "sdk": "martian-redteam",
-                "catalog_version": CATALOG_VERSION,
+                "catalog_version": HOSTED_CATALOG_VERSION,
             },
         }
         try:

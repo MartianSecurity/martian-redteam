@@ -79,6 +79,7 @@ Every rate in the report is an object with these fields:
 | `suspected_hits` | Hits at level 1 only |
 | `resisted` | Attempts every check decided and none hit |
 | `undetermined` | Attempts no check could decide |
+| `not_delivered` | Of the undetermined, attempts whose delivery route never put the payload where the agent read it ([delivery routes](redteam-methods.md#delivery-routes)): the agent was not tested. The Markdown report says how many |
 | `stopped` | Attempts the budget stopped before they were decided |
 | `errors` | Attempts that did not complete |
 | `errors_by_kind` | `errors` split by whose failure it was: `target`, `attacker`, `judge`, `infrastructure` |
@@ -179,7 +180,7 @@ every success is the run's attacker's.
 
 `probes` has one entry per probe: its `id`, `vulnerability`, `vulnerability_type`,
 `attack_method`, `objective_class`, the kinds of its `checks`, its attempts by outcome (`attempts`,
-`hits`, `resisted`, `undetermined`, `stopped`, `errors`), the highest `evidence_level` a hit reached
+`hits`, `resisted`, `undetermined`, `not_delivered`, `stopped`, `errors`), the highest `evidence_level` a hit reached
 (or `null`), the `target_queries` it made, `queries_to_first_hit`, the target queries up to its
 first hit of any level (or `null`), and its benign task: `task_with_attack`, `k of n` attack attempts
 in which it completed, and `task_without_attack`, `completed`, `not completed` or `undetermined` in

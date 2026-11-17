@@ -309,11 +309,10 @@ MartianSecurity/martian-evals.
 
 ## Adding a vulnerability
 
-1. Add a factory in `catalog/vulnerabilities.py` with `id`, `label`, `allowed_types`, and `gated`.
-2. Register it in `VULNERABILITIES` (PascalCase key). Lookup aliases are generated from the name and `id`.
-3. Add YAML/Python examples and a catalog test.
-4. **Do not** put rubric prose in the SDK. Add the rubric to the evaluator graph in martian-agents and extend that graph’s `context_schema` if needed.
-5. Bump `CATALOG_VERSION` when IDs/types/gate flags change in a way reports must distinguish.
+1. Add a `CatalogEntry` to `catalog/entries.py` with its YAML name, id, label, group, types, gate flag, objective, forms, default severity, framework tags, source and licence ([catalog](catalog.md#entries)). `VULNERABILITIES` and the lookup aliases follow from it.
+2. Add its goal and rubric to `martian.redteam.catalog.prompts`, and regenerate `tests/redteam/fixtures/hosted-prompt-digests.json` on purpose.
+3. Add YAML examples and a catalog test.
+4. Raise `CATALOG_VERSION` by the [version rule](catalog.md#version).
 
 ## Adding an attack
 

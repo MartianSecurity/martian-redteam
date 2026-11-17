@@ -30,7 +30,7 @@ Hosted features also need the SDK APIs enabled for the organisation.
    - [Red team API](redteam-api.md) — the `/v1/redteam` routes and their frozen contract
    - [Moving from promptfoo red team](redteam-from-promptfoo.md) — promptfoo's concepts in Martian's terms, what imports and what does not, and a walk-through of a sample project
    - [Red team interop](redteam-interop.md) — a promptfoo red team config as a run file, promptfoo red team results as runs in the local store, and garak's probes against a run file's target
-6. [Catalog](catalog.md) — vulnerability and attack IDs, frameworks, custom criteria
+6. [Catalog](catalog.md) — catalogue 1.0: each vulnerability's objective, forms and what each proves, default severity, framework tags, source and licence; the version rule; attack IDs, frameworks, custom criteria
 7. [Configuration](configuration.md) — env vars, YAML schema, CLI (`validate`, `-c`/`-a`/`-o`), Markdown reports
 8. [Gate and CI](gate-and-ci.md) — fail-closed local gate (not `deepeval gate`), this repo’s split CI, customer reusable workflow / composite action, the evals pull-request action and its comment with red team results, WAF
 9. [Security and data](security-and-data.md) — origin isolation, what leaves the customer network, and telemetry, which is off

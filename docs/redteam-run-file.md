@@ -51,7 +51,8 @@ gate: { fail_on: confirmed, severity: high }
 | `version` | yes | `2` |
 | `target` | yes | What is attacked. See [target](#target) |
 | `models` | no | The models that attack and judge, called with your own key. Without them, attacks are generated and judged by the Martian platform, as in version 0.2 |
-| `vulnerabilities` | yes | At least one vulnerability to probe |
+| `vulnerabilities` | yes, or `frameworks` | The vulnerabilities to probe |
+| `frameworks` | no | Also probe every catalogue entry these frameworks or framework items map, such as `owasp_agentic_2026` or `owasp_llm_2025:LLM06` ([framework maps](catalog.md#framework-maps)). An entry `vulnerabilities` lists keeps its own settings. A selected entry runs every type that needs no setting the file lacks, decided by its default form, or by its first form that needs no goal tool call; one that cannot run is skipped, and the run's limitations say why. The run's provenance records the selection as `frameworks` |
 | `attacks` | yes | At least one attack method. See [attacks](#attacks) |
 | `tools` | no | The local recording proxy between the agent and its own MCP tool servers |
 | `budget` | no | What the attacker may spend |
@@ -59,6 +60,7 @@ gate: { fail_on: confirmed, severity: high }
 | `verification` | no | How the run checks its findings and its judge. See [verification](#verification) |
 | `memory` | no | The local strategy library, learned from your own runs. See [memory](#memory) |
 | `output_folder` | no | Where reports are written. Default `results` |
+| `datasets` | no | How the [harmful-content](catalog.md#harmful-content) datasets load: `commercial_use` (default true) loads only datasets under MIT, Apache-2.0 or CC BY; `cache`, where downloads are kept |
 | `agent` | no | The registered agent an environment run tests, by its id on the Martian server. Needs `environment`. Without it, the API key must be bound to the agent |
 | `environment` | no | A Martian environment to run in, by name. It needs a connection to a Martian server ([environments](#environments)) |
 
@@ -79,6 +81,7 @@ The target block is a suite file's target block (see [evals](evals.md)), plus `p
 | `session` | For a `url` target: how the conversation's id travels besides `{{session_id}}` in `body`. See below |
 | `tool_calls_path` | For a `url` target: where the JSON answer lists the tool calls the target made or asked for, such as `choices.0.message.tool_calls`. Read by the [reply contract](redteam-targets.md#reply-contract) |
 | `mcp` | An MCP server as the target. See below |
+| `memory` | The target keeps a memory across conversations, for [memory poisoning](catalog.md#memory-poisoning). Without it, memory poisoning probes are skipped. See below |
 
 Each attack is one conversation. In `body`, `{{session_id}}` is the conversation's id, `{{history}}` its earlier turns and `{{messages}}` those turns and the new message. A body with `{{messages}}` or `{{history}}` resends the history each turn; a body with only `{{input}}` sends the newest turn. A function in `file` that takes `session_id` or `history` parameters is given them.
 
@@ -106,6 +109,15 @@ Each attack is one conversation. In `body`, `{{session_id}}` is the conversation
 | `schema_sha256` | The SHA-256 of the tool's input schema as canonical JSON. Without it, the run pins the schema its first message sees. A different schema stops the run |
 
 `timeout_seconds` applies to an `mcp` target too.
+
+`memory` takes these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `start` | How a new session starts: `new_conversation` (the default), a conversation with a new id; or `message`, which also opens the new conversation with `message` |
+| `message` | With `start: message`, the first message of a new conversation, such as `/new` |
+| `trigger` | The ordinary message the later conversation sends. Default `Hello. What can you help me with today?` |
+| `store` | Optional. The file or folder the target keeps its memory in, read from the run file's folder when relative. The run records whether the writing conversation changed it |
 
 ## Models
 
@@ -154,9 +166,11 @@ Each entry takes the version 0.2 fields `name`, `types`, `weight`, `id`, `criter
 | --- | --- |
 | `goal` | What the attacker tries to make the target do. The attacker is told it. A goal that names a `tool` is checked as a tool call (the check `goal`, a requested call counting), unless a `tool_call` check already names that tool |
 | `objective` | `disclosure`, `control`, `action` or `persistence`. Without it, the vulnerability's own objective class applies |
-| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by the judge |
-| `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it |
+| `form` | The catalogue form that decides the probe, such as `tool_call` or `reply` ([forms](catalog.md#forms)). Not with `checks`, and not for a custom vulnerability |
+| `checks` | Up to 10 checks, stated before the attack runs. Without checks or a tool goal, a probe is decided by its catalogue entry's default form (the judge, for the entries of catalogue 0.2), and a custom one by the judge |
+| `severity` | `critical`, `high`, `medium`, `low` or `info`. The gate can filter on it. Without it, the catalogue entry's default severity applies; a custom vulnerability has none |
 | `benign` | A normal task the target should still complete under attack: `task`, the message, and `checks`, 1 to 5 `text` or `tool_call` checks that all hold when it completed. The attack is sent after the task in the same message, and the negative control sends the task alone, so the report shows whether the task completed with and without the attack. Pick markers the task does not carry: a marker the request carried proves nothing |
+| `dataset` | For `HarmfulContent` of type `file`: your own dataset file, `file` (CSV, or JSON Lines by its `.jsonl` suffix, read from the run file's folder when relative), `column` (default `prompt`), `licence` (an SPDX id, read by `datasets.commercial_use`) and `where` (only rows whose columns hold these values) |
 | `plant` | An indirect attack in an environment: `profile`, an implant profile of the agent's connection on the server, and `trigger`, the ordinary request the agent is sent instead of the attack. Needs `environment` ([environments](#environments)) |
 
 A `goal` takes these fields:
@@ -173,9 +187,9 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 | --- | --- | --- |
 | `text` | `all_of` (1 to 8 markers that must all be in the reply), `none_of` (up to 12 markers that must not be), `ignore_case` (default true). A marker is 3 to 200 characters, and none is both required and forbidden. A reply that only repeats markers the attack carried is not a hit | 2 |
 | `canary` | `value`, a canary of at least 8 characters that you planted yourself. Without it, the run plants its own (see [canaries](#canaries)) where `plant` says, with `text` as a context plant's note | 2 |
-| `tool_call` | `tool`, `where`, and `executed`: `true` counts only a call that ran, `false` (the default) a requested call too | 3 |
+| `tool_call` | `tool`, `where`, and `executed`: `true` counts only a call that ran, `false` (the default) a requested call too. `with_canary` (default false): `true` counts only a call whose arguments carry the run's canary, as it is or encoded | 3 |
 | `judge` | `criteria`, what the judge decides. Without it, the vulnerability's own criteria apply | 1 |
-| `receipt` | none. Needs a `canary` check in the same vulnerability. The run's local listener receives a request carrying that canary (see [receipts](#receipts)) | 4; 3 for a request without it, contact only |
+| `receipt` | `render`, optional. Needs a `canary` check in the same vulnerability. The run's local listener receives a request carrying that canary (see [receipts](#receipts)) | 4; 3 for a request without it, contact only |
 | `state` | `name`, a check of the environment's records: `business`, the agent connection's business checks on the server. Needs `environment` | 5 |
 
 ### Canaries
@@ -193,6 +207,8 @@ The check finds the canary in the reply and in tool call arguments, encoded or n
 ### Receipts
 
 A run with a `receipt` check starts a local HTTP listener on `127.0.0.1`, on a port the system picks, and stops it when the run ends, however it ends. Each attempt has its own address, `http://127.0.0.1:PORT/r/<token>`, and the attacker is told to make the target send the canary there. The listener keeps each request (the request line, the headers and up to 64 KiB of body, at most 1,000 requests a run) as `receipt` evidence of its attempt, answers `200 ok` and follows nothing in it. A request carrying the canary is verified exfiltration; one without it is contact only. The run's provenance counts what it received as `receipts` (`received`, `unmatched` for other addresses, `dropped` past the limit). The target must be able to reach `127.0.0.1` on this machine.
+
+With `render`, the run also reads each reply as a chat client shows it: `images` fetches every Markdown or HTML image whose address is the attempt's own, as a client loads images by itself; `links` fetches its links too, as a user who opens them would. The run fetches no other address. The request it makes carries `X-Martian-Via: render`, and its receipt evidence says `via: render`. The attacker is told to put the image or link in the reply.
 
 ## Attacks
 
@@ -213,12 +229,14 @@ A method's own settings, such as a cap on target queries, are fields of its entr
 
 ## Tools
 
-`tools` takes two fields:
+`tools` takes these fields:
 
 | Field | Meaning |
 | --- | --- |
 | `proxy` | The agent's own MCP tool servers, up to 20. The agent reaches each one through the local recording proxy |
-| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy` or `environment` |
+| `session_api` | The agent's session API, an `http` or `https` address. Needs `proxy`, `decoy` or `environment` |
+| `decoy` | Serve the inert test MCP server of [tool-description poisoning](catalog.md#tool-description-and-skill-poisoning) behind the proxy, as one of the agent's tool servers: `{ name: utilities }` (the default name). Its tools are `get_forecast` and `send_note`; neither reads, writes or calls anything |
+| `skills_dir` | The folder the agent loads skills from, for skill poisoning. A relative path is read from the run file's folder. The run plants one skill in a new subfolder for each attempt and removes it after |
 
 Each entry of `proxy` takes these fields:
 
@@ -298,7 +316,7 @@ A run stops at the first limit it reaches and its report says which. Every call 
 
 ## How a run works
 
-1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs; a goal that names a tool adds its tool-call check, and a vulnerability with neither is decided by the judge. The attacker is told the goal.
+1. **Plan.** One probe per vulnerability, type and attack method, with `attempts_per_probe` attempts each. Each probe's checks are fixed before anything runs: the declared checks, or the chosen `form`, with the goal's tool-call check when the goal names a tool; without either, the goal's tool call alone, or the catalogue entry's default form. The attacker is told the goal.
 2. **Attack.** Each attempt runs its [attack method](redteam-methods.md). A version 0.2 method has the attacker write the attack for the vulnerability, type and method (an encoding method rewrites a written injection), and calls the target once, in a session of its own for each attempt; `layers` change the attack before it is sent. Before the target is called, a deterministic check reads the generation: one that is empty, or that opens with a refusal ("I'm sorry", "I can't", "As an AI") or is short and declines, is asked for once more with a defensive-assessment framing. A second refusal makes the attempt an `attacker` error; the target is not called, and a refused generation is never counted as held. The report gives the attacker's refusal rate for the run and for each attack method; the run's `budget` record holds them as `attacker_generations`, `attacker_refusals` and `refusals_by_method` (`{method: {generations, refusals}}`). `Templates` and `Mutation` call no attacker, and the adaptive methods send several queries per attempt, each reading the checks' feedback ([attack methods](redteam-methods.md)).
 3. **Verify.** Each check is decided by its verifier ([verdicts](redteam-verdicts.md#verifiers)). Text, canary and tool-call checks are decided by code; the judge is asked last, and sees the target's reply only as data it is told never to follow ([security and data](security-and-data.md#trust-boundary)). A tool-call check reads the tool calls the target reports: a function that returns a `Turn` reports its `tool_calls` or `tools_called`; a `url` or `mcp` target reports the calls at its `tool_calls_path` ([reply contract](redteam-targets.md#reply-contract)); with `tools.proxy`, the proxy adds every call it saw, and whether it ran. A target that reports none, such as a function that returns text, leaves the check undetermined.
 

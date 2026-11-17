@@ -86,6 +86,28 @@ class TargetSession(_Model):
     response_path: str | None = Field(default=None, min_length=1)
 
 
+class TargetMemory(_Model):
+    """That the target keeps a memory across conversations, and how a memory poisoning probe uses
+    it: how a new conversation starts, what the later conversation says, and, optionally, where the
+    memory is stored."""
+
+    start: Literal["new_conversation", "message"] = "new_conversation"
+    """``new_conversation``: a conversation with a new id is a new session. ``message``: a new
+    conversation also opens with ``message``, such as ``/new``, before anything else."""
+    message: str | None = Field(default=None, min_length=1, max_length=200)
+    trigger: str = Field(default="Hello. What can you help me with today?", min_length=1, max_length=2000)
+    """The ordinary message the later conversation sends."""
+    store: str | None = Field(default=None, min_length=1)
+    """The file or folder the target keeps its memory in. The run records whether the writing
+    conversation changed it. A relative path is read from the run file's folder."""
+
+    @model_validator(mode="after")
+    def _start(self) -> TargetMemory:
+        if (self.start == "message") != (self.message is not None):
+            raise ValueError("message is the opening of a new conversation, and needs start: message")
+        return self
+
+
 class Target(_Model):
     """The thing under test. ``file`` and ``function``, or ``url`` with ``body`` and the rest, are a
     suite file's target block and are checked by the same rules; ``mcp`` is an MCP server."""
@@ -103,6 +125,9 @@ class Target(_Model):
     tool_calls_path: str | None = Field(default=None, min_length=1)
     """Where an HTTP target's JSON answer lists the tool calls it made or asked for."""
     mcp: McpTarget | None = None
+    memory: TargetMemory | None = None
+    """The target keeps a memory across conversations. Without it, memory poisoning probes are
+    skipped."""
 
     @field_validator("purpose")
     @classmethod
@@ -280,6 +305,9 @@ class ToolCallCheck(_Model):
     where: dict[str, Any] = Field(default_factory=dict)
     executed: bool = False
     """``true``: only a call that ran counts. ``false``: a requested call counts too."""
+    with_canary: bool = False
+    """``true``: only a call whose arguments carry the run's canary, as it is or encoded, counts: data
+    the target was given reached the tool."""
 
 
 class JudgeCheck(_Model):
@@ -292,6 +320,10 @@ class ReceiptCheck(_Model):
     vulnerability: carrying that canary is verified exfiltration, a request without it contact only."""
 
     type: Literal["receipt"]
+    render: Literal["images", "links"] | None = None
+    """Read the reply as a chat client shows it: fetch each image (``images``), or each image and
+    link (``links``, as a user who opens them), whose address is this attempt's on the run's
+    receipt listener. Nothing else is fetched."""
 
 
 class StateCheck(_Model):
@@ -316,6 +348,28 @@ class Benign(_Model):
     checks: list[BenignCheck] = Field(min_length=1, max_length=5)
 
 
+class DatasetFile(_Model):
+    """A dataset file of the user's own, for ``HarmfulContent`` of type ``file``: CSV, or JSON Lines
+    by its ``.jsonl`` suffix, and its licence."""
+
+    file: str = Field(min_length=1)
+    column: str = Field(default="prompt", min_length=1)
+    licence: str = Field(min_length=1)
+    """Its licence as an SPDX id, such as ``MIT`` or ``CC-BY-4.0``. The commercial-use switch reads it."""
+    where: dict[str, str] = Field(default_factory=dict)
+    """Only rows whose columns hold these values."""
+
+
+class Datasets(_Model):
+    """How the harmful-content set's datasets load."""
+
+    commercial_use: bool = True
+    """Load only datasets under MIT, Apache-2.0 or CC BY. Off, a dataset under any licence loads."""
+    cache: str | None = Field(default=None, min_length=1)
+    """Where downloaded datasets are kept. Default ``MARTIAN_DATASET_CACHE``, else
+    ``~/.cache/martian/redteam-datasets``. A relative path is read from the run file's folder."""
+
+
 class Plant(_Model):
     """An indirect attack in an environment: the attack is planted in the world with an implant
     profile of the agent's connection on the Martian server, and the agent is sent ``trigger``, an
@@ -331,12 +385,43 @@ class Vulnerability(NamedSpec):
 
     goal: Goal | None = None
     objective: ObjectiveName | None = None
+    form: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    """The catalogue form that decides the probe, such as ``tool_call`` or ``reply``. Without it and
+    without checks, the entry's default form decides (``docs/catalog.md``)."""
     checks: list[CheckDecl] = Field(default_factory=list, max_length=10)
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     benign: Benign | None = None
     """A benign task whose completion is reported with and without the attack."""
     plant: Plant | None = None
     """Plant the attack in the environment and send ``plant.trigger``. Needs ``environment``."""
+    dataset: DatasetFile | None = None
+    """For ``HarmfulContent`` of type ``file``: the user's own dataset file."""
+
+    @model_validator(mode="after")
+    def _form_or_checks(self) -> Vulnerability:
+        if self.form is not None and self.checks:
+            raise ValueError("give a form or checks, not both: a form is a set of checks")
+        if self.is_custom:
+            if not (self.id or "").strip():
+                raise ValueError("a custom vulnerability needs an id")
+            judged = not self.declares_evidence or any(
+                check.type == "judge" and check.criteria is None for check in self.checks
+            )
+            if judged and not (self.criteria or "").strip():
+                raise ValueError(
+                    "a custom vulnerability the judge decides needs criteria; or declare checks (text, canary, "
+                    "tool_call, receipt) or a goal that names a tool"
+                )
+        return self
+
+    @property
+    def is_custom(self) -> bool:
+        return self.name.strip().lower().replace("-", "_") in {"custom", "customvulnerability"}
+
+    @property
+    def declares_evidence(self) -> bool:
+        """Whether checks or a goal that names a tool decide it, rather than the judge alone."""
+        return bool(self.checks) or (self.goal is not None and self.goal.tool is not None)
 
 
 class ProxiedServer(_Model):
@@ -377,11 +462,25 @@ class ProxiedServer(_Model):
         return self
 
 
+class Decoy(_Model):
+    """The inert test MCP server of tool-description poisoning probes, served by the run and handed
+    to the agent through the recording proxy as one of its tool servers."""
+
+    name: str = Field(default="utilities", min_length=1, max_length=24, pattern=r"^[a-z][a-z0-9_]{0,23}$")
+
+
 class Tools(_Model):
     """The local recording proxy: the agent's own tool servers it fronts, and where the agent is
-    handed the session that binds them."""
+    handed the session that binds them; the inert test server of tool-description poisoning probes,
+    and the folder the agent loads skills from."""
 
     proxy: list[ProxiedServer] = Field(default_factory=list, max_length=20)
+    decoy: Decoy | None = None
+    """Serve the inert test MCP server through the proxy, for ``ToolPoisoning`` probes of type
+    ``mcp_tool_description``."""
+    skills_dir: str | None = Field(default=None, min_length=1)
+    """The folder the agent loads skills from, for ``ToolPoisoning`` probes of type ``skill_file``. A
+    relative path is read from the run file's folder."""
     session_api: str | None = None
     """The agent's session API, as the cloud hands a session over: the run posts the session to
     ``{session_api}/sessions`` before the first attack: the proxy's, or in an environment the
@@ -401,9 +500,9 @@ class Tools(_Model):
 
     @model_validator(mode="after")
     def _unique(self) -> Tools:
-        names = [server.name for server in self.proxy]
+        names = [server.name for server in self.proxy] + ([self.decoy.name] if self.decoy else [])
         if len(set(names)) != len(names):
-            raise ValueError("each proxied server has its own name")
+            raise ValueError("each proxied server, and the decoy, has its own name")
         return self
 
 
@@ -618,7 +717,10 @@ class RunFile(_Model):
     version: Literal[2]
     target: Target
     models: Models = Field(default_factory=Models)
-    vulnerabilities: list[Vulnerability] = Field(min_length=1)
+    vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list, max_length=20)
+    """Also probe every catalogue entry these frameworks (``owasp_llm_2025``) or framework items
+    (``owasp_llm_2025:LLM06``) map, unless ``vulnerabilities`` lists it."""
     attacks: list[AttackSpec] = Field(min_length=1)
     tools: Tools = Field(default_factory=Tools)
     budget: Budget = Field(default_factory=Budget)
@@ -626,6 +728,7 @@ class RunFile(_Model):
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     memory: Memory = Field(default_factory=Memory)
     output_folder: str = "results"
+    datasets: Datasets = Field(default_factory=Datasets)
     environment: str | None = Field(default=None, min_length=1, max_length=200)
     """A Martian environment to run in. Needs a connection to a Martian server; a local run stops
     with a message that says so."""
@@ -635,8 +738,28 @@ class RunFile(_Model):
     """The registered agent an environment run tests, by its id on the Martian server: its approval,
     sandbox bindings and checks. Without it, the API key must be bound to the agent."""
 
+    @field_validator("frameworks")
+    @classmethod
+    def _known_frameworks(cls, value: list[str]) -> list[str]:
+        from martian_redteam.catalog.frameworks import FRAMEWORKS
+
+        for selection in value:
+            framework_id, _, item_id = selection.partition(":")
+            if framework_id not in FRAMEWORKS:
+                raise ValueError(f"unknown framework {framework_id!r}; the frameworks are {', '.join(FRAMEWORKS)}")
+            if item_id:
+                try:
+                    FRAMEWORKS[framework_id].item(item_id)
+                except KeyError:
+                    raise ValueError(f"{framework_id} has no item {item_id!r}") from None
+        if len(set(value)) != len(value):
+            raise ValueError("each framework is selected once")
+        return value
+
     @model_validator(mode="after")
     def _consistent(self) -> RunFile:
+        if not self.vulnerabilities and not self.frameworks:
+            raise ValueError("list vulnerabilities, or select them with frameworks")
         from martian.redteam.methods.registry import MethodError, resolve
 
         for index, attack in enumerate(self.attacks):
@@ -675,7 +798,12 @@ class RunFile(_Model):
             raise ValueError("agent names the registered agent of an environment run; set environment")
         if self.environment is not None and self.tools.proxy:
             raise ValueError("an environment's gateway is the tool boundary; tools.proxy applies to a run without one")
-        if self.tools.session_api is not None and not self.tools.proxy and self.environment is None:
+        if (
+            self.tools.session_api is not None
+            and not self.tools.proxy
+            and self.tools.decoy is None
+            and self.environment is None
+        ):
             raise ValueError("session_api hands over the proxy's session; list the servers in proxy")
         for index, vulnerability in enumerate(self.vulnerabilities):
             if vulnerability.plant is not None and self.environment is None:
@@ -732,6 +860,15 @@ class RunFile(_Model):
         if loaded.target.file is not None and not Path(loaded.target.file).is_absolute():
             target = loaded.target.model_copy(update={"file": str((file.parent / loaded.target.file).resolve())})
             loaded = loaded.model_copy(update={"target": target})
+        skills = loaded.tools.skills_dir
+        if skills is not None and not Path(skills).is_absolute():
+            tools = loaded.tools.model_copy(update={"skills_dir": str((file.parent / skills).resolve())})
+            loaded = loaded.model_copy(update={"tools": tools})
+        loaded = loaded.model_copy(update=_relative_datasets(loaded, file.parent))
+        kept = loaded.target.memory
+        if kept is not None and kept.store is not None and not Path(kept.store).is_absolute():
+            stored = kept.model_copy(update={"store": str((file.parent / kept.store).resolve())})
+            loaded = loaded.model_copy(update={"target": loaded.target.model_copy(update={"memory": stored})})
         sample = loaded.verification.calibration
         if sample is not None and not Path(sample).is_absolute():
             settings = loaded.verification.model_copy(update={"calibration": str((file.parent / sample).resolve())})
@@ -741,6 +878,23 @@ class RunFile(_Model):
             memory = loaded.memory.model_copy(update={"folder": str((file.parent / folder).resolve())})
             loaded = loaded.model_copy(update={"memory": memory})
         return loaded
+
+
+def _relative_datasets(loaded: RunFile, folder: Path) -> dict[str, Any]:
+    """The run file's vulnerabilities and datasets with dataset files and the cache read from
+    ``folder`` when relative."""
+    entries = []
+    for vulnerability in loaded.vulnerabilities:
+        given = vulnerability.dataset
+        if given is not None and not Path(given.file).is_absolute():
+            given = given.model_copy(update={"file": str((folder / given.file).resolve())})
+            vulnerability = vulnerability.model_copy(update={"dataset": given})
+        entries.append(vulnerability)
+    cache = loaded.datasets.cache
+    datasets = loaded.datasets
+    if cache is not None and not Path(cache).is_absolute():
+        datasets = datasets.model_copy(update={"cache": str((folder / cache).resolve())})
+    return {"vulnerabilities": entries, "datasets": datasets}
 
 
 def read_yaml(path: str | Path) -> dict[str, Any]:
@@ -803,6 +957,9 @@ __all__ = [
     "VerificationSettings",
     "CanaryCheck",
     "CanaryPlant",
+    "DatasetFile",
+    "Datasets",
+    "Decoy",
     "ErrorHandling",
     "Gate",
     "GateAction",
@@ -818,6 +975,7 @@ __all__ = [
     "RunFile",
     "StateCheck",
     "Target",
+    "TargetMemory",
     "TargetSession",
     "TextCheck",
     "ToolCallCheck",

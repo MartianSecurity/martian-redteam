@@ -12,7 +12,7 @@ from martian_redteam.catalog import (
 
 
 def test_catalog_version_is_bumped_for_new_ids() -> None:
-    assert CATALOG_VERSION == "0.2.0"
+    assert CATALOG_VERSION == "1.0.0"
 
 
 def test_unknown_type_rejected() -> None:
