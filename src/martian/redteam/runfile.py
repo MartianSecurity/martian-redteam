@@ -324,6 +324,8 @@ class AttackSpec(NamedSpec):
 
     layers: list[str] = Field(default_factory=list, max_length=4)
     """Transforms applied, in order, to every attack the method sends, such as ``[Base64]``."""
+    max_queries: int | None = Field(default=None, ge=1, le=1000)
+    """The most target queries one attempt of the method makes."""
 
 
 Severity = Literal["critical", "high", "medium", "low", "info"]

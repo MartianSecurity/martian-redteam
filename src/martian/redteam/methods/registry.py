@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from martian.redteam.methods.base import AttackMethod, Transform
 from martian.redteam.methods.rewrites import REWRITES, Rewrite, rewrite_request
+from martian.redteam.methods.templates import Templates
 from martian.redteam.methods.transforms import TRANSFORMS
 from martian_redteam.catalog.attacks import ATTACKS
 
@@ -168,6 +169,16 @@ def _pack_rewrite(style: str, label: str, file: str) -> MethodFactory:
 
 for _style, (_name, _label, _file) in REWRITES.items():
     register_method(_name, _pack_rewrite(_style, _label, _file), aliases=[_style])
+
+
+def _templates(spec: AttackSpec, layers: tuple[Transform, ...], values: dict[str, Any]) -> AttackMethod:
+    most = Templates.settings["max_queries"]
+    if values.get("max_queries", most) > most:
+        raise MethodError(f"max_queries is at most {most} for Templates, the number of templates")
+    return Templates(id="templates", label="Fixed templates", layers=layers, values=values)
+
+
+register_method("Templates", _templates, aliases=["templates"])
 for _item in TRANSFORMS.values():
     register_method(_item.name, _transform_attack(_item), aliases=[_item.id])
 

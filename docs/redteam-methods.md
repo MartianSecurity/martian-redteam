@@ -9,7 +9,7 @@ Every method has one of four kinds:
 | Kind | What it does |
 | --- | --- |
 | `transform` | Code changes the attack's text, with no model call and no network. Used as an attack, a transform rewrites a prompt injection the attacker wrote. Used as a layer, it changes whatever another method sends |
-| `rewrite` | One attack per query, written without feedback: by the attacker model in a stated style |
+| `rewrite` | One attack per query, written without feedback: by the attacker model in a stated style, or from a fixed template |
 | `conversation` | Several turns in one conversation, each written after the target's last reply |
 | `search` | Several queries, each chosen from the checks' feedback on the ones before |
 
@@ -26,6 +26,7 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 | `PromptInjection` | `prompt_injection` | rewrite | static | 1 | 1 | An instruction override or delimiter injection the target might take as a new system rule |
 | `Roleplay` | `roleplay` | rewrite | static | 1 | 1 | A roleplay or hypothetical frame that takes the target outside its role |
 | `PromptProbing` | `prompt_probing` | rewrite | static | 1 | 1 | A probing question for hidden instructions, tools or policy, without a blunt override |
+| `Templates` | `templates` | rewrite | control | Up to `max_queries` (default and most 10, one per template) | 0 | Nothing adaptive: the same fixed templates every run, the baseline every adaptive method is compared with. The set has a direct request, two instruction overrides, "important instructions", a behaviour update in the Skeleton Key style, a mode switch, a closed delimiter, an answer prefix, a task wrapper and urgency |
 | `Authority` | `authority` | rewrite | static | 1 | 1 | A target that obeys whoever claims to be in charge: the request comes from its developer, an administrator, a security team or a legal duty |
 | `Hypothetical` | `hypothetical` | rewrite | static | 1 | 1 | A target that answers inside an imagined case: the request is a thought experiment in which it is allowed, asking for the concrete answer |
 | `Citation` | `citation` | rewrite | static | 1 | 1 | A target that defers to documents: the request cites a policy, ticket or guideline that says it is allowed or required |
@@ -44,6 +45,18 @@ Each method has a cap on target queries per attempt. Every call of the target, t
 Every transform runs locally with no model call and no network, and is a pure function of the text: the same attack always becomes the same message. Its tests check a round trip (or, for alternating case and Morse, the property that holds) on generated texts.
 
 Prompt injection, roleplay and prompt probing take their style from the catalogue's generator prompt (`martian.redteam.catalog.prompts`). The other rewrites state their style in the attacker's request, from a prompt file of their own, with the probe's `goal` when the run file states one; the catalogue's generator prompt is unchanged. The six version 0.2 methods (the first six rows) have the results and attempt fingerprints they had before methods had an interface.
+
+## The control arm
+
+`Templates` sends the fixed templates of `prompts/templates-v1.json` in order, each in a conversation of its own, and stops at the first one a check finds succeeded. Each template is filled with the probe's request: the run file's `goal` (a tool goal reads "call issue_refund with amount > 50"), or the vulnerability's own request from the same file. It calls no model and draws nothing at random, so it sends identical attacks on every run; a released set is never edited, and a new one is a new version. List it beside any adaptive method:
+
+```yaml
+attacks:
+  - name: Templates     # control arm
+  - name: Roleplay      # static
+```
+
+The report's `by_method` gives each method's `arm` ([red team reports](redteam-reports.md#groups-and-probes)), so the control's success rate and queries to first hit read beside each static and adaptive method's.
 
 ## Prompt files and the licence register
 

@@ -1,6 +1,6 @@
 # Red team API
 
-Every red team route is under `/v1/redteam`. The routes are frozen as version 3 in `src/martian/redteam/server/contract/redteam-api-v3.json`, an OpenAPI document.
+Every red team route is under `/v1/redteam`. The routes are frozen as version 4 in `src/martian/redteam/server/contract/redteam-api-v4.json`, an OpenAPI document.
 
 The contract has two parts:
 

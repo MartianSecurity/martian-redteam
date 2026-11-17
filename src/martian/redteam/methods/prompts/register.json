@@ -50,6 +50,20 @@
           "licence": "not copied"
         }
       ]
+    },
+    "templates-v1.json": {
+      "licence": "Apache-2.0",
+      "source": "Written by Martian Security for martian-sdk; no text copied from another project.",
+      "references": [
+        {
+          "name": "Instruction-override and 'important instructions' injection styles, as described in the AgentDojo paper (Debenedetti et al., 2024)",
+          "licence": "not copied"
+        },
+        {
+          "name": "Skeleton Key behaviour-update jailbreak, as described by Microsoft (2024)",
+          "licence": "not copied"
+        }
+      ]
     }
   }
 }

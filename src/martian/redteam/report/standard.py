@@ -231,9 +231,14 @@ class Controls(_Out):
 
 
 class Group(_Out):
-    """The attack attempts of one attack method or one vulnerability."""
+    """The attack attempts of one attack method or one vulnerability. A method's group also has its
+    ``kind`` and ``arm`` (``control``, ``static`` or ``adaptive``), so the control arm's results read
+    beside the adaptive methods', the ``target_queries`` its attempts made and the median of its
+    probes' ``queries_to_first_hit``."""
 
     name: str
+    kind: str | None = None
+    arm: str | None = None
     probes: int = 0
     attempts: int = 0
     decided: int = 0
@@ -242,6 +247,8 @@ class Group(_Out):
     errors: int = 0
     confirmed: Rate
     suspected: Rate
+    target_queries: int = 0
+    queries_to_first_hit_median: float | None = None
 
 
 class ProbeRow(_Out):
@@ -430,6 +437,31 @@ def _refusals(run: RedteamRun, attempts: Sequence[Attempt]) -> Refusals:
     )
 
 
+def method_arm(probe: Probe) -> tuple[str | None, str | None]:
+    """A probe's method kind and arm, from what the plan recorded: a configured method's own, a
+    version 0.2 method's from its catalogue kind (an encoding is a transform, the rest rewrites, all
+    static), and none for a probe of another source, such as a hosted campaign."""
+    method = probe.metadata.get("method")
+    if isinstance(method, dict) and method.get("kind") and method.get("arm"):
+        return str(method["kind"]), str(method["arm"])
+    legacy = {"encoding": "transform", "llm": "rewrite"}.get(str(probe.metadata.get("attack_kind")))
+    return (legacy, "static") if legacy else (None, None)
+
+
+def _method_group(name: str, probes: list[Probe], attempts: Sequence[Attempt], rows: dict[str, ProbeRow]) -> Group:
+    kinds = {method_arm(probe) for probe in probes}
+    kind, arm = kinds.pop() if len(kinds) == 1 else (None, None)
+    firsts = [found for probe in probes if (found := rows[probe.id].queries_to_first_hit) is not None]
+    return _group(name, probes, attempts).model_copy(
+        update={
+            "kind": kind,
+            "arm": arm,
+            "target_queries": sum(_queries(attempt) for attempt in attempts),
+            "queries_to_first_hit_median": float(median(firsts)) if firsts else None,
+        }
+    )
+
+
 def _group(name: str, probes: Iterable[Probe], attempts: Sequence[Attempt]) -> Group:
     counted = _outcomes(attempts)
     return Group(
@@ -611,10 +643,11 @@ def build_report(run: RedteamRun, *, gate: GateOutcome | None = None) -> Redteam
         verification=_verifications(run),
         controls=_controls(run),
         by_method=[
-            _group(
+            _method_group(
                 method,
-                (probe for probe in run.probes if probe.attack_method == method),
+                [probe for probe in run.probes if probe.attack_method == method],
                 [attempt for attempt in attack if run.probe(attempt.probe_id).attack_method == method],
+                {row.id: row for row in probe_rows},
             )
             for method in methods
         ],
@@ -655,5 +688,6 @@ __all__ = [
     "Verifications",
     "WithinK",
     "build_report",
+    "method_arm",
     "rate_of",
 ]

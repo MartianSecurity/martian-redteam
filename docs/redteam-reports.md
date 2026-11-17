@@ -144,8 +144,15 @@ then says so.
 ### Groups and probes
 
 `by_method` and `by_vulnerability` have one entry per attack method and per vulnerability, each with
-its `name`, `probes`, `attempts`, `decided`, `undetermined`, `stopped` and `errors`, and its
-`confirmed` and `suspected` rates over decided attempts.
+its `name`, `probes`, `attempts`, `decided`, `undetermined`, `stopped` and `errors`, its
+`confirmed` and `suspected` rates over decided attempts, the `target_queries` its attempts made and
+`queries_to_first_hit_median`, the median of its probes' `queries_to_first_hit` (or `null`). A
+method's entry also has its `kind` and its `arm` ([attack methods](redteam-methods.md#kinds-and-arms)):
+`control` for the fixed templates, which send the same attacks every run, `static` for one written
+attack, and `adaptive` for a method that reads the replies or the checks. Reading the control arm's
+row beside each adaptive method's, over the same probes, is the static-versus-adaptive comparison;
+the Markdown and HTML reports show the arm beside each method. A version 0.2 method is `static`, a
+transform or a rewrite; a probe of a hosted campaign has neither.
 
 `probes` has one entry per probe: its `id`, `vulnerability`, `vulnerability_type`,
 `attack_method`, `objective_class`, the kinds of its `checks`, its attempts by outcome (`attempts`,
