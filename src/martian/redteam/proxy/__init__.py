@@ -20,24 +20,33 @@ server, chosen by the system. Each call is recorded with the ``X-Martian-Action-
 agent's binding sends (:func:`martian_redteam.bind_tools`), so an attempt's calls can be told apart
 from another's; :class:`ProxiedTarget` adds them to a target's replies. Needs the ``mcp`` extra.
 
+The proxy issues sessions in the shape the cloud issues them (:class:`martian_redteam.AssessmentSession`),
+so an agent binds its tools with :func:`martian_redteam.bind_tools` the same way in both editions:
+each MCP connection is a proxied server's local address, with a bearer token in its
+``Authorization`` header and the server's tools as its allow-list. Every request must carry the token
+of a session that is open: one that ended (:meth:`ToolProxy.end_session`, or the proxy stopped) or
+expired is refused with ``401``, before the request reaches a tool.
+
 Usage::
 
     async with ToolProxy(run_file.tools.proxy) as proxy:
-        proxy.url("commerce")    # http://127.0.0.1:PORT/mcp, in place of the upstream address
-        ...
+        session = await proxy.issue_session(target_id="refund-agent")
+        ...                      # the agent: async with bind_tools(session, action_id=...) as tools
         proxy.calls()            # every call, in order
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import itertools
 import json
+import secrets
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any, Literal, Self
 
@@ -46,12 +55,13 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, TextContent, Tool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from martian.redteam._mcp import HeldClient, LoopbackServer, every_tool
 from martian.redteam.model import Evidence, ToolCall
 from martian.redteam.runfile import ProxiedServer
 from martian.redteam.targets import Target, TargetReply
+from martian_redteam.integration import AssessmentSession, MCPConnection
 
 ACTION_HEADER = "x-martian-action-id"
 """The header :func:`martian_redteam.bind_tools` sends with the action (turn) its calls serve."""
@@ -62,6 +72,8 @@ MAX_CALLS = 10_000
 RESULT_LIMIT = 4_000
 """The most characters of a result the ledger keeps."""
 UPSTREAM_TIMEOUT_SECONDS = 90
+SESSION_TTL = timedelta(hours=1)
+"""How long a session lasts when its issuer gives no time: longer than a run should take."""
 
 
 class ProxyCall(BaseModel):
@@ -145,6 +157,15 @@ def _header(context: Any, name: str) -> str | None:
 
 
 @dataclass
+class _Open:
+    """An issued session: its id, its token and when it expires."""
+
+    session_id: str
+    token: str
+    expires_at: datetime
+
+
+@dataclass
 class _Proxied:
     config: ProxiedServer
     upstream: HeldClient
@@ -169,6 +190,7 @@ class ToolProxy:
         self._lock = asyncio.Lock()
         self._reserved = 0
         self._started = False
+        self._sessions: dict[str, _Open] = {}
 
     def _upstream(self, server: ProxiedServer) -> Any:
         @asynccontextmanager
@@ -200,8 +222,10 @@ class ToolProxy:
         self._started = True
 
     async def stop(self) -> None:
-        """Stop listening and close the upstream connections. The ledger stays readable."""
+        """End every session, stop listening and close the upstream connections. The ledger stays
+        readable."""
         self._started = False
+        self._sessions.clear()
         for proxied in self._servers.values():
             if proxied.loopback is not None:
                 await proxied.loopback.stop()
@@ -247,7 +271,15 @@ class ToolProxy:
             return await self._call(proxied, context, params)
 
         server = Server(f"martian-proxy-{proxied.config.name}", on_list_tools=list_tools, on_call_tool=call_tool)
-        return server.streamable_http_app(host="127.0.0.1")
+        app = server.streamable_http_app(host="127.0.0.1")
+
+        async def guarded(scope: Any, receive: Any, send: Any) -> None:
+            if scope["type"] == "http" and self._open(_bearer(scope)) is None:
+                await _refuse(send)
+                return
+            await app(scope, receive, send)
+
+        return guarded
 
     @staticmethod
     def _listed(proxied: _Proxied, tool: Tool) -> Tool:
@@ -307,7 +339,86 @@ class ToolProxy:
         return result
 
     def _session_of(self, context: Any) -> str | None:
+        authorization = _header(context, "authorization") or ""
+        found = self._open(authorization.removeprefix("Bearer ").strip() or None)
+        return found.session_id if found is not None else None
+
+    def _open(self, token: str | None) -> _Open | None:
+        """The open session ``token`` belongs to, or None."""
+        if not token:
+            return None
+        now = datetime.now(UTC)
+        for found in self._sessions.values():
+            if hmac.compare_digest(found.token, token) and now < found.expires_at:
+                return found
         return None
+
+    async def issue_session(
+        self, *, target_id: str = "local", campaign_id: str | None = None, ttl: timedelta = SESSION_TTL
+    ) -> AssessmentSession:
+        """A session in the cloud's shape whose connections are this proxy's servers: each one's
+        local address, a bearer token, and the tools its upstream lists now as the allow-list."""
+        if not self._started:
+            raise RuntimeError("the proxy is not running")
+        session_id = f"local-{secrets.token_hex(12)}"
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(UTC) + ttl
+        connections = []
+        for name, proxied in self._servers.items():
+            tools = sorted(await every_tool(await proxied.upstream.open()))
+            if not tools:
+                raise ValueError(f"tools.proxy {name!r} lists no tools, so a session cannot allow any")
+            connections.append(
+                MCPConnection(
+                    name=name,
+                    url=self.url(name),
+                    headers={"Authorization": SecretStr(f"Bearer {token}")},
+                    allowed_tools=tools,
+                )
+            )
+        session = AssessmentSession(
+            session_id=session_id,
+            campaign_id=campaign_id or session_id,
+            target_id=target_id,
+            expires_at=expires_at,
+            mcp_connections=connections,
+        )
+        self._sessions[session_id] = _Open(session_id, token, expires_at)
+        return session
+
+    def end_session(self, session_id: str) -> None:
+        """End a session: every later request with its token is refused."""
+        self._sessions.pop(session_id, None)
+
+
+def session_payload(session: AssessmentSession) -> dict[str, Any]:
+    """``session`` as JSON, with its connections' header values, as the cloud sends a session to an
+    agent: for an agent in another process, which reads it with
+    :func:`martian_redteam.parse_session_payload` or :func:`martian_redteam.bind_sandbox_mcp`."""
+    payload = session.model_dump(mode="json")
+    for connection, written in zip(session.mcp_connections, payload["mcp_connections"], strict=True):
+        written["headers"] = {name: value.get_secret_value() for name, value in connection.headers.items()}
+    return payload
+
+
+def _bearer(scope: Any) -> str | None:
+    for name, value in scope.get("headers") or []:
+        if name.lower() == b"authorization":
+            text = value.decode("latin-1")
+            return text[7:].strip() if text[:7].lower() == "bearer " else None
+    return None
+
+
+async def _refuse(send: Any) -> None:
+    body = b'{"error": "no open session of this proxy"}'
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 class ProxiedTarget:
@@ -355,5 +466,7 @@ __all__ = [
     "MAX_CALLS",
     "ProxiedTarget",
     "ProxyCall",
+    "SESSION_TTL",
     "ToolProxy",
+    "session_payload",
 ]

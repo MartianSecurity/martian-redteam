@@ -90,7 +90,7 @@ With no environment the harness controls nothing the agent reads and sees nothin
 from martian.redteam.proxy import ToolProxy
 
 async with ToolProxy(run_file.tools.proxy) as proxy:
-    proxy.url("commerce")   # http://127.0.0.1:PORT/mcp, used in place of the upstream address
+    session = await proxy.issue_session(target_id="refund-agent")   # what the agent binds
     ...
     proxy.calls()           # the ledger: every call, in order
 ```
@@ -110,3 +110,28 @@ Each ledger entry (`ProxyCall`) holds the server, the tool, its arguments, the a
 The proxy records each call with the `X-Martian-Action-Id` header that `bind_tools(..., action_id=...)` sends. An agent that passes its conversation's id (the HTTP body's `{{session_id}}`, a function's `session_id`) as the action id lets `ProxiedTarget(target, proxy)` add that conversation's calls to each reply. A call the target reported itself and the proxy saw, by its id or by its name and arguments, is kept once, as the proxy saw it.
 
 The proxy is not an environment. It simulates no application and holds no data: the ledger, in memory, is all it keeps. It listens on 127.0.0.1 only, one port per server. It records at most 10,000 calls a run, and refuses a call past that rather than leave it out. It needs the `mcp` extra. The upstream must be a Streamable HTTP server.
+
+## Local sessions
+
+The proxy issues sessions in the shape the cloud issues them, `martian_redteam.AssessmentSession`, so an agent binds its tools with `bind_tools` (or `bind_sandbox_mcp` for a JSON payload) the same way against a local run and a cloud assessment. Its code does not change between editions.
+
+```python
+from martian.redteam.proxy import session_payload
+from martian_redteam import bind_sandbox_mcp
+
+session = await proxy.issue_session(target_id="refund-agent", campaign_id=run_id)
+payload = session_payload(session)          # JSON with the header values, as the cloud sends it
+
+# In the agent, unchanged from the cloud:
+async with bind_sandbox_mcp(payload, action_id=conversation_id) as tools:
+    ...
+```
+
+| Field | Local session | Cloud session |
+| --- | --- | --- |
+| `session_id` | `local-` and a random id | The campaign's id |
+| `campaign_id`, `target_id` | What the run passes | The campaign and the registered agent |
+| `expires_at` | One hour by default (`ttl`) | The run's time limit and five minutes |
+| `mcp_connections` | One per proxied server: its loopback address, `Authorization: Bearer` with the session's token, and the tools its upstream lists now | One per sandbox system: the run-scoped gateway, its bearer token, the approved tools |
+
+Every request to the proxy must carry the token of an open session. A session ends when `end_session(session_id)` is called, when it expires, or when the proxy stops at the end of the run; after that its requests are refused with `401` before they reach a tool, and nothing is recorded. The ledger records each call's session, and its action id from the binding's `X-Martian-Action-Id` header.

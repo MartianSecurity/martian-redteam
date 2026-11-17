@@ -233,7 +233,9 @@ class Vulnerability(NamedSpec):
 class ProxiedServer(_Model):
     """One of the agent's own MCP tool servers, reached through the local recording proxy."""
 
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    name: str = Field(min_length=1, max_length=24, pattern=r"^[a-z][a-z0-9_]{0,23}$")
+    """The name the agent's session gives the server's MCP connection, so it follows the rule of
+    :class:`martian_redteam.MCPConnection` names."""
     upstream: str = Field(min_length=1)
     mode: Literal["record", "inject", "block"] = "record"
     inject: str | None = None

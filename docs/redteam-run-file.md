@@ -152,7 +152,7 @@ The [verdict rules](redteam-verdicts.md) say what each kind of check proves. Eve
 
 | Field | Meaning |
 | --- | --- |
-| `name` | A short name, lower case, with digits, `_` and `-` |
+| `name` | A short name: a lower-case letter, then up to 23 lower-case letters, digits or `_`. It names the server's connection in the agent's session, so it follows the rule of an `MCPConnection` name |
 | `upstream` | The server's Streamable HTTP address, `http` or `https` |
 | `mode` | `record` (the default) records each call. `inject` adds text to tool results. `block` stops calls and answers with a set reply |
 | `inject` | The text `inject` mode adds |
