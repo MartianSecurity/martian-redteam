@@ -17,6 +17,13 @@ from tests.scan.helpers import Clock, ContractDrift, Transport, config, contract
 FIXTURE = Path(__file__).resolve().parents[2] / "examples" / "scan" / "fixture"
 
 
+@pytest.fixture(autouse=True)
+def outside_ci(monkeypatch):
+    """The scan's source and default name read CI variables; a test that wants them sets them."""
+    for name in ("CI", "GITHUB_ACTIONS", "GITHUB_REPOSITORY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 class Printed:
     def __init__(self) -> None:
         self.out: list[str] = []
