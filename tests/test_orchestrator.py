@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -41,7 +42,7 @@ async def test_orchestrator_single_turn_pass(simulator_payload: dict, evaluator_
     assert assessment.errored == 0
     assert len(assessment.test_cases) == 2
     assert all(case.score == 1 for case in assessment.test_cases)
-    assert assessment.catalog_version == "0.2.0"
+    assert assessment.catalog_version == "1.0.0"
     rot13_case = next(case for case in assessment.test_cases if case.attack_method == "rot13")
     assert rot13_case.input != simulator_payload["attack"]
 
@@ -71,7 +72,8 @@ async def test_target_exception_is_target_error(simulator_payload: dict) -> None
 
 
 @pytest.mark.asyncio
-async def test_hung_target_times_out_as_target_error(simulator_payload: dict) -> None:
+@pytest.mark.parametrize("mode", ["sync", "async", "swallow"])
+async def test_hung_target_times_out_as_target_error(simulator_payload: dict, mode: str) -> None:
     settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
     cancelled = asyncio.Event()
 
@@ -80,15 +82,21 @@ async def test_hung_target_times_out_as_target_error(simulator_payload: dict) ->
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             cancelled.set()
+            if mode == "swallow":
+                return "late reply after cancellation"
             raise
         return "unreachable"
+
+    def sync_target(prompt: str) -> str:
+        time.sleep(0.15)
+        return "late reply"
 
     async with Client(settings=settings) as client:
         with respx.mock(base_url="https://agents.test.example") as router:
             route = router.post("/runs/wait").mock(return_value=httpx.Response(200, json=simulator_payload))
             assessment = await asyncio.wait_for(
                 a_red_team(
-                    target=target,
+                    target=sync_target if mode == "sync" else target,
                     vulnerabilities=[PromptLeakage(types=["system_prompt"])],
                     attacks=[PromptInjection()],
                     client=client,
@@ -99,7 +107,8 @@ async def test_hung_target_times_out_as_target_error(simulator_payload: dict) ->
             )
 
     case = assessment.test_cases[0]
-    assert cancelled.is_set()
+    if mode != "sync":
+        assert cancelled.is_set()
     assert assessment.target_errors == 1
     assert assessment.infrastructure_errors == 0
     assert case.error_kind == "target"
@@ -190,7 +199,8 @@ async def test_evaluator_failure_keeps_target_reply(simulator_payload: dict) -> 
 
 
 @pytest.mark.asyncio
-async def test_non_positive_target_timeout_rejected() -> None:
+@pytest.mark.parametrize("timeout", [0, float("nan"), float("inf")])
+async def test_non_positive_target_timeout_rejected(timeout: float) -> None:
     settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
     async with Client(settings=settings) as client:
         with pytest.raises(ValueError, match="target_timeout_seconds"):
@@ -200,7 +210,7 @@ async def test_non_positive_target_timeout_rejected() -> None:
                 attacks=[PromptInjection()],
                 client=client,
                 purpose="assistant",
-                target_timeout_seconds=0,
+                target_timeout_seconds=timeout,
             )
 
 
@@ -261,3 +271,49 @@ def test_sync_red_team_rejects_running_loop() -> None:
             )
 
     asyncio.run(inside())
+
+
+@pytest.mark.asyncio
+async def test_timed_out_sync_callbacks_do_not_exceed_the_configured_concurrency(simulator_payload: dict) -> None:
+    import threading
+
+    release, started = threading.Event(), threading.Event()
+    calls = []
+    completed = []
+
+    def target(prompt: str) -> str:
+        calls.append(prompt)
+        started.set()
+        release.wait(timeout=2)
+        return "late reply"
+
+    def on_probe(case) -> None:
+        completed.append(case)
+        if len(completed) == 3:
+            release.set()
+
+    settings = Settings(api_url="https://agents.test.example", api_key=SecretStr("test-key"))
+    try:
+        async with Client(settings=settings) as client:
+            with respx.mock(base_url="https://agents.test.example") as router:
+                router.post("/runs/wait").mock(return_value=httpx.Response(200, json=simulator_payload))
+                assessment = await asyncio.wait_for(
+                    a_red_team(
+                        target=target,
+                        vulnerabilities=[PromptLeakage(types=["system_prompt"])],
+                        attacks=[PromptInjection()],
+                        client=client,
+                        purpose="assistant",
+                        max_concurrent=1,
+                        attacks_per_vulnerability_type=3,
+                        target_timeout_seconds=0.05,
+                        on_probe=on_probe,
+                    ),
+                    timeout=5,
+                )
+        assert started.is_set()
+        assert len(calls) == 1
+        assert assessment.target_errors == 3
+        assert all(case.score is None for case in assessment.test_cases)
+    finally:
+        release.set()

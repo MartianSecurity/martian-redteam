@@ -8,7 +8,7 @@ The Phase 1 loop is **simulate → encode → target → evaluate**, once per (v
 | --- | --- |
 | `a_red_team(...)` | Async callers. Requires an already-open `Client`. |
 | `red_team(...)` | Sync wrapper via `asyncio.run`. Raises if an event loop is already running; use `a_red_team` then. |
-| `martian-redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes the JSON and Markdown reports, applies the gate. |
+| `martian redteam run config.yaml` | Loads YAML, opens `Client` in one loop, writes the JSON and Markdown reports, applies the gate. |
 
 `Client` is an async context manager. The CLI uses a single `asyncio.run` so `aclose()` happens on the same loop that ran the probes. Do not create a `Client`, call `red_team()`, then `asyncio.run(client.aclose())` — that second loop will fail.
 
@@ -39,10 +39,10 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
    - Encoding attacks send `attack_method=prompt_injection` so the graph still generates natural language, then the SDK encodes.
    - `mode=baseline`.
 2. **Encode** if `attack.kind == "encoding"` (`rot13`, `base64`, `leetspeak`). Pure local transforms. Unknown methods raise `ValueError` (should be unreachable if the catalog is used).
-3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. Each call has a deadline of `target_timeout_seconds` (default 120); a call that exceeds it is cancelled and recorded as `error_kind=target` (`target callback timed out after N seconds`). The generated attack is still stored on `TestCase.input` so reports remain useful.
+3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. Each call has a deadline of `target_timeout_seconds` (default 120); an await that exceeds it is cancelled and recorded as `error_kind=target` (`target callback timed out after N seconds`). The generated attack is still stored on `TestCase.input` so reports remain useful.
 4. **Evaluate.** `Client.evaluate(...)` with the **encoded** payload (what the target actually saw), the reply, and `tools_called`. Custom vulns include `criteria`.
 
-`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process. Any other exception is an SDK defect and propagates out of `a_red_team` rather than being blamed on the target.
+`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. A judgment the service received but could not read (`UndecidedJudgment`, which the local service raises) is neither: the case keeps no score and no error, its reason starts `undetermined:`, and the gate fails it as a probe missing an evaluator score. The **gate** then fails the process. An unexpected SDK or report callback failure cancels and joins the other probes before propagating to the caller.
 
 ## Callback adapter
 
@@ -50,28 +50,37 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
 
 - Parameter named `turns` → called as `callback(prompt, turns)`.
 - Otherwise → `callback(prompt)`.
+- Async callables run on the event loop; synchronous callables run in worker threads so they cannot prevent deadlines or sibling probes from progressing.
 - Await if the result is awaitable.
 - `str` → `Turn(role="ai", content=str)`.
-- `Turn` → returned as-is.
+- `Turn` → returned as-is. Its `tool_calls` hold each call's `name`, `arguments`, `call_id`, `executed` and `result`; its `tools_called`, the older names-only form, still works alone and is filled in from `tool_calls` when only those are given. The hosted evaluate step receives the names. The report keeps the calls; their arguments and results are target content and are hidden unless the report includes target content, and the Markdown report lists the calls of failed or errored probes.
 - Anything else → `TypeError`, recorded as a target error if it happens inside `_probe`.
+
+Synchronous callbacks need their own network/I/O timeouts. Cancelling an await
+cannot terminate a running Python thread. The SDK awaits owned worker cleanup
+off the event loop before returning, so another CI session cannot switch its
+tracking/tenant context while callbacks are still active. Each assessment caps sync workers at
+`max_concurrent`, including after a timeout, and cancels queued work on exit. Cleanup waits for already-running callbacks even if the caller cancels again. Late replies are discarded and never judged as a pass.
+Use async callbacks for cooperative cancellation and make sync callbacks safe
+for the configured concurrency (or select `max_concurrent=1`).
 
 Do not call Martian from the callback. The callback **is** the system under test (or a wrapper around it).
 
 ## Concurrency and rate limits
 
-Default two in-flight `/runs/wait` calls. Raise only after measuring Bedrock latency and WAF headroom.
+Default two in-flight probes, using typed Backend operations in modern mode. Raise only after measuring latency and admission headroom.
 
-GitHub-hosted runners share NAT IPs. martian-agents WAF is **2000 requests / 5 minutes / IP**. That is not a per-tenant quota. Several customers (or several workflows) on GitHub-hosted IPs can 429 each other. Prefer:
-
-- `max_concurrent: 2` (or 1)
-- self-hosted runners if you dogfood many jobs
-- treating 429 as infrastructure failure (already the case)
+Backend enforces per-key, organisation and global concurrency and admitted-stage
+budgets before native execution. Network/proxy limits may additionally reject
+requests. Keep `max_concurrent` at 2 (or 1) unless the granted limits support
+more. A 429 is an infrastructure error, not skipped coverage; modern execution
+POSTs are not automatically replayed.
 
 ## Reporting
 
 `RiskAssessment` includes:
 
-- `catalog_version`, optional `graph_revision`
+- `catalog_version`, graph/policy revisions and simulation/evaluation operation IDs
 - `purpose`, `started_at`, `run_duration_seconds`
 - `test_cases[]` with input, output, score/reason **or** error/`error_kind`
 - `vulnerability_type_results[]` with pass/fail/error counts and `gated`
@@ -79,13 +88,13 @@ GitHub-hosted runners share NAT IPs. martian-agents WAF is **2000 requests / 5 m
 
 Pass rate for a type is `passing / (passing + failing)`. Error-only types have pass rate `0.0` and are still caught by the infrastructure/target error gates.
 
-`assessment.save(directory)` creates the directory, writes `directory/risk-assessment.json` and `directory/risk-assessment.md`, and appends the Markdown to `$GITHUB_STEP_SUMMARY` when that variable is set. It returns the JSON path. The CLI prints a Rich overview table plus a table of failed or errored probes.
+`assessment.save(directory)` writes `directory/risk-assessment.json` and `directory/risk-assessment.md` (creating the directory if needed) and appends the Markdown report to `$GITHUB_STEP_SUMMARY` when set. The CLI prints a Rich overview table plus a table of failed or errored probes.
 
 ## What Phase 1 does not do
 
 - Multi-turn conversations (`turns` is always `None`)
 - Simulator `mode=enhance`
 - Mid-loop metric checks
-- Uploading results to a SaaS
+- Direct uploads from this probe loop (the separate CI session finalizer uploads results to Backend)
 - Telemetry
 - Invoking the target from Martian’s VPC

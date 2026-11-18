@@ -1,6 +1,6 @@
 # Cheap config check for customer repos and this repository's CI.
 # Walks up from github.action_path until pyproject.toml (package root).
-# Does not call Martian Agents and does not require MARTIAN_API_KEY.
+# Does not make network requests or require credentials.
 # Root action.yml remains the fail-closed `run` gate.
 # See docs/development.md and docs/gate-and-ci.md.
 name: Martian Red Team Validate
@@ -16,12 +16,12 @@ runs:
   using: composite
   steps:
     - name: Install uv
-      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       with:
         version: "0.10.0"
         python-version: "3.12"
 
-    - name: Install martian-redteam
+    - name: Install martian-sdk
       shell: bash
       run: |
         set -euo pipefail
@@ -44,4 +44,4 @@ runs:
       # substitution, so a crafted input cannot inject commands.
       env:
         MARTIAN_REDTEAM_CONFIG: ${{ inputs.config }}
-      run: martian-redteam validate "$MARTIAN_REDTEAM_CONFIG"
+      run: martian redteam validate "$MARTIAN_REDTEAM_CONFIG"

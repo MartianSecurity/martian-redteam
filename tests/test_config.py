@@ -104,12 +104,12 @@ def test_secure_and_loopback_api_urls_accepted(url: str) -> None:
     ],
 )
 def test_insecure_api_urls_rejected(url: str) -> None:
-    with pytest.raises(ValidationError, match="MARTIAN_API_URL"):
+    with pytest.raises(ValidationError, match="MARTIAN_REDTEAM_API_URL"):
         Settings(api_url=url, api_key=SecretStr("k"))
 
 
 def test_insecure_api_url_from_environment_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MARTIAN_API_URL", "http://evil.example")
+    monkeypatch.setenv("MARTIAN_REDTEAM_API_URL", "http://evil.example")
     with pytest.raises(ValidationError, match="must use https://"):
         Settings()
 
@@ -135,9 +135,24 @@ def test_yaml_api_url_must_be_secure() -> None:
         RunConfig.model_validate(_minimal_config(api={"url": "http://evil.example"}))
 
 
-def test_yaml_api_url_overlay_keeps_https_and_loopback() -> None:
+def test_yaml_cannot_redirect_an_origin_bound_legacy_credential() -> None:
     base = Settings(api_url="https://agents.test.example", api_key=SecretStr("k"))
-    remote = RunConfig.model_validate(_minimal_config(api={"url": "https://other.test.example/"}))
-    assert remote.settings_overlay(base).api_url == "https://other.test.example"
-    local = RunConfig.model_validate(_minimal_config(api={"url": "http://localhost:2026"}))
-    assert local.settings_overlay(base).api_url == "http://localhost:2026"
+    same = RunConfig.model_validate(_minimal_config(api={"url": "https://agents.test.example/"}))
+    assert same.settings_overlay(base) is base
+    for url in ("https://other.test.example/", "http://localhost:2026"):
+        other = RunConfig.model_validate(_minimal_config(api={"url": url}))
+        with pytest.raises(ValueError, match="origin"):
+            other.settings_overlay(base)
+
+
+def test_legacy_settings_do_not_read_generic_env_or_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MARTIAN_API_URL", "https://generic.test.example")
+    monkeypatch.setenv("MARTIAN_API_KEY", "generic-secret")
+    monkeypatch.delenv("MARTIAN_REDTEAM_API_URL", raising=False)
+    monkeypatch.delenv("MARTIAN_REDTEAM_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        "MARTIAN_REDTEAM_API_URL=https://dotenv.test.example\nMARTIAN_REDTEAM_API_KEY=dotenv-key\n"
+    )
+    with pytest.raises(ValidationError):
+        Settings()

@@ -1,5 +1,6 @@
 """Martian Security SDK for adversarial testing of AI agents."""
 
+from martian._version import __version__ as __version__
 from martian_redteam.callback import wrap_callback
 from martian_redteam.catalog import (
     RBAC,
@@ -24,17 +25,24 @@ from martian_redteam.catalog import (
 )
 from martian_redteam.client import Client, ClientError, RetryableClientError
 from martian_redteam.gate import GateFailure, evaluate_gate
-from martian_redteam.integration import AssessmentSession, MCPConnection, TraceRecorder, bind_tools
+from martian_redteam.integration import (
+    AssessmentSession,
+    MCPConnection,
+    TraceRecorder,
+    bind_sandbox_mcp,
+    bind_tools,
+    parse_session_payload,
+)
 from martian_redteam.orchestrator import a_red_team, red_team
 from martian_redteam.types import RiskAssessment, TestCase, Turn
-
-__version__ = "0.1.0"
 
 __all__ = [
     "AssessmentSession",
     "MCPConnection",
     "TraceRecorder",
+    "bind_sandbox_mcp",
     "bind_tools",
+    "parse_session_payload",
     "Base64",
     "Bias",
     "Client",

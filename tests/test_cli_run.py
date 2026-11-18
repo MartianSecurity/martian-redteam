@@ -25,8 +25,8 @@ Responder = Callable[[httpx.Request], httpx.Response]
 
 @pytest.fixture(autouse=True)
 def _cli_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MARTIAN_API_URL", API_URL)
-    monkeypatch.setenv("MARTIAN_API_KEY", "test-key")
+    monkeypatch.setenv("MARTIAN_REDTEAM_API_URL", API_URL)
+    monkeypatch.setenv("MARTIAN_REDTEAM_API_KEY", "test-key")
     # save() appends to the job summary when this is set; keep CI's own summary clean.
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
 
@@ -153,3 +153,36 @@ def test_run_applies_cli_overrides(
     assert route.call_count == 4
     assert not (tmp_path / "from-yaml").exists()
     assert route.calls.last.request.headers["x-api-key"] == "test-key"
+
+
+def test_run_keeps_the_run_in_the_local_store_unless_told_not_to(
+    api: respx.MockRouter,
+    config_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    simulator_payload: dict[str, Any],
+    evaluator_payload: dict[str, Any],
+) -> None:
+    import asyncio
+
+    from martian.redteam.store import RedteamStore
+
+    home = tmp_path / "data"
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(home))
+    api.post("/runs/wait").mock(side_effect=_responder(simulator_payload, httpx.Response(200, json=evaluator_payload)))
+
+    result = runner.invoke(app, ["run", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "Kept in the local store as" in result.output
+    store = RedteamStore.local(home)
+    try:
+        runs = asyncio.run(store.list()).items
+        assert len(runs) == 1
+        kept = asyncio.run(store.get("default", runs[0].id))
+        assert kept is not None and [attempt.outcome for attempt in kept.attempts] == ["resisted"]
+    finally:
+        store.close()
+
+    again = runner.invoke(app, ["run", str(config_path), "--no-store"])
+    assert again.exit_code == 0, again.output
+    assert "Kept in the local store" not in again.output
