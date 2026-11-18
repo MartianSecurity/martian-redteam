@@ -47,7 +47,7 @@ def test_martian_scan_on_the_fixture_prints_the_finding_and_exits_1(backend, tmp
     ran = _martian(str(FIXTURE), "--sarif", str(sarif), "--name", "fixture", url=url)
     assert ran.returncode == 1, ran.stderr
     assert "skills/release-notes/SKILL.md:1-4" in ran.stdout and "level 2" in ran.stdout
-    assert "Gate: failed" in ran.stderr
+    assert "Gate: failed (exit 1)" in ran.stderr
     assert json.loads(sarif.read_text())["version"] == "2.1.0"
     assert TOKEN not in ran.stdout + ran.stderr
     assert scanner.uploads[0]["manifest"]["source"] == "cli"
@@ -59,7 +59,7 @@ def test_a_server_that_cannot_be_reached_exits_2_never_0():
         port = probe.getsockname()[1]
     ran = _martian(str(FIXTURE), url=f"http://127.0.0.1:{port}")
     assert ran.returncode == 2
-    assert "whether the server queued a scan is unknown" in ran.stderr
+    assert "Could not reach Martian" in ran.stderr  # the policy file is checked before anything is uploaded
     assert "Traceback" not in ran.stderr
 
 

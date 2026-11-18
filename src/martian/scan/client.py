@@ -1,13 +1,15 @@
-"""The client's view of the backend's /v1/scanner routes (MartianSecurity/martian-notes#468).
+"""The client's view of the backend's /v1/scanner routes (MartianSecurity/martian-notes#468, #470).
 
-Upload once, then read. ``POST /v1/scanner/scans`` is sent exactly once: the backend has no
-idempotency key for it yet, so a repeated request would start a second scan. A transport error or a
-gateway status on the upload leaves its outcome unknown, and the client says so instead of sending it
-again. Reads (the scan, its findings, its check and its exports) are GETs and are retried on transport
-errors and transient statuses within one deadline.
+``POST /v1/scanner/scans`` carries a request id the client chose (``Idempotency-Key``), so the upload is
+retried safely: on a transport error, 429 and 500, 502, 503 and 504, the same bytes go again under the
+same id and the server answers the scan the first attempt created (200) instead of starting another. An
+id the server says was used for another upload (409 ``request_id_reused``) is an error, never retried.
+Checking the policy file (``POST /gate-policy/validate``) changes nothing and is retried like the reads
+(the scan, its findings and its exports). The gate (``POST /scans/{id}/gate``) stores an evaluation and is
+sent once.
 
-``tests/scan/contract/scanner-scans.json`` is the backend's contract for these routes. A server from
-before the findings, check and export routes answers them with FastAPI's bare
+``tests/scan/contract/scanner-scans.json`` is an unchanged copy of the backend's contract for these
+routes. A server from before the findings, export and gate routes answers them with FastAPI's bare
 ``404 {"detail": "Not Found"}``, which the client reports as the route being absent (``None``); any
 other 404 is an error.
 
@@ -27,7 +29,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from martian._errors import message, reference
 from martian.config import MartianConfig
@@ -35,6 +37,7 @@ from martian.config import MartianConfig
 ScanState = Literal["queued", "running", "completed", "failed"]
 TERMINAL: frozenset[str] = frozenset({"completed", "failed"})
 TRANSIENT = frozenset({429, 500, 502, 503, 504})
+UPLOAD_ATTEMPTS = 4
 MAX_RETRY_AFTER = 30.0
 _SERVER_CODE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
@@ -77,6 +80,7 @@ class Finding(_Read):
     title: str
     status: str = "open"
     match: str | None = None
+    gating: bool = True
 
 
 class FindingPage(_Read):
@@ -84,17 +88,52 @@ class FindingPage(_Read):
     next_cursor: str | None = None
 
 
-class Check(_Read):
-    passed: bool
-    blocking: list[str] = Field(default_factory=list)
-    coverage_shortfalls: list[str] = Field(default_factory=list)
+class Baseline(_Read):
+    scan_id: UUID
+    git: dict[str, Any] | None = None
 
-    @field_validator("passed", mode="before")
+
+class Gate(_Read):
+    """The server's verdict on a scan against the policy file: ``exit_code`` is what the command exits with."""
+
+    id: UUID
+    scan_id: UUID
+    verdict: Literal["passed", "failed", "not_judged"]
+    exit_code: Literal[0, 1, 2]
+    reasons: list[str]
+    new_findings_only: bool
+    baseline: Baseline | None = None
+    coverage_shortfalls: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    policy_sha256: str
+
+    @field_validator("exit_code", mode="before")
     @classmethod
-    def boolean(cls, value: object) -> object:
-        if type(value) is not bool:
-            raise ValueError("passed must be a boolean")
+    def integer(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("exit_code must be an integer")
         return value
+
+    @model_validator(mode="after")
+    def consistent(self) -> Gate:
+        if {"passed": 0, "failed": 1, "not_judged": 2}[self.verdict] != self.exit_code:
+            raise ValueError("the verdict and the exit code disagree")
+        return self
+
+
+class Policy(_Read):
+    """The policy file as the server validated it, every default filled in."""
+
+    policy: dict[str, Any]
+    policy_sha256: str
+
+
+class PolicyRefused(Exception):
+    """The server refused the policy file: each error's place in the file and why, on one line each."""
+
+    def __init__(self, errors: list[tuple[str, str]]) -> None:
+        self.errors = errors
+        super().__init__("the server refused the policy file")
 
 
 class ScanApiError(RuntimeError):
@@ -137,6 +176,20 @@ def _refusal(response: httpx.Response) -> tuple[str | None, int | None]:
         code if isinstance(code, str) and _SERVER_CODE.fullmatch(code) else None,
         limit if type(limit) is int else None,
     )
+
+
+def _policy_errors(response: httpx.Response) -> list[tuple[str, str]]:
+    """Where and why from a refused policy file (``detail.errors``), at most 20, each on one line."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return []
+    errors = detail.get("errors") if isinstance(detail, dict) else None
+    found = []
+    for item in errors if isinstance(errors, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("loc"), str) and isinstance(item.get("message"), str):
+            found.append((item["loc"][:200], item["message"][:300]))
+    return found[:20]
 
 
 def _absent(response: httpx.Response) -> bool:
@@ -208,43 +261,97 @@ class ScanClient:
 
     # --- the upload ------------------------------------------------------------------------------
 
-    def upload(self, manifest: dict[str, Any], archive: bytes) -> Scan:
-        """``POST /v1/scanner/scans``, sent once: the ``manifest`` part, then the ``archive`` part."""
+    def upload(self, manifest: dict[str, Any], archive: bytes, *, request_id: UUID) -> tuple[Scan, bool]:
+        """``POST /v1/scanner/scans`` under ``request_id``: the ``manifest`` part, then the ``archive``
+        part. Retried with the same id and bytes on a transport error or a transient status, at most
+        :data:`UPLOAD_ATTEMPTS` times. Returns the scan and whether the server answered an earlier
+        attempt's scan (200)."""
         files: dict[str, tuple[str | None, bytes | str, str]] = {
             "manifest": (None, json.dumps(manifest, separators=(",", ":")), "application/json"),
             "archive": ("bundle.zip", archive, "application/zip"),
         }
+        headers = {"Idempotency-Key": str(request_id)}
+        last = ScanApiError("connection_error")
+        for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+            delay = min(10.0, 0.5 * 2 ** (attempt - 1))
+            try:
+                response = self._http.post("/v1/scanner/scans", files=files, headers=headers)
+            except httpx.TransportError:
+                last = ScanApiError(
+                    "connection_error",
+                    explanation=(
+                        f"The upload got no answer in {attempt} attempt(s) under request id {request_id}; "
+                        "sending it again with that id gives the same scan."
+                    ),
+                )
+            else:
+                if response.status_code in (200, 201):
+                    return self._parse(response, Scan), response.status_code == 200
+                if response.status_code not in TRANSIENT:
+                    raise self._error(response)
+                last = self._error(response)
+                delay = max(delay, _retry_after(response))
+            if attempt < UPLOAD_ATTEMPTS:
+                self._sleep(delay)
+        raise last
+
+    # --- the policy file and the gate --------------------------------------------------------------
+
+    def validate_policy(self, text: str) -> Policy | None:
+        """``POST /v1/scanner/gate-policy/validate``: the file as the server reads it, or None when the
+        server has no gate. Raises :class:`PolicyRefused` for a file it refuses."""
+        response = self._retried("POST", "/v1/scanner/gate-policy/validate", body={"policy": text})
+        if _absent(response):
+            return None
+        if response.status_code == 422:
+            raise PolicyRefused(_policy_errors(response))
+        if response.status_code != 200:
+            raise self._error(response)
+        return self._parse(response, Policy)  # type: ignore[no-any-return]
+
+    def gate(self, scan_id: UUID, text: str) -> Gate | None:
+        """``POST /v1/scanner/scans/{scan_id}/gate``, sent once: the server's stored verdict, or None when
+        the server has no gate."""
         try:
-            response = self._http.post("/v1/scanner/scans", files=files)
+            response = self._http.post(f"/v1/scanner/scans/{scan_id}/gate", json={"policy": text})
         except httpx.TransportError:
-            raise ScanApiError(
-                "connection_error",
-                explanation=(
-                    "The upload did not get an answer, so whether the server queued a scan is unknown. "
-                    "It was not sent again."
-                ),
-            ) from None
+            raise ScanApiError("connection_error") from None
+        if _absent(response):
+            return None
+        if response.status_code == 422:
+            raise PolicyRefused(_policy_errors(response))
         if response.status_code != 201:
-            error = self._error(response)
-            if response.status_code in (500, 502, 503, 504):
-                error.args = (str(error) + " Whether the server queued a scan is unknown; it was not sent again.",)
-            raise error
-        return self._parse(response, Scan)  # type: ignore[no-any-return]
+            raise self._error(response)
+        gate: Gate = self._parse(response, Gate)
+        if gate.scan_id != scan_id:
+            raise ScanApiError("invalid_response", status=201)
+        return gate
 
     # --- reads -----------------------------------------------------------------------------------
 
     def _get(
         self, path: str, *, params: dict[str, str | int] | None = None, deadline: float | None = None
     ) -> httpx.Response:
-        """A GET, retried on transport errors and transient statuses: four attempts, or until
-        ``deadline`` (a ``clock`` value) when one is given."""
+        return self._retried("GET", path, params=params, deadline=deadline)
+
+    def _retried(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        body: dict[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> httpx.Response:
+        """A request that changes nothing, retried on transport errors and transient statuses: four
+        attempts, or until ``deadline`` (a ``clock`` value) when one is given."""
         attempt = 0
         while True:
             attempt += 1
             last: ScanApiError
             delay = min(10.0, 0.5 * 2 ** (attempt - 1))
             try:
-                response = self._http.get(path, params=params)
+                response = self._http.request(method, path, params=params, json=body)
             except httpx.TransportError:
                 last = ScanApiError("connection_error")
             else:
@@ -323,15 +430,6 @@ class ScanClient:
                 return
             cursor = page.next_cursor
         raise ScanApiError("invalid_response", status=200)
-
-    def check(self, scan_id: UUID) -> Check | None:
-        """The server's gate for a completed scan, or None when the server has no gate."""
-        response = self._get(f"/v1/scanner/scans/{scan_id}/check")
-        if _absent(response):
-            return None
-        if response.status_code != 200:
-            raise self._error(response)
-        return self._parse(response, Check)  # type: ignore[no-any-return]
 
     def export(self, scan_id: UUID, form: Literal["json", "sarif"]) -> bytes | None:
         """The scan as the server exports it, byte for byte, or None when the server has no export.

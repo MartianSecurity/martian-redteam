@@ -11,7 +11,11 @@ Selection, in order:
 2. The include patterns: ``DEFAULT_INCLUDE`` (the files coding agents load) unless the caller gives its
    own. With the defaults, every folder that holds a ``SKILL.md`` or a ``.claude-plugin/`` folder is sent
    whole, because a skill or a plugin is its folder.
-3. Symbolic links are never followed. A link that the include patterns could reach and that points out
+3. The policy file's ``paths`` and ``include`` (``.martian/scan.yml``, as the server validated it): only
+   files under one of ``paths`` are candidates, and with the default patterns only files of the add-on
+   families ``include`` names are sent (:func:`family_of`). Explicit include patterns choose the files
+   themselves, so families do not apply to them.
+4. Symbolic links are never followed. A link that the include patterns could reach and that points out
    of the folder refuses the whole scan (:class:`SymlinkOutside`); a link that stays inside is not sent
    and is listed as skipped, since its target is sent in its own right when it is selected.
 """
@@ -63,6 +67,40 @@ DEFAULT_INCLUDE: tuple[str, ...] = (
 # With the default patterns, a folder holding one of these is sent whole.
 FOLDER_MARKERS = ("SKILL.md", ".claude-plugin")
 
+# The add-on families a policy file's ``include`` names. Each file the default patterns send belongs to
+# one, by its path alone (:func:`family_of`); ``agent-code`` has no default path, so the agent's own code
+# is sent only through explicit include patterns.
+FAMILIES: tuple[str, ...] = ("skills", "mcp", "plugins", "subagents", "harness-config", "agent-code")
+_MCP_NAMES = frozenset({".mcp.json", "mcp.json", "mcp_config.json"})
+_AGENT_FOLDERS = frozenset(
+    {".claude", ".agents", ".cursor", ".windsurf", ".gemini", ".codex", ".continue", ".roo", ".kiro", ".amazonq",
+     ".clinerules", ".github"}
+)  # fmt: skip
+
+
+def _under(path: str, folder: str) -> bool:
+    return not folder or path.startswith(folder + "/")
+
+
+def family_of(path: str, *, skills: tuple[str, ...] = (), plugins: tuple[str, ...] = ()) -> str:
+    """The add-on family of a file the default patterns send, by its path: in a plugin folder
+    (``plugins``), in a skill folder (``skills``) or an agent folder's ``skills/``, an MCP configuration
+    file, an agent folder's ``agents/`` or ``chatmodes/`` (``subagents``), else ``harness-config``."""
+    if any(_under(path, folder) for folder in plugins):
+        return "plugins"
+    if any(_under(path, folder) for folder in skills):
+        return "skills"
+    parts = path.split("/")
+    if parts[-1] in _MCP_NAMES:
+        return "mcp"
+    for index, part in enumerate(parts[:-1]):
+        if part in _AGENT_FOLDERS and index + 1 < len(parts) - 1:
+            if parts[index + 1] == "skills":
+                return "skills"
+            if parts[index + 1] in ("agents", "chatmodes"):
+                return "subagents"
+    return "harness-config"
+
 
 class SelectionError(Exception):
     """The folder cannot be packed as asked; the message names no file content."""
@@ -92,6 +130,8 @@ class Selection:
     skipped: tuple[Skipped, ...]
     git: bool
     """Whether the candidates came from Git, so ``.gitignore`` applied."""
+    left_out: tuple[str, ...] = ()
+    """Files the default patterns chose that the policy file's ``include`` left out."""
 
 
 @dataclass(frozen=True)
@@ -208,7 +248,23 @@ def _inside(root: Path, link: Path) -> bool:
     return target == root or root in target.parents
 
 
-def collect(folder: Path, include: tuple[str, ...] | list[str] | None = None) -> Selection:
+def _within(paths: tuple[str, ...]) -> tuple[str, ...]:
+    found = []
+    for path in paths:
+        parts = [part for part in path.replace("\\", "/").split("/") if part not in ("", ".")]
+        if ".." in parts or path.startswith("/"):
+            raise SelectionError(f"policy path {path!r} leaves the folder")
+        found.append("/".join(parts))
+    return tuple(found)
+
+
+def collect(
+    folder: Path,
+    include: tuple[str, ...] | list[str] | None = None,
+    *,
+    paths: tuple[str, ...] = (".",),
+    families: tuple[str, ...] = FAMILIES,
+) -> Selection:
     """Choose the files to send from ``folder`` (see the module docstring)."""
     try:
         root = folder.resolve(strict=True)
@@ -220,15 +276,26 @@ def collect(folder: Path, include: tuple[str, ...] | list[str] | None = None) ->
     listed = _git_candidates(root)
     git = listed is not None
     candidates = listed if listed is not None else _walked_candidates(root)
+    roots = _within(paths)
+    if not roots:
+        raise SelectionError("the policy file names no path")
+    candidates = [path for path in candidates if any(path == top or _under(path, top) for top in roots)]
 
-    whole: list[str] = []
+    skills: list[str] = []
+    plugins: list[str] = []
     if not include:
         for path in candidates:
             parts = path.split("/")
             if parts[-1] == FOLDER_MARKERS[0]:
-                whole.append("/".join(parts[:-1]))
+                skills.append("/".join(parts[:-1]))
             elif FOLDER_MARKERS[1] in parts[:-1]:
-                whole.append("/".join(parts[: parts.index(FOLDER_MARKERS[1])]))
+                plugins.append("/".join(parts[: parts.index(FOLDER_MARKERS[1])]))
+    whole = skills + plugins
+    wanted = frozenset(families)
+    unknown = wanted - set(FAMILIES)
+    if unknown:
+        raise SelectionError(f"unknown add-on families {sorted(unknown)}")
+    left_out: list[str] = []
 
     def selected(path: str) -> bool:
         if patterns.matches(path):
@@ -262,13 +329,16 @@ def collect(folder: Path, include: tuple[str, ...] | list[str] | None = None) ->
             continue
         if not selected(path):
             continue
+        if not include and family_of(path, skills=tuple(skills), plugins=tuple(plugins)) not in wanted:
+            left_out.append(path)
+            continue
         if stat.S_ISREG(mode):
             files.append(path)
         else:
             skipped.append(Skipped(path, "not_regular"))
     if outside:
         raise SymlinkOutside(outside)
-    return Selection(root=root, files=tuple(files), skipped=tuple(skipped), git=git)
+    return Selection(root=root, files=tuple(files), skipped=tuple(skipped), git=git, left_out=tuple(left_out))
 
 
 # --- the archive ---------------------------------------------------------------------------------

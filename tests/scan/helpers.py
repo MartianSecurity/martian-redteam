@@ -55,6 +55,12 @@ def check_exchange(document: dict[str, Any], request: httpx.Request, status: int
     unknown = set(request.url.params) - allowed
     if unknown:
         raise ContractDrift(f"{request.method} {template} sends query parameters {sorted(unknown)} the contract lacks")
+    declared_headers = {p["name"].lower() for p in operation.get("parameters", []) if p["in"] == "header"}
+    if "idempotency-key" in request.headers and "idempotency-key" not in declared_headers:
+        raise ContractDrift(f"{request.method} {template} sends an Idempotency-Key the contract lacks")
+    if method == "post" and template != "/v1/scanner/scans":
+        schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        _validate(schema, json.loads(request.content), document, f"the {template} body")
     if method == "post" and template == "/v1/scanner/scans":
         content = operation["requestBody"]["content"]["multipart/form-data"]
         message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(

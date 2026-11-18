@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from martian.scan.files import DEFAULT_INCLUDE, SelectionError, SymlinkOutside, collect, pack
+from martian.scan.files import DEFAULT_INCLUDE, FAMILIES, SelectionError, SymlinkOutside, collect, family_of, pack
 from tests.scan.fake_backend import content_digest
 
 FIXTURE = Path(__file__).resolve().parents[2] / "examples" / "scan" / "fixture"
@@ -177,3 +177,44 @@ def test_nothing_to_send_is_an_error(tmp_path):
 
 def test_the_default_paths_are_paths_only():
     assert all(isinstance(pattern, str) and "\n" not in pattern for pattern in DEFAULT_INCLUDE)
+
+
+# --- the policy file's paths and include (MartianSecurity/martian-notes#470) --------------------------
+
+
+def test_each_default_file_belongs_to_one_family_by_its_path():
+    families = {path: family_of(path, skills=("skills/notes",), plugins=("plugins/tidy",)) for path in SENT}
+    assert families == {
+        ".claude/agents/reviewer.md": "subagents",
+        ".claude/settings.json": "harness-config",
+        ".github/copilot-instructions.md": "harness-config",
+        ".mcp.json": "mcp",
+        "AGENTS.md": "harness-config",
+        "packages/web/CLAUDE.md": "harness-config",
+        "plugins/tidy/.claude-plugin/plugin.json": "plugins",
+        "plugins/tidy/commands/tidy.md": "plugins",
+        "skills/notes/SKILL.md": "skills",
+        "skills/notes/data/table.csv": "skills",
+        "skills/notes/scripts/run.py": "skills",
+    }
+    assert family_of(".claude/skills/x/notes.md") == "skills"
+    assert family_of(".github/chatmodes/plan.md") == "subagents"
+    assert set(families.values()) < set(FAMILIES)
+
+
+def test_include_families_and_paths_narrow_the_default_selection(tmp_path):
+    _write(tmp_path, AGENT_FILES)
+    only = collect(tmp_path, families=("skills", "mcp"))
+    assert list(only.files) == [".mcp.json", "skills/notes/SKILL.md", "skills/notes/data/table.csv",
+                                "skills/notes/scripts/run.py"]  # fmt: skip
+    assert len(only.left_out) == len(SENT) - 4
+    under = collect(tmp_path, paths=("plugins", "./packages/"))
+    assert list(under.files) == ["packages/web/CLAUDE.md", "plugins/tidy/.claude-plugin/plugin.json",
+                                 "plugins/tidy/commands/tidy.md"]  # fmt: skip
+    # Explicit patterns choose the files themselves: families do not apply, paths still do.
+    chosen = collect(tmp_path, ["src/"], families=("mcp",), paths=("src",))
+    assert list(chosen.files) == ["src/app.py"] and chosen.left_out == ()
+    with pytest.raises(SelectionError, match="leaves the folder"):
+        collect(tmp_path, paths=("../elsewhere",))
+    with pytest.raises(SelectionError, match="unknown add-on families"):
+        collect(tmp_path, families=("everything",))
