@@ -1,0 +1,14 @@
+{
+  "session_id": "4b1f0c52-6d1e-4a8e-9a57-3f2c9d0e7a11",
+  "campaign_id": "4b1f0c52-6d1e-4a8e-9a57-3f2c9d0e7a11",
+  "target_id": "8e2d6a90-1c3b-4f5e-b7a8-0d9c1e2f3a4b",
+  "expires_at": "EXPIRES_AT",
+  "mcp_connections": [
+    {
+      "name": "commerce",
+      "url": "GATEWAY/v1/assessment-sessions/4b1f0c52-6d1e-4a8e-9a57-3f2c9d0e7a11/mcp/commerce",
+      "headers": {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.recorded-gateway-token.signature"},
+      "allowed_tools": ["issue_refund", "lookup_order"]
+    }
+  ]
+}

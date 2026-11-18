@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: "3.12"
@@ -33,13 +33,13 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals
 
       - name: Check formatting
-        run: uv run ruff format --check src tests examples
+        run: uv run --extra evals ruff format --check src tests examples scripts
 
       - name: Lint Python
-        run: uv run ruff check src tests examples
+        run: uv run --extra evals ruff check src tests examples scripts
 
   types:
     name: Types
@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: "3.12"
@@ -60,18 +60,18 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals
 
       - name: Type-check Python
-        run: uv run --extra mcp mypy src
+        run: uv run --extra mcp --extra evals mypy src
 
       - name: Compile source
-        run: uv run python -m compileall -q src
+        run: uv run --extra evals python -m compileall -q src
 
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +83,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: ${{ matrix.python-version }}
@@ -91,12 +91,13 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install Python dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra evals --extra mcp
 
+      # The mcp extra is installed so the red team MCP target, proxy and session tests run.
       - name: Run Python tests
         run: >
-          uv run pytest -q
-          --cov=martian_redteam
+          uv run --extra evals --extra mcp pytest -q -n auto
+          --cov=martian_redteam --cov=martian
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --junitxml=junit.xml
@@ -111,6 +112,128 @@ jobs:
             junit.xml
           if-no-files-found: error
 
+  redteam-examples:
+    name: Red team examples
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # The agent frameworks are the pinned examples group, never a dependency of the package.
+      - name: Install Python dependencies
+        run: uv sync --locked --extra evals --extra mcp --group examples
+
+      # Each framework's agent runs against its stub model, through the recording proxy: no key.
+      - name: Run the red team framework examples
+        run: uv run --extra evals --extra mcp --group examples pytest -q examples/redteam
+
+  evals-core:
+    name: Evals core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      # The in-process MLflow store and the record store run their contracts on Postgres too.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: martian
+          POSTGRES_PASSWORD: martian_ci
+          POSTGRES_DB: evals
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U martian -d evals"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python dependencies
+        run: uv sync --locked --extra postgres
+
+      - name: Test the evals core without the backend
+        env:
+          MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
+        run: >
+          uv run --extra postgres pytest -q -n auto tests/evals/test_server.py tests/evals/test_store.py
+          tests/evals/test_store_mlflow.py tests/evals/test_records.py tests/evals/test_store_errors.py
+          tests/evals/test_model.py
+          tests/evals/test_mlflow_private.py tests/evals/test_entitlements.py tests/evals/test_bootstrap.py
+          tests/evals/test_local.py tests/evals/test_local_targets.py tests/evals/test_read_routes.py tests/evals/test_read_contract.py
+          tests/evals/test_write_routes.py
+          tests/evals/test_write_contract.py tests/evals/test_user_ids.py tests/evals/test_worker.py
+          tests/evals/test_worker_process.py
+          tests/evals/test_worker_targets.py tests/evals/test_worker_judges.py tests/evals/test_worker_queue.py
+          tests/evals/test_no_outbound.py tests/evals/test_worker_concurrency.py tests/evals/test_trace_conventions.py
+          tests/evals/test_otlp.py tests/evals/test_monitors.py tests/evals/test_thresholds.py
+          tests/evals/test_schedules.py tests/evals/test_push.py
+          tests/redteam/test_store.py
+
+  mlflow-compat:
+    name: MLflow compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: martian
+          POSTGRES_PASSWORD: martian_ci
+          POSTGRES_DB: evals
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U martian -d evals"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MARTIAN_TEST_POSTGRES_URL: postgresql+psycopg://martian:martian_ci@127.0.0.1:5432/evals
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.10.0"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Suite on the pinned MLflow
+        run: python3 scripts/mlflow_compat.py pinned --upgrade-store "$RUNNER_TEMP/mlflow-upgrade"
+
+      # Early warning for the next upgrade: reported, but a new MLflow release cannot fail CI.
+      - name: Suite on the newest MLflow release
+        continue-on-error: true
+        run: python3 scripts/mlflow_compat.py next --upgrade-store "$RUNNER_TEMP/mlflow-upgrade"
+
   packaging:
     name: Packaging
     runs-on: ubuntu-24.04
@@ -122,7 +245,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: "3.12"
@@ -132,7 +255,12 @@ jobs:
       - name: Build wheel and validate example config
         run: |
           set -euo pipefail
+          uv sync --locked --all-extras
           uv build
+          uv run --all-extras twine check --strict dist/*
+          uv run --all-extras python scripts/check_release.py --install
+          # The release's licence check: a dependency under a licence outside scripts/licence-policy.json fails here.
+          uv run --all-extras python scripts/sbom.py wheel --out-dir release-sbom
           shopt -s nullglob
           wheels=(dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then
@@ -141,7 +269,10 @@ jobs:
             exit 1
           fi
           uv venv .ci-wheel
-          uv pip install --python .ci-wheel "${wheels[0]}"
+          uv pip install --python .ci-wheel "${wheels[0]}[evals]"
+          .ci-wheel/bin/martian --version
+          .ci-wheel/bin/martian redteam validate examples/config.yaml
+          .ci-wheel/bin/python -c "from martian.evals import load_dataset; from martian.redteam import red_team; from martian.evals.server import create_app; from martian.evals.store import MemoryStore"
           .ci-wheel/bin/martian-redteam --version
           .ci-wheel/bin/martian-redteam catalog
           .ci-wheel/bin/martian-redteam validate examples/config.yaml
@@ -150,6 +281,10 @@ jobs:
     name: Action smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The evals action comments on this repository's pull requests; nothing else is written.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -161,10 +296,90 @@ jobs:
         with:
           config: examples/config.yaml
 
+      # The two sample suites need no secret: each keeps its own comment on the pull request.
+      # The passing sample keeps its result on main and compares each pull request with it.
+      - name: Evals action on the passing sample
+        uses: ./.github/actions/evals
+        with:
+          suite: examples/github-action/passing/evals.yaml
+          output: results/evals-passing
+          baseline-branch: main
+
+      - name: Evals action on the failing sample
+        id: failing-sample
+        continue-on-error: true
+        uses: ./.github/actions/evals
+        with:
+          suite: examples/github-action/failing/evals.yaml
+          output: results/evals-failing
+
+      - name: Require the failing sample to fail its step on its failed cases
+        env:
+          FAILING_SAMPLE_OUTCOME: ${{ steps.failing-sample.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$FAILING_SAMPLE_OUTCOME" != "failure" ]; then
+            echo "the failing sample suite did not fail the evals action (outcome: ${FAILING_SAMPLE_OUTCOME})" >&2
+            exit 1
+          fi
+          jq -e '.failed == 2 and .errors == 0' results/evals-failing/summary.json
+
+      # The scan action against a stand-in for the backend's scan routes on
+      # loopback (tests/scan/fake_backend.py), which reports one seeded finding
+      # on every SKILL.md. The token is the stand-in's test value, not a secret.
+      - name: Start the stand-in scan backend
+        id: scan-backend
+        run: |
+          set -euo pipefail
+          python3 tests/scan/fake_backend.py --port-file "${RUNNER_TEMP}/scan-port" &
+          for _ in $(seq 50); do
+            [ -s "${RUNNER_TEMP}/scan-port" ] && break
+            sleep 0.2
+          done
+          echo "url=http://127.0.0.1:$(cat "${RUNNER_TEMP}/scan-port")" >> "${GITHUB_OUTPUT}"
+
+      - name: Scan action on the fixture without its skill
+        uses: ./.github/actions/scan
+        env:
+          MARTIAN_API_URL: ${{ steps.scan-backend.outputs.url }}
+          MARTIAN_API_TOKEN: mce_test_scan_key_0123456789
+        with:
+          path: examples/scan/fixture
+          include: |
+            AGENTS.md
+            .mcp.json
+          output: results/scan-clean
+
+      - name: Scan action on the fixture with its seeded finding
+        id: seeded-scan
+        continue-on-error: true
+        uses: ./.github/actions/scan
+        env:
+          MARTIAN_API_URL: ${{ steps.scan-backend.outputs.url }}
+          MARTIAN_API_TOKEN: mce_test_scan_key_0123456789
+        with:
+          path: examples/scan/fixture
+          output: results/scan-seeded
+
+      - name: Require the seeded finding to fail the gate with SARIF written
+        env:
+          SEEDED_OUTCOME: ${{ steps.seeded-scan.outcome }}
+          SEEDED_EXIT: ${{ steps.seeded-scan.outputs.exit-code }}
+          SEEDED_SARIF: ${{ steps.seeded-scan.outputs.sarif }}
+        run: |
+          set -euo pipefail
+          if [ "$SEEDED_OUTCOME" != "failure" ] || [ "$SEEDED_EXIT" != "1" ]; then
+            echo "the seeded finding did not fail the scan gate (outcome ${SEEDED_OUTCOME}, exit ${SEEDED_EXIT})" >&2
+            exit 1
+          fi
+          jq -e '.version == "2.1.0" and (.runs[0].results | length) == 1' "$SEEDED_SARIF"
+          jq -e '.runs[0].results[0].partialFingerprints["martianScannerFinding/v1"] | length == 64' "$SEEDED_SARIF"
+          jq -e '.runs[0].results | length == 0' results/scan-clean/scan.sarif
+
   ci:
     name: CI
     if: always()
-    needs: [lint, types, test, packaging, action-smoke]
+    needs: [lint, types, test, redteam-examples, evals-core, mlflow-compat, packaging, action-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -173,10 +388,13 @@ jobs:
           lint_result="${{ needs.lint.result }}"
           types_result="${{ needs.types.result }}"
           test_result="${{ needs.test.result }}"
+          redteam_examples_result="${{ needs.redteam-examples.result }}"
+          evals_core_result="${{ needs.evals-core.result }}"
+          mlflow_compat_result="${{ needs.mlflow-compat.result }}"
           packaging_result="${{ needs.packaging.result }}"
           action_smoke_result="${{ needs.action-smoke.result }}"
-          echo "lint=${lint_result} types=${types_result} test=${test_result} packaging=${packaging_result} action-smoke=${action_smoke_result}"
-          if [ "$lint_result" != "success" ] || [ "$types_result" != "success" ] || [ "$test_result" != "success" ] || [ "$packaging_result" != "success" ] || [ "$action_smoke_result" != "success" ]; then
+          echo "lint=${lint_result} types=${types_result} test=${test_result} redteam-examples=${redteam_examples_result} evals-core=${evals_core_result} mlflow-compat=${mlflow_compat_result} packaging=${packaging_result} action-smoke=${action_smoke_result}"
+          if [ "$lint_result" != "success" ] || [ "$types_result" != "success" ] || [ "$test_result" != "success" ] || [ "$redteam_examples_result" != "success" ] || [ "$evals_core_result" != "success" ] || [ "$mlflow_compat_result" != "success" ] || [ "$packaging_result" != "success" ] || [ "$action_smoke_result" != "success" ]; then
             echo "One or more required jobs failed" >&2
             exit 1
           fi

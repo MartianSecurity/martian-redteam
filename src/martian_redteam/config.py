@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from urllib.parse import urlsplit
 
 import yaml
@@ -28,6 +28,8 @@ def require_secure_api_url(value: str, *, label: str) -> str:
     """
     trimmed = value.strip().rstrip("/")
     parts = urlsplit(trimmed)
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        raise ValueError(f"{label} must not contain credentials, query parameters or a fragment")
     if parts.scheme not in {"http", "https"} or not parts.hostname:
         raise ValueError(f"{label} must start with http:// or https://")
     if parts.scheme == "https" or parts.hostname in _LOOPBACK_HOSTS:
@@ -44,19 +46,26 @@ class Settings(BaseSettings):
     """API location and credentials. Loaded from the environment."""
 
     model_config = SettingsConfigDict(
-        env_prefix="MARTIAN_",
-        env_file=".env",
+        env_prefix="MARTIAN_REDTEAM_",
+        env_file=None,
         extra="ignore",
     )
 
-    api_url: str = "https://api.agents.martiansecurity.ai"
+    api_url: str = ""
     api_key: SecretStr = Field(default=SecretStr(""))
     request_timeout_seconds: float = Field(default=120.0, ge=1.0, le=240.0)
+
+    def __init__(self, **values: Any) -> None:
+        if ("api_url" in values) != ("api_key" in values):
+            raise ValueError(
+                "provide the complete explicit legacy api_url/api_key pair, or the dedicated environment pair"
+            )
+        super().__init__(**values)
 
     @field_validator("api_url")
     @classmethod
     def api_url_must_be_secure(cls, value: str) -> str:
-        return require_secure_api_url(value, label="MARTIAN_API_URL")
+        return require_secure_api_url(value, label=f"{cls.model_config['env_prefix']}API_URL")
 
 
 class CallbackRef(BaseModel):
@@ -91,7 +100,7 @@ class SystemConfig(BaseModel):
     attacks_per_vulnerability_type: int = 1
     output_folder: str = "results"
     # Upper bound for one target callback call; a hung target becomes a target error.
-    target_timeout_seconds: float = Field(default=120.0, ge=1.0)
+    target_timeout_seconds: float = Field(default=120.0, ge=1.0, allow_inf_nan=False)
 
     @field_validator("max_concurrent")
     @classmethod
@@ -167,4 +176,10 @@ class RunConfig(BaseModel):
     def settings_overlay(self, settings: Settings) -> Settings:
         if self.api is None or self.api.url is None:
             return settings
-        return settings.model_copy(update={"api_url": str(self.api.url).rstrip("/")})
+        if str(self.api.url).rstrip("/") != settings.api_url:
+            raise ValueError("YAML cannot override the approved direct-Agents origin; configure it explicitly")
+        return settings
+
+    def require_platform_origin(self) -> None:
+        if self.api is not None and self.api.url is not None:
+            raise ValueError("Platform YAML cannot choose an API origin; use MartianConfig or MARTIAN_API_URL")

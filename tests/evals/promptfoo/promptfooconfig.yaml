@@ -1,0 +1,45 @@
+# results.json here is what promptfoo 0.125.1 wrote for this config, with no model call:
+#
+#   npx promptfoo@0.125.1 eval -c promptfooconfig.yaml -o results.json --no-cache
+#
+# Only config.basePath, the folder it ran in, is replaced. promptfoo gives each provider its own
+# prompt columns: bot-v1's rows have promptIdx 0 and 1, bot-v2's 2 and 3, and the same promptId.
+description: FAQ bot
+
+prompts:
+  - "Answer the customer briefly. Question: {{question}}"
+  - "You are a shop assistant. Reply in one sentence. Question: {{question}}"
+
+providers:
+  - id: file://provider.py:bot_v1
+    label: bot-v1
+  - id: file://provider.py:bot_v2
+    label: bot-v2
+
+evaluateOptions:
+  maxConcurrency: 1
+
+defaultTest:
+  assert:
+    - type: not-icontains
+      value: as an AI
+
+tests:
+  - description: opening hours
+    vars:
+      question: When do you open?
+    assert:
+      - type: icontains
+        value: 9am
+  - description: delivery
+    vars:
+      question: Do you deliver?
+    assert:
+      - type: regex
+        value: "\\d+ km"
+  - description: card payments
+    vars:
+      question: Can I pay by card?
+    assert:
+      - type: icontains
+        value: card
