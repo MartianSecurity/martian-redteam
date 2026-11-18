@@ -1,6 +1,9 @@
 """evaluate() raises on mistakes that would otherwise give a silent wrong result."""
 
+import threading
+
 import mlflow
+import pandas as pd
 import pytest
 from mlflow.genai.scorers import scorer
 
@@ -54,3 +57,22 @@ def test_missing_per_row_results_raise(monkeypatch):
     monkeypatch.setattr("mlflow.genai.evaluate", lambda **kwargs: Empty())
     with pytest.raises(EvaluationError, match="no per-row results"):
         evaluate(data=[{"inputs": {"message": "hi"}, "outputs": "hello"}], scorers=[_named("answered")])
+
+
+def test_a_prediction_function_that_hangs_on_one_case_is_that_cases_error(store):
+    never = threading.Event()  # never set: the hung call would wait for ever
+
+    def target(message):
+        if message == "hang":
+            never.wait()
+        return "hello " + message
+
+    data = [{"inputs": {"message": "one"}}, {"inputs": {"message": "hang"}}, {"inputs": {"message": "two"}}]
+    result = evaluate(data=data, scorers=[_named("answered")], predict_fn=target, target_timeout_seconds=0.3)
+    frame = result.result_df
+    assert len(frame) == 3
+    by_message = {row["request"]["message"]: row for _, row in frame.iterrows()}
+    assert by_message["one"]["response"] == "hello one"
+    assert by_message["two"]["response"] == "hello two"
+    assert pd.isna(by_message["hang"]["response"])
+    assert "ERROR" in str(by_message["hang"]["state"]).upper()

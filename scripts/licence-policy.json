@@ -1,0 +1,62 @@
+{
+  "$comment": "The licences a release may ship, read by scripts/sbom.py; see docs/releasing.md#bills-of-materials-and-the-licence-check. Components are named <ecosystem>:<name>. A first_party entry with a licence gives it to a component that declares none and refuses one that declares another. MartianSecurity/MartianFrontend keeps the same allowed list in its scripts/licence-policy.json.",
+  "allowed": [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "PSF-2.0",
+    "Python-2.0",
+    "Unlicense",
+    "Zlib"
+  ],
+  "first_party": [
+    {"component": "pypi:martian-sdk", "reason": "This repository's package."},
+    {"component": "npm:@martian/*", "licence": "Apache-2.0", "reason": "The Evals UI's own packages, @martian/evals, @martian/redteam, @martian/design-system and @martian/client, built in MartianSecurity/MartianFrontend, where each is Apache-2.0 with a LICENSE and NOTICE. The build's ui-version.json names no licence, so this entry records it; NOTICE attributes them."}
+  ],
+  "concluded": [
+    {
+      "component": "pypi:gitdb",
+      "declared": "BSD License",
+      "licence": "BSD-3-Clause",
+      "reason": "The metadata names no BSD variant; the LICENSE file in the distribution is the 3-clause text. The GPL pack files it mentions are test fixtures the distribution does not hold."
+    },
+    {
+      "component": "pypi:pyasn1-modules",
+      "declared": "BSD",
+      "licence": "BSD-2-Clause",
+      "reason": "The metadata names no BSD variant; licenses/LICENSE.txt in the distribution is the 2-clause text."
+    },
+    {
+      "component": "pypi:sqlparse",
+      "declared": "BSD License",
+      "licence": "BSD-3-Clause",
+      "reason": "The metadata names no BSD variant; licenses/LICENSE in the distribution is the 3-clause text."
+    },
+    {
+      "component": "generic:python",
+      "declared": "",
+      "licence": "PSF-2.0",
+      "reason": "The image's CPython interpreter carries no package metadata; its LICENSE.txt is the PSF License Agreement."
+    }
+  ],
+  "exceptions": [
+    {
+      "component": "npm:@fontsource-variable/inter",
+      "licence": "OFL-1.1",
+      "reason": "The Inter typeface in the Evals UI. The SIL Open Font License lets a font be bundled with any software; it is shipped unmodified, with its licence in third-party-licenses.md."
+    }
+  ],
+  "not_checked": [
+    {
+      "component": "deb:*",
+      "reason": "The Debian packages of the image's pinned base image, python:3.12-slim. They are separate programs and system libraries that Debian distributes under its own licences, many of them GPL or LGPL; they are listed with the licences their copyright files declare but are not held to the allowed list."
+    }
+  ]
+}

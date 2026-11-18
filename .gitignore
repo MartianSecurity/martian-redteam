@@ -7,6 +7,8 @@ __pycache__/
 build/
 dist/
 release-checksums.json
+release-image/
+release-sbom/
 *.egg-info/
 *.egg
 
@@ -45,3 +47,8 @@ results/
 
 # Local uv caches
 .uv-cache/
+
+# Red team benchmark downloads and generated inputs (benchmarks/injecagent/reproduce.py)
+benchmarks/*/data/
+benchmarks/*/cases.json
+benchmarks/*/run.yaml

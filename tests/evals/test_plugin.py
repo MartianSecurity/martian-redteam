@@ -1,4 +1,4 @@
-"""The kit end to end: real pytest, real MLflow 3.16.1 local store, loopback Backend stand-in."""
+"""The kit end to end: real pytest, real MLflow local store, loopback Backend stand-in."""
 
 import json
 import os

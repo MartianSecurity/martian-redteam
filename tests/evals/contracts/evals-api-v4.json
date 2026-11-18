@@ -185,6 +185,67 @@
         "title": "BootstrapUser",
         "type": "object"
       },
+      "CheckRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_]{0,59}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "options": {
+            "additionalProperties": true,
+            "title": "Options",
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "contains",
+              "not_contains",
+              "contains_any",
+              "contains_all",
+              "equals",
+              "starts_with",
+              "ends_with",
+              "similarity",
+              "matches",
+              "not_matches",
+              "is_json",
+              "json_schema",
+              "length",
+              "latency",
+              "cost",
+              "number_equals",
+              "sums_to",
+              "reconciles",
+              "table_equals",
+              "no_prohibited_phrases",
+              "no_personal_data",
+              "no_secrets",
+              "resists_injection",
+              "no_refusal",
+              "tool_called",
+              "tool_not_called",
+              "tool_trajectory",
+              "step_count"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "CheckRequest",
+        "type": "object"
+      },
       "CiCheckRow": {
         "additionalProperties": false,
         "properties": {
@@ -2106,6 +2167,16 @@
             "title": "Dataset Name",
             "type": "string"
           },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "max_items": {
             "default": 100,
             "maximum": 1000.0,
@@ -2339,6 +2410,76 @@
         "title": "IssueTriageRequest",
         "type": "object"
       },
+      "JudgeModelOut": {
+        "properties": {
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "selectable": {
+            "title": "Selectable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "endpoint",
+          "selectable"
+        ],
+        "title": "JudgeModelOut",
+        "type": "object"
+      },
+      "JudgeModelRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "pattern": "^https?://[^\\s/?#@]+(/[^\\s?#]*[^\\s?#/])?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "pattern": "^[a-z][a-z0-9_-]{0,39}:/\\S{1,200}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "title": "JudgeModelRequest",
+        "type": "object"
+      },
       "JudgeReference": {
         "additionalProperties": false,
         "properties": {
@@ -2368,6 +2509,19 @@
             "maxLength": 1000,
             "title": "Description",
             "type": "string"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "pattern": "^https?://[^\\s/?#@]+(/[^\\s?#]*[^\\s?#/])?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
           },
           "expected_version": {
             "default": 0,
@@ -2401,6 +2555,19 @@
             "default": 0,
             "title": "Minimum",
             "type": "number"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "pattern": "^[a-z][a-z0-9_-]{0,39}:/\\S{1,200}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           },
           "name": {
             "pattern": "^[a-z][a-z0-9_]{0,59}$",
@@ -2699,6 +2866,23 @@
         "title": "ResumeIn",
         "type": "object"
       },
+      "ResumeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ResumeRequest",
+        "type": "object"
+      },
       "ReviewQuestion": {
         "additionalProperties": false,
         "properties": {
@@ -2848,6 +3032,38 @@
         "title": "ReviewRequest",
         "type": "object"
       },
+      "RunLimits": {
+        "additionalProperties": false,
+        "description": "When a run stops before its last case: once it has run for ``max_seconds`` of wall time, or\nonce its model calls on the judges' provider path have used ``max_judge_tokens`` tokens, input\nand output together, as the provider reported them: its LLM judges' and, in ``martian evals\nrun``, its simulated users' (:mod:`martian.evals.simulation`). ``None`` is no limit. Each start\nor resume of a run has its limits afresh. A run that reaches one is ``stopped``, keeps its\nfinished cases and can be resumed.",
+        "properties": {
+          "max_judge_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Judge Tokens"
+          },
+          "max_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Seconds"
+          }
+        },
+        "title": "RunLimits",
+        "type": "object"
+      },
       "SavedViewRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2926,6 +3142,14 @@
             "title": "Acknowledge Model Cost",
             "type": "boolean"
           },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/CheckRequest"
+            },
+            "maxItems": 40,
+            "title": "Checks",
+            "type": "array"
+          },
           "guidelines": {
             "default": "",
             "maxLength": 4000,
@@ -2984,6 +3208,14 @@
       "SuiteRequest": {
         "additionalProperties": false,
         "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/CheckRequest"
+            },
+            "maxItems": 40,
+            "title": "Checks",
+            "type": "array"
+          },
           "expected_version": {
             "default": 0,
             "minimum": 0.0,
@@ -3029,7 +3261,6 @@
               "type": "string"
             },
             "maxItems": 7,
-            "minItems": 1,
             "title": "Scorers",
             "type": "array"
           },
@@ -3296,7 +3527,7 @@
   "info": {
     "description": "Every /v1/evals route. Generated by scripts/evals_contract.py; do not edit by hand.",
     "title": "Martian Evals API",
-    "version": "2"
+    "version": "4"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3475,6 +3706,26 @@
         "summary": "Capabilities",
         "tags": [
           "evaluation explorer"
+        ]
+      }
+    },
+    "/v1/evals/checks": {
+      "get": {
+        "description": "The deterministic checks a scoring request or a saved suite may name, each with its options.",
+        "operationId": "check_catalogue_v1_evals_checks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Check Catalogue",
+        "tags": [
+          "evals"
         ]
       }
     },
@@ -4974,6 +5225,66 @@
         "summary": "List Dataset Items",
         "tags": [
           "evals"
+        ]
+      }
+    },
+    "/v1/evals/judge-model": {
+      "get": {
+        "operationId": "judge_model_v1_evals_judge_model_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeModelOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Judge Model",
+        "tags": [
+          "evaluation explorer"
+        ]
+      },
+      "put": {
+        "operationId": "set_judge_model_v1_evals_judge_model_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeModelOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Judge Model",
+        "tags": [
+          "evaluation explorer"
         ]
       }
     },
@@ -6609,6 +6920,58 @@
           "evals"
         ],
         "x-mlflow-shaped": "`native` carries MLflow's run status and metric objects"
+      }
+    },
+    "/v1/evals/{run_id}/resume": {
+      "post": {
+        "operationId": "resume_eval_v1_evals__run_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Eval",
+        "tags": [
+          "evals"
+        ]
       }
     },
     "/v1/evals/{run_id}/scores": {

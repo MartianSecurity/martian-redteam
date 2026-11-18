@@ -1,0 +1,34 @@
+# Run with:  martian evals run examples/evals/matrix/evals.yaml
+# Two models and two prompts: the suite runs its cases once per combination, four runs in all,
+# and prints one row per combination. agent.py stands in for a model call, so the example
+# needs no model key.
+data: cases.jsonl
+target:
+  file: agent.py
+  function: answer               # called as answer(message="...", model="...", prompt="...")
+
+matrix:
+  model: [small-model, large-model]   # a list: each value is its own name
+  prompt:                             # a mapping: a short name for each prompt
+    terse: "Answer in one sentence."
+    friendly: "Greet the customer, then answer in one sentence."
+
+checks:
+  - type: contains
+    name: states_the_fact
+    expectation: answer          # read from each case's expectations
+  - type: length
+    name: brief
+    max_length: 90
+
+# With an HTTP endpoint, such as an OpenAI-compatible one, the body takes each axis:
+# target:
+#   url: "${OPENAI_API_BASE}/chat/completions"
+#   headers:
+#     Authorization: "Bearer ${OPENAI_API_KEY}"
+#   body:
+#     model: "{{matrix.model}}"
+#     messages:
+#       - {role: system, content: "{{matrix.prompt}}"}
+#       - {role: user, content: "{{input}}"}
+#   response_path: choices.0.message.content
