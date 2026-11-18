@@ -24,7 +24,7 @@ from martian._privacy import RedactionPolicy
 from martian.redteam.engine.local import LocalService
 from martian.redteam.engine.report import for_report
 from martian.redteam.engine.run import Engine
-from martian.redteam.engine.service import select_service
+from martian.redteam.engine.service import ServiceSelectionError, select_service
 from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.runfile import Target as TargetBlock
@@ -231,17 +231,33 @@ def build_service(
     kind = select_service(run_file, environ)
     policy = redaction_for(run_file, environ)
     if kind == "local":
+        if (
+            run_file.budget.cost_usd is not None
+            and (run_file.models.attacker is not None or run_file.models.judge is not None)
+            and not os.environ.get("MLFLOW_MODEL_CATALOG_URI", "").strip()
+        ):
+            raise ServiceSelectionError("A local cost_usd budget requires MLFLOW_MODEL_CATALOG_URI for model pricing.")
         if len(run_file.models.pool) > 1:
             from martian.redteam.engine.local import PooledService
 
             pooled = PooledService(
                 [
-                    LocalService(attacker=attacker, judge=run_file.models.judge, redaction_policy=policy)
+                    LocalService(
+                        attacker=attacker,
+                        judge=run_file.models.judge,
+                        redaction_policy=policy,
+                        spend_capped=run_file.budget.limits_model_spend,
+                    )
                     for attacker in run_file.models.pool
                 ]
             )
             return pooled, pooled.describe()
-        local = LocalService(attacker=run_file.models.attacker, judge=run_file.models.judge, redaction_policy=policy)
+        local = LocalService(
+            attacker=run_file.models.attacker,
+            judge=run_file.models.judge,
+            redaction_policy=policy,
+            spend_capped=run_file.budget.limits_model_spend,
+        )
         return local, local.describe()
     from martian.config import MartianConfig
     from martian.redteam.client import Client

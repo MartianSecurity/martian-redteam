@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from html import escape
 
-from martian.redteam.model import RedteamRun
+from martian.redteam.model import RedteamRun, budget_usage_error
 from martian.redteam.report.standard import Rate, RedteamReport, build_report
 
 CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; form-action 'none'; base-uri 'none'"
@@ -112,13 +112,13 @@ def render_html(run: RedteamRun, report: RedteamReport | None = None) -> str:
         ["Budget", ", ".join(f"{name} {value}" for name, value in budget.limits.items()) or "no limit"],
         ["Attempts per probe", budget.attempts_per_probe],
         [
-            "Spent",
+            "Recorded spend",
             f"{spent.get('target_queries', 0)} target queries, {spent.get('attacker_calls', 0)} attacker calls, "
             f"{spent.get('judge_calls', 0)} judge calls, "
             f"{spent.get('input_tokens', 0) + spent.get('output_tokens', 0)} tokens"
-            + (f", {spent['cost_usd']:.4f} USD" if spent.get("cost_usd") else ""),
+            + (f", {spent['cost_usd']:.4f} USD" if spent.get("cost_usd") is not None else ""),
         ],
-        ["Stopped by", budget.stopped_by or "nothing: the run finished"],
+        ["Stopped by", budget_usage_error(run.budget) or budget.stopped_by or "nothing: the run finished"],
     ]
     add(_table(["", ""], rows))
 

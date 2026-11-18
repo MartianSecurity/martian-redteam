@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from martian.redteam.model import RedteamRun
+from martian.redteam.model import RedteamRun, budget_usage_error
 from martian.redteam.report.standard import GateOutcome
 from martian.redteam.runfile import Gate, threshold_level
 
@@ -59,6 +59,8 @@ def evaluate(run: RedteamRun, gate: Gate) -> GateResult:
     """The gate's result for ``run``."""
     failures: list[str] = []
     warnings: list[str] = []
+    if budget_error := budget_usage_error(run.budget):
+        failures.append(budget_error)
     attempts = [attempt for attempt in run.attempts if attempt.role == "attack"]
     if not attempts:
         failures.append("the run has no attempt")

@@ -215,7 +215,16 @@ class LocalLauncher:
         if run is None:
             raise HTTPException(404, "Red team run not found")
         if self._orphan(run):
-            run = run.model_copy(update={"state": "cancelled"})
+            run = run.model_copy(
+                update={
+                    "state": "cancelled",
+                    "budget": {**run.budget, "history_incomplete": True},
+                    "limitations": [
+                        *run.limitations,
+                        "The process stopped before a final budget checkpoint. Recorded spend is a lower bound.",
+                    ],
+                }
+            )
             await self.store.save(run, principal=principal)
         return run
 

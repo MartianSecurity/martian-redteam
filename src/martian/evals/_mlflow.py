@@ -16,6 +16,7 @@ tracing needs itself; they are listed here too, and the guard allows them in tha
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
@@ -36,7 +37,6 @@ from mlflow.genai.judges.adapters.utils import (
     is_response_format_error,
 )
 from mlflow.genai.judges.adapters.utils import _safe_parse_error as error_text
-from mlflow.genai.utils.llm_utils import _lookup_model_cost as lookup_model_cost
 from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_instance
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
 from mlflow.ml_package_versions import FLAVOR_TO_MODULE_NAME
@@ -52,6 +52,7 @@ from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as Workspace
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
 from mlflow.tracing.utils.artifact_utils import TRACE_DATA_FILE_NAME, get_artifact_uri_for_trace
 from mlflow.tracking import fluent as _fluent
+from mlflow.utils.providers import _fetch_remote_provider as _configured_model_prices
 from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
@@ -75,7 +76,6 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.genai.judges.adapters.utils", "get_adapter"),
     ("mlflow.genai.judges.adapters.utils", "is_context_window_error"),
     ("mlflow.genai.judges.adapters.utils", "is_response_format_error"),
-    ("mlflow.genai.utils.llm_utils", "_lookup_model_cost"),
     ("mlflow.metrics.genai.model_utils", "_get_provider_instance"),
     ("mlflow.metrics.genai.model_utils", "_parse_model_uri"),
     ("mlflow.ml_package_versions", "FLAVOR_TO_MODULE_NAME"),
@@ -98,6 +98,7 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.tracing.utils.artifact_utils", "TRACE_DATA_FILE_NAME"),
     ("mlflow.tracing.utils.artifact_utils", "get_artifact_uri_for_trace"),
     ("mlflow.tracking.fluent", "_active_experiment_id"),
+    ("mlflow.utils.providers", "_fetch_remote_provider"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
     ("mlflow.store.model_registry.sqlalchemy_workspace_store", "WorkspaceAwareSqlAlchemyStore"),
@@ -320,6 +321,24 @@ def start_span(name: str) -> AbstractContextManager[Any]:
     """A span named ``name`` under the current one, open while the context lasts, which yields
     MLflow's live span (``mlflow.start_span``)."""
     return mlflow.start_span(name=name)
+
+
+def lookup_model_cost(model_uri: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Price a call using explicitly configured rates for both token directions."""
+    provider, model = parse_model_uri(model_uri)
+    models = _configured_model_prices(provider) or {}
+    rates = models.get(model.removeprefix(f"{provider}/"))
+    if rates is None:
+        return None
+    input_rate = rates.get("input_cost_per_token")
+    output_rate = rates.get("output_cost_per_token")
+    if (
+        input_rate is None
+        or output_rate is None
+        or any(rate < 0 or not math.isfinite(rate) for rate in (input_rate, output_rate))
+    ):
+        return None
+    return input_tokens * input_rate + output_tokens * output_rate
 
 
 def add_spans(trace: dict[str, Any], span: Any) -> None:

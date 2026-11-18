@@ -295,11 +295,17 @@ def test_a_judged_call_is_priced_when_the_operator_names_a_catalogue(endpoint, m
 
 def test_a_catalogue_the_operator_names_is_read_from_a_folder_and_not_downloaded(monkeypatch, tmp_path):
     # A provider of its own, so that no catalogue MLflow cached earlier in the process answers instead.
-    prices = {"priced-model": {"pricing": {"input_per_million_tokens": 2.0, "output_per_million_tokens": 4.0}}}
+    prices = {
+        "priced-model": {"pricing": {"input_per_million_tokens": 2.0, "output_per_million_tokens": 4.0}},
+        "partial-model": {"pricing": {"input_per_million_tokens": 2.0}},
+        "free-model": {"pricing": {"input_per_million_tokens": 0.0, "output_per_million_tokens": 0.0}},
+    }
     (tmp_path / "fixture-judge-provider.json").write_text(json.dumps({"schema_version": "1", "models": prices}))
     monkeypatch.setenv("MLFLOW_MODEL_CATALOG_URI", tmp_path.as_uri())  # a folder, not a download
     price = _judge_transport._price("fixture-judge-provider:/priced-model", 10, 5)
     assert price == pytest.approx(10 * 2.0 / 1_000_000 + 5 * 4.0 / 1_000_000)
+    assert _judge_transport._price("fixture-judge-provider:/partial-model", 10, 5) is None
+    assert _judge_transport._price("fixture-judge-provider:/free-model", 10, 5) == 0
 
 
 def test_a_judge_that_needs_the_expected_response_fails_without_one(endpoint):

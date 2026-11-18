@@ -472,6 +472,8 @@ def _run_version_2(
 
 
 def _print_run(run: Any) -> None:
+    from martian.redteam.model import budget_usage_error
+
     counts = run.counts
     table = Table(title=f"Martian red team run {run.id}")
     for column in ("Attempts", "Vulnerable", "Held", "Undetermined", "Stopped", "Errors", "Confirmed", "Suspected"):
@@ -497,7 +499,9 @@ def _print_run(run: Any) -> None:
             f"Attacker refused or left empty {counts.refusals} of {counts.generations} generations "
             f"({counts.refusals / counts.generations:.0%})."
         )
-    if run.budget.get("stopped_by"):
+    if budget_error := budget_usage_error(run.budget):
+        console.print(budget_error, markup=False)
+    elif run.budget.get("stopped_by"):
         console.print(f"Stopped by the budget: {run.budget['stopped_by']} ran out.")
 
 

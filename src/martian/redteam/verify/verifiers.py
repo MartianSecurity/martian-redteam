@@ -17,9 +17,10 @@ only a Martian server provides. A server registers its own with :meth:`Verifiers
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from martian.redteam.model import Check, CheckKind, CheckResult, EvidenceLevel, Probe, ToolCall
 from martian.redteam.verify.rules import (
@@ -28,6 +29,7 @@ from martian.redteam.verify.rules import (
     text_check,
     tool_call_check,
 )
+from martian_redteam.types import ModelUsage
 
 RULE = "rule"
 """The source of a result decided by code."""
@@ -61,6 +63,28 @@ class Meter(Protocol):
     def reserve(self, kind: Any) -> None: ...
 
     def record(self, usage: Any) -> None: ...
+
+
+@asynccontextmanager
+async def meter_model_call(
+    meter: Meter | None, kind: Literal["attacker", "judge"]
+) -> AsyncIterator[Callable[[ModelUsage | None], None]]:
+    """Reserve a model call and settle it once, including cancellation or a provider error."""
+    slot = getattr(meter, "model_slot", nullcontext)
+    async with slot():
+        if meter is not None:
+            meter.reserve(kind)
+        usage: ModelUsage | None = None
+
+        def reported(value: ModelUsage | None) -> None:
+            nonlocal usage
+            usage = value
+
+        try:
+            yield reported
+        finally:
+            if meter is not None:
+                meter.record(usage)
 
 
 class VerifierFailed(Exception):

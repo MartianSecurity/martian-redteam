@@ -312,7 +312,25 @@ A run in an `environment` takes no `memory`.
 | `attempts_per_probe` | Attacks per vulnerability type and attack method. Default 1 |
 | `max_concurrent` | Probes at the same time. Default 2 |
 
-A run stops at the first limit it reaches and its report says which. Every call is counted before it is made, so a run never makes more target or model calls than `target_queries` and `model_calls` allow. Tokens and cost are known only after a call returns, so the last model call may cross `tokens` or `cost_usd`, and none is made after it. An attempt the budget stopped before it was decided is reported `stopped`, never as held, and the run's state is `stopped`. Each attempt records what it spent, and `redteam-run.json` gives the run's and each probe's totals.
+Every call is counted before dispatch against `target_queries` or `model_calls`. With a `tokens` or
+`cost_usd` limit, the SDK admits one model call at a time and checks the reported spend before
+admitting the next. The last model call may cross the limit. When a call's required usage is
+missing, including a timeout or cancellation whose usage could not be read, the budget is
+unverifiable. The run stops admitting calls and the gate fails with
+`budget_usage_unavailable`, even if all checks passed or the gate allows undetermined attempts.
+A measured zero is valid. Missing price only stops a run that sets a dollar cap, and missing
+tokens only stop a run that sets a token cap. With a spend cap, the CLI and local UI disable
+local model retries after transport errors and throttling. A request failure with unreported
+usage reaches the ledger before another request is admitted. A run that configures local
+models and a dollar cap needs a model price catalogue (`MLFLOW_MODEL_CATALOG_URI`) before
+it can start.
+
+An attempt the budget stopped before it was decided is reported `stopped`. The run's budget stats
+and [reports](redteam-reports.md#what-attacked) keep recorded spend and missing usage separately.
+Resume restores cumulative spend, including for failed and stopped attempts that will be retried.
+A checkpoint left running after process interruption may omit calls. A spend-capped resume stops
+when historical usage cannot be verified, including older run records with model calls and no
+usage completeness data.
 
 ## How a run works
 
@@ -351,7 +369,7 @@ It prints each case and exits 1, naming the cases, when one does not find its pl
 
 ## Gate
 
-The gate decides the exit code: 0 when nothing fails it, 1 when something does, 2 when the run could not start. A warning is printed and kept in `redteam-report.json` under `gate.warnings` ([reports](redteam-reports.md)), and never changes the exit code.
+The gate decides the exit code: 0 when nothing fails it, 1 when something does, 2 when the run could not start. A warning is printed and kept in `redteam-report.json` under `gate.warnings` ([reports](redteam-reports.md)), and never changes the exit code. A configured [budget](#budget) with unverifiable usage always fails the gate.
 
 | Field | Meaning |
 | --- | --- |
@@ -371,7 +389,7 @@ A run whose results are only suspected passes with a warning under:
 gate: { fail_on: confirmed, warn_on: suspected }
 ```
 
-A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) gives the same result as before.
+A gate block of the first version (`fail_on: confirmed` or `suspected`, `severity`, `fail_on_infrastructure_error`, `ignore_target_errors` and `undetermined: fail` or `ignore`) continues to apply those settings to findings and attempts.
 
 ## Environments
 

@@ -324,8 +324,8 @@ def _price(model_uri: str, prompt_tokens: int, completion_tokens: int) -> float 
     a judged call that reaches only its endpoint cannot make it, and an installation with no route
     out would wait on it. So a call is priced only from a catalogue the operator named with
     ``MLFLOW_MODEL_CATALOG_URI`` (a mirror, or a ``file://`` folder), and is left unpriced without
-    one. Nothing reads the price; the tokens, the model version and the verdict do not depend on it.
-    The variable is read here, and the same setting prices the model calls a traced target makes.
+    one. An entry needs explicit input and output rates. The tokens, model version and judgment
+    are recorded independently of the price. The same setting prices a traced target's calls.
     """
     if not MLFLOW_MODEL_CATALOG_URI.get_raw():  # type: ignore[no-untyped-call]
         return None

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
-from martian.redteam.model import RedteamRun
+from martian.redteam.model import BUDGET_USAGE_UNAVAILABLE, RedteamRun, budget_usage_error
 from martian.redteam.report.standard import ProbeRow, RedteamReport, build_report
 
 
@@ -66,6 +66,12 @@ def render_junit(run: RedteamRun, report: RedteamReport | None = None) -> str:
             suite.set(key, str(value))
             totals[key] += value
         suite.set("skipped", "0")
+    if budget_error := budget_usage_error(run.budget):
+        suite = ET.SubElement(root, "testsuite", name="budget", tests="1", errors="1", failures="0", skipped="0")
+        case = ET.SubElement(suite, "testcase", classname="redteam.budget", name="verify model usage")
+        ET.SubElement(case, "error", type=BUDGET_USAGE_UNAVAILABLE, message=budget_error)
+        totals["tests"] += 1
+        totals["errors"] += 1
     for key, value in totals.items():
         root.set(key, str(value))
     ET.indent(root)

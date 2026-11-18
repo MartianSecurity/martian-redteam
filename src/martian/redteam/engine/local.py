@@ -150,12 +150,13 @@ class LocalService:
         max_retries: int = 2,
         rate_limit_wait_seconds: float = 60.0,
         redaction_policy: RedactionPolicy | None = None,
+        spend_capped: bool = False,
     ) -> None:
         self.attacker = ModelConfig(model=attacker) if isinstance(attacker, str) else attacker
         """``None`` when the run's methods need no attacker: a generation then fails, as the attacker's."""
         self.judge = ModelConfig(model=judge) if isinstance(judge, str) else judge
-        self.max_retries = max_retries
-        self.rate_limit_wait_seconds = rate_limit_wait_seconds
+        self.max_retries = 0 if spend_capped else max_retries
+        self.rate_limit_wait_seconds = 0 if spend_capped else rate_limit_wait_seconds
         self._redaction = redaction_policy or RedactionPolicy()
 
     @property
