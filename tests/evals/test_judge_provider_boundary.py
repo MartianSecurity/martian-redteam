@@ -241,13 +241,15 @@ def test_rate_limits_without_retry_after_back_off_within_the_budget(provider, no
 def test_connection_failures_are_retried(provider, no_backoff, monkeypatch):
     import socket
 
+    # Bound but not listening refuses connections, and holding it keeps a parallel worker's server
+    # from being given the same port.
     with socket.socket() as closed:
         closed.bind(("127.0.0.1", 0))
         port = closed.getsockname()[1]
-    monkeypatch.setenv("OPENAI_API_BASE", f"http://127.0.0.1:{port}/v1")
+        monkeypatch.setenv("OPENAI_API_BASE", f"http://127.0.0.1:{port}/v1")
 
-    with pytest.raises(GateFailure):
-        assert_checks(_evaluate(max_retries=2))
+        with pytest.raises(GateFailure):
+            assert_checks(_evaluate(max_retries=2))
     assert len(no_backoff) == 2
 
 

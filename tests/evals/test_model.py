@@ -9,6 +9,9 @@ from pydantic import ValidationError
 from martian.evals.model import (
     RESULTS_RECORD_FIELDS,
     Case,
+    CaseResult,
+    CheckVerdict,
+    Repeats,
     Review,
     RunSettings,
     Score,
@@ -93,6 +96,7 @@ def test_a_case_status_follows_the_sdk_verdict():
 @pytest.fixture
 def local_run(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_DISABLE_TELEMETRY", "true")
+    monkeypatch.setenv("MARTIAN_EVALS_HOME", str(tmp_path / "evals-home"))
     monkeypatch.setattr(mlflow.tracking.fluent, "_active_experiment_id", None)
     old_uri = mlflow.get_tracking_uri()
     STATE.reset()
@@ -134,6 +138,47 @@ def test_every_field_of_a_local_results_record_has_a_place_in_the_model(local_ru
         "code",
         "1",
     )
+
+
+def test_repeats_and_attempts_are_left_out_until_used():
+    # A suite and a case result without repeats are written as before the fields existed, so a
+    # stored suite keeps its digest and a stored result reads exactly as it did.
+    rubric = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", model="openai:/judge")
+    suite = Suite(id="s", name="s", scorers=[rubric], digest=DIGEST)
+    result = CaseResult(run_id="run", case_id="c", status="passed")
+    assert "repeats" not in suite.model_dump() and "attempts" not in result.model_dump(mode="json")
+    repeated = suite.model_copy(update={"repeats": Repeats(attempts=3)})
+    assert repeated.model_dump()["repeats"] == {"attempts": 3, "combine": "all", "checks": {}}
+    assert suite_digest(repeated) != suite_digest(suite)
+    with pytest.raises(ValidationError, match="repeats name scorers the suite does not have: no_leak"):
+        Suite(id="s", name="s", scorers=[rubric], repeats=Repeats(checks={"no_leak": "any"}), digest=DIGEST)
+
+
+def test_a_results_record_with_attempts_keeps_each_attempt():
+    check = {"passed": False, "rationale": "1 of 3 attempts passed", "error": None}
+    attempts = [
+        {"number": 1, "passed": True, "checks": {"no_leak": {"passed": True}}, "output": "No.", "error": None},
+        {"number": 2, "passed": False, "checks": {"no_leak": {"passed": False}}, "output": "piano", "error": None},
+        {
+            "number": 3,
+            "passed": None,
+            "checks": {"no_leak": {"passed": None, "error": "x"}},
+            "output": None,
+            "error": "the target call failed",
+        },
+    ]
+    record = {"id": "a", "passed": False, "checks": {"no_leak": check}, "output": "piano", "attempts": attempts}
+    result, (score,) = from_results_record(record, run_id="run", position=0)
+    assert (result.status, score.passed) == ("failed", False)
+    assert [(a.number, a.status, a.output, a.error) for a in result.attempts] == [
+        (1, "passed", "No.", ""),
+        (2, "failed", "piano", ""),
+        (3, "error", None, "the target call failed"),
+    ]
+    assert result.attempts[2].checks["no_leak"] == CheckVerdict(passed=None, error="x")
+    assert CaseResult.model_validate(result.model_dump(mode="json")) == result
+    with pytest.raises(ValueError, match="attempt fields the model does not map: latency"):
+        from_results_record({**record, "attempts": [{**attempts[0], "latency": 3}]}, run_id="run", position=0)
 
 
 def test_a_results_record_with_an_unmapped_field_is_refused():

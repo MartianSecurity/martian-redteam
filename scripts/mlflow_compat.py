@@ -27,18 +27,24 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# Every test module that runs MLflow itself: the store binding, the judge transport and the judges
-# built on it, the private-import guard, and the pytest kit and suite runner end to end.
+# Every test module that runs MLflow itself: the store binding and its errors, the judge transport
+# and the judges built on it, the private-import guard, the pytest kit and suite runner end to end,
+# the copy of an MLflow tracking store that the release under test writes, and the setting that
+# turns MLflow's telemetry off.
 SUITE = (
     "tests/evals/test_mlflow_compat.py",
     "tests/evals/test_mlflow_private.py",
     "tests/evals/test_store_mlflow.py",
+    "tests/evals/test_mlflow_import.py",
+    "tests/evals/test_store_errors.py",
     "tests/evals/test_judge_provider_boundary.py",
     "tests/evals/test_response_guidelines.py",
     "tests/evals/test_response_conditions.py",
     "tests/evals/test_response_rubric.py",
+    "tests/evals/test_grounding_judges.py",
     "tests/evals/test_plugin.py",
     "tests/evals/test_runner.py",
+    "tests/evals/test_no_outbound.py",
 )
 
 

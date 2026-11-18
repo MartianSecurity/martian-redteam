@@ -1,17 +1,21 @@
 """Scoring a finished run, and Monitoring: a port of the scoring routes of the server's
 ``app/api/evals_workbench.py`` and ``GET /monitoring`` and ``scoring_config`` of
-``app/api/evals_quality.py`` (MorningHQ/MartianBackend).
+``app/api/evals_quality.py`` (MartianSecurity/MartianBackend).
 
 A scoring request admits a ``queued`` scoring job and submits it to the worker, which runs the code
 scorers and, through its judge, the model judges. The request calls no model.
 
 - The job's id is derived from ``request_id``; the same request again returns the same job.
 - The scorers are the console's built-in scorers by name, registered judges pinned by name and
-  version, or a saved suite version's scorers and policies.
+  version, deterministic checks with their options (``checks``, MartianSecurity/martian-notes#334), or a saved suite
+  version's scorers, checks and policies. A check calls no model.
 - Judge scorers need a worker with a judge (``Worker.judges``), as the server needs a configured
   judge.
-- One active scoring job per run. The server holds one per organisation, to bound model use; that
-  bound belongs to the worker that runs the jobs.
+- Each judge scorer is pinned to its model when the job is admitted: the judge's own, or the
+  default judge model when it names none. Changing the default later does not change the job.
+- One active scoring job per run, and at most the edition's ``concurrent_scoring_jobs`` queued or
+  running in the organisation at once, which bounds its model use as the server's one per
+  organisation does (:mod:`martian.evals.server.admission`).
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -23,11 +27,17 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.model import Policy, Run, ScorerVersion, ScoringJob
+from martian.evals.outbox import save_score
 from martian.evals.records import RecordStore
+from martian.evals.server.admission import ACTIVE, ensure_scoring_place
 from martian.evals.server.dependencies import (
+    EntitlementsDep,
+    JudgeSettingsDep,
+    OptionalWorkerDep,
     PrincipalDep,
     RecordsDep,
     StoreDep,
@@ -49,14 +59,16 @@ from martian.evals.server.projection import (
 )
 from martian.evals.server.quality import definition_digest, scorecard
 from martian.evals.server.runs import find_run, project_runs, run_results, writable_key
-from martian.evals.server.write_schemas import ScoreRequest
+from martian.evals.server.write_schemas import ScoreRequest, SuiteRequest
 from martian.evals.store import EvalStore, StoreError
-from martian.evals.worker import Work, Worker
+
+# `execute` as a module: the worker package imports these routes while it is importing it.
+from martian.evals.worker import Work, execute
+from martian.evals.worker.checks import is_check
 from martian.evals.worker.scorers import BUILTIN_SCORERS, CODE_SCORERS, JUDGE_SCORERS, builtin_scorer
 
 router = APIRouter(prefix="/v1/evals", tags=["evals"])
 
-ACTIVE = ("queued", "running")
 LABELS = {
     "exact_match": "Exact match",
     "contains_expected": "Contains expected text",
@@ -76,11 +88,6 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _worker(request: Request) -> Worker | None:
-    worker: Worker | None = request.app.state.martian_evals_worker
-    return worker
-
-
 async def find_suite_version(records: RecordStore, principal: Principal, version_id: uuid.UUID) -> Any:
     """The saved suite version with this API id, or ``None``."""
     for latest in await records.list_suites(principal, DEFAULT_PROJECT):
@@ -88,6 +95,14 @@ async def find_suite_version(records: RecordStore, principal: Principal, version
             if suite_version_id(latest.id, version) == version_id:
                 return await records.get_suite(principal, DEFAULT_PROJECT, latest.id, version=version)
     return None
+
+
+def requested_checks(body: ScoreRequest | SuiteRequest) -> list[ScorerVersion]:
+    """The deterministic checks a request names, as the scorers a job runs: each is what loading the same
+    entry of a suite file makes (:func:`martian.evals.check_options.check_scorer`)."""
+    from martian.evals.check_options import check_scorer
+
+    return [check_scorer(check.type, check.name, check.options) for check in body.checks]
 
 
 async def _pinned_judges(
@@ -103,10 +118,42 @@ async def _pinned_judges(
     return pinned
 
 
+async def with_models(
+    settings: JudgeSettings | None, principal: Principal, scorers: list[ScorerVersion]
+) -> list[ScorerVersion]:
+    """The scorers with each judge that names no model pinned to the default judge model. With no
+    default either, the judge stays without one, and the worker's judge uses its own. A judge
+    graded by a panel names its models in the panel, so the default never applies to it."""
+
+    def unpinned(scorer: ScorerVersion) -> bool:
+        return scorer.kind == "llm_judge" and scorer.model is None and not scorer.panel
+
+    if not any(unpinned(s) for s in scorers) or settings is None:
+        return scorers
+    default = await settings.default_model(principal)
+    return [
+        s.model_copy(update={"model": default.model, "endpoint": default.endpoint}) if unpinned(s) else s
+        for s in scorers
+    ]
+
+
 async def scoring_plan(
+    store: EvalStore,
+    records: RecordStore,
+    principal: Principal,
+    run: Run,
+    body: ScoreRequest,
+    settings: JudgeSettings | None = None,
+) -> tuple[list[ScorerVersion], list[Policy], str | None, int | None]:
+    """The scorers, policies and suite version a scoring request asks for, each judge pinned to the
+    model it will run on."""
+    scorers, policies, suite_id, suite_version = await _planned(store, records, principal, run, body)
+    return await with_models(settings, principal, scorers), policies, suite_id, suite_version
+
+
+async def _planned(
     store: EvalStore, records: RecordStore, principal: Principal, run: Run, body: ScoreRequest
 ) -> tuple[list[ScorerVersion], list[Policy], str | None, int | None]:
-    """The scorers, policies and suite version a scoring request asks for."""
     if body.suite_version_id is not None:
         if body.judges:
             raise HTTPException(422, "This suite pins its own criteria; apply custom judges as a separate scoring job")
@@ -114,17 +161,32 @@ async def scoring_plan(
         if suite is None:
             raise HTTPException(404, "Not found")
         guidelines = next((str(s.criteria.get("guidelines", "")) for s in suite.scorers if s.name == "policy"), "")
-        if sorted(body.scorers) != sorted(s.name for s in suite.scorers) or body.guidelines != guidelines:
+        kept = [s for s in suite.scorers if is_check(s)]
+        if (
+            sorted(body.scorers) != sorted(s.name for s in suite.scorers if not is_check(s))
+            or body.guidelines != guidelines
+            or sorted(requested_checks(body), key=lambda s: s.name) != sorted(kept, key=lambda s: s.name)
+        ):
             raise HTTPException(422, "Scoring request differs from its pinned suite version")
         return list(suite.scorers), list(suite.policies), suite.id, suite.version
     scorers = [builtin_scorer(name, guidelines=body.guidelines) for name in sorted(body.scorers)]
     scorers += await _pinned_judges(store, principal, run.project_id, body)
+    scorers += requested_checks(body)
     return sorted(scorers, key=lambda s: s.name), [], None, None
 
 
+@router.get("/checks", response_model=None)
+async def check_catalogue(principal: PrincipalDep) -> dict[str, Any]:
+    """The deterministic checks a scoring request or a saved suite may name, each with its options."""
+    from martian.evals.check_options import CATALOGUE
+
+    return {"items": CATALOGUE}
+
+
 @router.get("/scorers", response_model=None)
-async def scorers(request: Request, principal: PrincipalDep) -> list[dict[str, Any]]:
-    worker = _worker(request)
+async def scorers(principal: PrincipalDep, worker: OptionalWorkerDep) -> list[dict[str, Any]]:
+    # The worker through its dependency, as every route reads it, so an edition that binds the
+    # dependency (the server mounts the core on its own application) is served the same.
     judging = worker is not None and worker.judges
     return [
         {
@@ -161,12 +223,14 @@ async def score(
     run_id: uuid.UUID,
     body: ScoreRequest,
     principal: PrincipalDep,
+    entitlements: EntitlementsDep,
     store: StoreDep,
     records: RecordsDep,
     worker: WorkerDep,
+    settings: JudgeSettingsDep,
 ) -> dict[str, Any]:
     run = await find_run(store, records, principal, run_id)
-    scorers, policies, suite_id, suite_version = await scoring_plan(store, records, principal, run, body)
+    scorers, policies, suite_id, suite_version = await scoring_plan(store, records, principal, run, body, settings)
     job_id = str(derived_id("scoring-job", str(body.request_id)))
     if existing := await _job(records, principal, run, job_id):
         if not _same_job(existing, run, scorers, policies, (suite_id, suite_version), principal):
@@ -179,6 +243,7 @@ async def score(
         raise HTTPException(422, "Model judges require a judge configured for this installation's worker")
     if any(j.state in ACTIVE for j in await records.list_scoring_jobs(principal, run.project_id, run.id)):
         raise HTTPException(409, "A scoring job is already active for this run")
+    await ensure_scoring_place(store, records, principal, entitlements)
     job = await records.create_scoring_job(
         principal,
         run.project_id,
@@ -196,8 +261,10 @@ async def score(
     )
     if job.run_id != run.id:
         raise HTTPException(409, "request_id belongs to a different scoring request")
-    await worker.submit(
-        Work(kind="scoring", principal=principal, project_id=run.project_id, run_id=run.id, job_id=job.id)
+    await execute.submit_or_fail(
+        worker,
+        records,
+        Work(kind="scoring", principal=principal, project_id=run.project_id, run_id=run.id, job_id=job.id),
     )
     return public_job(job)
 
@@ -252,11 +319,11 @@ async def sync(
     )
     if found is None:
         raise HTTPException(404, "Not found")
+    state = "unavailable"
     if found.store.assessment_id is None and found.value is not None and found.trace_id:
-        logged = await store.log_score(principal, run.project_id, found.trace_id, found)
-        found = found.model_copy(update={"store": logged.store})
-        await records.put_scores(principal, run.project_id, [found])
-    return {"id": assessment_id, "telemetry_state": "persisted" if found.store.assessment_id else "unavailable"}
+        found, delivery = await save_score(store, records, principal, run.project_id, found)
+        state = "pending" if delivery is not None and delivery.state == "pending" else state
+    return {"id": assessment_id, "telemetry_state": "persisted" if found.store.assessment_id else state}
 
 
 @router.get("/monitoring", response_model=None, dependencies=[Depends(require_entitlement("monitoring"))])
@@ -311,4 +378,4 @@ async def monitoring(
     }
 
 
-__all__ = ["find_suite_version", "router", "scoring_plan"]
+__all__ = ["find_suite_version", "requested_checks", "router", "scoring_plan", "with_models"]

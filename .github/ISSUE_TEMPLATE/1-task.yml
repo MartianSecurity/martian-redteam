@@ -1,7 +1,7 @@
 name: Task
 description: A specific piece of work on the Martian Security Board.
 type: Task
-projects: ["MorningHQ/2"]
+projects: ["MartianSecurity/2"]
 body:
   - type: markdown
     attributes:

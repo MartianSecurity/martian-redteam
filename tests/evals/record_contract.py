@@ -19,9 +19,31 @@ from martian.evals.model import (
     ScorerVersion,
     ScoringJob,
     Suite,
+    Target,
     digest,
 )
-from martian.evals.records import EventsLost, RecordStore, SavedView
+from martian.evals.outbox import queue_item_delivery, score_delivery
+from martian.evals.records import (
+    Alert,
+    BlindQueue,
+    CalibrationRecheck,
+    EventsLost,
+    JudgeCalibration,
+    Monitor,
+    MonitoredTrace,
+    MonitorProgress,
+    MonitorScores,
+    RecordStore,
+    SavedView,
+    Schedule,
+    ScheduledRun,
+    ScheduleGates,
+    ScheduleProgress,
+    SuiteAudit,
+    Threshold,
+    ThresholdStatus,
+    WebhookChannel,
+)
 from martian.evals.server.principal import SINGLE_USER, organisation_principal
 from martian.evals.store import StoreError
 
@@ -29,6 +51,41 @@ ORG_A = organisation_principal("user-a", "org-a", frozenset({"admin"}))
 ORG_B = organisation_principal("user-b", "org-b", frozenset({"admin"}))
 T0 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 JUDGE = ScorerVersion(name="rubric_judge", kind="llm_judge", type="rubric", model="openai:/judge")
+
+
+def monitor(monitor_id: str, *, name: str = "Safety") -> Monitor:
+    return Monitor(id=monitor_id, project_id="p1", name=name, scorers=[JUDGE], sampling_rate=0.5)
+
+
+def threshold(threshold_id: str, *, name: str = "Safety rate", webhook: bool = True) -> Threshold:
+    return Threshold(
+        id=threshold_id,
+        project_id="p1",
+        name=name,
+        source=MonitorScores(monitor_id="m1", scorer="rubric_judge"),
+        measure="pass_rate",
+        direction="at_least",
+        value=0.9,
+        window_seconds=3600,
+        min_count=20,
+        webhook=WebhookChannel(url="https://alerts.example/hook") if webhook else None,
+    )
+
+
+def schedule(schedule_id: str, *, name: str = "Nightly") -> Schedule:
+    return Schedule(
+        id=schedule_id,
+        project_id="p1",
+        name=name,
+        cron="0 2 * * *",
+        suite_id="s1",
+        suite_version=1,
+        scorers=[JUDGE],
+        target=Target(kind="agent", agent_id="agent-1"),
+        dataset_name="faq",
+        dataset_id="d1",
+        max_cases=10,
+    )
 
 
 def run(run_id: str, *, minutes: int = 0, state: str = "running") -> Run:
@@ -62,6 +119,16 @@ class RecordContract:
         assert [r.id for r in (await records.list_runs(ORG_A, "p1", states=["running"])).items] == ["r3", "r1"]
         assert await records.get_run(ORG_A, "p1", "r9") is None
 
+    # isdigit() is true of ², which int() refuses, and of ١, which int() reads as 1; 19 nines is
+    # past the 64-bit OFFSET SQL takes.
+    @pytest.mark.parametrize("cursor", ["²", "١", "page-2", pytest.param("9" * 19, id="19-nines")])
+    async def test_a_run_cursor_the_store_did_not_return_is_refused(self, records: RecordStore, cursor: str) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        with pytest.raises(StoreError) as caught:
+            await records.list_runs(ORG_A, "p1", cursor=cursor)
+        assert caught.value.kind == "invalid"
+        assert caught.value.detail == "cursor is not a next_cursor this store returned"
+
     async def test_a_run_moves_on_only_from_the_state_it_was_expected_in(self, records: RecordStore) -> None:
         started = await records.create_run(ORG_A, run("r1"))
         done = started.model_copy(update={"state": "completed", "counts": Counts(cases=2, passed=2)})
@@ -89,6 +156,49 @@ class RecordContract:
             "not_found", records.put_results(ORG_A, "p1", [CaseResult(run_id="r9", case_id="c", status="passed")])
         )
         await refused("not_found", records.list_results(ORG_A, "p1", "r9"))
+
+    async def test_a_case_result_and_its_scores_are_stored_together_or_not_at_all(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        result = CaseResult(run_id="r1", case_id="c1", status="passed", output="ok")
+        own = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+        listener = records.events.subscribe(ORG_A)
+        try:
+            await records.put_results(ORG_A, "p1", [result], scores=[own])
+            got = [await listener.next(timeout=5), await listener.next(timeout=5)]
+            assert [(e.kind, e.id) for e in got] == [("case_results", "r1"), ("scores", "r1")]
+        finally:
+            listener.close()
+        assert [r.case_id for r in (await records.list_results(ORG_A, "p1", "r1")).items] == ["c1"]
+        assert [s.scorer for s in await records.list_scores(ORG_A, "p1", "r1", case_id="c1")] == ["exact_match"]
+        # A score the store refuses leaves the case without its result too.
+        later = CaseResult(run_id="r1", case_id="c2", position=1, status="passed")
+        await refused(
+            "invalid",
+            records.put_results(ORG_A, "p1", [later], scores=[Score(scorer="s", source="code", trace_id="t")]),
+        )
+        assert [r.case_id for r in (await records.list_results(ORG_A, "p1", "r1")).items] == ["c1"]
+
+    async def test_active_runs_and_scoring_jobs_are_counted_across_projects_and_only_for_the_organisation(
+        self, records: RecordStore
+    ) -> None:
+        for run_id, state in [("r1", "queued"), ("r2", "running"), ("r3", "completed"), ("r4", "failed")]:
+            await records.create_run(ORG_A, run(run_id, state=state))
+        other_project = run("r5", state="running").model_copy(update={"project_id": "p2"})
+        await records.create_run(ORG_A, other_project)
+        await records.create_run(ORG_B, run("b1", state="running"))
+        assert await records.count_active_runs(ORG_A) == 3
+        assert await records.count_active_runs(ORG_A, up_to=2) == 2
+        assert await records.count_active_runs(ORG_B) == 1
+        for job_id, state in [("j1", "queued"), ("j2", "running"), ("j3", "completed"), ("j4", "failed")]:
+            await records.create_scoring_job(
+                ORG_A, "p1", ScoringJob(id=job_id, run_id="r3", scorers=[JUDGE], state=state)
+            )
+        # A job of a run that has not completed is not one a worker can take.
+        await records.create_scoring_job(ORG_A, "p1", ScoringJob(id="j5", run_id="r1", scorers=[JUDGE], state="queued"))
+        await records.create_scoring_job(ORG_B, "p1", ScoringJob(id="bj", run_id="b1", scorers=[JUDGE], state="queued"))
+        assert await records.count_active_scoring_jobs(ORG_A) == 2
+        assert await records.count_active_scoring_jobs(ORG_A, up_to=1) == 1
+        assert await records.count_active_scoring_jobs(ORG_B) == 0
 
     async def test_a_scoring_job_adds_scores_beside_the_runs_own(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
@@ -122,6 +232,33 @@ class RecordContract:
             "not_found",
             records.create_scoring_job(ORG_A, "p1", ScoringJob(id="j2", run_id="r9", scorers=[JUDGE], state="queued")),
         )
+
+    async def test_a_persons_score_sits_beside_a_check_score_of_the_same_name(self, records: RecordStore) -> None:
+        # A review question named like a check of the run (MartianSecurity/martian-notes#345).
+        await records.create_run(ORG_A, run("r1"))
+        judged = Score(run_id="r1", case_id="c1", scorer="politeness", source="llm_judge", value=True, passed=True)
+        checked = Score(run_id="r1", case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+        await records.put_scores(ORG_A, "p1", [judged, checked])
+        answers = [
+            Score(run_id="r1", case_id="c1", scorer=name, source="human", source_id="user-a", value=False, passed=False)
+            for name in ("politeness", "exact_match")
+        ]
+        await records.put_scores(ORG_A, "p1", answers)
+        found = await records.list_scores(ORG_A, "p1", "r1", case_id="c1")
+        assert [(s.scorer, s.source, s.value) for s in found] == [
+            ("exact_match", "code", True),
+            ("exact_match", "human", False),
+            ("politeness", "human", False),
+            ("politeness", "llm_judge", True),
+        ]
+        # A newer answer replaces the person's score alone, and the judge's score the judge's.
+        await records.put_scores(ORG_A, "p1", [answers[0].model_copy(update={"value": True, "passed": True})])
+        await records.put_scores(ORG_A, "p1", [judged.model_copy(update={"rationale": "Kind."})])
+        found = await records.list_scores(ORG_A, "p1", "r1", case_id="c1")
+        assert [(s.source, s.value, s.rationale) for s in found if s.scorer == "politeness"] == [
+            ("human", True, ""),
+            ("llm_judge", True, "Kind."),
+        ]
 
     async def test_review_chains_never_fork(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
@@ -163,6 +300,31 @@ class RecordContract:
         assert await records.get_suite(ORG_A, "p1", "s9") is None
         await records.save_suite(ORG_A, "p1", suite("x", name="Another").model_copy(update={"id": "s0"}))
         assert [(s.id, s.version) for s in await records.list_suites(ORG_A, "p1")] == [("s0", 1), ("s1", 2)]
+
+    async def test_an_audit_is_kept_with_its_suite_version_and_replaced_by_the_next(self, records: RecordStore) -> None:
+        suite = Suite(id="s1", name="Support", scorers=[JUDGE], digest="b" * 64)
+        await records.save_suite(ORG_A, "p1", suite)
+
+        def audit(flagged: bool, version: int = 1) -> SuiteAudit:
+            return SuiteAudit(
+                suite_id="s1",
+                suite_version=version,
+                suite_digest="b" * 64,
+                dataset_name="faq",
+                dataset_digest="c" * 64,
+                flagged=flagged,
+                result={"flagged": flagged, "findings": []},
+            )
+
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) is None
+        first = await records.put_suite_audit(ORG_A, "p1", audit(True))
+        assert (first.created_by, first.flagged) == ("user-a", True) and first.created_at is not None
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) == first
+        again = await records.put_suite_audit(ORG_A, "p1", audit(False))
+        assert await records.get_suite_audit(ORG_A, "p1", "s1", 1) == again and not again.flagged
+        await refused("not_found", records.put_suite_audit(ORG_A, "p1", audit(True, version=2)))
+        assert await records.get_suite_audit(ORG_B, "p1", "s1", 1) is None
+        await refused("not_found", records.put_suite_audit(ORG_B, "p1", audit(True)))
 
     async def test_a_draft_takes_edits_in_turn_and_none_after_publishing(self, records: RecordStore) -> None:
         draft = await records.create_draft(ORG_A, "p1", DatasetDraft(id="d1", project_id="p1", name="Refunds"))
@@ -229,6 +391,84 @@ class RecordContract:
         assert await records.get_view(ORG_A, "p1", "v1") is None
         await refused("not_found", records.delete_view(ORG_A, "p1", "v1", expected_revision=2))
 
+    async def test_a_blind_queue_is_kept_once_and_listed_by_its_run(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("r1"))
+        await records.create_run(ORG_A, run("r2"))
+        first = await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="user-a"))
+        assert first.created_at is not None
+        # Marking the same queue again returns it as it was first kept.
+        assert (
+            await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q1", run_id="r1", created_by="someone")) == first
+        )
+        await records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q2", run_id="r2"))
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1")] == ["q1", "q2"]
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1", run_id="r2")] == ["q2"]
+        # A queue of a run the project does not have, of another project, or of another space.
+        await refused("not_found", records.add_blind_queue(ORG_A, "p1", BlindQueue(id="q3", run_id="nope")))
+        assert await records.list_blind_queues(ORG_A, "p2") == []
+        assert await records.list_blind_queues(ORG_B, "p1") == []
+
+    async def test_every_calibration_is_kept_and_listed_newest_first(self, records: RecordStore) -> None:
+        def calibration(id: str, judge: str, minutes: int) -> JudgeCalibration:
+            return JudgeCalibration(
+                id=id,
+                project_id="p1",
+                judge=judge,
+                version="2",
+                model="openai:/judge",
+                labelled=30,
+                report={"status": "measured", "agreement": 0.9},
+                created_at=T0 + timedelta(minutes=minutes),
+            )
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 0))
+            assert await records.save_calibration(ORG_A, "p1", calibration("k1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("calibration", "k1")
+        finally:
+            listener.close()
+        await records.save_calibration(ORG_A, "p1", calibration("k2", "tone", 1))
+        await records.save_calibration(ORG_A, "p1", calibration("k3", "brevity", 2))
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1")] == ["k3", "k2", "k1"]
+        assert [c.id for c in await records.list_calibrations(ORG_A, "p1", judge="tone")] == ["k2", "k1"]
+        assert await records.get_calibration(ORG_A, "p1", "k1") == first
+        assert first.report == {"status": "measured", "agreement": 0.9}
+        await refused("invalid", records.save_calibration(ORG_A, "p2", calibration("k4", "tone", 3)))
+        assert await records.list_calibrations(ORG_B, "p1") == []
+        assert await records.get_calibration(ORG_B, "p1", "k1") is None
+        assert await records.list_calibrations(ORG_A, "p2") == []
+
+    async def test_a_recheck_is_created_once_moved_on_from_the_state_it_was_in_and_listed(
+        self, records: RecordStore
+    ) -> None:
+        def recheck(id: str, judge: str, minutes: int) -> CalibrationRecheck:
+            return CalibrationRecheck(id=id, project_id="p1", judge=judge, version="2", calibration_id="k1",
+                                      scorer=JUDGE, definition="d", state="queued", total=30,
+                                      created_at=T0 + timedelta(minutes=minutes))  # fmt: skip
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            first = await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 0))
+            assert await records.create_recheck(ORG_A, "p1", recheck("q1", "tone", 9)) == first
+            heard = await listener.next(timeout=5)
+            assert (heard.kind, heard.id) == ("recheck", "q1")
+        finally:
+            listener.close()
+        running = await records.update_recheck(
+            ORG_A, "p1", first.model_copy(update={"state": "running"}), expected_state="queued"
+        )
+        assert (running.state, running.created_at) == ("running", first.created_at)
+        await refused("conflict", records.update_recheck(ORG_A, "p1", first, expected_state="queued"))
+        await refused("not_found", records.update_recheck(ORG_A, "p1", recheck("q9", "tone", 0)))
+        await records.create_recheck(ORG_A, "p1", recheck("q2", "brevity", 1))
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1")] == ["q2", "q1"]
+        assert [r.id for r in await records.list_rechecks(ORG_A, "p1", judge="tone")] == ["q1"]
+        assert await records.get_recheck(ORG_A, "p1", "q1") == running
+        await refused("invalid", records.create_recheck(ORG_A, "p2", recheck("q3", "tone", 2)))
+        assert await records.list_rechecks(ORG_B, "p1") == [] and await records.get_recheck(ORG_B, "p1", "q1") is None
+
     async def test_organisations_and_the_local_user_never_see_each_other(self, records: RecordStore) -> None:
         await records.create_run(ORG_A, run("r1"))
         await records.put_results(ORG_A, "p1", [CaseResult(run_id="r1", case_id="c1", status="passed")])
@@ -249,6 +489,348 @@ class RecordContract:
         await records.create_run(ORG_B, run("r1", state="queued"))
         assert (await records.get_run(ORG_A, "p1", "r1")).state == "running"
         assert (await records.list_results(ORG_A, "p1", "r1")).items[0].status == "passed"
+
+    async def test_a_monitor_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_monitor(ORG_A, "p1", monitor("m1", name="Other")) == made
+        await records.create_monitor(ORG_A, "p1", monitor("m0", name="A first"))
+        assert [m.id for m in await records.list_monitors(ORG_A, "p1")] == ["m0", "m1"]
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == MonitorProgress()
+        progress = MonitorProgress(watermark=T0, day=T0.date(), judge_tokens=12, scored=3)
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)
+        paused = await records.update_monitor(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_monitor(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.monitor_progress(ORG_A, "p1", "m1") == progress
+        assert await records.get_monitor(ORG_A, "p1", "m1") == paused
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.get_monitor(ORG_A, "p1", "m1") is None
+        assert await records.monitor_progress(ORG_A, "p1", "m1") is None
+        await records.set_monitor_progress(ORG_A, "p1", "m1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_monitor(ORG_A, "p1", "m1"))
+        await refused("not_found", records.update_monitor(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_monitor_takes_each_trace_once_and_only_while_active(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="first")  # its own
+        # A pass that stopped before storing its scores is taken over by the next.
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="second")
+        score = Score(trace_id="tr-1", scorer="safety", source="llm_judge", value=True, passed=True)
+        done = MonitoredTrace(monitor_id="m1", trace_id="tr-1", state="scored", pass_id="second", scores=[score])
+        await records.finish_monitored_trace(ORG_A, "p1", done)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-1", pass_id="third")
+        assert await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-2", pass_id="third")
+        page = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1)
+        assert [t.trace_id for t in page.items] == ["tr-2"] and page.next_cursor
+        # A cursor of other digits than 0-9, such as ``²``, which ``int()`` refuses, is no cursor.
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor="²")).items == page.items
+        rest = await records.list_monitored_traces(ORG_A, "p1", "m1", limit=1, cursor=page.next_cursor)
+        [scored] = rest.items
+        assert (scored.state, scored.scores, scored.created_at is not None) == ("scored", [score], True)
+        # Paused or gone, it takes nothing; another organisation's monitor of the same id is its own.
+        stored = await records.get_monitor(ORG_A, "p1", "m1")
+        assert stored is not None
+        await records.update_monitor(ORG_A, "p1", stored.model_copy(update={"state": "paused"}), expected_revision=1)
+        assert not await records.claim_monitored_trace(ORG_A, "p1", "m1", "tr-3", pass_id="third")
+        assert not await records.claim_monitored_trace(ORG_B, "p1", "m1", "tr-3", pass_id="third")
+        assert await records.get_monitor(ORG_B, "p1", "m1") is None
+        assert (await records.list_monitored_traces(ORG_B, "p1", "m1")).items == []
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert (await records.list_monitored_traces(ORG_A, "p1", "m1")).items == []
+
+    async def test_a_monitors_window_is_its_scored_traces_by_when_it_took_them(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        before = datetime.now(UTC)
+        for number in range(4):
+            trace_id = f"tr-{number}"
+            assert await records.claim_monitored_trace(ORG_A, "p1", "m1", trace_id, pass_id="p")
+            if number != 2:  # tr-2 is still being scored
+                score = Score(trace_id=trace_id, scorer="safety", source="llm_judge", value=number % 2 == 0)
+                await records.finish_monitored_trace(
+                    ORG_A,
+                    "p1",
+                    MonitoredTrace(monitor_id="m1", trace_id=trace_id, state="scored", pass_id="p", scores=[score]),
+                )
+            await asyncio.sleep(0.01)
+        after = datetime.now(UTC) + timedelta(seconds=1)
+        window = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=10)
+        assert [t.trace_id for t in window] == ["tr-3", "tr-1", "tr-0"]
+        newest = await records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=2)
+        assert [t.trace_id for t in newest] == ["tr-3", "tr-1"]
+        assert await records.scored_monitored_traces(ORG_A, "p1", "m1", since=after, until=after, limit=10) == []
+        assert await records.scored_monitored_traces(ORG_B, "p1", "m1", since=before, until=after, limit=10) == []
+        await refused("invalid", records.scored_monitored_traces(ORG_A, "p1", "m1", since=before, until=after, limit=0))
+
+    async def test_a_threshold_changes_state_once_and_keeps_its_secret_apart(self, records: RecordStore) -> None:
+        await records.create_monitor(ORG_A, "p1", monitor("m1"))
+        made = await records.create_threshold(ORG_A, "p1", threshold("t1"), webhook_secret="s3cret-s3cret-s3cret")
+        assert (made.created_by, made.created_at is not None) == ("user-a", True)
+        assert (
+            await records.create_threshold(ORG_A, "p1", threshold("t1", name="Other"), webhook_secret="x" * 16) == made
+        )
+        await records.create_threshold(ORG_A, "p1", threshold("t0", name="A first", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t0", "t1"]
+        on_m1 = await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m1")
+        assert [t.id for t in on_m1] == ["t0", "t1"]
+        assert await records.list_thresholds(ORG_A, "p1", source_kind="monitor", source_id="m2") == []
+        # The secret is kept beside the threshold, not in it, and only one method reads it back.
+        assert "s3cret" not in made.model_dump_json()
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
+        await refused(
+            "invalid", records.create_threshold(ORG_A, "p1", threshold("t2", webhook=False), webhook_secret="y" * 16)
+        )
+        assert await records.threshold_status(ORG_A, "p1", "t1") == ThresholdStatus()
+        assert [await records.threshold_signed(ORG_A, "p1", t) for t in ("t0", "t1")] == [False, True]
+        # A webhook an import wrote has no secret until it is given one, once (data export).
+        await records.create_threshold(ORG_A, "p1", threshold("t3", name="Imported"), webhook_secret=None)
+        assert not await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.set_threshold_secret(ORG_B, "p1", "t3", "o" * 16)
+        assert await records.set_threshold_secret(ORG_A, "p1", "t3", "n3w-s3cret-n3w-s3cret")
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t3", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t1", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "t0", "z" * 16)
+        assert not await records.set_threshold_secret(ORG_A, "p1", "gone", "z" * 16)
+        assert await records.threshold_secret(ORG_A, "p1", "t3") == "n3w-s3cret-n3w-s3cret"
+        assert await records.threshold_secret(ORG_A, "p1", "t1") == "s3cret-s3cret-s3cret"
+        assert await records.threshold_signed(ORG_A, "p1", "t3")
+        assert not await records.threshold_signed(ORG_B, "p1", "t3")
+        assert await records.threshold_secret(ORG_A, "p1", "t0") is None
+
+        # A change of state and its alerts are written together, once, conditioned on the sequence.
+        breached = ThresholdStatus(state="breached", sequence=1, since=T0)
+        alert = Alert(id="a1", threshold_id="t1", channel="webhook", event="breached", sequence=1, payload={"n": 1})
+        assert await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert not await records.set_threshold_status(ORG_A, "p1", "t1", breached, expected_sequence=0, alerts=[alert])
+        assert await records.threshold_status(ORG_A, "p1", "t1") == breached
+        [stored] = (await records.list_alerts(ORG_A, "p1", "t1")).items
+        assert (stored.id, stored.state, stored.created_at is not None) == ("a1", "pending", True)
+        assert (await records.list_alerts(ORG_A, "p1", "t1", cursor="²")).items == [stored]
+        assert stored.next_attempt_at is not None
+
+        # A due alert is taken by one delivery until it is held no longer, then recorded.
+        now = datetime.now(UTC) + timedelta(seconds=1)
+        hold = now + timedelta(minutes=2)
+        [taken] = await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold)
+        assert taken.next_attempt_at == hold
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=now, hold_until=hold) == []
+        assert await records.take_due_alerts(ORG_B, "p1", ["t1"], now=hold, hold_until=hold) == []
+        delivered = taken.model_copy(update={"state": "delivered", "attempts": 1, "next_attempt_at": None})
+        await records.finish_alert(ORG_A, "p1", delivered)
+        assert await records.take_due_alerts(ORG_A, "p1", ["t1"], now=hold, hold_until=hold) == []
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == [delivered]
+
+        # Another organisation sees none of it; deleting the threshold removes its alerts.
+        assert await records.get_threshold(ORG_B, "p1", "t1") is None
+        assert await records.threshold_secret(ORG_B, "p1", "t1") is None
+        assert not await records.set_threshold_status(ORG_B, "p1", "t1", breached, expected_sequence=1)
+        await records.delete_threshold(ORG_A, "p1", "t1")
+        assert await records.get_threshold(ORG_A, "p1", "t1") is None
+        assert (await records.list_alerts(ORG_A, "p1", "t1")).items == []
+        await refused("not_found", records.delete_threshold(ORG_A, "p1", "t1"))
+        # Deleting the monitor deletes the thresholds on its scores.
+        await records.delete_monitor(ORG_A, "p1", "m1")
+        assert await records.list_thresholds(ORG_A, "p1") == []
+
+    async def test_a_schedule_changes_in_turn_and_keeps_its_progress_apart(self, records: RecordStore) -> None:
+        made = await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        assert (made.revision, made.created_by, made.active_since) == (1, "user-a", made.created_at)
+        assert await records.create_schedule(ORG_A, "p1", schedule("sc1", name="Other")) == made
+        await records.create_schedule(ORG_A, "p1", schedule("sc0", name="A first"))
+        assert [s.id for s in await records.list_schedules(ORG_A, "p1")] == ["sc0", "sc1"]
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == ScheduleProgress()
+        progress = ScheduleProgress(next_slot=T0, last_slot=T0 - timedelta(days=1))
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)
+        paused = await records.update_schedule(
+            ORG_A, "p1", made.model_copy(update={"state": "paused"}), expected_revision=1
+        )
+        assert (paused.state, paused.revision, paused.created_at) == ("paused", 2, made.created_at)
+        await refused("conflict", records.update_schedule(ORG_A, "p1", made, expected_revision=1))
+        # The routes' changes and the worker's progress never overwrite each other.
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") == progress
+        assert await records.get_schedule(ORG_A, "p1", "sc1") == paused
+        assert await records.get_schedule(ORG_B, "p1", "sc1") is None
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert await records.get_schedule(ORG_A, "p1", "sc1") is None
+        assert await records.schedule_progress(ORG_A, "p1", "sc1") is None
+        await records.set_schedule_progress(ORG_A, "p1", "sc1", progress)  # gone: nothing happens
+        await refused("not_found", records.delete_schedule(ORG_A, "p1", "sc1"))
+        await refused("not_found", records.update_schedule(ORG_A, "p1", made, expected_revision=2))
+
+    async def test_a_schedule_records_each_slot_once_latest_first(self, records: RecordStore) -> None:
+        await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        first = ScheduledRun(schedule_id="sc1", slot=T0, state="admitted", run_id="r1", missed=2)
+        saved = await records.add_scheduled_run(ORG_A, "p1", first)
+        assert saved.created_at is not None and saved.missed == 2
+        # The same slot again keeps what was recorded first.
+        again = ScheduledRun(schedule_id="sc1", slot=T0, state="skipped", reason="An eval run is already in progress")
+        assert await records.add_scheduled_run(ORG_A, "p1", again) == saved
+        for day in (1, 2):
+            skipped = again.model_copy(update={"slot": T0 + timedelta(days=day)})
+            await records.add_scheduled_run(ORG_A, "p1", skipped)
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == saved
+        gated = await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0, "failed")
+        assert gated == saved.model_copy(update={"gate": "failed"})
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) == gated
+        saved = gated
+        assert await records.set_scheduled_run_gate(ORG_A, "p1", "sc1", T0 + timedelta(days=9), "passed") is None
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0 + timedelta(days=9)) is None
+        page = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2)
+        assert [e.slot for e in page.items] == [T0 + timedelta(days=2), T0 + timedelta(days=1)] and page.next_cursor
+        rest = await records.list_scheduled_runs(ORG_A, "p1", "sc1", limit=2, cursor=page.next_cursor)
+        assert rest.items == [saved] and rest.next_cursor is None
+        # Another organisation's schedule of the same id is its own; a deleted schedule takes no slot.
+        assert (await records.list_scheduled_runs(ORG_B, "p1", "sc1")).items == []
+        await refused("not_found", records.add_scheduled_run(ORG_B, "p1", first))
+        # Deleting it removes the thresholds on its gate results, and leaves those on other sources.
+        gates = threshold("t-gate", webhook=False).model_copy(update={"source": ScheduleGates(schedule_id="sc1")})
+        await records.create_threshold(ORG_A, "p1", gates, webhook_secret=None)
+        await records.create_threshold(ORG_A, "p1", threshold("t-monitor", webhook=False), webhook_secret=None)
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1", source_kind="gate", source_id="sc1")] == [
+            "t-gate"
+        ]
+        await records.delete_schedule(ORG_A, "p1", "sc1")
+        assert (await records.list_scheduled_runs(ORG_A, "p1", "sc1")).items == []
+        assert [t.id for t in await records.list_thresholds(ORG_A, "p1")] == ["t-monitor"]
+        await refused("not_found", records.add_scheduled_run(ORG_A, "p1", first))
+
+    async def test_a_finished_run_is_deleted_with_every_record_keyed_to_it(self, records: RecordStore) -> None:
+        await records.create_schedule(ORG_A, "p1", schedule("sc1"))
+        answers = {}
+        for day, run_id in enumerate(("r1", "r2")):
+            await records.create_run(ORG_A, run(run_id, minutes=day, state="completed"))
+            own = Score(run_id=run_id, case_id="c1", scorer="exact_match", source="code", value=True, passed=True)
+            await records.put_results(
+                ORG_A, "p1", [CaseResult(run_id=run_id, case_id="c1", status="passed", output="ok")], scores=[own]
+            )
+            job = ScoringJob(id=f"{run_id}-job", run_id=run_id, scorers=[JUDGE], state="completed")
+            await records.create_scoring_job(ORG_A, "p1", job)
+            judged = own.model_copy(update={"scorer": "rubric_judge", "source": "llm_judge", "scoring_job_id": job.id})
+            # A person's answer named like the check: a row of its own, keyed by its source.
+            answers[run_id] = own.model_copy(update={"source": "human", "trace_id": f"tr-{run_id}", "value": False})
+            await records.put_scores(ORG_A, "p1", [judged, answers[run_id]])
+            sources = [s.source for s in await records.list_scores(ORG_A, "p1", run_id) if s.scorer == "exact_match"]
+            assert sources == ["code", "human"]
+            first = Review(id=f"{run_id}-v1", run_id=run_id, case_id="c1", state="complete", value=True)
+            await records.add_review(ORG_A, "p1", first)
+            later = first.model_copy(update={"id": f"{run_id}-v2", "previous_id": first.id, "value": False})
+            await records.add_review(ORG_A, "p1", later)
+            await records.put_delivery(ORG_A, "p1", score_delivery("p1", answers[run_id]))
+            slot = ScheduledRun(schedule_id="sc1", slot=T0 + timedelta(days=day), state="admitted", run_id=run_id)
+            await records.add_scheduled_run(ORG_A, "p1", slot)
+            # A review queue with blind double review of the run: its blind mode is keyed to the run.
+            await records.add_blind_queue(ORG_A, "p1", BlindQueue(id=f"{run_id}-queue", run_id=run_id))
+
+        listener = records.events.subscribe(ORG_A)
+        try:
+            removed = await records.delete_run(ORG_A, "p1", "r1")
+            assert ("run", "r1") in {(e.kind, e.id) for e in [await listener.next(timeout=5)]}
+        finally:
+            listener.close()
+        assert removed == {
+            "martian_case_results": 1,
+            "martian_scores": 3,
+            "martian_scoring_jobs": 1,
+            "martian_reviews": 2,
+            "martian_work_queue": 0,
+            "martian_deliveries": 1,
+            "martian_schedule_runs": 1,
+            "martian_blind_queues": 1,
+            "martian_runs": 1,
+        }
+        assert await records.get_run(ORG_A, "p1", "r1") is None
+        assert await records.list_blind_queues(ORG_A, "p1", run_id="r1") == []
+        await refused("not_found", records.list_results(ORG_A, "p1", "r1"))
+        await refused("not_found", records.list_scores(ORG_A, "p1", "r1"))
+        await refused("not_found", records.list_scoring_jobs(ORG_A, "p1", "r1"))
+        await refused("not_found", records.list_reviews(ORG_A, "p1", "r1"))
+        assert await records.get_delivery(ORG_A, "p1", score_delivery("p1", answers["r1"]).id) is None
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0) is None
+        # Another run keeps all of its own, and the schedule keeps its other slots.
+        assert [r.id for r in (await records.list_runs(ORG_A, "p1")).items] == ["r2"]
+        assert len((await records.list_results(ORG_A, "p1", "r2")).items) == 1
+        assert len(await records.list_scores(ORG_A, "p1", "r2")) == 3
+        assert [j.id for j in await records.list_scoring_jobs(ORG_A, "p1", "r2")] == ["r2-job"]
+        assert len(await records.list_reviews(ORG_A, "p1", "r2", current_only=False)) == 2
+        assert await records.get_delivery(ORG_A, "p1", score_delivery("p1", answers["r2"]).id) is not None
+        assert await records.get_scheduled_run(ORG_A, "p1", "sc1", T0 + timedelta(days=1)) is not None
+        assert [q.id for q in await records.list_blind_queues(ORG_A, "p1")] == ["r2-queue"]
+        assert await records.get_schedule(ORG_A, "p1", "sc1") is not None
+        # Gone is not found, and another organisation reaches none of it.
+        await refused("not_found", records.delete_run(ORG_A, "p1", "r1"))
+        await refused("not_found", records.delete_run(ORG_B, "p1", "r2"))
+        assert await records.get_run(ORG_A, "p1", "r2") is not None
+
+    async def test_a_run_still_in_progress_is_not_deleted(self, records: RecordStore) -> None:
+        await records.create_run(ORG_A, run("queued", state="queued"))
+        await records.create_run(ORG_A, run("running", state="running"))
+        await records.put_results(ORG_A, "p1", [CaseResult(run_id="running", case_id="c1", status="passed")])
+        for run_id in ("queued", "running"):
+            await refused("conflict", records.delete_run(ORG_A, "p1", run_id))
+            assert await records.get_run(ORG_A, "p1", run_id) is not None
+        assert len((await records.list_results(ORG_A, "p1", "running")).items) == 1
+        # A finished run is still in progress while one of its scoring jobs is queued or running.
+        await records.create_run(ORG_A, run("scored", state="completed"))
+        for state in ("queued", "running"):
+            job = ScoringJob(id=f"job-{state}", run_id="scored", scorers=[JUDGE], state=state)
+            await records.create_scoring_job(ORG_A, "p1", job)
+            await refused("conflict", records.delete_run(ORG_A, "p1", "scored"))
+            assert [j.id for j in await records.list_scoring_jobs(ORG_A, "p1", "scored")][-1] == job.id
+            cancelled = job.model_copy(update={"state": "cancelled"})
+            await records.update_scoring_job(ORG_A, "p1", cancelled, expected_state=state)
+        removed = await records.delete_run(ORG_A, "p1", "scored")
+        assert (removed["martian_runs"], removed["martian_scoring_jobs"]) == (1, 2)
+
+    async def test_finished_runs_created_before_a_cutoff_are_listed_oldest_first(self, records: RecordStore) -> None:
+        states = ["completed", "queued", "failed", "running", "cancelled", "partial", "stopped", "completed"]
+        for minutes, state in enumerate(states):
+            await records.create_run(ORG_A, run(f"r{minutes}", minutes=minutes, state=state))
+        elsewhere = run("other-project", state="completed").model_copy(update={"project_id": "p2"})
+        await records.create_run(ORG_A, elsewhere)
+        await records.create_run(ORG_B, run("theirs", state="completed"))
+        cutoff = T0 + timedelta(minutes=7)  # r7 was created at the cutoff, not before it
+        page = await records.list_finished_runs(ORG_A, "p1", created_before=cutoff, limit=3)
+        assert [r.id for r in page.items] == ["r0", "r2", "r4"] and page.next_cursor
+        rest = await records.list_finished_runs(ORG_A, "p1", created_before=cutoff, limit=3, cursor=page.next_cursor)
+        assert [r.id for r in rest.items] == ["r5", "r6"] and rest.next_cursor is None
+        assert (await records.list_finished_runs(ORG_A, "p1", created_before=T0)).items == []
+        later = T0 + timedelta(days=1)
+        assert [r.id for r in (await records.list_finished_runs(ORG_B, "p1", created_before=later)).items] == ["theirs"]
+        await refused("invalid", records.list_finished_runs(ORG_A, "p1", created_before=cutoff, cursor="page-2"))
+        await refused("invalid", records.list_finished_runs(ORG_A, "p1", created_before=cutoff, limit=0))
+
+    async def test_forgetting_deleted_traces_removes_what_the_records_kept_of_them(self, records: RecordStore) -> None:
+        for monitor_id in ("m1", "m2"):
+            await records.create_monitor(ORG_A, "p1", monitor(monitor_id, name=monitor_id))
+            for trace_id in ("tr-1", "tr-2"):
+                assert await records.claim_monitored_trace(ORG_A, "p1", monitor_id, trace_id, pass_id="p")
+        verdict = Score(trace_id="tr-1", scorer="safety", source="llm_judge", value=True, passed=True)
+        scored = MonitoredTrace(monitor_id="m1", trace_id="tr-1", state="scored", pass_id="p", scores=[verdict])
+        await records.finish_monitored_trace(ORG_A, "p1", scored)
+        answer = Score(run_id="r1", case_id="c1", trace_id="tr-1", scorer="politeness", source="human", value=True)
+        to_score = await records.put_delivery(ORG_A, "p1", score_delivery("p1", answer))
+        to_queue = await records.put_delivery(ORG_A, "p1", queue_item_delivery("p1", "q1", "tr-1", "completed"))
+        kept = await records.put_delivery(ORG_A, "p1", queue_item_delivery("p1", "q1", "tr-2", "completed"))
+
+        removed = await records.forget_traces(ORG_A, "p1", ["tr-1", "tr-9"])
+        assert removed == {"martian_monitored_traces": 2, "martian_deliveries": 2}
+        for monitor_id in ("m1", "m2"):
+            taken = (await records.list_monitored_traces(ORG_A, "p1", monitor_id)).items
+            assert [t.trace_id for t in taken] == ["tr-2"]
+        assert await records.get_delivery(ORG_A, "p1", to_score.id) is None
+        assert await records.get_delivery(ORG_A, "p1", to_queue.id) is None
+        assert await records.get_delivery(ORG_A, "p1", kept.id) is not None
+        # Another organisation's call removes nothing of this one's.
+        nothing = {"martian_monitored_traces": 0, "martian_deliveries": 0}
+        assert await records.forget_traces(ORG_B, "p1", ["tr-2"]) == nothing
+        assert len((await records.list_monitored_traces(ORG_A, "p1", "m1")).items) == 1
+        assert await records.forget_traces(ORG_A, "p1", []) == nothing
+        await refused("invalid", records.forget_traces(ORG_A, "p1", [f"tr-{n}" for n in range(1001)]))
 
     async def test_changes_reach_listeners_of_the_same_organisation_only(self, records: RecordStore) -> None:
         mine, theirs = records.events.subscribe(ORG_A), records.events.subscribe(ORG_B)

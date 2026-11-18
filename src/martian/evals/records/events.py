@@ -17,15 +17,35 @@ from pydantic import BaseModel, ConfigDict
 if TYPE_CHECKING:
     from martian.evals.server.principal import Principal
 
-EventKind = Literal["run", "case_results", "scores", "scoring_job", "review", "suite", "draft", "view"]
+EventKind = Literal[
+    "run",
+    "case_results",
+    "scores",
+    "scoring_job",
+    "review",
+    "suite",
+    "draft",
+    "view",
+    "monitor",
+    "threshold",
+    "schedule",
+    "calibration",
+    "recheck",
+    "blind_queue",
+]
 
 
 class Event(BaseModel):
+    """``id`` names the record: a run's id for ``run``, ``case_results`` and ``scores``, and the
+    record's own id for the other kinds. A ``scoring_job`` event also names its ``run_id``, which
+    reading the job takes, so a listener follows a scoring job's progress as it follows a run's."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: EventKind
     project_id: str
     id: str
+    run_id: str | None = None
 
 
 class EventsLost(Exception):
