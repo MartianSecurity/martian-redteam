@@ -931,6 +931,21 @@
             "title": "Category",
             "type": "string"
           },
+          "cause": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rule_change",
+                  "content_change"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cause"
+          },
           "evidence": {
             "items": {
               "$ref": "#/components/schemas/EvidenceOut"
@@ -1824,6 +1839,21 @@
             "title": "Category",
             "type": "string"
           },
+          "cause": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rule_change",
+                  "content_change"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cause"
+          },
           "evidence_count": {
             "title": "Evidence Count",
             "type": "integer"
@@ -2609,6 +2639,29 @@
         "title": "RevokeIn",
         "type": "object"
       },
+      "RulePackOut": {
+        "properties": {
+          "pack": {
+            "title": "Pack",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pack",
+          "version",
+          "sha256"
+        ],
+        "title": "RulePackOut",
+        "type": "object"
+      },
       "SandboxUsage": {
         "properties": {
           "minutes": {
@@ -2931,6 +2984,55 @@
             ],
             "title": "Registry"
           },
+          "rescan_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rescan Of"
+          },
+          "rescan_reason": {
+            "anyOf": [
+              {
+                "const": "rule_change",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rescan Reason"
+          },
+          "rule_packs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RulePackOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Packs"
+          },
+          "rules_stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Stale"
+          },
           "scanner_version": {
             "anyOf": [
               {
@@ -2956,6 +3058,13 @@
               }
             ],
             "title": "Stage"
+          },
+          "stale_packs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Packs",
+            "type": "array"
           },
           "started_at": {
             "anyOf": [
@@ -3021,6 +3130,21 @@
           "category": {
             "title": "Category",
             "type": "string"
+          },
+          "cause": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rule_change",
+                  "content_change"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cause"
           },
           "evidence": {
             "items": {
@@ -3420,6 +3544,55 @@
             ],
             "title": "Registry"
           },
+          "rescan_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rescan Of"
+          },
+          "rescan_reason": {
+            "anyOf": [
+              {
+                "const": "rule_change",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rescan Reason"
+          },
+          "rule_packs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RulePackOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Packs"
+          },
+          "rules_stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Stale"
+          },
           "scanner_version": {
             "anyOf": [
               {
@@ -3445,6 +3618,13 @@
               }
             ],
             "title": "Stage"
+          },
+          "stale_packs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Packs",
+            "type": "array"
           },
           "started_at": {
             "anyOf": [
@@ -5280,6 +5460,21 @@
             "title": "Category",
             "type": "string"
           },
+          "cause": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rule_change",
+                  "content_change"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cause"
+          },
           "evidence_count": {
             "title": "Evidence Count",
             "type": "integer"
@@ -5581,7 +5776,7 @@
   "info": {
     "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated by scripts/scanner-scans-contract.py; do not edit by hand.",
     "title": "Martian Scanner scan API",
-    "version": "9"
+    "version": "10"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -8089,7 +8284,7 @@
                 }
               }
             },
-            "description": "Unprocessable Content"
+            "description": "Unprocessable Entity"
           }
         },
         "summary": "Set Allowed Sources",
@@ -8149,7 +8344,7 @@
                 }
               }
             },
-            "description": "Unprocessable Content"
+            "description": "Unprocessable Entity"
           }
         },
         "summary": "Set Analysis Settings",
