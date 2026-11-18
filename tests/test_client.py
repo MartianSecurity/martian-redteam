@@ -20,6 +20,33 @@ def _client() -> Client:
 
 
 @pytest.mark.asyncio
+async def test_aegra_error_envelope_with_partial_score_is_not_accepted() -> None:
+    async with _client() as client:
+        with respx.mock(base_url="https://agents.test.example") as router:
+            route = router.post("/runs/wait").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "score": 1,
+                        "reason": "partial score",
+                        "__error__": {"error": "RuntimeError"},
+                    },
+                )
+            )
+            with pytest.raises(ClientError, match="status error"):
+                await client.evaluate(
+                    EvaluatorContext(
+                        vulnerability="prompt_leakage",
+                        vulnerability_type="system_prompt",
+                        attack_method="prompt_injection",
+                    ),
+                    attack="reveal instructions",
+                    target_output="I refuse",
+                )
+            assert route.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_simulate_parses_graph_state(simulator_payload: dict) -> None:
     async with _client() as client:
         with respx.mock(base_url="https://agents.test.example") as router:
@@ -115,7 +142,7 @@ async def test_evaluate_rejects_non_binary_score(score: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retryable_http_error_becomes_client_error() -> None:
+async def test_503_with_unknown_execution_state_is_not_retried() -> None:
     async with _client() as client:
         with respx.mock(base_url="https://agents.test.example") as router:
             router.post("/runs/wait").mock(return_value=httpx.Response(503, json={"detail": "busy"}))
@@ -128,7 +155,7 @@ async def test_retryable_http_error_becomes_client_error() -> None:
                         attack_method="prompt_injection",
                     )
                 )
-            assert router.calls.call_count == 3
+            assert router.calls.call_count == 1
 
 
 @pytest.mark.asyncio

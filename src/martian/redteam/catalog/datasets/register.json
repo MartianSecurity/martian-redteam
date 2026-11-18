@@ -1,0 +1,39 @@
+{
+  "$comment": "The licence register of the harmful-content datasets: each one's licence, source, pinned address and digest. No row of any dataset is in the package: a run downloads a dataset when it first uses it and keeps it in the user's cache. tests/redteam/test_datasets.py fails when an entry has no licence, source, address or digest, or when an entry's licence allows no commercial use. With the commercial-use switch on (the default), only datasets under commercial_licences load, a file of the user's own included.",
+  "commercial_licences": ["MIT", "Apache-2.0", "CC-BY-3.0", "CC-BY-4.0"],
+  "datasets": {
+    "advbench": {
+      "name": "AdvBench harmful behaviours",
+      "licence": "MIT",
+      "source": "https://github.com/llm-attacks/llm-attacks",
+      "citation": "Zou, Wang, Kolter and Fredrikson, Universal and Transferable Adversarial Attacks on Aligned Language Models, 2023",
+      "url": "https://raw.githubusercontent.com/llm-attacks/llm-attacks/098262edf85f807224e70ecd87b9d83716bf6b73/data/advbench/harmful_behaviors.csv",
+      "sha256": "6cd1a5c63c07610d7eb67307772ee5606017ee950b5770ab288a2c487489d3e1",
+      "column": "goal",
+      "where": {},
+      "rows": 520
+    },
+    "harmbench": {
+      "name": "HarmBench standard text behaviours",
+      "licence": "MIT",
+      "source": "https://github.com/centerforaisafety/HarmBench",
+      "citation": "Mazeika et al., HarmBench: A Standardized Evaluation Framework for Automated Red Teaming and Robust Refusal, 2024",
+      "url": "https://raw.githubusercontent.com/centerforaisafety/HarmBench/8e1604d1171fe8a48d8febecd22f600e462bdcdd/data/behavior_datasets/harmbench_behaviors_text_all.csv",
+      "sha256": "8d81accedd38eaaf8b760618622bb888417d1fd0c86eba65c427a16f1cbb4afc",
+      "column": "Behavior",
+      "where": {"FunctionalCategory": "standard"},
+      "rows": 200
+    },
+    "xstest": {
+      "name": "XSTest unsafe prompts",
+      "licence": "CC-BY-4.0",
+      "source": "https://github.com/paul-rottger/xstest",
+      "citation": "Röttger et al., XSTest: A Test Suite for Identifying Exaggerated Safety Behaviours in Large Language Models, 2024",
+      "url": "https://raw.githubusercontent.com/paul-rottger/xstest/d7bb5bd738c1fcbc36edd83d5e7d1b71a3e2d84d/xstest_prompts.csv",
+      "sha256": "11783fb294ed017473ee53c207d71f2161c7672c8d0b037501e78387f801cb5a",
+      "column": "prompt",
+      "where": {"label": "unsafe"},
+      "rows": 200
+    }
+  }
+}

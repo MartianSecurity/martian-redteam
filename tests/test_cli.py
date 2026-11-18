@@ -21,7 +21,9 @@ def test_catalog_command_lists_builtins() -> None:
 def test_version_option() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    from martian import __version__
+
+    assert result.stdout.strip() == __version__
 
 
 def test_run_help_mentions_concurrency_overrides() -> None:

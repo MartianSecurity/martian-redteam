@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 _GRAPH_MARKERS = frozenset({"attack", "attack_method", "score", "reason", "messages"})
-_FAILED_STATUSES = frozenset({"error", "failed", "timeout", "cancelled", "interrupted"})
+_FAILED_STATUSES = frozenset({"error", "failed", "timeout", "cancelled", "canceled", "interrupted"})
 
 
 def parse_wait_body(text: str) -> dict[str, Any]:
@@ -55,9 +55,15 @@ def graph_state(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def failed_run_status(payload: dict[str, Any]) -> str | None:
-    status = payload.get("status")
-    if isinstance(status, str) and status.lower() in _FAILED_STATUSES:
-        return status
+    containers = [payload, *(payload[k] for k in ("output", "values") if isinstance(payload.get(k), dict))]
+    for container in containers:
+        if "__error__" in container:
+            return "error"
+        if container.get("__interrupt__"):
+            return "interrupted"
+        status = container.get("status")
+        if isinstance(status, str) and status.lower() in _FAILED_STATUSES:
+            return status
     return None
 
 

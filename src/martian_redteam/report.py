@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -41,8 +42,28 @@ def _probe_detail(case: TestCase) -> str:
     return "-"
 
 
+def _executed(value: bool | None) -> str:
+    return "requested" if value is None else ("ran" if value else "not run")
+
+
+def _tool_calls(cases: list[TestCase]) -> str | None:
+    """The tool calls of ``cases``, one row each, or None when they made none."""
+    rows: list[list[object]] = [
+        [
+            f"{case.vulnerability}/{case.vulnerability_type}",
+            call.name,
+            json.dumps(call.arguments, ensure_ascii=False, sort_keys=True) if call.arguments else "-",
+            _executed(call.executed),
+        ]
+        for case in cases
+        for turn in case.turns
+        for call in turn.tool_calls
+    ]
+    return _table(["Vulnerability", "Tool", "Arguments", "Call"], rows) if rows else None
+
+
 def render_markdown(assessment: RiskAssessment) -> str:
-    """GitHub-flavored markdown: overview table, error counts, failed probes."""
+    """GitHub-flavored markdown: overview table, error counts, failed probes and their tool calls."""
     overview = _table(
         ["Field", "Value"],
         [
@@ -86,6 +107,7 @@ def render_markdown(assessment: RiskAssessment) -> str:
         )
     else:
         probes = "No failed or errored probes."
+    calls = _tool_calls(failed)
 
     return "\n".join(
         [
@@ -101,6 +123,7 @@ def render_markdown(assessment: RiskAssessment) -> str:
             "",
             probes,
             "",
+            *(["## Tool calls of failed or errored probes", "", calls, ""] if calls else []),
         ]
     )
 

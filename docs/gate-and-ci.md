@@ -1,495 +1,285 @@
 # Gate and CI
 
-This package is an **internal scaffold**. Do not point untrusted CI at the shared staging API key until martian-agents exposes dedicated `simulator` / `evaluator` graphs **and** per-key identity with quotas. Taxonomy IDs are Apache-2.0 (DeepTeam-derived; see `NOTICE`). This SDK is not a DeepTeam fork and does not implement Confident AI’s remote gate.
-
-The local gate is fail-closed. DeepTeam’s SDK default `ignore_errors=True` is **not** copied. CI must not inherit a “keep going” SDK default, must not set `continue-on-error` on the assessment step, and must not treat a later SaaS policy call as the job result.
-
-`evaluate_gate(assessment, ...)` raises `GateFailure` with every failing reason joined by `"; "`. The CLI prints it in red and exits `1`. Artifacts (JSON and Markdown) are written **before** the gate runs so a failed job still has reports.
-
-## DeepTeam / Confident AI vs this gate
-
-DeepTeam and DeepEval are built to **upload then remotely gate**:
-
-1. A CI step runs `deepteam run` / `deepeval test run`, often with `OPENAI_API_KEY` because attack generation and judging happen in the customer process.
-2. Those steps commonly use `continue-on-error: true` so a failing assessment does not stop the job.
-3. Results go to Confident AI (`CONFIDENT_API_KEY`).
-4. A later `deepeval gate` (or `POST /v1/governance/assess`) decides pass/fail from cloud policy.
-
-That model is **not** this product. Martian red-team is the opposite shape:
-
-| | DeepTeam / Confident AI | martian-redteam |
-| --- | --- | --- |
-| Who generates attacks | Customer process (OpenAI or other local judge models) | Martian Agents `simulator` graph |
-| Who scores replies | Customer process or Confident AI | Martian Agents `evaluator` graph |
-| What leaves the customer network | Often full traces to Confident AI; local LLMs see the target | Attack string + **target reply** to Martian Agents (see [security and data](security-and-data.md)) |
-| CI secrets | `OPENAI_API_KEY`, `CONFIDENT_API_KEY` | `MARTIAN_API_KEY` only. Never `OPENAI_API_KEY` |
-| Cheap PR check | Usually none (or a full run) | `martian-redteam validate` — no API key, no HTTP |
-| Pass/fail | Remote `deepeval gate` after upload; eval steps often `continue-on-error` | Local `evaluate_gate` **is** the job result |
-| Failed run artifacts | Platform dashboards | `results/risk-assessment.json` + `.md`, uploaded with `if: always()` |
-
-Do not add `deepeval gate`, Confident AI login, or `continue-on-error` to a Martian pipeline. If the local gate fails, the GitHub job must be red.
-
-## Error kinds
-
-| `error_kind` | Source | Default gate |
-| --- | --- | --- |
-| `infrastructure` | `ClientError`: HTTP, timeout, connect, non-JSON, schema, failed run status | Fail if `fail_on_infrastructure_error` (default true) |
-| `target` | Exception from `model_callback` | Fail unless `ignore_target_errors` |
-| `null` (scored) | Evaluator returned `0` or `1` | Fail **only** if the type is `gated` and `pass_rate < threshold` |
-
-Parse misses and non-binary scores are infrastructure, not `score=0`.
-
-## Matrix
-
-| Event | Test case | Gated vuln (leakage, agency) | Report-only vuln (toxicity, …) |
-| --- | --- | --- | --- |
-| HTTP 4xx/5xx, timeout, transport | `error` + `infrastructure` | Job **fails** | Job **fails** |
-| Schema/parse miss, non-binary score, failed run status | `error` + `infrastructure` | Job **fails** | Job **fails** |
-| Bedrock/content refusal with no `attack` | schema/`ClientError` | Job **fails** | Job **fails** |
-| Target callback exception or timeout (`target_timeout_seconds`) | `error` + `target` | Job **fails** unless `ignore_target_errors` | Same |
-| `score == 0` | scored fail | Fails if pass-rate below threshold | Reported only |
-| `score == 1` | scored pass | Counts toward pass-rate | Reported |
-
-Optional ignore applies **only** to target exceptions, never to transport or schema errors. There is no YAML or CLI switch that ignores HTTP/schema failures.
-
-## Pass rate
-
-For each `(vulnerability, vulnerability_type)`:
-
-```text
-pass_rate = passing / (passing + failing)   # errors excluded from denominator
-```
-
-If every probe for a gated type errored, `pass_rate` is `0.0` **and** `infrastructure_errors` / `target_errors` are non-zero, so the job still fails on the error clause. That avoids “100% passed because nothing scored.”
-
-Default `pass_rate_threshold` is `1.0` (every scored gated probe must resist). Lower it only with an explicit product decision.
-
-Prompt leakage and excessive agency are `gated=True` in the catalog. Toxicity, illegal activity, and PII leakage are report-only until you set `gated: true` on the YAML entry (or `get_vulnerability(name, gated=True)` in Python).
-
-## CLI used in CI
-
-DeepTeam-compatible flags on `run`. YAML `system_config` supplies defaults; flags override for that invocation only.
-
-```text
-martian-redteam validate CONFIG.yaml
-martian-redteam run CONFIG.yaml [-o DIR] [-c N] [-a N]
-```
-
-| Flag | DeepTeam equivalent | Overrides | Default if omitted |
-| --- | --- | --- | --- |
-| `-o` / `--output` | `-o` | `system_config.output_folder` | YAML, else `results` |
-| `-c` / `--max-concurrent` | `-c` | `system_config.max_concurrent` | YAML, else `2` |
-| `-a` / `--attacks-per-vuln` | `-a` | `system_config.attacks_per_vulnerability_type` | YAML, else `1` |
-
-Keep `-c 2` (or `1`) on GitHub-hosted runners. DeepTeam’s docs often show `-c 20` against local OpenAI; that will 429 martian-agents WAF. See [WAF](#waf-and-github-hosted-ips).
-
-`run` always writes reports, then applies the gate:
+The SDK can run standalone Python/YAML checks or one persisted session containing
+evals, redteam, or both. Use one Backend origin/API token for both modules;
+[SDK and CI](sdk-and-ci.md) defines auth, scope and the Python result contract.
 
 ```bash
-martian-redteam run config.yaml -o results -c 2 -a 1
+martian redteam validate redteam.yaml  # No credentials or network requests.
+martian redteam run redteam.yaml -o results -c 2 -a 1  # Local report/gate.
+martian ci --redteam-config redteam.yaml --output results  # Persisted session.
+martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
 ```
 
-Writes (directory created if missing):
+`martian redteam run` returns 0 for a passing local gate, 1 for a failed gate,
+and 2 for setup/execution failures. It writes JSON/Markdown before applying the
+gate. A version 0.2 file gates on the pass rate of gated vulnerability types. A
+version 2 file gates on its `gate` block: the evidence level and severity a
+finding must reach to fail, what only warns (such as a run whose results are
+all suspected), and whether undetermined attempts and each kind of error fail,
+warn or are ignored ([run file gate](redteam-run-file.md#gate)). A warning
+never changes the exit code. `martian redteam pin run` re-runs
+[pinned findings](redteam-reports.md#pinned-findings) with no model, and exits 1
+when one still reproduces or is not decided. `martian ci` requires a complete Backend acknowledgment as well as complete
+passing local results. Keep its typed receipt, report and probe checkpoints with
+`if: always()`; a running/incomplete receipt never passes.
 
-| File | Role |
-| --- | --- |
-| `results/risk-assessment.json` | Full `RiskAssessment` (machine-readable) |
-| `results/risk-assessment.md` | Human summary; append to `$GITHUB_STEP_SUMMARY` |
+## Required behavior
 
-Exit codes:
+- `score` is the integer 1 for resistance and 0 for vulnerability. Invalid/missing
+  judgments, expired/unknown operation results and execution errors fail closed.
+- Every planned required and informational probe must finish. A lower declared
+  threshold affects required pass rates; it never excuses absent scores/errors.
+- The persisted runner rejects ignored target/infrastructure failures, skipped or
+  deselected coverage and empty required suites. Caught gate exceptions still fail.
+- The pytest gate's `evaluate(...)` gives each `predict_fn` call a time limit,
+  `target_timeout_seconds` (default 120); a call that outlasts it is that case's error and the
+  gate fails closed on it. See [Evals](evals.md).
+- Dataset outputs are canonically re-scored by Backend. Inline checks and redteam
+  judgments remain declared client-executed/client-scored evidence, with catalog,
+  graph/policy revisions and operation IDs; a CI upload is not binary attestation.
+- Redteam execution POSTs run once. Ambiguous delivery uses GET of the same UUID;
+  no execution retry can turn a failing judgment into a pass. Idempotent eval/session
+  uploads have their own bounded transport retry policy.
 
-| Code | `validate` | `run` |
+## Customer workflows
+
+[combined-ci.yml](../examples/combined-ci.yml) is the complete persisted example.
+It installs a reviewed hash-checked wheel, configures `MARTIAN_API_URL`,
+`MARTIAN_API_TOKEN`, agent/Git attribution and the customer's target credentials,
+then runs both suites once and retains only safe reports. Omit either suite to
+run the other. It does not request an Agents key or MLflow server credentials.
+A downstream deployment should depend on that gate and deploy its tested artifact.
+
+The root [composite action](../action.yml) and [reusable workflow](../.github/workflows/red-team.yml)
+run **`martian redteam run`**, a local report/gate through Backend. They do not
+persist a CI session. Both require a Backend URL and token with `redteam:run`.
+For a red team run on your own models with no Martian token, use the evals
+action's `redteam` input ([below](#red-team-results-in-the-comment)).
+The action accepts YAML path, output, `max-concurrent` and `attacks-per-vuln`.
+Use `martian ci` for console session history/export requirements.
+
+Pin SDK releases/commits and SHA-pin third-party actions. Use reviewed protected
+refs/environments for credential access, contents-read checkout and
+`persist-credentials: false`. Do not make the secret available to unreviewed PR
+code. Validate configuration without secrets first. The callback has its own
+provider/key setup; it is executed locally and can have side effects.
+
+## Evals on a pull request, with one comment
+
+The [evals action](../.github/actions/evals/action.yml) runs one
+[suite file](evals.md#run-a-suite-file-locally) with `martian evals run` and
+reports it on the pull request. Reference it as
+`MartianSecurity/martian-redteam/.github/actions/evals@<tag or full SHA>` after
+`actions/checkout`. [examples/github-action](../examples/github-action/) holds
+a [workflow](../examples/github-action/workflow.yml), a passing suite and a
+failing one that is the passing suite with two replies broken, and the
+comments they produce: [passed](../examples/github-action/comments/passed.md),
+[failed](../examples/github-action/comments/failed.md),
+[compared](../examples/github-action/comments/compared.md), the failing suite
+compared with a result of the passing one, as a pull request that broke two
+of its cases would be compared with `main`: both newly fail a security check,
+so it fails although two changed cases are within noise; and
+[matrix](../examples/github-action/comments/matrix.md), the
+[matrix example](../examples/evals/matrix/evals.yaml)'s two models and two
+prompts.
+
+| Input | Default | Meaning |
 | --- | --- | --- |
-| 0 | YAML, catalog names, callback path, and gate fields are legal | Assessment finished and gate passed |
-| 1 | Invalid config | `GateFailure` or Typer usage error |
-| 2 | (Typer) invalid options | (Typer) invalid options |
-| other | Uncaught Python exception | Uncaught exception (bad YAML, missing callback, missing API key) |
-
-`validate` does **not** read `MARTIAN_API_KEY`, does **not** call Martian Agents, and does **not** invoke `model_callback`. It is the cheap PR check.
-
-`run` requires `MARTIAN_API_KEY`. Missing key is a client error, not a skipped gate.
-
-## This repository’s CI
-
-`.github/workflows/ci.yml` runs on `pull_request` and `push` to `main`. It tests **this SDK**, not a customer agent. Split jobs plus a required aggregator:
-
-| Job | What | Python |
-| --- | --- | --- |
-| `lint` | `uv sync --locked`, `ruff format --check`, `ruff check` | 3.12 |
-| `types` | `uv sync --locked`, `uv run --extra mcp mypy src`, `compileall` | 3.12 |
-| `test` | `uv sync --locked`, `pytest` with coverage (`term-missing` + `xml:coverage.xml`) and JUnit (`junit.xml`) | **matrix 3.12 and 3.13** |
-| `ci` | Aggregator: succeeds only if `lint`, `types`, and every `test` cell succeeded | — |
-
-Protect `main` with the single required check **`ci`**, not the matrix cells. That way a skipped/failed 3.13 cell cannot look green. The aggregator checks each `needs.*.result == success`; adding a job only to `needs` without that check would leave `ci` green on failure.
-
-This workflow does **not**:
-
-- Call staging or production Martian Agents
-- Set `MARTIAN_API_KEY` or `OPENAI_API_KEY`
-- Treat `martian_agents` as a red-team target
-- Run `martian-redteam run`
-
-Live `run` dogfood (composite `action.yml` / reusable `red-team.yml` against staging graphs) is **layer 3** and is not a required PR check. See [development](development.md#testing-this-library).
-
-Concurrency cancels in-progress runs on the same ref. Third-party actions are **SHA-pinned** (tag in the comment only).
-
-### Dependabot
-
-`.github/dependabot.yml` opens weekly PRs for:
-
-- `package-ecosystem: uv` (lockfile + `pyproject.toml`)
-- `package-ecosystem: github-actions` (action SHAs)
-
-Review action bumps by SHA, not by floating major tags. See [development](development.md).
-
-## Customer GitHub Actions
-
-Three supported ways to run an assessment against **your** agent. Prefer the reusable workflow. All three must:
-
-- Fail closed (no `continue-on-error` on `run` / the composite)
-- Upload `results/` with `if: always()` (JSON **and** Markdown)
-- Append Markdown to `$GITHUB_STEP_SUMMARY`
-- Keep `-c` at 2 (or 1)
-- Use `permissions: contents: read`
-- Pin this SDK to a **tag or commit SHA** in production, not floating `@main`
-
-Start with `workflow_dispatch` only. Add `pull_request` for `validate` immediately; add `pull_request` for `run` only when the simulator/evaluator graphs exist and you understand WAF quota.
-
-Required secrets / variables on the **customer** repo:
-
-- Secret `MARTIAN_API_KEY` (required for `run`)
-- Optional variable `MARTIAN_API_URL`
-
-Fork pull requests do not receive repository secrets. Keep `validate` on `pull_request` (no key). Keep `run` on `workflow_dispatch`, `push` to default, or `pull_request` from the same repo — never as the only check on a public fork PR.
-
-### 1. Cheap PR check (`validate`, no API key)
-
-Run on every pull request. Catches broken YAML, unknown catalog names, missing callback files, and illegal gate fields before anyone spends Bedrock.
-
-```yaml
-name: Validate red-team config
-
-on:
-  pull_request:
-  push:
-    branches: [main]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: redteam-validate-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.10.0"
-
-      - name: Install martian-redteam
-        run: |
-          uv venv "${RUNNER_TEMP}/martian-redteam"
-          uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
-            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam.git@v0.1.0"
-          echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
-
-      - name: Validate config
-        run: martian-redteam validate config.yaml
-```
-
-Replace `v0.1.0` with the tag or SHA you actually depend on. Do not use `@main` once you are past dogfood.
-
-Same check via this repo’s validate composite (still no API key; the root `action.yml` stays the `run` gate):
-
-```yaml
-      - uses: MorningHQ/martian-redteam/.github/actions/validate@v0.1.0
-        with:
-          config: config.yaml
-```
-
-### 2. Reusable workflow (recommended gate)
-
-The reusable workflow checks out **your** repository, installs this SDK, runs the local gate (`martian-redteam run`), always uploads artifacts, and appends Markdown to `$GITHUB_STEP_SUMMARY` when `save()` runs. It does **not** run `validate`; keep that in a separate PR job with no API key.
-
-```yaml
-name: Red team
-
-on:
-  workflow_dispatch:
-  # pull_request:   # enable when graphs exist and WAF headroom is understood
-  #   paths:
-  #     - "config.yaml"
-  #     - "callback.py"
-  #     - ".github/workflows/red-team.yml"
-
-permissions:
-  contents: read
-
-jobs:
-  red-team:
-    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@v0.1.0
-    with:
-      config: config.yaml
-      output: results
-      max-concurrent: "2"
-      attacks-per-vuln: "1"
-    secrets:
-      MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
-```
-
-Optional API host: set `MARTIAN_API_URL` as a repository variable on the caller, or pass it if the reusable workflow exposes a matching input. Do not put the API key in `with:`.
-
-**Production pin** (tag or SHA, not `@main`):
-
-```yaml
-jobs:
-  red-team:
-    uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@v0.1.0
-    # or:
-    # uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@0123456789abcdef0123456789abcdef01234567
-```
-
-Dogfood only:
-
-```yaml
-uses: MorningHQ/martian-redteam/.github/workflows/red-team.yml@main
-```
-
-The called workflow’s `run` step is the job result. It does not set `continue-on-error`. A `GateFailure` fails the reusable job, which fails your caller.
-
-Typical `workflow_call` inputs (names may match the workflow file; keep concurrency at 2):
-
-| Input | Meaning | Default |
-| --- | --- | --- |
-| `config` | Path to YAML in the **caller** repo | `examples/config.yaml` |
-| `output` | Directory for JSON + Markdown | `results` |
-| `sdk-ref` | Git ref of this repo to `pip install` | empty: the commit the workflow was called at (`job.workflow_sha`) |
-| `max-concurrent` | Passed as `-c` when non-empty | empty (use YAML) |
-| `attacks-per-vuln` | Passed as `-a` when non-empty | empty (use YAML) |
-
-| Secret | Required |
-| --- | --- |
-| `MARTIAN_API_KEY` | yes for the run job |
-
-The SDK is installed at the same commit as the workflow file. `uses: …/red-team.yml@v0.1.0` installs the SDK at the commit `v0.1.0` points to; there is no floating `main` behind a pinned workflow. Set `sdk-ref` only to install a different ref. It must match `^[A-Za-z0-9._/-]+$` and the job fails before installing anything if it does not. `job.workflow_sha` is provided by github.com runners; where it is missing (GitHub Enterprise Server) the job fails with a message asking for an explicit `sdk-ref`.
-
-Inputs never appear inside a `run:` script in the reusable workflow or the composite action. GitHub substitutes `${{ … }}` into the script text before the shell parses it, so a crafted input value would be executed as shell. Each input is mapped to an environment variable under `env:` and the script reads `"$VAR"`. Do the same in any step you add around these.
-
-### 3. Composite action
-
-Use when you already have a workflow and only need this repo to install the CLI and run the gate. Check out **your** repository first; the action files come from `MorningHQ/martian-redteam`. The reusable workflow runs `run` only. Keep `validate` in a prior job that has **no** API key.
-
-```yaml
-name: Red team
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  red-team:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Run assessment
-        uses: MorningHQ/martian-redteam@v0.1.0
-        with:
-          config: config.yaml
-          output: results
-          max-concurrent: "2"
-          attacks-per-vuln: "1"
-        env:
-          MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
-          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
-
-      - name: Job summary
-        if: always()
-        run: |
-          if [ -f results/risk-assessment.md ]; then
-            cat results/risk-assessment.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: red-team-results
-          path: results/
-```
-
-The composite maps `max-concurrent` → `-c` and `attacks-per-vuln` → `-a` when those inputs are non-empty, then runs:
-
-```bash
-martian-redteam run <config> -o <output> [-c N] [-a N]
-```
-
-If the composite already appends Markdown to `$GITHUB_STEP_SUMMARY` and uploads artifacts, omit the duplicate steps — but keep `if: always()` on upload so a failed gate still leaves JSON + Markdown. **Do not** put `continue-on-error: true` on `Run assessment`. The composite’s exit code **is** the job result.
-
-Pin the action the same way:
-
-```yaml
-- uses: MorningHQ/martian-redteam@v0.1.0
-# production SHA:
-- uses: MorningHQ/martian-redteam@0123456789abcdef0123456789abcdef01234567
-# dogfood only:
-- uses: MorningHQ/martian-redteam@main
-```
-
-### 4. Copy-paste workflow
-
-`examples/github-actions.yml` is the same gate without calling back into this repo’s action/workflow. Use it when you vendor the CLI yourself.
-
-```yaml
-name: Red team
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  red-team:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.10.0"
-
-      - name: Install
-        run: uv sync --locked
-
-      - name: Validate config
-        run: uv run martian-redteam validate examples/config.yaml
-
-      - name: Run assessment
-        env:
-          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
-          MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
-        run: uv run martian-redteam run examples/config.yaml -o results -c 2 -a 1
-
-      - name: Job summary
-        if: always()
-        run: |
-          if [ -f results/risk-assessment.md ]; then
-            cat results/risk-assessment.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: red-team-results
-          path: results/
-```
-
-Suggested split when you want validate on every PR and the live gate on demand:
-
-```yaml
-name: Red team
-
-on:
-  pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.10.0"
-      - run: uv sync --locked
-      - run: uv run martian-redteam validate config.yaml
-
-  red-team:
-    needs: validate
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.10.0"
-      - run: uv sync --locked
-      - name: Run assessment
-        env:
-          MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
-          MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
-        run: uv run martian-redteam run config.yaml -o results -c 2 -a 1
-      - name: Job summary
-        if: always()
-        run: cat results/risk-assessment.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: red-team-results
-          path: results/
-```
-
-## WAF and GitHub-hosted IPs
-
-martian-agents public ingress uses WAF **2000 requests / 5 minutes / IP**. GitHub-hosted runners share NAT pools. Two workflows on the same egress IP can 429 each other even if they use different API keys.
-
-Each probe is two `/runs/wait` calls (simulator + evaluator). At `-c 2` that is a small concurrent burst, which is the intended default. Raising `-c` toward DeepTeam’s examples (`10`–`20`) is how you hit the WAF.
-
-The SDK retries 429 three times, then fails the gate as **infrastructure**. That is fail-closed, not “try a bigger concurrency.”
-
-Keep `max_concurrent` / `-c` at **2** or **1**. Prefer self-hosted runners if you dogfood many jobs. Application-level per-key quotas are a martian-agents Phase 0/public blocker; do not treat WAF as tenancy.
-
-## Artifacts and the job summary
-
-Upload `results/` on success **and** failure (`if: always()`). A red gate with no artifact is harder to debug than a red gate with JSON.
-
-`risk-assessment.md` is the human report: per-type pass rates, gated vs report-only, infrastructure/target error counts, and failed or errored probes (reason + what the target saw). Append it to GitHub’s job summary:
-
-```bash
-cat results/risk-assessment.md >> "$GITHUB_STEP_SUMMARY"
-```
-
-The reusable workflow and composite action do this for you. The Markdown is **not** a remote policy document. It does not replace `evaluate_gate`.
-
-## Interpreting `risk-assessment.json`
-
-Inspect `infrastructure_errors` and `target_errors` first. A pile of `score: 1` with `errored > 0` is **not** a green run if the gate defaults are on.
-
-For scored fails, read `reason` (evaluator prose) and `input` (what the target saw, including encodings). Evaluator calls send that reply to Martian Agents; treat production-app CI as a data-sharing decision.
-
-## What not to copy from DeepTeam CI snippets
-
-- `continue-on-error: true` on the assessment
-- `deepeval gate` / Confident AI upload as the pass/fail signal
-- `OPENAI_API_KEY` in this SDK’s CI (judging is not local)
-- `ignore_errors: true` in YAML (this schema rejects DeepTeam-only keys; extra keys are forbidden)
-- Floating `@main` on the composite action or reusable workflow in production
-- `-c 10` or `-c 20` on GitHub-hosted runners
+| `suite` | empty | The suite file, relative to the workspace. Give `suite`, `redteam` or both |
+| `redteam` | empty | A version 2 [red team run file](redteam-run-file.md), relative to the workspace; see [red team results in the comment](#red-team-results-in-the-comment) |
+| `redteam-output` | `results/redteam` | Folder for the red team reports |
+| `output` | `results/evals` | Folder for `results.jsonl`, `summary.json`, `junit.xml` and `verdicts.json`; one per suite |
+| `github-token` | the workflow token | Writes the comment |
+| `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request. A suite's own [matrix](evals.md#a-matrix-of-prompts-and-models) needs none: its combinations share one comment and one baseline |
+| `comment-author` | `github-actions[bot]` | Login that writes the comment; change it only with another token |
+| `baseline-branch` | empty: off | Branch whose last result a pull request is compared with, usually the default branch; see [compared with the last result of main](#compared-with-the-last-result-of-main) |
+
+- **No Martian account.** The run is local, as on a laptop. A suite that grades
+  stored replies with deterministic checks needs no secret at all. An LLM judge
+  or a URL target reads its provider key or agent credential from the step's
+  `env`.
+- **One comment per suite.** The comment starts with a hidden marker,
+  `<!-- martian-evals-comment: <key> -->`. Each run looks through the pull
+  request's comments for that marker on a comment by `comment-author`, edits
+  it, and creates one only when there is none. A comment by anyone else that
+  quotes the marker is left alone. Give the job a `concurrency` group per pull
+  request and suite, as the example does, so two quick pushes cannot both
+  create it.
+- **What it says.** The headline follows the exit code: passed (0), failed (1),
+  or did not finish (2, a case without a verdict, a run that stopped at one of its
+  [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
+  that stopped says how many cases it did not run and which limit it reached;
+  its counts, rates and reliability are of the cases it finished.
+  A run with the [cache of model calls](evals.md#a-cache-of-model-calls) on
+  says so first, in bold, with how many target and judge calls replayed a
+  reply an earlier run stored. A suite with a
+  [policy check](evals.md#false-refusals) adds how many of its
+  benign cases were refused, so a model that refuses everything cannot look
+  as if it passed. Below it are per-check counts, each pass rate with its 95%
+  interval ([pass rates and intervals](evals.md#pass-rates-and-confidence-intervals)),
+  for a suite that [repeats its cases](evals.md#repeated-attempts) how many
+  times each case ran, the rule each check's attempts combined by, a
+  **Reliability** row under the pass rate and the
+  [flaky cases](evals.md#reliability-and-flaky-cases), for a suite with
+  [conversation cases](evals.md#conversations) a **Turns** row with the
+  turns' own counts and how many cases are conversations, for a suite with
+  [simulated users](evals.md#simulated-users) the simulated cases counted in
+  the headline, a **Simulated** row with their own counts, a `goal_reached`
+  row and the simulator's model,
+  and up to 25 failed and 25 unfinished case
+  IDs with the checks that did not pass, `(simulated)` beside a simulated
+  case and, for a conversation, the numbers of the turns that failed. A suite
+  with a [matrix](evals.md#a-matrix-of-prompts-and-models) has one row per
+  combination instead, up to 25: its counts, pass rate and interval, its reliability
+  with repeats, its false refusals with a policy check, its comparison with a
+  baseline, and how it ended; then, for up to ten combinations, their cases
+  that went from pass to fail, failed or have no verdict, five of each by
+  name. Inputs, replies and judge reasons stay
+  out of the comment; a case without a verdict shows only the SDK's own
+  target-failure wording. A run that stops before writing results says so
+  instead of repeating an earlier result. The same text goes to the job summary
+  on every event, and the comment is written only for `pull_request` events.
+- **The exit code is the gate.** The action fails with the suite's exit code
+  after reporting; compared with a baseline, that is the comparison's gate
+  (below). It uploads nothing; upload `summary.json`, `junit.xml`,
+  `verdicts.json` and `comparison.json` with `if: always()`, and keep
+  `results.jsonl` and `mlflow.db` out of shared artifacts, because they hold
+  prompts and replies.
+- **Permissions.** The job needs `contents: read` and `pull-requests: write`,
+  nothing more. Pull requests from forks and from Dependabot get a read-only
+  token: GitHub refuses the comment with 403, the action prints a warning, and
+  the result is in the job summary only. Any other GitHub API failure fails the
+  step. Trigger on `pull_request`, never `pull_request_target`: the suite runs
+  the pull request's code, and `pull_request_target` would give that code a
+  write token and the repository's secrets.
+
+### Red team results in the comment
+
+With `redteam`, the action also runs that version 2 run file with
+`martian redteam run --no-store --format sarif,junit,html` and adds its result
+to the same comment. [examples/github-action](../examples/github-action/)
+holds a [sample run file](../examples/github-action/redteam/redteam.yaml), a
+deliberately weak [agent](../examples/github-action/redteam/agent.py), the
+`redteam` job of the [workflow](../examples/github-action/workflow.yml), and
+the [comment](../examples/github-action/comments/redteam.md) they produce.
+
+- **No Martian token.** The run is local: the run file's `models` generate and
+  judge the attacks with your own key, read from the step's `env` (such as
+  `OPENAI_API_KEY`). The step clears `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
+  so a token set on the job is neither needed nor read, and nothing reaches
+  Martian. A run file without `models` cannot run here. The pull request's
+  code runs in the step and can read the model key, so use a key kept for red
+  team runs; GitHub gives no secrets to pull requests from forks.
+- **What it says.** The headline follows the run's exit code: passed, passed
+  with warnings, failed, or did not finish (exit 2, or no report). Below it
+  are the attempts by outcome, the service, attacker and judge models and
+  attack methods, the budget and what was spent, the attacker's refusal rate,
+  the confirmed and suspected finding counts with the success rate per attempt
+  and its 95% interval (an upper bound when nothing succeeded), up to 25
+  confirmed findings by vulnerability, type, attack method, label, level,
+  severity and verification, the suspected count, errors by kind, and the
+  gate's failures and warnings. It is read from `redteam-report.json`
+  ([red team reports](redteam-reports.md)), which holds no attack or reply
+  text, so neither does the comment.
+- **The key.** With a suite, the comment is keyed by `comment-key` or the
+  suite path; with a red team run file only, by `comment-key` or the run
+  file's path.
+- **The exit code.** The action fails with 2 when the suite or the red team
+  run did not finish, else with 1 when either failed, else it passes.
+- **The reports.** The step writes `redteam-report.json`, `redteam-report.md`,
+  `redteam-report.html`, `redteam.sarif` and `redteam-junit.xml` to
+  `redteam-output`. Upload them with `if: always()`. To show findings in code
+  scanning, upload `redteam.sarif` with `github/codeql-action/upload-sarif`,
+  which needs `security-events: write`.
+
+### Compared with the last result of main
+
+On its own, a run fails on any failed case, so a case that already fails on
+`main` fails every pull request, and the comment cannot say what the pull
+request changed. With `baseline-branch: main`, and the workflow triggered on
+`push` to `main` as well as on `pull_request`, the action compares each pull
+request with the last result of `main`, case by case:
+
+- **Where the result is kept.** On a push to `baseline-branch`, a run in
+  which every case has a verdict (exit 0 or 1) keeps its `verdicts.json` and
+  the commit in the repository's GitHub Actions cache, one entry per
+  `comment-key`. On a `pull_request`, the action restores the newest entry,
+  from the pull request's base branch or the default branch, and runs
+  `martian evals run <suite> --baseline <folder>`. The cache needs no
+  permission in the job, no write access to the repository and no paid
+  service, and only a push to `baseline-branch` writes the baseline: a cache
+  entry written in a pull request's run is visible to that pull request only,
+  and the action writes none. Other events, and a push to another branch, run
+  without a baseline. To compare a run with a result kept some other way,
+  run the command yourself with `--baseline`
+  ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+- **What is kept.** `verdicts.json` holds each case's id, verdict and check
+  verdicts, a digest of its inputs and expectations, and the reasons of the
+  deterministic checks that report counts, sizes or names. It holds no input,
+  reply or judge reason, so a pull request from a fork, which can read the
+  cache, sees no more than the case ids and verdicts.
+- **The comparison** pairs a case of the pull request with the same case on
+  `main`: the same id, inputs and expectations, and a verdict in both runs. The
+  exact McNemar test labels the change **better**, **worse** or **within
+  noise** ([comparing two runs](evals.md#comparing-two-runs)). With fewer than
+  six changed cases a change is always within noise.
+- **The gate.** Compared with `main`, the job fails when the change is worse
+  than noise; when a case newly fails a security check, whatever the label; or
+  when a case with no result on `main` to compare with failed: a new case, one
+  whose inputs or expectations changed, or one without a verdict on `main`.
+  Cases that failed on `main` too, and a few cases that went from pass to fail
+  on other checks, within noise, do not fail it. A case without a verdict still
+  fails the job.
+- **Security checks fail the gate case by case.** One leaked secret or
+  followed injection is never noise. A case that newly fails a
+  [security check](evals.md#repeated-attempts) (`not_contains`, `not_matches`,
+  `tool_not_called` and the policy checks other than `no_refusal`, the types in
+  `martian.evals.runner.SECURITY_CHECKS`, and a
+  [`python` check](evals.md#custom-python-checks) marked `security: true`)
+  fails the job on its own: it fails
+  the check here and passed it on `main`, or `main` had no such check, also
+  when the case already failed another check on `main`. A case that failed the
+  same security check on `main` is a known failure and does not fail the job.
+  Other checks keep the noise rule, `no_refusal` and LLM judges among them,
+  even a judge that guards a secret.
+- **What the comment says.** The headline says `passed against main` or
+  `failed against main`, then the label with the counts it rests on, the
+  p-value and the smallest change it can tell, and the cases it could not pair.
+  **Cases that newly failed a security check, which fails the gate** names each
+  such case with those checks and their reasons; **Cases that went from pass to
+  fail** names each other case that did, with its failed checks and their
+  reasons.
+  A reason that could quote the reply, an LLM judge's or a numeric, table or
+  schema check's, shows as `—`; `results.jsonl` has it. A suite whose checks or
+  attempts per case changed since `main` says so, because the label then
+  measures that change too. `comparison.json` lists the security cases under
+  `security_regressed`.
+- **A matrix.** The kept `verdicts.json` holds every combination's verdicts,
+  and each combination of a pull request is compared with the same
+  combination on `main`, by its id. A combination `main` has no result of,
+  such as one a pull request adds, says `no baseline yet` in its row and is
+  gated on its own.
+- **No baseline yet.** Until a push to `main` has kept a result for the suite,
+  or after GitHub has evicted it (an entry unused for seven days, or beyond the
+  repository's cache size), the comment says there is no baseline yet and the
+  pull request is gated on its own, so any failed case fails it.
+
+## Limits and privacy
+
+Use small suites/concurrency first (`max_concurrent` defaults to 2). Admission
+limits are enforced by Backend per key; shared network rate limits may also
+reject work. A 429 is an execution error rather than a skipped gate.
+
+Reports use input/output/reason digests by default. Content is opt-in and explicit
+redaction flags take precedence; constructor credentials remain redacted after
+client close. Keep private local MLflow SQLite/traces out of shared artifacts.
+Backend scoring receives raw dataset outputs and judging receives attack/reply
+text; approve those data flows before using production data.
+
+Repository CI is separate: lint, strict types, Python 3.12/3.13 tests, package and
+a credential-free action smoke (validate, and the evals action on both sample
+suites, commenting on this repository's pull requests; the passing sample keeps
+its result on `main` and compares each pull request with it). Fast tests use
+fixtures and loopback services.
+Real service/model/UI qualification is recorded in [validation](validation.md).
