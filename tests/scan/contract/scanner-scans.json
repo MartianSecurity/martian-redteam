@@ -267,6 +267,29 @@
         "title": "ApproveIn",
         "type": "object"
       },
+      "BundleCounts": {
+        "properties": {
+          "purged": {
+            "title": "Purged",
+            "type": "integer"
+          },
+          "stored": {
+            "title": "Stored",
+            "type": "integer"
+          },
+          "stored_bytes": {
+            "title": "Stored Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stored",
+          "stored_bytes",
+          "purged"
+        ],
+        "title": "BundleCounts",
+        "type": "object"
+      },
       "BundleOut": {
         "properties": {
           "file_count": {
@@ -276,6 +299,33 @@
           "format": {
             "title": "Format",
             "type": "string"
+          },
+          "purge_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "retention",
+                  "request"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purge Reason"
+          },
+          "purged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purged At"
           },
           "sha256": {
             "title": "Sha256",
@@ -1584,6 +1634,34 @@
         "title": "McpRegistrySourceIn",
         "type": "object"
       },
+      "ModelUsage": {
+        "properties": {
+          "analysis_requests": {
+            "title": "Analysis Requests",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "model_calls": {
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "title": "Output Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "analysis_requests",
+          "model_calls",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "ModelUsage",
+        "type": "object"
+      },
       "NotificationOut": {
         "properties": {
           "attempts": {
@@ -2031,6 +2109,69 @@
         "title": "PackageSourceIn",
         "type": "object"
       },
+      "PurgedOut": {
+        "properties": {
+          "bundle_sha256": {
+            "title": "Bundle Sha256",
+            "type": "string"
+          },
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "purge_reason": {
+            "title": "Purge Reason",
+            "type": "string"
+          },
+          "purged_at": {
+            "format": "date-time",
+            "title": "Purged At",
+            "type": "string"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "scans_of_bundle": {
+            "title": "Scans Of Bundle",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scan_id",
+          "bundle_sha256",
+          "content_digest",
+          "purged_at",
+          "purge_reason",
+          "scans_of_bundle"
+        ],
+        "title": "PurgedOut",
+        "type": "object"
+      },
+      "ReferenceCounts": {
+        "properties": {
+          "not_attempted": {
+            "title": "Not Attempted",
+            "type": "integer"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "integer"
+          },
+          "unresolved": {
+            "title": "Unresolved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "resolved",
+          "unresolved",
+          "not_attempted"
+        ],
+        "title": "ReferenceCounts",
+        "type": "object"
+      },
       "ReferenceOut": {
         "description": "One reference of a scan and what resolving it found (MartianSecurity/martian-notes#434), in the shape of\nthe scanner's contract (``#/$defs/reference``) plus the findings that cite it.",
         "properties": {
@@ -2466,6 +2607,65 @@
           "reason"
         ],
         "title": "RevokeIn",
+        "type": "object"
+      },
+      "SandboxUsage": {
+        "properties": {
+          "minutes": {
+            "title": "Minutes",
+            "type": "number"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          },
+          "seconds": {
+            "title": "Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "runs",
+          "seconds",
+          "minutes"
+        ],
+        "title": "SandboxUsage",
+        "type": "object"
+      },
+      "ScanCounts": {
+        "properties": {
+          "by_source": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Source",
+            "type": "object"
+          },
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "in_progress": {
+            "title": "In Progress",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "completed",
+          "failed",
+          "in_progress",
+          "by_source"
+        ],
+        "title": "ScanCounts",
         "type": "object"
       },
       "ScanDetail": {
@@ -3389,6 +3589,19 @@
       "SettingsIn": {
         "additionalProperties": false,
         "properties": {
+          "bundle_retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Retention Days"
+          },
           "email_enabled": {
             "default": false,
             "title": "Email Enabled",
@@ -3458,6 +3671,11 @@
       },
       "SettingsOut": {
         "properties": {
+          "bundle_retention_days": {
+            "default": 30,
+            "title": "Bundle Retention Days",
+            "type": "integer"
+          },
           "email_delivery_configured": {
             "title": "Email Delivery Configured",
             "type": "boolean"
@@ -4172,6 +4390,145 @@
           "accepted"
         ],
         "title": "TriageState",
+        "type": "object"
+      },
+      "UsageLimits": {
+        "properties": {
+          "analysis_requests_per_scan": {
+            "title": "Analysis Requests Per Scan",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "enabled_repositories": {
+            "title": "Enabled Repositories",
+            "type": "integer"
+          },
+          "github_app_enabled": {
+            "title": "Github App Enabled",
+            "type": "boolean"
+          },
+          "max_bundle_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Bundle Bytes"
+          },
+          "max_repositories": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repositories"
+          },
+          "model_analysis_allowed": {
+            "title": "Model Analysis Allowed",
+            "type": "boolean"
+          },
+          "scans_per_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scans Per Day"
+          },
+          "scans_today": {
+            "title": "Scans Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "scans_per_day",
+          "scans_today",
+          "max_bundle_bytes",
+          "model_analysis_allowed",
+          "analysis_requests_per_scan",
+          "github_app_enabled",
+          "max_repositories",
+          "enabled_repositories"
+        ],
+        "title": "UsageLimits",
+        "type": "object"
+      },
+      "UsageOut": {
+        "properties": {
+          "bundles": {
+            "$ref": "#/components/schemas/BundleCounts"
+          },
+          "bytes_read": {
+            "title": "Bytes Read",
+            "type": "integer"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "files_read": {
+            "title": "Files Read",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/UsageLimits"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelUsage"
+          },
+          "organisation_id": {
+            "format": "uuid",
+            "title": "Organisation Id",
+            "type": "string"
+          },
+          "references": {
+            "$ref": "#/components/schemas/ReferenceCounts"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/SandboxUsage"
+          },
+          "scans": {
+            "$ref": "#/components/schemas/ScanCounts"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organisation_id",
+          "days",
+          "since",
+          "until",
+          "scans",
+          "files_read",
+          "bytes_read",
+          "references",
+          "model",
+          "sandbox",
+          "bundles",
+          "limits"
+        ],
+        "title": "UsageOut",
         "type": "object"
       },
       "ValidationError": {
@@ -5042,7 +5399,7 @@
   "info": {
     "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated by scripts/scanner-scans-contract.py; do not edit by hand.",
     "title": "Martian Scanner scan API",
-    "version": "7"
+    "version": "8"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -6457,6 +6814,50 @@
           }
         },
         "summary": "Get Scan",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/bundle": {
+      "delete": {
+        "description": "Delete the stored archive of a scan's bundle now; the scan and its findings stay.",
+        "operationId": "delete_bundle_v1_scanner_scans__scan_id__bundle_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Bundle",
         "tags": [
           "scanner"
         ]
@@ -7996,6 +8397,52 @@
           }
         },
         "summary": "List Watches",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/usage": {
+      "get": {
+        "description": "What the organisation's scanning used over the last ``days`` days, and its limits (owners and admins).",
+        "operationId": "get_usage_v1_scanner_usage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 366,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Usage",
         "tags": [
           "scanner"
         ]
