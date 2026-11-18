@@ -1,0 +1,4047 @@
+{
+  "components": {
+    "schemas": {
+      "AcceptIn": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "AcceptIn",
+        "type": "object"
+      },
+      "BundleOut": {
+        "properties": {
+          "file_count": {
+            "title": "File Count",
+            "type": "integer"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "unpacked_bytes": {
+            "title": "Unpacked Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "format",
+          "size_bytes",
+          "file_count",
+          "unpacked_bytes"
+        ],
+        "title": "BundleOut",
+        "type": "object"
+      },
+      "CategoryResult": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "incomplete_stages": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Incomplete Stages",
+            "type": "array"
+          },
+          "missing_stages": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Stages",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stages_not_run",
+                  "stages_incomplete",
+                  "incomplete_unpack"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "flagged",
+              "not_checked"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "state",
+          "missing_stages"
+        ],
+        "title": "CategoryResult",
+        "type": "object"
+      },
+      "CheckOut": {
+        "description": "Whether a completed scan passes a threshold and a minimum coverage, on the server\n(MartianSecurity/martian-notes#400, #402). The gate policy file (#470) is read into these terms.",
+        "properties": {
+          "blocking": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Blocking",
+            "type": "array"
+          },
+          "counted": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counted",
+            "type": "object"
+          },
+          "coverage_shortfalls": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Coverage Shortfalls",
+            "type": "array"
+          },
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scan_id",
+          "passed",
+          "coverage_shortfalls",
+          "blocking",
+          "counted",
+          "evaluated_at"
+        ],
+        "title": "CheckOut",
+        "type": "object"
+      },
+      "CoverageSummary": {
+        "properties": {
+          "bytes_read": {
+            "title": "Bytes Read",
+            "type": "integer"
+          },
+          "complete": {
+            "default": true,
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "files_not_inspected": {
+            "default": 0,
+            "title": "Files Not Inspected",
+            "type": "integer"
+          },
+          "files_read": {
+            "title": "Files Read",
+            "type": "integer"
+          },
+          "files_skipped": {
+            "title": "Files Skipped",
+            "type": "integer"
+          },
+          "levels_reached": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Levels Reached"
+          },
+          "stages_run": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stages Run",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files_read",
+          "bytes_read",
+          "files_skipped"
+        ],
+        "title": "CoverageSummary",
+        "type": "object"
+      },
+      "EvidenceOut": {
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "content_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Sha256"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "level": {
+            "title": "Level",
+            "type": "integer"
+          },
+          "next_check_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Check At"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "level",
+          "summary"
+        ],
+        "title": "EvidenceOut",
+        "type": "object"
+      },
+      "FindingCounts": {
+        "properties": {
+          "by_category": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Category",
+            "type": "object"
+          },
+          "by_evidence_level": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Evidence Level",
+            "type": "object"
+          },
+          "by_severity": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Severity",
+            "type": "object"
+          }
+        },
+        "required": [
+          "by_category",
+          "by_severity",
+          "by_evidence_level"
+        ],
+        "title": "FindingCounts",
+        "type": "object"
+      },
+      "FindingDetail": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceOut"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "evidence_level": {
+            "title": "Evidence Level",
+            "type": "integer"
+          },
+          "evidence_level_name": {
+            "title": "Evidence Level Name",
+            "type": "string"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "first_seen_scan_id": {
+            "format": "uuid",
+            "title": "First Seen Scan Id",
+            "type": "string"
+          },
+          "fix": {
+            "title": "Fix",
+            "type": "string"
+          },
+          "fixed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed At"
+          },
+          "fixed_in_scan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed In Scan Id"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/TriageEntryOut"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "last_seen_scan_id": {
+            "format": "uuid",
+            "title": "Last Seen Scan Id",
+            "type": "string"
+          },
+          "line_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line End"
+          },
+          "line_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Start"
+          },
+          "match": {
+            "enum": [
+              "new",
+              "persisting",
+              "returned"
+            ],
+            "title": "Match",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Id"
+          },
+          "reported_severity": {
+            "title": "Reported Severity",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "severity_source": {
+            "enum": [
+              "scanner",
+              "policy"
+            ],
+            "title": "Severity Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "accepted",
+              "waived",
+              "fixed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "triage": {
+            "$ref": "#/components/schemas/TriageState"
+          }
+        },
+        "required": [
+          "id",
+          "scan_id",
+          "subject_id",
+          "position",
+          "rule_id",
+          "category",
+          "severity",
+          "reported_severity",
+          "severity_source",
+          "evidence_level",
+          "evidence_level_name",
+          "title",
+          "message",
+          "path",
+          "fix",
+          "fingerprint",
+          "match",
+          "status",
+          "triage",
+          "first_seen_scan_id",
+          "first_seen_at",
+          "last_seen_scan_id",
+          "last_seen_at",
+          "evidence_count",
+          "evidence",
+          "history"
+        ],
+        "title": "FindingDetail",
+        "type": "object"
+      },
+      "FindingPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/app__scanner_schema__FindingOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "FindingPage",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "MatchCounts": {
+        "description": "How this scan's findings compare with the subject's earlier scans (MartianSecurity/martian-notes#403).",
+        "properties": {
+          "fixed": {
+            "title": "Fixed",
+            "type": "integer"
+          },
+          "new": {
+            "title": "New",
+            "type": "integer"
+          },
+          "persisting": {
+            "title": "Persisting",
+            "type": "integer"
+          },
+          "returned": {
+            "title": "Returned",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "new",
+          "persisting",
+          "returned",
+          "fixed"
+        ],
+        "title": "MatchCounts",
+        "type": "object"
+      },
+      "ReferenceOut": {
+        "description": "One reference of a scan and what resolving it found (MartianSecurity/martian-notes#434), in the shape of\nthe scanner's contract (``#/$defs/reference``) plus the findings that cite it.",
+        "properties": {
+          "checked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "direct": {
+            "title": "Direct",
+            "type": "boolean"
+          },
+          "ecosystem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ecosystem"
+          },
+          "facts": {
+            "additionalProperties": true,
+            "title": "Facts",
+            "type": "object"
+          },
+          "finding_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Finding Ids",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "line_end": {
+            "title": "Line End",
+            "type": "integer"
+          },
+          "line_start": {
+            "title": "Line Start",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "next_check_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Check At"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pin"
+          },
+          "pulled_in_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Pulled In By",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "receipts": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceOut"
+            },
+            "title": "Receipts",
+            "type": "array"
+          },
+          "resolver": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolver"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "via": {
+            "title": "Via",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "role",
+          "value",
+          "target",
+          "via",
+          "path",
+          "line_start",
+          "line_end",
+          "direct",
+          "pulled_in_by",
+          "facts",
+          "receipts",
+          "finding_ids"
+        ],
+        "title": "ReferenceOut",
+        "type": "object"
+      },
+      "ReferencePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReferenceOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ReferencePage",
+        "type": "object"
+      },
+      "ReopenIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ReopenIn",
+        "type": "object"
+      },
+      "ScanDetail": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "bundle": {
+            "$ref": "#/components/schemas/BundleOut"
+          },
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CategoryResult"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FindingCounts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage_statement": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Statement"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScanError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "findings": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ScanFindingOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Findings"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "inventory": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inventory"
+          },
+          "matching": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MatchCounts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "options": {
+            "additionalProperties": true,
+            "title": "Options",
+            "type": "object"
+          },
+          "references": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ReferenceOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "References"
+          },
+          "scanner_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scanner Version"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/app__scanner_schema__SubjectOut"
+          }
+        },
+        "required": [
+          "id",
+          "subject",
+          "content_digest",
+          "bundle",
+          "source",
+          "state",
+          "attempts",
+          "options",
+          "created_at"
+        ],
+        "title": "ScanDetail",
+        "type": "object"
+      },
+      "ScanError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "ScanError",
+        "type": "object"
+      },
+      "ScanFindingOut": {
+        "description": "A finding with its receipts, as the scan record and the JSON export hold it.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceOut"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "evidence_level": {
+            "title": "Evidence Level",
+            "type": "integer"
+          },
+          "evidence_level_name": {
+            "title": "Evidence Level Name",
+            "type": "string"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "first_seen_scan_id": {
+            "format": "uuid",
+            "title": "First Seen Scan Id",
+            "type": "string"
+          },
+          "fix": {
+            "title": "Fix",
+            "type": "string"
+          },
+          "fixed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed At"
+          },
+          "fixed_in_scan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed In Scan Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "last_seen_scan_id": {
+            "format": "uuid",
+            "title": "Last Seen Scan Id",
+            "type": "string"
+          },
+          "line_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line End"
+          },
+          "line_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Start"
+          },
+          "match": {
+            "enum": [
+              "new",
+              "persisting",
+              "returned"
+            ],
+            "title": "Match",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Id"
+          },
+          "reported_severity": {
+            "title": "Reported Severity",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "severity_source": {
+            "enum": [
+              "scanner",
+              "policy"
+            ],
+            "title": "Severity Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "accepted",
+              "waived",
+              "fixed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "triage": {
+            "$ref": "#/components/schemas/TriageState"
+          }
+        },
+        "required": [
+          "id",
+          "scan_id",
+          "subject_id",
+          "position",
+          "rule_id",
+          "category",
+          "severity",
+          "reported_severity",
+          "severity_source",
+          "evidence_level",
+          "evidence_level_name",
+          "title",
+          "message",
+          "path",
+          "fix",
+          "fingerprint",
+          "match",
+          "status",
+          "triage",
+          "first_seen_scan_id",
+          "first_seen_at",
+          "last_seen_scan_id",
+          "last_seen_at",
+          "evidence_count",
+          "evidence"
+        ],
+        "title": "ScanFindingOut",
+        "type": "object"
+      },
+      "ScanOut": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "bundle": {
+            "$ref": "#/components/schemas/BundleOut"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FindingCounts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScanError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "options": {
+            "additionalProperties": true,
+            "title": "Options",
+            "type": "object"
+          },
+          "scanner_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scanner Version"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/app__scanner_schema__SubjectOut"
+          }
+        },
+        "required": [
+          "id",
+          "subject",
+          "content_digest",
+          "bundle",
+          "source",
+          "state",
+          "attempts",
+          "options",
+          "created_at"
+        ],
+        "title": "ScanOut",
+        "type": "object"
+      },
+      "ScanPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ScanOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ScanPage",
+        "type": "object"
+      },
+      "SeverityOverrideIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "S1",
+              "S2",
+              "S3",
+              "S4",
+              "S5"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "reason"
+        ],
+        "title": "SeverityOverrideIn",
+        "type": "object"
+      },
+      "SeverityOverrideOut": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "updated_by": {
+            "format": "uuid",
+            "title": "Updated By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "severity",
+          "reason",
+          "updated_by",
+          "updated_at"
+        ],
+        "title": "SeverityOverrideOut",
+        "type": "object"
+      },
+      "SeverityPolicyOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SeverityOverrideOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SeverityPolicyOut",
+        "type": "object"
+      },
+      "SubjectPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/app__scanner_schema__SubjectOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SubjectPage",
+        "type": "object"
+      },
+      "TrackOut": {
+        "description": "One finding of a subject across its scans, as it stands now.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "first_seen_scan_id": {
+            "format": "uuid",
+            "title": "First Seen Scan Id",
+            "type": "string"
+          },
+          "fixed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed At"
+          },
+          "fixed_in_scan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed In Scan Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_evidence_level": {
+            "title": "Last Evidence Level",
+            "type": "integer"
+          },
+          "last_finding_id": {
+            "format": "uuid",
+            "title": "Last Finding Id",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "last_seen_scan_id": {
+            "format": "uuid",
+            "title": "Last Seen Scan Id",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Id"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "accepted",
+              "waived",
+              "fixed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "triage": {
+            "$ref": "#/components/schemas/TriageState"
+          }
+        },
+        "required": [
+          "id",
+          "subject_id",
+          "fingerprint",
+          "rule_id",
+          "category",
+          "path",
+          "status",
+          "triage",
+          "last_evidence_level",
+          "first_seen_scan_id",
+          "first_seen_at",
+          "last_seen_scan_id",
+          "last_seen_at",
+          "last_finding_id"
+        ],
+        "title": "TrackOut",
+        "type": "object"
+      },
+      "TrackPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TrackOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "TrackPage",
+        "type": "object"
+      },
+      "TriageEntryOut": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "format": "uuid",
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "finding_id": {
+            "format": "uuid",
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "from_status": {
+            "title": "From Status",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "to_status": {
+            "title": "To Status",
+            "type": "string"
+          },
+          "waiver_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Id"
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "from_status",
+          "to_status",
+          "reason",
+          "actor_id",
+          "finding_id",
+          "created_at"
+        ],
+        "title": "TriageEntryOut",
+        "type": "object"
+      },
+      "TriageOut": {
+        "description": "The answer to a triage action; its top-level fields are the audit log entry's details.",
+        "properties": {
+          "action": {
+            "enum": [
+              "accept",
+              "waive",
+              "reopen"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "finding": {
+            "$ref": "#/components/schemas/app__scanner_schema__FindingOut"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "accepted",
+              "waived",
+              "fixed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "waiver_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Id"
+          },
+          "waivers_revoked": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Waivers Revoked",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "status",
+          "reason",
+          "rule_id",
+          "path",
+          "subject_id",
+          "finding"
+        ],
+        "title": "TriageOut",
+        "type": "object"
+      },
+      "TriageState": {
+        "description": "The triage behind a finding's status: an acceptance (with its reason, member and end) and the\nwaiver that holds, if any.",
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "accepted_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted Until"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "waiver": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaiverOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "TriageState",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WaiveIn": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "expires_at"
+        ],
+        "title": "WaiveIn",
+        "type": "object"
+      },
+      "WaiverOut": {
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "format": "uuid",
+            "title": "Created By",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "finding_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "revoke_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoke Reason"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "revoked_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked By"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "subject_id",
+          "rule_id",
+          "path",
+          "reason",
+          "expires_at",
+          "created_by",
+          "created_at",
+          "active"
+        ],
+        "title": "WaiverOut",
+        "type": "object"
+      },
+      "WaiverPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WaiverOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "WaiverPage",
+        "type": "object"
+      },
+      "app__scanner_schema__FindingOut": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "evidence_level": {
+            "title": "Evidence Level",
+            "type": "integer"
+          },
+          "evidence_level_name": {
+            "title": "Evidence Level Name",
+            "type": "string"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "first_seen_scan_id": {
+            "format": "uuid",
+            "title": "First Seen Scan Id",
+            "type": "string"
+          },
+          "fix": {
+            "title": "Fix",
+            "type": "string"
+          },
+          "fixed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed At"
+          },
+          "fixed_in_scan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed In Scan Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "last_seen_scan_id": {
+            "format": "uuid",
+            "title": "Last Seen Scan Id",
+            "type": "string"
+          },
+          "line_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line End"
+          },
+          "line_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Start"
+          },
+          "match": {
+            "enum": [
+              "new",
+              "persisting",
+              "returned"
+            ],
+            "title": "Match",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Id"
+          },
+          "reported_severity": {
+            "title": "Reported Severity",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "severity_source": {
+            "enum": [
+              "scanner",
+              "policy"
+            ],
+            "title": "Severity Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "accepted",
+              "waived",
+              "fixed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "triage": {
+            "$ref": "#/components/schemas/TriageState"
+          }
+        },
+        "required": [
+          "id",
+          "scan_id",
+          "subject_id",
+          "position",
+          "rule_id",
+          "category",
+          "severity",
+          "reported_severity",
+          "severity_source",
+          "evidence_level",
+          "evidence_level_name",
+          "title",
+          "message",
+          "path",
+          "fix",
+          "fingerprint",
+          "match",
+          "status",
+          "triage",
+          "first_seen_scan_id",
+          "first_seen_at",
+          "last_seen_scan_id",
+          "last_seen_at",
+          "evidence_count"
+        ],
+        "title": "FindingOut",
+        "type": "object"
+      },
+      "app__scanner_schema__SubjectOut": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "source",
+          "created_at"
+        ],
+        "title": "SubjectOut",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated from the backend's routes; do not edit by hand.",
+    "title": "Martian Scanner scan API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/scanner/findings/{finding_id}": {
+      "get": {
+        "operationId": "get_finding_v1_scanner_findings__finding_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Finding",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/findings/{finding_id}/accept": {
+      "post": {
+        "operationId": "accept_v1_scanner_findings__finding_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/findings/{finding_id}/reopen": {
+      "post": {
+        "operationId": "reopen_v1_scanner_findings__finding_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReopenIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reopen",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/findings/{finding_id}/waive": {
+      "post": {
+        "operationId": "waive_v1_scanner_findings__finding_id__waive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WaiveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Waive",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans": {
+      "get": {
+        "operationId": "list_scans_v1_scanner_scans_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "completed",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "skill",
+                    "mcp_server",
+                    "plugin",
+                    "subagent",
+                    "harness_config",
+                    "agent_code",
+                    "repository",
+                    "registry_entry"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "content_digest",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Digest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Scans",
+        "tags": [
+          "scanner"
+        ]
+      },
+      "post": {
+        "operationId": "upload_v1_scanner_scans_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "encoding": {
+                "archive": {
+                  "contentType": "application/zip"
+                },
+                "manifest": {
+                  "contentType": "application/json"
+                }
+              },
+              "schema": {
+                "properties": {
+                  "archive": {
+                    "description": "A ZIP file; the second part",
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "manifest": {
+                    "additionalProperties": false,
+                    "description": "JSON, at most 16 KiB; the first part",
+                    "properties": {
+                      "options": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "model_analysis": {
+                            "default": true,
+                            "title": "Model Analysis",
+                            "type": "boolean"
+                          }
+                        },
+                        "title": "ScanOptions",
+                        "type": "object"
+                      },
+                      "source": {
+                        "default": "api",
+                        "enum": [
+                          "console",
+                          "cli",
+                          "ci",
+                          "api"
+                        ],
+                        "title": "Source",
+                        "type": "string"
+                      },
+                      "subject": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "agent_id": {
+                            "anyOf": [
+                              {
+                                "format": "uuid",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Agent Id"
+                          },
+                          "kind": {
+                            "enum": [
+                              "skill",
+                              "mcp_server",
+                              "plugin",
+                              "subagent",
+                              "harness_config",
+                              "agent_code",
+                              "repository",
+                              "registry_entry"
+                            ],
+                            "title": "Kind",
+                            "type": "string"
+                          },
+                          "name": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Name",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "title": "SubjectIn",
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "subject"
+                    ],
+                    "title": "UploadManifest",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "manifest",
+                  "archive"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Upload",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}": {
+      "get": {
+        "operationId": "get_scan_v1_scanner_scans__scan_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scan",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/check": {
+      "get": {
+        "operationId": "check_v1_scanner_scans__scan_id__check_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_evidence_level",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 6,
+              "minimum": 0,
+              "title": "Min Evidence Level",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_severity",
+            "required": false,
+            "schema": {
+              "default": "S5",
+              "enum": [
+                "S1",
+                "S2",
+                "S3",
+                "S4",
+                "S5"
+              ],
+              "title": "Min Severity",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "required_stages",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Required Stages",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_levels_reached",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 6,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Levels Reached"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_skipped_files",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Skipped Files"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_not_inspected_files",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Not Inspected Files"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_unresolved_references",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Unresolved References"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_not_attempted_references",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Not Attempted References"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/export": {
+      "get": {
+        "operationId": "export_v1_scanner_scans__scan_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "enum": [
+                "json",
+                "sarif"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/sarif+json": {}
+            },
+            "description": "The scan as JSON or SARIF 2.1.0"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/findings": {
+      "get": {
+        "operationId": "list_findings_v1_scanner_scans__scan_id__findings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "open",
+                    "accepted",
+                    "waived",
+                    "fixed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "severity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "S1",
+                    "S2",
+                    "S3",
+                    "S4",
+                    "S5"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Severity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_evidence_level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 6,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Evidence Level"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "new",
+                    "persisting",
+                    "returned"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Match"
+            }
+          },
+          {
+            "in": "query",
+            "name": "rule_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Findings",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/fixed": {
+      "get": {
+        "operationId": "list_fixed_v1_scanner_scans__scan_id__fixed_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Fixed",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/references": {
+      "get": {
+        "operationId": "list_references_v1_scanner_scans__scan_id__references_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "resolved",
+                    "does_not_exist",
+                    "unresolved",
+                    "not_attempted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "instruction_source",
+                    "executed_code",
+                    "dependency",
+                    "data",
+                    "link"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Role"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 20,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReferencePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List References",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/severity-policy": {
+      "get": {
+        "operationId": "severity_policy_v1_scanner_severity_policy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeverityPolicyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Severity Policy",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/severity-policy/{rule_id}": {
+      "delete": {
+        "operationId": "remove_severity_v1_scanner_severity_policy__rule_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$",
+              "title": "Rule Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeverityOverrideOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Severity",
+        "tags": [
+          "scanner"
+        ]
+      },
+      "put": {
+        "operationId": "set_severity_v1_scanner_severity_policy__rule_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$",
+              "title": "Rule Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeverityOverrideIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeverityOverrideOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Severity",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/subjects": {
+      "get": {
+        "operationId": "list_subjects_v1_scanner_subjects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "skill",
+                    "mcp_server",
+                    "plugin",
+                    "subagent",
+                    "harness_config",
+                    "agent_code",
+                    "repository",
+                    "registry_entry"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubjectPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Subjects",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/subjects/{subject_id}/findings": {
+      "get": {
+        "operationId": "subject_findings_v1_scanner_subjects__subject_id__findings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "open",
+                    "accepted",
+                    "waived",
+                    "fixed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subject Findings",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/waivers": {
+      "get": {
+        "operationId": "list_waivers_v1_scanner_waivers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Active"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaiverPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Waivers",
+        "tags": [
+          "scanner"
+        ]
+      }
+    }
+  }
+}

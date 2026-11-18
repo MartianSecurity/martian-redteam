@@ -13,6 +13,7 @@ Editable install from the repo root (`uv sync`). Packages live under `src/martia
 | --- | --- |
 | `src/martian/config.py` | Immutable origin/token and separate CI attribution |
 | `src/martian/redteam/client.py` | Typed Backend operations, status recovery and total deadline |
+| `src/martian/scan/` | `martian scan`, the Scanner's thin client; `tests/scan/` holds the copy of the backend's scan contract and a stand-in backend (`fake_backend.py`) the tests and the scan action's smoke job use ([scanning agent files](scan.md)) |
 | `src/martian/evals/runner.py` | Suite file, JSONL/CSV cases, resumable local results, JUnit |
 | `src/martian/evals/stats.py` | Confidence intervals for pass rates and mean scores, grouped or not ([evals](evals.md#pass-rates-and-confidence-intervals)), and the paired tests and label of a comparison of two runs ([comparing two runs](evals.md#comparing-two-runs)) |
 | `src/martian/evals/agreement.py` | A judge version's agreement with people's labels: agreement, Cohen's kappa, false-pass and false-fail rates, and the bias and concordance of numeric scores ([evals](evals.md#judge-agreement-with-human-labels)); and people's agreement with each other per review queue and question, with Cohen's or Fleiss' kappa and Lin's concordance or the intraclass correlation ([evals](evals.md#agreement-between-reviewers)) |
@@ -81,7 +82,7 @@ Ruff: `E,F,I,UP,B,SIM`, Python 3.12, line length 120. Mypy: `strict` on both SDK
 | `evals-core` | The evals core's tests with `-n auto`, with the stores on Postgres too | 3.12 |
 | `mlflow-compat` | `scripts/mlflow_compat.py` on the pinned MLflow, then on the newest release (reported only); see [MLflow upgrades](#mlflow-upgrades) | 3.12 |
 | `packaging` | `uv build`, `scripts/check_release.py --install` (clean installs, the pinned Evals UI served by `martian ui`), `scripts/sbom.py wheel` (the wheel's bill of materials and the licence check), throwaway venv install, `validate examples/config.yaml` | 3.12 |
-| `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases | 3.12 |
+| `action-smoke` | `uses: ./.github/actions/validate`, then `./.github/actions/evals` on the passing and the failing sample suite; the failing one must fail its step with two failed cases; then `./.github/actions/scan` twice on `examples/scan/fixture` against the stand-in scan backend (`tests/scan/fake_backend.py`): without the skill it passes, with it the step must fail with exit 1 and SARIF holding one result | 3.12 |
 | `ci` | Succeeds only if every job above succeeded | — |
 
 Require the **`ci`** check on `main`, not the individual matrix cells. Format is `--check` (no rewrite).
