@@ -128,6 +128,15 @@ def test_a_linked_folder_out_of_the_folder_refuses_the_scan(tmp_path):
     with pytest.raises(SymlinkOutside) as refused:
         collect(root)
     assert refused.value.paths == [".claude"]
+    # A linked folder whose own name no pattern matches, but an AGENTS.md under it would.
+    (root / ".claude").unlink()
+    (root / "vendor").mkdir()
+    (root / "vendor" / "shared").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SymlinkOutside) as refused:
+        collect(root)
+    assert refused.value.paths == ["vendor/shared"]
+    # Explicit patterns that cannot reach below it leave it alone.
+    assert collect(root, ["/AGENTS.md"]).files == ("AGENTS.md",)
 
 
 def test_a_link_inside_the_folder_is_not_sent_and_is_listed(tmp_path):

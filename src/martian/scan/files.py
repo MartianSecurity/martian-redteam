@@ -115,7 +115,7 @@ def _segments(pattern: str) -> list[str]:
     parts = [part for part in cleaned.split("/") if part not in ("", ".")]
     if ".." in parts:
         raise SelectionError(f"include pattern {pattern!r} leaves the folder")
-    if "/" not in pattern.strip().strip("/"):
+    if "/" not in pattern.strip().rstrip("/"):  # a name, at any depth; a leading slash anchors it
         parts = ["**", *parts]
     if folder:
         parts.append("**")

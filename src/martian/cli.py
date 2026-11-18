@@ -1434,7 +1434,8 @@ def run_scan_command(
             show_default=False,
             help=(
                 "A path pattern of files to send, relative to the folder; repeat it for more. A pattern without "
-                "a slash matches a name at any depth, ** any number of folders, a trailing / a whole folder. "
+                "a slash matches a name at any depth, a leading / anchors it, ** matches any number of folders, "
+                "a trailing / a whole folder. "
                 "Replaces the default agent paths."
             ),
         ),

@@ -48,9 +48,9 @@ refused with 403, and the command says what it needs.
    (`DEFAULT_INCLUDE` and `FOLDER_MARKERS` in `src/martian/scan/files.py`).
 
    `--include` replaces the defaults; repeat it for more patterns. Patterns are relative to the
-   folder: one without a slash matches a name at any depth (`*.md`), `*` matches within one folder
-   name, `**` any number of folders (`skills/**`), and a trailing `/` a whole folder (`src/agent/`).
-   A pattern with `..` is refused.
+   folder: one without a slash matches a name at any depth (`*.md`) and a leading `/` anchors it
+   to the folder (`/AGENTS.md`); `*` matches within one folder name, `**` any number of folders
+   (`skills/**`), and a trailing `/` a whole folder (`src/agent/`). A pattern with `..` is refused.
 3. **Symbolic links are never followed.** A link the patterns could reach that points out of the
    folder refuses the scan (exit 2, naming the links): an agent would read the file it points at,
    which the scan cannot send. A link that stays inside the folder is not sent and is listed as
