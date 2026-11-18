@@ -115,6 +115,11 @@ pull request with the last result of `main` and name the cases that went from pa
 - `assert_redteam(...)`: record saved adversarial probe results alongside
   dataset and quality checks in one eval session.
 - `martian ci`: one persisted session for evals, redteam, or both, with typed Python results.
+- `martian scan`: a folder's agent files (skills, MCP configuration, plugins, sub-agents, hooks,
+  settings, rules files) scanned by the Martian Scanner, exiting on the server's gate, with a GitHub
+  Action and SARIF for code scanning. It needs a Scanner-enabled Martian Cloud or Enterprise
+  organisation and ships no rules; see
+  [scanning agent files](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/scan.md).
 
 The distribution is `martian-sdk`, published on
 [PyPI](https://pypi.org/project/martian-sdk/). Its `evals` extra covers both modules.

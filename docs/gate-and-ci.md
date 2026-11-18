@@ -65,6 +65,17 @@ refs/environments for credential access, contents-read checkout and
 code. Validate configuration without secrets first. The callback has its own
 provider/key setup; it is executed locally and can have side effects.
 
+## Scanning agent files
+
+The [scan action](../.github/actions/scan/action.yml) runs `martian scan` on a
+repository's agent files and fails on the Martian server's gate: 0 passed, 1
+failed, 2 no result. It needs a Scanner-enabled Cloud or Enterprise organisation
+and a token with `scan:run` and `scan:read` from the job's environment. Run it on
+pushes to protected branches, not on pull requests, and upload its SARIF to code
+scanning; [examples/scan/workflow.yml](../examples/scan/workflow.yml) does both.
+Pull requests are scanned through the Martian GitHub App. See
+[scanning agent files](scan.md#in-github-actions).
+
 ## Evals on a pull request, with one comment
 
 The [evals action](../.github/actions/evals/action.yml) runs one

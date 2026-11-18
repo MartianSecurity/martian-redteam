@@ -1,0 +1,131 @@
+# Scan a repository's agent files with the Martian Scanner and fail on the
+# server's gate. Callers check out their repository first.
+#
+# `martian scan` packs the folder's agent files (skills, MCP configuration,
+# plugins, sub-agents, hooks, settings and rules files; files .gitignore
+# ignores are not sent), uploads them, waits for the scan and exits on the
+# server's gate: 0 passed, 1 failed, 2 no result. The scan runs on the server
+# and needs a Scanner-enabled Martian Cloud or Enterprise organisation.
+#
+# The token comes from the job's environment, never from an input: set
+# MARTIAN_API_URL and MARTIAN_API_TOKEN (a key with scan:run and scan:read) on
+# the job or this step. Run it on pushes to protected branches, never on
+# pull_request_target: a customer token must not reach unreviewed code, and
+# pull requests from forks get no secrets. Pull requests are scanned through
+# the Martian GitHub App instead.
+#
+# The action writes the server's SARIF and JSON exports to `output` and
+# uploads nothing; upload the SARIF to code scanning with
+# github/codeql-action/upload-sarif and `if: always()` (see
+# examples/scan/workflow.yml). Walks up from github.action_path to
+# pyproject.toml and installs the SDK from there, like the evals action.
+# See docs/scan.md.
+name: Martian Scan
+description: Scan a repository's agent files with the Martian Scanner and fail on the server's gate
+
+inputs:
+  path:
+    description: The folder to scan, relative to the workspace. SARIF paths are relative to it, so keep the repository root for code scanning
+    required: false
+    default: "."
+  include:
+    description: >
+      Path patterns of the files to send, one per line, relative to the
+      folder. Empty sends the default agent paths.
+    required: false
+    default: ""
+  name:
+    description: The scan subject's name. Empty uses the repository (GITHUB_REPOSITORY)
+    required: false
+    default: ""
+  output:
+    description: Folder for scan.sarif and scan.json, relative to the workspace
+    required: false
+    default: results/scan
+  timeout:
+    description: Seconds to wait for the scan to end
+    required: false
+    default: "600"
+  model-analysis:
+    description: >
+      "true" lets the scan send file contents to a model when the
+      organisation's policy allows it; "false" keeps them from any model.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: The exit code of martian scan (0 passed, 1 the gate failed, 2 no result)
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif:
+    description: Path of the SARIF file, when the scan wrote one
+    value: ${{ steps.scan.outputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: "0.10.0"
+        python-version: "3.12"
+
+    - name: Install martian-sdk
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo_root="${GITHUB_ACTION_PATH}"
+        while [ ! -f "${repo_root}/pyproject.toml" ]; do
+          parent="$(cd "${repo_root}/.." && pwd)"
+          if [ "${parent}" = "${repo_root}" ]; then
+            echo "could not find pyproject.toml above ${GITHUB_ACTION_PATH}" >&2
+            exit 1
+          fi
+          repo_root="${parent}"
+        done
+        uv venv --allow-existing "${RUNNER_TEMP}/martian-scan"
+        uv pip install --python "${RUNNER_TEMP}/martian-scan" "${repo_root}"
+
+    # Inputs reach the script through env and are referenced as quoted shell
+    # variables, never by expression substitution, so a crafted input cannot
+    # become shell code.
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        MARTIAN_SCAN_PATH: ${{ inputs.path }}
+        MARTIAN_SCAN_INCLUDE: ${{ inputs.include }}
+        MARTIAN_SCAN_NAME: ${{ inputs.name }}
+        MARTIAN_SCAN_OUTPUT: ${{ inputs.output }}
+        MARTIAN_SCAN_TIMEOUT: ${{ inputs.timeout }}
+        MARTIAN_SCAN_MODEL_ANALYSIS: ${{ inputs.model-analysis }}
+      run: |
+        set -uo pipefail
+        args=(--json "${MARTIAN_SCAN_OUTPUT}/scan.json" --sarif "${MARTIAN_SCAN_OUTPUT}/scan.sarif" --timeout "${MARTIAN_SCAN_TIMEOUT}")
+        while IFS= read -r pattern; do
+          pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+          pattern="${pattern%"${pattern##*[![:space:]]}"}"
+          if [ -n "${pattern}" ]; then
+            args+=(--include "${pattern}")
+          fi
+        done <<< "${MARTIAN_SCAN_INCLUDE}"
+        if [ -n "${MARTIAN_SCAN_NAME}" ]; then
+          args+=(--name "${MARTIAN_SCAN_NAME}")
+        fi
+        case "${MARTIAN_SCAN_MODEL_ANALYSIS}" in
+          true) ;;
+          false) args+=(--no-model-analysis) ;;
+          *) echo "::error title=Martian Scan::model-analysis must be true or false"; exit 2 ;;
+        esac
+        status=0
+        "${RUNNER_TEMP}/martian-scan/bin/martian" scan "${MARTIAN_SCAN_PATH}" "${args[@]}" || status=$?
+        echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+        if [ -f "${MARTIAN_SCAN_OUTPUT}/scan.sarif" ]; then
+          echo "sarif=${MARTIAN_SCAN_OUTPUT}/scan.sarif" >> "${GITHUB_OUTPUT}"
+        fi
+        case "${status}" in
+          0) ;;
+          1) echo "::error title=Martian Scan::The scan gate failed; see the findings above." ;;
+          *) echo "::error title=Martian Scan::The scan gave no result (exit ${status}); see the log above." ;;
+        esac
+        exit "${status}"

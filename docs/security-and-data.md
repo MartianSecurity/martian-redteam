@@ -542,6 +542,20 @@ score whose write fails. `tests/evals/test_queue_errors.py` does the same for a 
 a kind the database refuses, in the queue's errors and in an API answer carrying them. Each finds
 the canary in no error, API answer or log line, MLflow's included, on SQLite and on Postgres.
 
+## What `martian scan` sends
+
+`martian scan` uploads the **full contents** of the files it selects (by default
+the folder's agent files; see [scanning agent files](scan.md#what-is-sent)) to
+the configured Martian server as a ZIP, with the subject's kind and name. The
+server keeps the archive and scans it, and with model analysis allowed by both
+the organisation's policy and the command (`--no-model-analysis` turns it off)
+it may send file contents to a model. Run `martian scan --dry-run` to see the
+exact file list first, and narrow it with `--include`. Inside a Git work tree,
+files `.gitignore` ignores are not sent; outside one, nothing is ignored. The
+command follows no symbolic link and refuses a link that points out of the
+folder. Its terminal output carries no excerpt of a file; the `--json` and
+`--sarif` exports do, so treat them like the files scanned.
+
 ## Runtime reporting data boundary
 
 Optional `RuntimeReporter` uses a different destination and credential from the probe APIs above: outbound HTTPS to the backend's `/v1/discovery/telemetry-bindings/{id}/resource-events` (v3), authenticated with a file-mounted, binding-scoped `mt_` token. It sends generated event/trace/optional parent UUIDs, model/tool kind, configured provider or connection alias, configured model/tool name, completion time, duration and outcome. It does not export the assessment TraceRecorder, prompts, arguments, results, customer/session identifiers, raw URLs or provider credentials.
@@ -551,7 +565,8 @@ Strict allowlisted fields and identifier syntax limit the payload but cannot det
 ## API keys
 
 An owner/admin issues one organisation key with explicitly selected evals/CI
-and/or `redteam:run` capabilities and applicable resource restrictions. The
+and/or `redteam:run` capabilities (and `scan:run` / `scan:read` for `martian scan`)
+and applicable resource restrictions. The
 plaintext is shown once; save it in a secret manager. Lists and later reads
 contain metadata only. The key cannot manage the console or mint other keys.
 Existing evals tokens retain their original capabilities; use a newly authorized
