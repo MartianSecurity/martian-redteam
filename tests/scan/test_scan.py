@@ -448,3 +448,18 @@ def test_a_failed_scan_is_not_judged_and_exits_2_with_its_evaluation():
     code, printed = _run(Transport(scanner))
     assert code == EXIT_ERROR and scanner.gates[0]["verdict"] == "not_judged"
     assert any(text.startswith("Gate: not_judged (exit 2)") for text in printed.err)
+
+
+def test_a_verdict_that_disagrees_with_its_exit_code_is_an_error():
+    scanner = FakeScanner()
+    original = scanner._gate
+
+    def lying(scan_id, body):
+        status, headers, answer = original(scan_id, body)
+        gate = json.loads(answer)
+        gate["verdict"] = "passed"  # exit_code stays 1
+        return status, headers, json.dumps(gate).encode()
+
+    scanner._gate = lying  # type: ignore[method-assign]
+    code, printed = _run(Transport(scanner))
+    assert code == EXIT_ERROR and "invalid response" in printed.text
