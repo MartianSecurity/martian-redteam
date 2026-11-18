@@ -119,7 +119,7 @@ def test_principals_are_well_formed():
 
 
 def test_the_status_route_is_in_the_shape_of_the_frozen_contract():
-    # The server's EvalsStatusOut, from contracts/evals-api.json in MorningHQ/MartianBackend.
+    # The server's EvalsStatusOut, from contracts/evals-api.json in MartianSecurity/MartianBackend.
     contract_fields = {"status", "ready", "error_code", "updated_at", "provider", "admission_paused", "routing_epoch"}
     schema = create_app(records=RECORDS, store=MemoryStore(), principal=lambda: SINGLE_USER).openapi()
     assert set(schema["components"]["schemas"]["StoreStatus"]["properties"]) == contract_fields

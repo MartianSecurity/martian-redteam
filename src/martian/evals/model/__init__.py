@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
+
+from martian.evals.matrix import MatrixAxis, combinations
 
 MODEL_VERSION = "martian-eval-model-v1"
 
@@ -26,10 +28,33 @@ TargetKind = Literal["function", "http", "agent", "stored"]
 ScorerKind = Literal["llm_judge", "check", "code", "human"]
 DatasetSource = Literal["file", "draft", "global", "upload", "traces"]
 RunSource = Literal["local", "console", "ci"]
-RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled"]
+RunKind = Literal["eval", "redteam"]
+"""An eval run, or a red team run: an attempt of a red team run is a case result and each of its
+checks a score (:mod:`martian.redteam.store`). Listings show one kind at a time."""
+RunState = Literal["queued", "running", "completed", "partial", "failed", "cancelled", "stopped"]
+"""``stopped``: a run or scoring job that ended before its last case at one of its limits
+(:class:`RunLimits`). It keeps its finished cases and can be resumed."""
+LimitName = Literal["max_seconds", "max_judge_tokens"]
 CaseStatus = Literal["pending", "passed", "failed", "error", "skipped"]
 ScoreSource = Literal["code", "llm_judge", "human"]
 QuestionKind = Literal["boolean", "numeric", "categorical", "text"]
+CombineRule = Literal["all", "majority", "any"]
+"""How a check's verdicts over a case's attempts become one: every attempt passes, more than half
+pass, or at least one passes (``martian.evals.repeats``)."""
+
+MAX_ATTEMPTS = 100
+"""The most attempts a suite runs of each case."""
+
+MIN_PANEL = 2
+MAX_PANEL = 9
+"""The fewest and the most judge models a panel of judges names (``martian.evals.panel``)."""
+
+MAX_TURNS = 100
+"""The most user turns one conversation case has."""
+
+CheckScope = Literal["turn", "conversation"]
+"""What a scorer grades in a conversation case: each turn's reply (``turn``, the default), or the
+whole conversation once (``conversation``). A case of one input is graded by every scorer alike."""
 
 
 def digest(value: Any) -> str:
@@ -63,16 +88,74 @@ class Project(_Object):
     store: StoreRef = StoreRef()
 
 
+class Turn(_Object):
+    """One user turn of a conversation case: what the target receives this turn, what to check its
+    reply against, and the turn-scoped scorers that grade it, by name. ``checks`` left out (None)
+    means every turn-scoped scorer of the suite grades the turn; an empty list means none does."""
+
+    inputs: dict[str, Any] = Field(min_length=1)
+    expectations: dict[str, Any] = Field(default_factory=dict)
+    checks: list[Identifier] | None = None
+
+
+class SimulatedUser(_Object):
+    """A user a model plays in a conversation case, in place of scripted turns
+    (:mod:`martian.evals.simulation`): what the user wants (``goal``), who they are and how they
+    write (``persona``), the most messages they send (``max_turns``), and when they stop
+    (``stop_when``). The simulator writes each message from the conversation so far, and says at
+    the end whether the goal was reached."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    persona: str = Field(min_length=1, max_length=4000)
+    max_turns: int = Field(ge=1, le=MAX_TURNS)
+    stop_when: str = Field(min_length=1, max_length=4000)
+
+
 class Case(_Object):
     """One test case: what the target receives, what to check it against, and optionally a stored
-    output to grade instead of calling a target."""
+    output to grade instead of calling a target.
+
+    A conversation case has ``turns`` instead of ``inputs``: the user turns the target receives in
+    order, in one conversation. Its ``expectations`` are the conversation's, for the scorers that
+    grade it as a whole. It always runs against a target, so it has no stored ``outputs``.
+    ``turns`` is left out when empty, so a case of one input has the digest it had before the field
+    existed.
+
+    A simulated conversation case has a ``simulated_user`` instead of ``turns``: a model writes the
+    user's turns as the conversation goes. Its ``expectations`` are the conversation's and each of
+    its turns'. ``simulated_user`` is left out when there is none, so other cases keep their
+    digests."""
 
     id: Identifier
-    inputs: dict[str, Any] = Field(min_length=1)
+    inputs: dict[str, Any] = Field(default_factory=dict)
     expectations: dict[str, Any] = Field(default_factory=dict)
     outputs: Any = None
     tags: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    turns: list[Turn] = Field(default_factory=list, max_length=MAX_TURNS)
+    simulated_user: SimulatedUser | None = None
+
+    @model_validator(mode="after")
+    def inputs_or_turns(self) -> Case:
+        given = [name for name in ("inputs", "turns", "simulated_user") if getattr(self, name)]
+        if not given:
+            raise ValueError("a case needs inputs, turns for a conversation, or a simulated user")
+        if self.turns and self.inputs:
+            raise ValueError("a conversation case gives its inputs in each turn, not as the case's inputs")
+        if len(given) > 1:
+            raise ValueError("a case with a simulated user has neither inputs nor turns: the simulator writes them")
+        if (self.turns or self.simulated_user) and self.outputs is not None:
+            raise ValueError("a conversation case runs against a target, so it has no stored outputs")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _without_empty_turns(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and not self.turns:
+            written.pop("turns", None)
+        if isinstance(written, dict) and self.simulated_user is None:
+            written.pop("simulated_user", None)
+        return written
 
 
 class DatasetVersion(_Object):
@@ -109,10 +192,22 @@ class DatasetDraft(_Object):
     updated_at: datetime | None = None
 
 
+HEADER_NAME = r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$"
+"""An HTTP header name: one or more of the characters RFC 9110 allows in a token."""
+MODEL_NAME_LENGTH = 200
+"""The longest model name a trace, a run or a schedule keeps."""
+
+
 class Target(_Object):
     """The thing under test. An HTTP target's ``url`` and ``headers`` are kept as the suite file
     writes them, with ``${NAME}`` references unexpanded: the values a run reads from the
-    environment are never part of the model."""
+    environment are never part of the model.
+
+    An HTTP target may say where its response reports the model that answered:
+    ``model_path``, a path into the JSON response written as ``response_path`` is (``model`` for
+    an OpenAI-compatible reply), or ``model_header``, a response header. Unset, each is left out
+    when the target is written, so a target without them keeps the digest it had before the
+    fields existed."""
 
     kind: TargetKind
     file: str | None = None
@@ -122,17 +217,29 @@ class Target(_Object):
     response_path: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = None
+    model_path: str | None = Field(default=None, min_length=1, max_length=200)
+    model_header: str | None = Field(default=None, pattern=HEADER_NAME)
 
     @model_validator(mode="after")
     def fields_for_kind(self) -> Target:
         given = {
             name
-            for name in ("file", "function", "url", "body", "response_path", "headers", "agent_id")
+            for name in (
+                "file",
+                "function",
+                "url",
+                "body",
+                "response_path",
+                "headers",
+                "agent_id",
+                "model_path",
+                "model_header",
+            )
             if getattr(self, name)
         }
         allowed = {
             "function": {"file", "function"},
-            "http": {"url", "body", "response_path", "headers"},
+            "http": {"url", "body", "response_path", "headers", "model_path", "model_header"},
             "agent": {"agent_id"},
             "stored": set(),
         }[self.kind]
@@ -141,19 +248,126 @@ class Target(_Object):
             raise ValueError(f"a {self.kind} target needs {', '.join(missing)}")
         if extra := sorted(given - allowed):
             raise ValueError(f"{', '.join(extra)} does not apply to a {self.kind} target")
+        if self.model_path and self.model_header:
+            raise ValueError("a target reports its model at model_path or in model_header, not both")
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_unset_model_source(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict):
+            for name in ("model_path", "model_header"):
+                if written.get(name, "") is None:
+                    del written[name]
+        return written
+
+
+class PanelMember(_Object):
+    """One judge model of a panel: an MLflow model URI, and the base address of the
+    OpenAI-compatible endpoint that serves it, or None for the provider's own."""
+
+    model: str = Field(min_length=1, max_length=240)
+    endpoint: str | None = None
 
 
 class ScorerVersion(_Object):
-    """One way of scoring a case, pinned to the version that produced the score."""
+    """One way of scoring a case, pinned to the version that produced the score.
+
+    A judge's ``model`` is an MLflow model URI (``openai:/<model>``); ``endpoint`` is the base
+    address of the OpenAI-compatible endpoint that serves it, or None for the provider's own. Keys
+    are never part of the model. ``scope`` is what it grades in a conversation case: each turn's
+    reply, or the conversation once. An unset ``endpoint`` and the default ``scope`` (``turn``) are
+    left out when the scorer is written, so a scorer without them has the digest it had before
+    the fields existed.
+
+    A judge with a ``panel`` is graded by each of its judge models in turn, and the strict majority
+    of those that give a verdict decides (``martian.evals.panel``). A panel names from
+    :data:`MIN_PANEL` to :data:`MAX_PANEL` different models; the judge then names no ``model`` or
+    ``endpoint`` of its own. An empty panel is left out when the scorer is written, as an unset
+    endpoint is.
+    """
 
     name: Identifier
     kind: ScorerKind
     type: str = Field(min_length=1, max_length=80)
     version: str = ""
     model: str | None = None
+    endpoint: str | None = None
+    panel: list[PanelMember] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     criteria: dict[str, Any] = Field(default_factory=dict)
+    scope: CheckScope = "turn"
+
+    @model_validator(mode="after")
+    def _a_panel_is_the_judges_models(self) -> ScorerVersion:
+        if not self.panel:
+            return self
+        if self.kind != "llm_judge":
+            raise ValueError("only an llm_judge scorer has a panel of judge models")
+        if self.model is not None or self.endpoint is not None:
+            raise ValueError("a judge with a panel names its models in the panel, not in model or endpoint")
+        if not MIN_PANEL <= len(self.panel) <= MAX_PANEL:
+            raise ValueError(f"a panel names {MIN_PANEL} to {MAX_PANEL} judge models")
+        if len(set(self.panel)) != len(self.panel):
+            raise ValueError("a panel names each judge model once")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _without_unset_endpoint(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and written.get("endpoint", "") is None:
+            del written["endpoint"]
+        if isinstance(written, dict) and written.get("panel") == []:
+            del written["panel"]
+        if isinstance(written, dict) and self.scope == "turn":
+            written.pop("scope", None)
+        return written
+
+
+PROMPT_NAME = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+"""A prompt's name: 1 to 64 letters, digits and ``. _ -``, starting with a letter or a digit. A
+name MLflow's prompt registry takes, and one a URL path holds as written."""
+
+MAX_PROMPT_LENGTH = 100_000
+"""The longest a prompt version's text is, in characters: the most MLflow's prompt registry keeps."""
+
+PromptName = Annotated[str, Field(pattern=PROMPT_NAME)]
+
+
+def prompt_digest(text: str) -> str:
+    """The content digest of a prompt's text: SHA-256 of the text as UTF-8, exactly as written. A
+    run's prompt is matched to a registered version by it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class Prompt(_Object):
+    """A named prompt whose text changes over time, each change an immutable ``PromptVersion``. A
+    prompt belongs to an organisation, not a project. In MLflow, a prompt of its prompt registry."""
+
+    name: PromptName
+    description: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+
+class PromptVersion(_Object):
+    """One version of a prompt: its text, the digest of the text (:func:`prompt_digest`), the
+    commit message that came with it, and who added it when. ``version`` counts up from 1 in each
+    prompt and is assigned when the version is added; a version never changes."""
+
+    name: PromptName
+    version: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
+    digest: Digest
+    message: str = Field(default="", max_length=1000)
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+    @model_validator(mode="after")
+    def digest_is_the_texts(self) -> PromptVersion:
+        if self.digest != prompt_digest(self.text):
+            raise ValueError("digest is not the digest of the text")
+        return self
 
 
 class Policy(_Object):
@@ -165,18 +379,112 @@ class Policy(_Object):
     minimum_coverage: float = Field(default=1, ge=0, le=1)
 
 
+class CacheSettings(_Object):
+    """The cache of model calls a run replays replies from (:mod:`martian.evals.cache`): its
+    ``folder`` as the suite file writes it, the ``ttl_seconds`` of an entry, and whether a function
+    target's calls are cached (``functions``). ``None`` leaves the runner's default."""
+
+    folder: str | None = None
+    ttl_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    functions: bool | None = None
+
+
+class RunLimits(_Object):
+    """When a run stops before its last case: once it has run for ``max_seconds`` of wall time, or
+    once its model calls on the judges' provider path have used ``max_judge_tokens`` tokens, input
+    and output together, as the provider reported them: its LLM judges' and, in ``martian evals
+    run``, its simulated users' (:mod:`martian.evals.simulation`). ``None`` is no limit. Each start
+    or resume of a run has its limits afresh. A run that reaches one is ``stopped``, keeps its
+    finished cases and can be resumed."""
+
+    max_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_judge_tokens: int | None = Field(default=None, ge=1)
+
+    def stop(
+        self, limit: LimitName, used: float | None, *, simulated: int = 0, unreported: str = "the judge"
+    ) -> dict[str, Any]:
+        """What a run that stopped at ``limit`` records of it (``Run.provenance["stopped"]``): the
+        limit, its value, what had been used (None for tokens a model call did not report), and a
+        message that names the setting to raise. ``simulated`` is how many of the tokens used were
+        the simulated users', which the message then counts apart from the judges'; ``unreported``
+        names the model call that reported no usage."""
+        value = getattr(self, limit)
+        if limit == "max_seconds":
+            message = f"Stopped at its time limit (max_seconds {value:g}) after {used or 0:.0f} seconds"
+        elif used is None:
+            message = (
+                f"Stopped: {unreported} reported no token usage, so its token limit (max_judge_tokens) cannot be kept"
+            )
+        else:
+            message = f"Stopped at its judge token limit (max_judge_tokens {value}) after {used:.0f} tokens"
+            if simulated:
+                message += f" ({used - simulated:.0f} by its judges, {simulated} by its simulated users)"
+        return {"limit": limit, "value": value, "used": used, "message": message}
+
+
+_UNSET_LEFT_OUT = (
+    "limits",
+    "cache",
+    "simulator_max_retries",
+    "simulator_rate_limit_wait_seconds",
+    "simulator_headers",
+)
+
+
 class RunSettings(_Object):
     """How a run of the suite is carried out, not what it grades. ``None`` leaves the runner's
-    default. A case result's fingerprint leaves these out, so changing one keeps earlier results."""
+    default. A case result's fingerprint leaves these out, so changing one keeps earlier results.
+    Unset ``limits`` and simulator settings are left out when the settings are written, so a suite
+    without them keeps the digest it had before those fields existed. ``cache`` is set when the
+    suite file turns the cache of model calls on, and left out when unset in the same way."""
 
     concurrency: int | None = Field(default=None, ge=1)
     batch: int | None = Field(default=None, ge=1)
     target_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     judge_max_retries: int | None = Field(default=None, ge=0)
     judge_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Headers added to every judge request, values as written with ${NAME} unexpanded.
+    judge_headers: dict[str, str] | None = None
     output: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
+    limits: RunLimits | None = None
+    cache: CacheSettings | None = None
+    simulator_max_retries: int | None = Field(default=None, ge=0)
+    simulator_rate_limit_wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Headers added to every simulator request, values as written with ${NAME} unexpanded.
+    simulator_headers: dict[str, str] | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_unset(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict):
+            for name in _UNSET_LEFT_OUT:
+                if written.get(name, "") is None:
+                    del written[name]
+        return written
+
+
+class Simulator(_Object):
+    """The model that plays a suite's simulated users (``Case.simulated_user``): an MLflow model URI
+    (``openai:/<model>``) on the judges' provider path, and its inference ``parameters``. Never a
+    key: the provider's key comes from the environment."""
+
+    model: str = Field(min_length=1, max_length=240)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class Repeats(_Object):
+    """How many times a suite runs each case, and how each check's verdicts over those attempts
+    combine into the case's verdict for that check. ``combine`` is the suite's rule and ``checks``
+    the rules checks name for themselves, by scorer name. A check that names none takes ``all`` if
+    it is a security check and the suite's rule otherwise; the runner decides which checks are
+    security checks. Repeats change verdicts, so they are part of the suite's definition and of a
+    case result's fingerprint, not a run setting."""
+
+    attempts: int = Field(default=1, ge=1, le=MAX_ATTEMPTS)
+    combine: CombineRule = "all"
+    checks: dict[str, CombineRule] = Field(default_factory=dict)
 
 
 class Suite(_Object):
@@ -184,7 +492,15 @@ class Suite(_Object):
 
     ``dataset_location`` is where the cases are read from: a suite file's ``data`` path, as written
     there. ``input_key`` names the input that judges grade against and that a plain-text case
-    input fills.
+    input fills. ``repeats`` is left out when it is the default (one attempt, rule ``all``, no
+    check rules), so a suite without repeats has the digest it had before the field existed.
+
+    ``matrix`` holds the suite's axes as its suite file writes them, each a list of values or a
+    mapping of names to values (:mod:`martian.evals.matrix`): the suite runs once per combination,
+    each run with that combination in its ``provenance``. It is left out when empty, so a suite
+    without one keeps its digest too.
+
+    ``simulator`` is the model that plays its cases' simulated users, left out when there is none.
     """
 
     id: Identifier
@@ -198,7 +514,12 @@ class Suite(_Object):
     scorers: list[ScorerVersion] = Field(min_length=1)
     policies: list[Policy] = Field(default_factory=list)
     settings: RunSettings = RunSettings()
+    repeats: Repeats = Repeats()
+    matrix: dict[str, MatrixAxis] = Field(default_factory=dict)
+    simulator: Simulator | None = None
     digest: Digest
+    created_at: datetime | None = None
+    created_by: str | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Suite:
@@ -207,13 +528,29 @@ class Suite(_Object):
             raise ValueError("scorer names must be unique within a suite")
         if unknown := sorted({policy.scorer for policy in self.policies} - set(names)):
             raise ValueError(f"policies name scorers the suite does not have: {', '.join(unknown)}")
+        if unknown := sorted(set(self.repeats.checks) - set(names)):
+            raise ValueError(f"repeats name scorers the suite does not have: {', '.join(unknown)}")
+        combinations(self.matrix)  # raises for a matrix that cannot run
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict):
+            if self.repeats == Repeats():
+                written.pop("repeats", None)
+            if not self.matrix:
+                written.pop("matrix", None)
+            if self.simulator is None:
+                written.pop("simulator", None)
+        return written
 
 
 def suite_digest(suite: Suite) -> str:
-    """The digest of a suite's definition: every field but ``id``, ``version`` and ``digest``.
-    Run settings count, so a store that keeps one version per digest never drops a change to them."""
-    return digest(suite.model_dump(mode="json", exclude={"id", "version", "digest"}))
+    """The digest of a suite's definition: every field but ``id``, ``version``, ``digest`` and who
+    saved the version when. Run settings count, so a store that keeps one version per digest never
+    drops a change to them."""
+    return digest(suite.model_dump(mode="json", exclude={"id", "version", "digest", "created_at", "created_by"}))
 
 
 class Counts(_Object):
@@ -225,11 +562,14 @@ class Counts(_Object):
 
 
 class Run(_Object):
-    """One execution of a suite, or of a dataset, target and scorers, over its cases."""
+    """One execution of a suite, or of a dataset, target and scorers, over its cases. ``kind`` is
+    ``eval`` unless it is a red team run; it is left out when ``eval``, so an eval run is written as
+    it was before the field existed."""
 
     id: Identifier
     project_id: Identifier
     code: str = ""
+    kind: RunKind = "eval"
     source: RunSource
     state: RunState
     suite_id: str | None = None
@@ -248,12 +588,103 @@ class Run(_Object):
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the run. Whoever executes it stops before its next case."""
     store: StoreRef = StoreRef()
+
+    @model_serializer(mode="wrap")
+    def _without_eval_kind(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and self.kind == "eval":
+            written.pop("kind", None)
+        return written
+
+
+class CheckVerdict(_Object):
+    """One check's verdict on one attempt. ``passed`` is None when there is no verdict.
+    ``metadata`` is what the check recorded beside its verdict, such as a panel's votes; it is
+    left out when empty, so a verdict without any is written as it was before the field existed."""
+
+    passed: bool | None = None
+    rationale: str = ""
+    error: str = ""
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def _without_empty_metadata(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and not self.metadata:
+            written.pop("metadata", None)
+        return written
+
+
+class TurnResult(_Object):
+    """One turn of a conversation case in one run: the turn's inputs and expectations, its verdict
+    (every check that grades the turn passed it), each of those checks' verdict, the reply, why
+    the target call failed if it did, and the trace the turn was recorded in. A turn no check
+    grades passes when the target answered."""
+
+    number: int = Field(ge=1, le=MAX_TURNS)
+    status: CaseStatus
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    expectations: dict[str, Any] = Field(default_factory=dict)
+    checks: dict[str, CheckVerdict] = Field(default_factory=dict)
+    output: Any = None
+    error: str = ""
+    latency_ms: float | None = Field(default=None, ge=0)
+    trace_id: str | None = None
+
+
+def _without_unused_conversation(written: Any, owner: Any) -> Any:
+    """A result written without the conversation fields it does not use, so a case of one input
+    is written as it was before they existed."""
+    if isinstance(written, dict):
+        if not owner.turns:
+            written.pop("turns", None)
+        if owner.session_id is None:
+            written.pop("session_id", None)
+    return written
+
+
+class Attempt(_Object):
+    """One attempt of a case that its suite runs more than once (``Suite.repeats``): its verdict,
+    each check's verdict, the reply, why the target call failed if it did, and the trace it was
+    recorded in, if any. An attempt of a conversation case has its own conversation: its
+    ``session_id`` and its ``turns``, left out for a case of one input."""
+
+    number: int = Field(ge=1, le=MAX_ATTEMPTS)
+    status: CaseStatus
+    checks: dict[str, CheckVerdict] = Field(default_factory=dict)
+    output: Any = None
+    error: str = ""
+    latency_ms: float | None = Field(default=None, ge=0)
+    trace_id: str | None = None
+    session_id: str | None = None
+    turns: list[TurnResult] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _without_unused_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
+        return _without_unused_conversation(handler(self), self)
 
 
 class CaseResult(_Object):
     """What one case produced in one run. ``fingerprint`` identifies everything that produced it,
-    so a resumed run reuses the result only while that is unchanged."""
+    so a resumed run reuses the result only while that is unchanged.
+
+    A case its suite runs more than once has every attempt in ``attempts``, in order; its
+    ``status`` and scores are the attempts combined by each check's rule, and its ``output``,
+    ``error`` and trace are those of the first attempt whose verdict is the case's, else of its
+    first attempt. ``attempts`` is left out when empty, so a result without repeats is written as
+    it was before the field existed.
+
+    A conversation case has its conversation's ``session_id``, the id its turns' traces share, and
+    every turn it sent in ``turns``; its ``output`` is the conversation as ``role`` and ``content``
+    messages, and its scores are the conversation's verdicts, a turn check's passing when it
+    passed every turn it grades. With repeats, these are the attempt's that stands for the case.
+    Both are left out for a case of one input.
+
+    ``simulated`` marks the result of a case whose user turns a simulator wrote
+    (``Case.simulated_user``), left out for every other case."""
 
     run_id: Identifier
     case_id: Identifier
@@ -267,6 +698,19 @@ class CaseResult(_Object):
     fingerprint: Digest | None = None
     finished_at: datetime | None = None
     store: StoreRef = StoreRef()
+    attempts: list[Attempt] = Field(default_factory=list)
+    session_id: str | None = None
+    turns: list[TurnResult] = Field(default_factory=list)
+    simulated: bool = False
+
+    @model_serializer(mode="wrap")
+    def _without_empty_attempts(self, handler: SerializerFunctionWrapHandler) -> Any:
+        written = handler(self)
+        if isinstance(written, dict) and not self.attempts:
+            written.pop("attempts", None)
+        if isinstance(written, dict) and not self.simulated:
+            written.pop("simulated", None)
+        return _without_unused_conversation(written, self)
 
 
 class Score(_Object):
@@ -297,11 +741,15 @@ class Score(_Object):
 
 
 class ScoringJob(_Object):
-    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them."""
+    """Scoring a finished run again with more scorers. Its scores add to the run's, never replace them.
+    A job that applies a saved suite names its version and carries the suite's policies."""
 
     id: Identifier
     run_id: Identifier
     scorers: list[ScorerVersion] = Field(min_length=1)
+    policies: list[Policy] = Field(default_factory=list)
+    suite_id: str | None = None
+    suite_version: int | None = Field(default=None, ge=1)
     state: RunState
     total: int = Field(default=0, ge=0)
     succeeded: int = Field(default=0, ge=0)
@@ -310,6 +758,8 @@ class ScoringJob(_Object):
     requested_by: str | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    """When someone asked to stop the job. Whoever executes it stops before its next case."""
 
 
 class ReviewQuestion(_Object):
@@ -337,7 +787,11 @@ class ReviewQueue(_Object):
 
 class Review(_Object):
     """A person's answer about one case result. A new answer is a new review that names the one it
-    replaces in ``previous_id``; reviews are never edited."""
+    replaces in ``previous_id``; reviews are never edited.
+
+    ``blind`` says the answer was given blind: in a review queue with blind double review, before
+    its reviewer could read another reviewer's answer to the same item and question, which is their
+    first complete answer to it. Any other answer is not blind."""
 
     id: Identifier
     run_id: Identifier
@@ -351,6 +805,7 @@ class Review(_Object):
     queue_id: str | None = None
     previous_id: str | None = None
     score_id: str | None = None
+    blind: bool = False
     created_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -381,7 +836,9 @@ class Span(_Object):
 class Trace(_Object):
     """A recorded call to the thing under test, from an eval run or from live traffic. A case result
     is a trace of a run; a trace need not belong to one. ``spans`` is empty in search results and
-    filled when one trace is read."""
+    filled when one trace is read. A search may give a preview of a long ``request`` or
+    ``response``, and the trace's ``martian.request_preview_truncated`` or
+    ``martian.response_preview_truncated`` metadata is then ``"true"``; one trace read has both whole."""
 
     id: Identifier
     project_id: Identifier
@@ -404,21 +861,63 @@ class Trace(_Object):
 
 
 class TraceQuery(_Object):
-    """Which traces of a project to return, newest first unless ``oldest_first``."""
+    """Which traces of a project to return, newest first unless ``oldest_first``.
+
+    ``model`` keeps the traces whose model is exactly that name. ``text`` matches, ignoring case, a
+    trace's name and its request and response up to 1,000 characters, or the first 997 of a longer
+    one (``martian.evals.store.text_matches``). ``min_latency_ms`` keeps traces whose latency is at
+    least that (a trace with no latency is left out), and ``verdicts`` keeps traces with a verdict
+    of each named scorer equal to its boolean: a feedback score, never an expectation
+    (:func:`is_expectation`). ``slowest_first`` orders by latency instead of time, slowest first or,
+    when ``False``, fastest first, with the traces that have no latency last. A store applies every
+    filter and the order before it pages, so a page is the query's, whatever the project's size."""
 
     project_id: Identifier
     run_id: str | None = None
     session_id: str | None = None
     user_id: str | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=MODEL_NAME_LENGTH)
     trace_ids: list[Identifier] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=500)
     states: list[TraceState] = Field(default_factory=list)
     tags: dict[str, str] = Field(default_factory=dict)
     since: datetime | None = None
     until: datetime | None = None
+    min_latency_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    verdicts: dict[str, bool] = Field(default_factory=dict)
     oldest_first: bool = False
+    slowest_first: bool | None = None
     limit: int = Field(default=50, ge=1, le=500)
     cursor: str | None = None
+
+
+def is_expectation(score: Score) -> bool:
+    """Whether a score is a person's expectation on a trace rather than a verdict. The core records
+    an expectation annotation as a score whose metadata has ``martian.annotation: expectation``, and
+    a store binding reads MLflow's expectation assessments the same way."""
+    return score.metadata.get("martian.annotation") == "expectation"
+
+
+def query_keeps(trace: Trace, query: TraceQuery) -> bool:
+    """Whether a trace, with its scores, passes the query's latency and verdict filters."""
+    if query.min_latency_ms is not None and (trace.latency_ms is None or trace.latency_ms < query.min_latency_ms):
+        return False
+    return all(
+        any(s.scorer == name and not is_expectation(s) and s.value is wanted for s in trace.scores)
+        for name, wanted in query.verdicts.items()
+    )
+
+
+def query_order(traces: list[Trace], query: TraceQuery) -> list[Trace]:
+    """Traces in the query's order: by request time, then by latency when ``slowest_first`` is set."""
+    epoch = datetime.min.replace(tzinfo=UTC)
+    found = sorted(traces, key=lambda t: (t.request_time or epoch, t.id), reverse=not query.oldest_first)
+    if query.slowest_first is None:
+        return found
+    timed = sorted(
+        (t for t in found if t.latency_ms is not None), key=lambda t: t.latency_ms or 0.0, reverse=query.slowest_first
+    )
+    return timed + [t for t in found if t.latency_ms is None]
 
 
 class Page[T](BaseModel):
@@ -513,7 +1012,68 @@ RESULTS_RECORD_FIELDS = {
     "output": "CaseResult.output",
     "error": "CaseResult.error",
     "fingerprint": "CaseResult.fingerprint",
+    "attempts": "CaseResult.attempts (only when the suite repeats its cases)",
+    "session_id": "CaseResult.session_id (only for a conversation case)",
+    "turns": "CaseResult.turns (only for a conversation case)",
+    "simulated": "CaseResult.simulated (only for a case with a simulated user)",
 }
+
+# Every field of one entry of a results.jsonl record's ``attempts``, and where the model keeps it.
+ATTEMPT_RECORD_FIELDS = {
+    "number": "Attempt.number",
+    "passed": "Attempt.status",
+    "checks": "Attempt.checks (one CheckVerdict per check label)",
+    "output": "Attempt.output",
+    "error": "Attempt.error",
+    "session_id": "Attempt.session_id (only for a conversation case)",
+    "turns": "Attempt.turns (only for a conversation case)",
+}
+
+# Every field of one entry of a results.jsonl record's ``turns``, and where the model keeps it.
+TURN_RECORD_FIELDS = {
+    "number": "TurnResult.number",
+    "inputs": "TurnResult.inputs",
+    "passed": "TurnResult.status",
+    "checks": "TurnResult.checks (one CheckVerdict per check label that grades the turn)",
+    "output": "TurnResult.output",
+    "error": "TurnResult.error",
+}
+
+
+def _verdict(check: dict[str, Any]) -> CheckVerdict:
+    return CheckVerdict(
+        passed=check.get("passed"),
+        rationale=check.get("rationale") or "",
+        error=check.get("error") or "",
+        metadata=dict(check.get("metadata") or {}),
+    )
+
+
+def _turn(entry: dict[str, Any]) -> TurnResult:
+    if unknown := sorted(set(entry) - set(TURN_RECORD_FIELDS)):
+        raise ValueError(f"results record has turn fields the model does not map: {', '.join(unknown)}")
+    return TurnResult(
+        number=entry["number"],
+        status=case_status(entry["passed"]),
+        inputs=entry.get("inputs") or {},
+        checks={label: _verdict(check) for label, check in (entry.get("checks") or {}).items()},
+        output=entry.get("output"),
+        error=entry.get("error") or "",
+    )
+
+
+def _attempt(entry: dict[str, Any]) -> Attempt:
+    if unknown := sorted(set(entry) - set(ATTEMPT_RECORD_FIELDS)):
+        raise ValueError(f"results record has attempt fields the model does not map: {', '.join(unknown)}")
+    return Attempt(
+        number=entry["number"],
+        status=case_status(entry["passed"]),
+        checks={label: _verdict(check) for label, check in (entry.get("checks") or {}).items()},
+        output=entry.get("output"),
+        error=entry.get("error") or "",
+        session_id=entry.get("session_id"),
+        turns=[_turn(turn) for turn in entry.get("turns") or []],
+    )
 
 
 def from_results_record(
@@ -522,7 +1082,10 @@ def from_results_record(
     """One ``results.jsonl`` record as a case result and its scores.
 
     ``scorers`` maps a check label to the scorer that produced it, so each score names its
-    version and source; a label not in it is recorded as a check.
+    version and source; a label not in it is recorded as a check. A record's ``attempts`` become
+    the result's attempts, and a conversation's ``session_id`` and ``turns`` its own; its scores
+    are the record's own checks: the attempts combined, and a conversation's verdicts. A check's
+    ``metadata``, such as a panel's votes, is its score's metadata.
     """
     if unknown := sorted(set(record) - set(RESULTS_RECORD_FIELDS)):
         raise ValueError(f"results record has fields the model does not map: {', '.join(unknown)}")
@@ -535,6 +1098,10 @@ def from_results_record(
         output=record.get("output"),
         error=record.get("error") or "",
         fingerprint=record.get("fingerprint"),
+        attempts=[_attempt(entry) for entry in record.get("attempts") or []],
+        session_id=record.get("session_id"),
+        turns=[_turn(entry) for entry in record.get("turns") or []],
+        simulated=record.get("simulated") is True,
     )
     scores = []
     for label, check in (record.get("checks") or {}).items():
@@ -550,24 +1117,44 @@ def from_results_record(
                 passed=check.get("passed"),
                 rationale=check.get("rationale") or "",
                 error=check.get("error") or "",
+                metadata=dict(check.get("metadata") or {}),
             )
         )
     return result, scores
 
 
 __all__ = [
+    "ATTEMPT_RECORD_FIELDS",
+    "HEADER_NAME",
+    "MAX_ATTEMPTS",
+    "MAX_PANEL",
+    "MAX_PROMPT_LENGTH",
+    "MAX_TURNS",
+    "MIN_PANEL",
+    "MODEL_NAME_LENGTH",
     "MODEL_VERSION",
+    "PROMPT_NAME",
     "SESSION_TRACE_LIMIT",
+    "TURN_RECORD_FIELDS",
+    "Attempt",
+    "CheckScope",
+    "CheckVerdict",
+    "CombineRule",
+    "Repeats",
     "DatasetDraft",
     "Page",
+    "PanelMember",
     "QueueItem",
     "Session",
     "SessionSearch",
+    "SimulatedUser",
+    "Simulator",
     "Span",
     "Trace",
     "TraceQuery",
     "TraceState",
     "RESULTS_RECORD_FIELDS",
+    "CacheSettings",
     "Case",
     "CaseResult",
     "CaseStatus",
@@ -575,20 +1162,31 @@ __all__ = [
     "DatasetVersion",
     "Policy",
     "Project",
+    "Prompt",
+    "PromptVersion",
     "Review",
     "ReviewQuestion",
     "ReviewQueue",
+    "LimitName",
     "Run",
+    "RunLimits",
     "RunSettings",
+    "RunState",
     "Score",
     "ScorerVersion",
     "ScoringJob",
     "StoreRef",
     "Suite",
     "Target",
+    "Turn",
+    "TurnResult",
     "case_status",
     "digest",
     "from_results_record",
+    "is_expectation",
+    "prompt_digest",
+    "query_keeps",
+    "query_order",
     "sessions_from_traces",
     "suite_digest",
 ]

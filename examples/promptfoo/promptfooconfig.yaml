@@ -1,0 +1,106 @@
+# A promptfoo config for a travel assistant, written by hand for martian-sdk's promptfoo converter
+# from promptfoo's configuration reference (promptfoo 0.125). It is not promptfoo's own test data.
+# Convert it and run the suites against agent.py, with no model call:
+#
+#   martian evals convert promptfoo examples/promptfoo/promptfooconfig.yaml \
+#     --target examples/promptfoo/agent.py:answer --output converted
+#   martian evals run converted/evals.yaml
+#   martian evals run converted/evals-2.yaml
+#   martian evals run converted/evals-3.yaml
+#
+# The cost check in evals-3.yaml gives an error: agent.py makes no model call for MLflow to price.
+#
+# results.json is what `promptfoo eval -o results.json` writes for this config, written by hand the
+# same way: martian evals import promptfoo examples/promptfoo/results.json
+description: Travel assistant
+
+prompts:
+  - id: answer
+    label: answer
+    raw: "You are a travel assistant. Answer {{traveller}} in one sentence. Question: {{question}}"
+
+providers:
+  - id: openai:gpt-4.1-mini
+    label: mini
+  - id: file://agent.py
+    label: agent
+
+evaluateOptions:
+  maxConcurrency: 2
+
+defaultTest:
+  vars:
+    traveller: Sam
+  assert:
+    - type: not-icontains
+      value: as an AI language model
+    - type: not-regex
+      value: "\\b(?:sorry|apologi[sz]e)\\b"
+    - type: latency
+      threshold: 3000
+
+tests:
+  - description: capital of France
+    vars:
+      question: What is the capital of France?
+    assert:
+      - type: starts-with
+        value: The capital of
+      - type: icontains
+        value: paris
+        weight: 2
+      - type: llm-rubric
+        value: Names Paris as the capital of France
+
+  - description: capital of Japan
+    vars:
+      question: What is the capital of Japan?
+    assert:
+      - type: starts-with
+        value: The capital of
+      - type: icontains
+        value: tokyo
+      - type: llm-rubric
+        value: Names Tokyo as the capital of Japan
+
+  - description: capital of Portugal
+    vars:
+      question: What is the capital of Portugal?
+    assert:
+      - type: starts-with
+        value: The capital of
+      - type: icontains
+        value: lisbon
+      - type: llm-rubric
+        value: Names Lisbon as the capital of Portugal
+      - type: similar
+        value: The capital of Portugal is Lisbon.
+        threshold: 0.8
+
+  - description: a day in Paris as JSON
+    vars:
+      question: Plan a day in Paris as JSON with the keys city, traveller and stops.
+    assert:
+      - type: is-json
+        value:
+          type: object
+          required: [city, traveller, stops]
+      - type: contains-all
+        value: [Louvre, "{{traveller}}"]
+      - type: contains-json
+
+  - description: a day in Lisbon as JSON
+    vars:
+      question: Plan a day in Lisbon as JSON with the keys city, traveller and stops.
+    assert:
+      - type: is-json
+        value:
+          type: object
+          required: [city, traveller, stops]
+      - type: contains-all
+        value: [Alfama, "{{traveller}}"]
+      - type: javascript
+        value: JSON.parse(output).stops.length >= 2
+      - type: cost
+        threshold: 0.002
+        metric: spend

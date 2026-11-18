@@ -1,20 +1,13 @@
 """Trace search, sessions and trace detail: a port of the trace routes of the server's
-``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store.
+``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store.
 
-The store's ``TraceQuery`` filters on project, session, user, text, state and time and orders by
-time. The contract's search also filters on minimum latency and a boolean assessment, and orders
-by latency; the core applies those to what the store returns:
-
-- With a latency or assessment filter, a page is filled from the store's pages in turn, at most
-  1,000 traces read per request; the cursor names the store's page and how many of its matches
-  were already returned.
-- Ordering by latency reads every trace the store's filters match, up to 1,000, and refuses more.
-- A session search is the store's ``search_sessions``. With a latency or assessment filter or a
-  latency order, the core reads the first 1,000 traces the store's filters match, filters and
-  orders them, and groups them the same way (``sessions_from_traces``); ``has_more`` then says
-  more traces matched the store's filters than were read.
-
-A cursor belongs to its query and project: another query gets ``409``.
+Every filter and order of the contract's ``TraceQuery`` is the store's
+(``martian.evals.model.TraceQuery``): content, state, session, user and time, minimum latency, a
+boolean assessment, and newest, oldest, slowest or fastest first. So a page of results and a
+session search are the store's answer for the whole project, however many traces it holds. A store
+that filters in its own process may answer a page with fewer traces than its limit, or none, and a
+cursor that reads on: only a ``next_cursor`` of ``None`` ends a search. A cursor names the store's
+page and belongs to its query and project: another query gets ``409``.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description, and
 the contract's operations have none.
@@ -26,13 +19,12 @@ import base64
 import binascii
 import json
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Response
 
-from martian.evals.model import SessionSearch, Trace, digest, sessions_from_traces
+from martian.evals.model import SessionSearch, Trace, digest
 from martian.evals.model import TraceQuery as StoreQuery
 from martian.evals.server.dependencies import PrincipalDep, StoreDep
 from martian.evals.server.principal import Principal
@@ -50,8 +42,6 @@ from martian.evals.store import EvalStore
 router = APIRouter(prefix="/v1/evals", tags=["evaluation explorer"])
 
 TRACE_ID = r"^tr-[a-f0-9]{32}$"
-STORE_PAGE = 100
-READ_LIMIT = 1000
 EXPIRED = "Trace page expired or its scope changed; refresh the search"
 
 
@@ -70,7 +60,8 @@ def _from_ms(value: int | None) -> datetime | None:
     return None if value is None else datetime.fromtimestamp(value / 1000, UTC)
 
 
-def _store_query(body: TraceQuery, project: str) -> StoreQuery:
+def store_query(body: TraceQuery, project: str) -> StoreQuery:
+    """The store's query for a request's ``TraceQuery`` in ``project``."""
     return StoreQuery(
         project_id=project,
         session_id=body.session_id or None,
@@ -80,26 +71,12 @@ def _store_query(body: TraceQuery, project: str) -> StoreQuery:
         since=_from_ms(body.start_time_ms),
         # The contract's end is inclusive; the store's is exclusive.
         until=_from_ms(body.end_time_ms + 1) if body.end_time_ms is not None else None,
+        min_latency_ms=body.min_latency_ms,
+        verdicts={body.assessment: body.assessment_value == "true"} if body.assessment else {},
         oldest_first=body.order == "oldest",
-        limit=STORE_PAGE,
+        slowest_first={"slowest": True, "fastest": False}.get(body.order),
+        limit=body.limit,
     )
-
-
-def _filter(body: TraceQuery) -> Callable[[Trace], bool] | None:
-    tests: list[Callable[[Trace], bool]] = []
-    if body.min_latency_ms is not None:
-        minimum = body.min_latency_ms
-        tests.append(lambda t: t.latency_ms is not None and t.latency_ms >= minimum)
-    if body.assessment:
-        wanted = body.assessment_value == "true"
-        tests.append(
-            lambda t: any(
-                s.scorer == body.assessment and isinstance(s.value, bool) and s.value is wanted for s in t.scores
-            )
-        )
-    if not tests:
-        return None
-    return lambda trace: all(test(trace) for test in tests)
 
 
 def _scope(body: TraceQuery, project: str) -> str:
@@ -123,65 +100,6 @@ def _position(body: TraceQuery, project: str) -> dict[str, Any]:
     return found
 
 
-async def _bounded(
-    store: EvalStore, principal: Principal, body: TraceQuery, project: str, keep: Callable[[Trace], bool] | None
-) -> tuple[list[Trace], bool]:
-    """The first 1,000 traces the store's filters match, filtered and in the query's order, and
-    whether more matched."""
-    query, cursor = _store_query(body, project), None
-    rows: list[Trace] = []
-    while len(rows) <= READ_LIMIT:
-        page = await store.search_traces(principal, query.model_copy(update={"cursor": cursor}))
-        rows.extend(page.items)
-        if (cursor := page.next_cursor) is None:
-            break
-    more = len(rows) > READ_LIMIT
-    rows = [t for t in rows[:READ_LIMIT] if keep is None or keep(t)]
-    if body.order in ("slowest", "fastest"):
-        known = [t for t in rows if t.latency_ms is not None]
-        known.sort(key=lambda t: t.latency_ms or 0, reverse=body.order == "slowest")
-        rows = known + [t for t in rows if t.latency_ms is None]
-    return rows, more
-
-
-async def _by_latency(
-    store: EvalStore, principal: Principal, body: TraceQuery, project: str, keep: Callable[[Trace], bool] | None
-) -> tuple[list[Trace], str | None]:
-    rows, more = await _bounded(store, principal, body, project, keep)
-    if more:
-        raise HTTPException(422, "Ordering by latency covers at most 1,000 traces; narrow the filters")
-    offset = _position(body, project).get("offset", 0)
-    if not isinstance(offset, int) or offset < 0:
-        raise HTTPException(409, EXPIRED)
-    end = offset + body.limit
-    return rows[offset:end], _cursor(body, project, offset=end) if end < len(rows) else None
-
-
-async def _in_order(
-    store: EvalStore, principal: Principal, body: TraceQuery, project: str, keep: Callable[[Trace], bool] | None
-) -> tuple[list[Trace], str | None]:
-    position = _position(body, project)
-    query = _store_query(body, project).model_copy(update={"limit": body.limit if keep is None else STORE_PAGE})
-    cursor, skip = position.get("page"), position.get("skip", 0)
-    if not (cursor is None or isinstance(cursor, str)) or not isinstance(skip, int) or skip < 0:
-        raise HTTPException(409, EXPIRED)
-    items: list[Trace] = []
-    for _ in range(READ_LIMIT // STORE_PAGE):
-        page = await store.search_traces(principal, query.model_copy(update={"cursor": cursor}))
-        matches = [t for t in page.items if keep is None or keep(t)][skip:]
-        wanted = body.limit - len(items)
-        if len(matches) > wanted:
-            return items + matches[:wanted], _cursor(body, project, page=cursor, skip=skip + wanted)
-        items += matches
-        skip = 0
-        if page.next_cursor is None:
-            return items, None
-        cursor = page.next_cursor
-        if len(items) == body.limit:
-            break
-    return items, _cursor(body, project, page=cursor, skip=0)
-
-
 @router.post(
     "/traces/search",
     response_model=None,
@@ -194,12 +112,12 @@ async def trace_search(body: TraceQuery, principal: PrincipalDep, store: StoreDe
     project = await project_scope(store, principal, body.project_id)
     if project is None:
         return {"items": [], "next_cursor": None, "limit": body.limit}
-    keep = _filter(body)
-    if body.order in ("slowest", "fastest"):
-        traces, cursor = await _by_latency(store, principal, body, project, keep)
-    else:
-        traces, cursor = await _in_order(store, principal, body, project, keep)
-    return {"items": [trace_row(t) for t in traces], "next_cursor": cursor, "limit": body.limit}
+    cursor = _position(body, project).get("page")
+    if not (cursor is None or isinstance(cursor, str)):
+        raise HTTPException(409, EXPIRED)
+    page = await store.search_traces(principal, store_query(body, project).model_copy(update={"cursor": cursor}))
+    after = _cursor(body, project, page=page.next_cursor) if page.next_cursor is not None else None
+    return {"items": [trace_row(t) for t in page.items], "next_cursor": after, "limit": body.limit}
 
 
 @router.post("/sessions/search", response_model=None)
@@ -209,11 +127,8 @@ async def session_search(body: TraceQuery, principal: PrincipalDep, store: Store
     project = await project_scope(store, principal, body.project_id)
     if project is None:
         found = SessionSearch(items=[], traces_examined=0, ungrouped=0)
-    elif (keep := _filter(body)) is None and body.order in ("newest", "oldest"):
-        found = await store.search_sessions(principal, _store_query(body, project))
     else:
-        traces, more = await _bounded(store, principal, body, project, keep)
-        found = sessions_from_traces(traces, has_more=more)
+        found = await store.search_sessions(principal, store_query(body, project))
     return found.model_dump(mode="json")
 
 

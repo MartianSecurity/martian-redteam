@@ -1,11 +1,16 @@
 """Scorecards, judge calibration and run comparison: summaries over stored results, no model calls.
 
 A port of the server's ``app/evals_quality.py`` and ``compare_runs`` (``app/evals_workbench.py``
-in MorningHQ/MartianBackend), over the shared model's case results, scores and reviews in their
+in MartianSecurity/MartianBackend), over the shared model's case results, scores and reviews in their
 server shapes (``martian.evals.server.projection``). Two differences, because the model holds
 less than the server's rows: a scorer's kind comes from its values (text values are categorical,
 numbers other than booleans numeric, anything else boolean; ``response_length`` is numeric), and a
-scoring job's definition digest is a digest of its pinned scorer versions.
+scoring job's definition digest is a digest of its pinned scorer versions. A scorecard also carries
+``mean_confidence_95``, the t interval of a scorer's mean (``martian.evals.stats``), which the
+server's scorecard does not have; its ``confidence_95`` is the same Wilson interval as the server's.
+A comparison also carries ``significance``, the paired test and label of the canonical exact
+match, and with scoring jobs ``criteria_significance``, one per scorer; the server's comparison
+has neither.
 """
 
 from __future__ import annotations
@@ -13,12 +18,24 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from dataclasses import asdict
 from statistics import mean
 from typing import Any
 
 from martian.evals.model import Run, Value, digest
 from martian.evals.server.projection import Assessment, ReviewRow, dataset_identity
 from martian.evals.server.schemas import EvalItemOut
+from martian.evals.stats import (
+    Interval,
+    PairedComparison,
+    compare_outcomes,
+    compare_scores,
+    mean_interval,
+    wilson,
+)
+
+Scalar = bool | int | float | str
+"""A score's value once it is known: a ``Value`` that is not None."""
 
 
 def percentile(values: Iterable[Any], fraction: float) -> float | None:
@@ -30,14 +47,14 @@ def percentile(values: Iterable[Any], fraction: float) -> float | None:
     return float(ordered[lo] + (ordered[hi] - ordered[lo]) * (position - lo))
 
 
-def wilson(passed: int, count: int) -> list[float] | None:
-    if not count:
-        return None
-    z = 1.959963984540054
-    p = passed / count
-    mid = (p + z * z / (2 * count)) / (1 + z * z / count)
-    radius = z * math.sqrt(p * (1 - p) / count + z * z / (4 * count * count)) / (1 + z * z / count)
-    return [max(0, mid - radius), min(1, mid + radius)]
+def interval(found: Interval | None) -> list[float] | None:
+    """An interval as the server's responses carry it: ``[low, high]``."""
+    return None if found is None else [found[0], found[1]]
+
+
+def significance(found: PairedComparison | None) -> dict[str, Any] | None:
+    """A paired comparison as a comparison response carries it. None when no pair was compared."""
+    return None if found is None else asdict(found)
 
 
 def definition_digest(config: dict[str, Any]) -> str:
@@ -109,8 +126,9 @@ def scorecard(
                 "coverage": coverage,
                 "pass_rate": rate,
                 "passed": passed if boolean else None,
-                "confidence_95": wilson(passed, len(values)) if boolean else None,
+                "confidence_95": interval(wilson(passed, len(values))) if boolean else None,
                 "mean": average,
+                "mean_confidence_95": interval(mean_interval(nums)),
                 "p50": percentile(nums, 0.5),
                 "p95": percentile(nums, 0.95),
                 "minimum": min(nums) if nums else None,
@@ -188,8 +206,17 @@ def compare_runs(
         "changes": {
             k: sum(i["change"] == k for i in rows) for k in ("improved", "regressed", "unchanged", "not_comparable")
         },
+        "significance": significance(_exact_match(rows)),
         "items": rows,
     }
+
+
+def _exact_match(rows: Sequence[dict[str, Any]]) -> PairedComparison | None:
+    """The exact-match verdicts of the comparable pairs, by the exact McNemar test."""
+    paired = [r for r in rows if r["change"] != "not_comparable"]
+    return compare_outcomes(
+        [r["baseline"]["status"] == "passed" for r in paired], [r["candidate"]["status"] == "passed" for r in paired]
+    )
 
 
 def _side(item: EvalItemOut | None) -> dict[str, Any] | None:
@@ -224,6 +251,7 @@ def compare_assessments(
     policies = {p["name"]: p for p in left_job["config"].get("policies", [])}
     names = left_job["config"]["scorers"]
     counts: dict[str, Counter[str]] = {n: Counter() for n in names}
+    pairs: dict[str, list[tuple[Scalar, Scalar]]] = {n: [] for n in names}
     for row in result["items"]:
         left_item, right_item = li.get(row["dataset_item_id"]), ri.get(row["dataset_item_id"])
         criteria = {}
@@ -242,6 +270,7 @@ def compare_assessments(
                 and b.value is not None
                 and a.source_id == b.source_id
             ):
+                pairs[name].append((a.value, b.value))
                 if isinstance(a.value, str) or isinstance(b.value, str):
                     change = "unchanged" if type(a.value) is type(b.value) and a.value == b.value else "changed"
                     counts[name][change] += 1
@@ -274,12 +303,26 @@ def compare_assessments(
         compatible=not reason,
         reason=reason,
         criteria={n: dict(c) for n, c in counts.items()},
+        criteria_significance={n: significance(_scored(n, pairs[n], policies.get(n, {}))) for n in names},
         baseline_job_id=left_job["id"],
         candidate_job_id=right_job["id"],
         baseline_scorecard=scorecard(baseline_items, left, left_job["config"]),
         candidate_scorecard=scorecard(candidate_items, right, right_job["config"]),
     )
     return result
+
+
+def _scored(name: str, pairs: Sequence[tuple[Scalar, Scalar]], policy: dict[str, Any]) -> PairedComparison | None:
+    """A scorer's comparable pairs: boolean values by the exact McNemar test, numbers by the paired
+    t test, each in the policy's direction. Categorical values have no direction and no test."""
+    values = [value for pair in pairs for value in pair]
+    if any(isinstance(value, str) for value in values):
+        return None
+    higher = policy.get("direction", "higher") == "higher"
+    baseline, candidate = [a for a, _ in pairs], [b for _, b in pairs]
+    if _kind(name, values) == "numeric":
+        return compare_scores([float(a) for a in baseline], [float(b) for b in candidate], higher_is_better=higher)
+    return compare_outcomes([a is True for a in baseline], [b is True for b in candidate], higher_is_better=higher)
 
 
 def calibration(assessments: Iterable[Assessment], reviews: Iterable[ReviewRow]) -> list[dict[str, Any]]:

@@ -6,7 +6,8 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Literal
 
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import Scorer, scorer
@@ -19,6 +20,11 @@ from martian.evals._judge_transport import (
     PROVIDER_RETRIES_KEY,
     invoke_response_judge,
 )
+from martian.evals.cache import HIT_KEY
+
+if TYPE_CHECKING:
+    from martian.evals._pinned_address import AddressPolicy
+    from martian.evals.cache import ModelCallCache
 
 RESPONSE_GUIDELINES_VERSION = "response-guidelines-v5"
 RESPONSE_CONDITIONS_VERSION = "response-conditions-v1"
@@ -406,6 +412,8 @@ def response_guidelines(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Create a response-only MLflow-compatible scorer for expectations.guidelines.
 
@@ -414,7 +422,9 @@ def response_guidelines(
     ``outputs`` must be nonempty text; ``expectations.guidelines`` a nonempty list
     of nonempty strings. No policy or provider is silently selected.
 
-    Provider routing/authentication uses MLflow's pinned model-URI adapter. No
+    Provider routing/authentication uses MLflow's pinned model-URI adapter; ``headers``
+    are added to every request, after the provider's own, as MLflow's ``extra_headers``
+    are (a gateway's key or routing header). They are never recorded. No
     semantic retry or verdict repair is performed. Only provider replies that carry no
     judgment are retried. Rate limits (HTTP 429 and 529) are retried for up to
     ``rate_limit_wait_seconds`` (default 300, 0 to disable), waiting as long as the
@@ -426,6 +436,8 @@ def response_guidelines(
     errors raise, so MLflow records a scorer error and assert_checks fails closed.
     Private local Feedback metadata retains validated per-rule checks and prompt
     digests. Opt in to the rendered prompt only in a private evidence store.
+    ``cache`` (:class:`martian.evals.cache.ModelCallCache`, as ``martian evals run --cache``
+    passes it) replays the judgment stored for the same full request, and stores a new one.
     """
     return _response_judge(
         model=model,
@@ -438,6 +450,8 @@ def response_guidelines(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
+        cache=cache,
     )
 
 
@@ -451,6 +465,8 @@ def response_conditions(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge expectations.conditions with explicit, caller-controlled polarity.
 
@@ -475,6 +491,8 @@ def response_conditions(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
+        cache=cache,
     )
 
 
@@ -489,6 +507,8 @@ def response_rubric(
     verify: bool = False,
     max_retries: int = 5,
     rate_limit_wait_seconds: float = DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    headers: Mapping[str, str] | None = None,
+    cache: ModelCallCache | None = None,
 ) -> Scorer:
     """Judge expectations.rubric / expectations.rubrics with direct pass/fail verdicts.
 
@@ -507,24 +527,24 @@ def response_rubric(
         verify=verify,
         max_retries=max_retries,
         rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
+        cache=cache,
     )
 
 
-def _response_judge(
+def _judge_options(
     *,
     model: str,
     name: str,
     input_key: str,
     context_key: str | None,
     inference_params: dict[str, Any] | None,
-    include_judge_prompt: bool,
-    mode: Literal["guidelines", "conditions", "rubrics"],
-    verify: bool,
     max_retries: int,
     rate_limit_wait_seconds: float,
-) -> Scorer:
-    if type(verify) is not bool:
-        raise ValueError("verify must be a boolean")
+    headers: Mapping[str, str] | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Check the options every judge built on this engine takes, when the judge is created.
+    Returns the inference parameters and the extra headers to send."""
     if type(max_retries) is not int or not 0 <= max_retries <= 10:
         raise ValueError("max_retries must be an integer between 0 and 10")
     if (
@@ -539,6 +559,14 @@ def _response_judge(
         raise ValueError("name and input_key must be nonempty")
     if context_key is not None and (not isinstance(context_key, str) or not context_key.strip()):
         raise ValueError("context_key must be None or a nonempty string")
+    if headers is not None and not isinstance(headers, Mapping):
+        raise ValueError("headers must map header names to values")
+    extra_headers = dict(headers or {})
+    for header, value in extra_headers.items():
+        if not isinstance(header, str) or not header.strip() or not isinstance(value, str):
+            raise ValueError("headers must map nonempty header names to string values")
+        if any(character in header + value for character in "\r\n"):
+            raise ValueError("A judge header name or value must not contain a line break")
     params = dict(inference_params or {})
     for key, value in params.items():
         if key not in {"temperature", "top_p", "max_tokens", "seed"}:
@@ -551,6 +579,51 @@ def _response_judge(
             raise ValueError(f"Judge inference parameter is out of range: {key}")
         if key == "top_p" and not 0 < value <= 1:
             raise ValueError("top_p must be in (0, 1]")
+    return params, extra_headers
+
+
+def _response_judge(
+    *,
+    model: str,
+    name: str,
+    input_key: str,
+    context_key: str | None,
+    inference_params: dict[str, Any] | None,
+    include_judge_prompt: bool,
+    mode: Literal["guidelines", "conditions", "rubrics"],
+    verify: bool,
+    max_retries: int,
+    rate_limit_wait_seconds: float,
+    headers: Mapping[str, str] | None,
+    endpoint: str | None = None,
+    cache: ModelCallCache | None = None,
+    address_policy: AddressPolicy | None = None,
+) -> Scorer:
+    """The three judges' shared implementation. ``endpoint`` is the base address of the
+    OpenAI-compatible endpoint that serves an ``openai:/`` model, used instead of
+    ``OPENAI_API_BASE``: the evals worker's judge passes the endpoint each judge is pinned to.
+    ``address_policy`` is the worker's: the judge connects only to an address it allows, at the
+    address the endpoint's name resolved to when the connection opened (``sdk_judge``)."""
+    if type(verify) is not bool:
+        raise ValueError("verify must be a boolean")
+    params, extra_headers = _judge_options(
+        model=model,
+        name=name,
+        input_key=input_key,
+        context_key=context_key,
+        inference_params=inference_params,
+        max_retries=max_retries,
+        rate_limit_wait_seconds=rate_limit_wait_seconds,
+        headers=headers,
+    )
+
+    version = (
+        RESPONSE_CONDITIONS_VERSION
+        if mode == "conditions"
+        else RESPONSE_RUBRICS_VERSION
+        if mode == "rubrics"
+        else RESPONSE_GUIDELINES_VERSION
+    )
 
     @scorer(name=name)
     def assess(inputs: Any, outputs: Any, expectations: dict[str, Any]) -> Feedback:
@@ -648,6 +721,11 @@ def _response_judge(
             stage="draft",
             max_retries=max_retries,
             rate_limit_wait_seconds=rate_limit_wait_seconds,
+            headers=extra_headers,
+            endpoint=endpoint,
+            cache=cache,
+            judge_version=version,
+            address_policy=address_policy,
         )
         condition_answers: list[dict[str, Any]] = []
         rubric_verdicts: list[dict[str, Any]] = []
@@ -677,6 +755,11 @@ def _response_judge(
                 stage="review",
                 max_retries=max_retries,
                 rate_limit_wait_seconds=rate_limit_wait_seconds,
+                headers=extra_headers,
+                endpoint=endpoint,
+                cache=cache,
+                judge_version=version,
+                address_policy=address_policy,
             )
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
@@ -688,13 +771,6 @@ def _response_judge(
             review_messages = []
         rendered = _json([{"role": m.role, "content": m.content} for m in messages])
         metadata = dict(feedback.metadata or {})
-        version = (
-            RESPONSE_CONDITIONS_VERSION
-            if mode == "conditions"
-            else RESPONSE_RUBRICS_VERSION
-            if mode == "rubrics"
-            else RESPONSE_GUIDELINES_VERSION
-        )
         criteria_hash_key = (
             "martian.judge.conditions_sha256"
             if mode == "conditions"
@@ -728,10 +804,18 @@ def _response_judge(
         if verify:
             metadata["martian.judge.draft"] = _json(draft)
             metadata["martian.judge.review_metadata"] = _json(dict(feedback.metadata or {}))
+            # A stage replayed from the cache made no call and used no tokens. The judgment is
+            # replayed only when both stages were.
+            stages = (draft["metadata"], metadata)
+            replayed = [stage.get(HIT_KEY) == "hit" for stage in stages]
             for token_key in ("mlflow.assessment.judgeInputTokens", "mlflow.assessment.judgeOutputTokens"):
-                first, second = draft["metadata"].get(token_key), metadata.get(token_key)
+                first, second = (
+                    0 if hit else stage.get(token_key) for hit, stage in zip(replayed, stages, strict=True)
+                )
                 if first is not None and second is not None:
                     metadata[token_key] = str(int(first) + int(second))
+            if not all(replayed):
+                metadata.pop(HIT_KEY, None)
             review_rendered = _json([{"role": m.role, "content": m.content} for m in review_messages])
             metadata["martian.judge.review_prompt_sha256"] = _digest(review_rendered)
             if include_judge_prompt:

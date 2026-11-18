@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError, field_va
 from martian._errors import error_code, message, reference
 from martian._privacy import RedactionPolicy
 from martian.config import ConfigError, MartianConfig
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.types import EvaluatorContext, EvaluatorOutput, SimulatorContext, SimulatorOutput
 
@@ -218,7 +218,7 @@ class Client:
             identifier = UUID(str(operation_id)) if operation_id is not None else uuid4()
         except ValueError:
             raise ConfigError("operation_id must be a UUID") from None
-        payload = {"operation_id": str(identifier), "catalog_version": CATALOG_VERSION, **body}
+        payload = {"operation_id": str(identifier), "catalog_version": HOSTED_CATALOG_VERSION, **body}
         if self.agent_id is not None:
             payload["agent_id"] = str(self.agent_id)
         try:
@@ -246,11 +246,21 @@ class Client:
         return operation
 
     async def simulate(
-        self, context: SimulatorContext, *, prompt: str | None = None, operation_id: UUID | str | None = None
+        self,
+        context: SimulatorContext,
+        *,
+        prompt: str | None = None,
+        operation_id: UUID | str | None = None,
+        source: Literal["reviewed_cases"] | None = None,
     ) -> SimulatorOutput:
+        """One attack from the hosted engine. ``source="reviewed_cases"`` has it written from one
+        reviewed attack case and one attack skill, server side; the answer is the attack alone. It
+        needs an edition that includes reviewed cases: a Community organisation is refused (403)."""
         body: dict[str, object] = {"context": context.model_dump(exclude_none=True)}
         if prompt is not None:
             body["prompt"] = prompt
+        if source is not None:
+            body["source"] = source
         operation = await self._execute("simulate", body, operation_id)
         assert isinstance(operation.result, SimulatorResult)
         return SimulatorOutput(**operation.result.model_dump(), operation_id=str(operation.operation_id))
