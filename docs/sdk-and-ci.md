@@ -100,7 +100,8 @@ Create one API key under the console's **API Keys** settings (admin/owner),
 select only the needed capabilities and applicable restrictions, and save the
 once-shown token in your secret manager. Evals dataset reads need `evals:read`;
 redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities;
-`martian evals push` needs `evals:write`.
+`martian evals push` needs `evals:write`; `martian scan` needs `scan:run` and
+`scan:read` in an organisation with the Scanner.
 The key neither grants model entitlement nor administers the console. An
 agent-bound key supplies its immutable agent binding automatically; explicit
 `Client(agent_id=...)` attribution must match that grant. This labels/access-binds
@@ -154,7 +155,13 @@ martian redteam validate redteam.yaml
 martian redteam run redteam.yaml -o results/redteam
 # A stored version 2 run decided again by the file's current checks, without calling the target:
 martian redteam rejudge redteam.yaml --run RUN_ID
+# The folder's agent files scanned by the Martian Scanner (a Scanner-enabled Cloud or Enterprise organisation):
+martian scan --sarif results/scan.sarif
 ```
+
+`martian scan` is a thin client of the server's Scanner: it packs and uploads the
+folder's agent files, waits for the scan, prints the findings and exits 0, 1 or 2
+on the server's gate. It ships no scanner rules. See [scanning agent files](scan.md).
 
 Python and `martian ci` use one runner and one pytest execution. The YAML suite
 is a pytest item in that execution. Session finalization uploads dataset runs
