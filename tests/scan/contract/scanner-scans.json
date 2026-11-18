@@ -223,6 +223,119 @@
         "title": "BundleOut",
         "type": "object"
       },
+      "CapabilitiesOut": {
+        "properties": {
+          "compared_with": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CapabilityBase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diff": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scan_id"
+        ],
+        "title": "CapabilitiesOut",
+        "type": "object"
+      },
+      "CapabilityBase": {
+        "description": "The scan the report was compared with.",
+        "properties": {
+          "chosen": {
+            "enum": [
+              "baseline",
+              "requested"
+            ],
+            "title": "Chosen",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scan_id",
+          "chosen",
+          "created_at"
+        ],
+        "title": "CapabilityBase",
+        "type": "object"
+      },
       "CategoryResult": {
         "properties": {
           "category": {
@@ -1574,6 +1687,18 @@
             ],
             "title": "Checked At"
           },
+          "credibility": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credibility"
+          },
           "detail": {
             "anyOf": [
               {
@@ -1975,6 +2100,26 @@
       },
       "ScanDetail": {
         "properties": {
+          "agent_files": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Files"
+          },
+          "analysis_requests": {
+            "default": 0,
+            "title": "Analysis Requests",
+            "type": "integer"
+          },
           "attempts": {
             "title": "Attempts",
             "type": "integer"
@@ -2063,6 +2208,18 @@
             "title": "Created At",
             "type": "string"
           },
+          "credibility": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credibility"
+          },
           "error": {
             "anyOf": [
               {
@@ -2140,6 +2297,33 @@
                 "type": "null"
               }
             ]
+          },
+          "model_analysis": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Analysis"
+          },
+          "model_analysis_off": {
+            "anyOf": [
+              {
+                "enum": [
+                  "policy",
+                  "setting",
+                  "option"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Analysis Off"
           },
           "on_default_branch": {
             "default": false,
@@ -2506,6 +2690,11 @@
       },
       "ScanOut": {
         "properties": {
+          "analysis_requests": {
+            "default": 0,
+            "title": "Analysis Requests",
+            "type": "integer"
+          },
           "attempts": {
             "title": "Attempts",
             "type": "integer"
@@ -2606,6 +2795,33 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "model_analysis": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Analysis"
+          },
+          "model_analysis_off": {
+            "anyOf": [
+              {
+                "enum": [
+                  "policy",
+                  "setting",
+                  "option"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Analysis Off"
           },
           "on_default_branch": {
             "default": false,
@@ -2716,6 +2932,85 @@
         "title": "ScanPage",
         "type": "object"
       },
+      "ScannerSettingsIn": {
+        "additionalProperties": false,
+        "description": "``PUT /v1/scanner/settings``: both settings, replacing what was set.",
+        "properties": {
+          "client_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Client Versions",
+            "type": "object"
+          },
+          "credibility_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credibility Policy"
+          }
+        },
+        "title": "ScannerSettingsIn",
+        "type": "object"
+      },
+      "ScannerSettingsOut": {
+        "properties": {
+          "client_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Client Versions",
+            "type": "object"
+          },
+          "credibility_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credibility Policy"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "updated_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated By"
+          }
+        },
+        "required": [
+          "client_versions"
+        ],
+        "title": "ScannerSettingsOut",
+        "type": "object"
+      },
       "SettingsIn": {
         "additionalProperties": false,
         "properties": {
@@ -2731,6 +3026,17 @@
             "maxItems": 20,
             "title": "Email Recipients",
             "type": "array"
+          },
+          "model_analysis": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Analysis"
           },
           "notify_min_severity": {
             "default": "S2",
@@ -2792,6 +3098,21 @@
             },
             "title": "Email Recipients",
             "type": "array"
+          },
+          "model_analysis": {
+            "default": true,
+            "title": "Model Analysis",
+            "type": "boolean"
+          },
+          "model_analysis_allowed_by_policy": {
+            "default": false,
+            "title": "Model Analysis Allowed By Policy",
+            "type": "boolean"
+          },
+          "model_analysis_effective": {
+            "default": false,
+            "title": "Model Analysis Effective",
+            "type": "boolean"
           },
           "notify_min_severity": {
             "default": "S2",
@@ -3900,6 +4221,18 @@
               }
             ]
           },
+          "capability_diff": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability Diff"
+          },
           "counts": {
             "additionalProperties": {
               "type": "integer"
@@ -4334,7 +4667,7 @@
   "info": {
     "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated by scripts/scanner-scans-contract.py; do not edit by hand.",
     "title": "Martian Scanner scan API",
-    "version": "3"
+    "version": "5"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5539,6 +5872,68 @@
         ]
       }
     },
+    "/v1/scanner/scans/{scan_id}/capabilities": {
+      "get": {
+        "operationId": "capabilities_v1_scanner_scans__scan_id__capabilities_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A completed scan to compare with; the scan's baseline of the default branch when left out",
+            "in": "query",
+            "name": "compare_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A completed scan to compare with; the scan's baseline of the default branch when left out",
+              "title": "Compare To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Capabilities",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
     "/v1/scanner/scans/{scan_id}/check": {
       "get": {
         "operationId": "check_v1_scanner_scans__scan_id__check_get",
@@ -6272,6 +6667,66 @@
           }
         },
         "summary": "Put Settings",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/settings/analysis": {
+      "get": {
+        "operationId": "analysis_settings_v1_scanner_settings_analysis_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScannerSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Analysis Settings",
+        "tags": [
+          "scanner"
+        ]
+      },
+      "put": {
+        "operationId": "set_analysis_settings_v1_scanner_settings_analysis_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScannerSettingsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScannerSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalOrInvalid"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Set Analysis Settings",
         "tags": [
           "scanner"
         ]
