@@ -12,7 +12,7 @@ from martian.evals.client import BackendError
 
 class _Test(BaseModel):
     name: str
-    kind: Literal["dataset", "checks", "redteam"]
+    kind: Literal["dataset", "checks", "redteam", "scan"]
     passed: StrictBool
 
 

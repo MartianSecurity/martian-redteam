@@ -1,7 +1,7 @@
 # Gate and CI
 
 The SDK can run standalone Python/YAML checks or one persisted session containing
-evals, redteam, or both. Use one Backend origin/API token for both modules;
+evals, redteam, a scan of the repository's agent files, or any of them together. Use one Backend origin/API token for both modules;
 [SDK and CI](sdk-and-ci.md) defines auth, scope and the Python result contract.
 
 ```bash
@@ -9,6 +9,7 @@ martian redteam validate redteam.yaml  # No credentials or network requests.
 martian redteam run redteam.yaml -o results -c 2 -a 1  # Local report/gate.
 martian ci --redteam-config redteam.yaml --output results  # Persisted session.
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
+martian ci --evals-path tests/evals --redteam-config redteam.yaml --scan . --output results
 ```
 
 `martian redteam run` returns 0 for a passing local gate, 1 for a failed gate,
@@ -38,6 +39,9 @@ passing local results. Keep its typed receipt, report and probe checkpoints with
 - Dataset outputs are canonically re-scored by Backend. Inline checks and redteam
   judgments remain declared client-executed/client-scored evidence, with catalog,
   graph/policy revisions and operation IDs; a CI upload is not binary attestation.
+- A scan test's verdict is the gate the server evaluated against the repository's
+  `.martian/scan.yml` (`server_evaluated_gate`); the scan must be of the session's
+  commit, and a required scan that did not run or was not judged fails the session.
 - Redteam execution POSTs run once. Ambiguous delivery uses GET of the same UUID;
   no execution retry can turn a failing judgment into a pass. Idempotent eval/session
   uploads have their own bounded transport retry policy.
@@ -68,12 +72,16 @@ provider/key setup; it is executed locally and can have side effects.
 ## Scanning agent files
 
 The [scan action](../.github/actions/scan/action.yml) runs `martian scan` on a
-repository's agent files and fails on the Martian server's gate: 0 passed, 1
-failed, 2 no result. It needs a Scanner-enabled Cloud or Enterprise organisation
+repository's agent files and fails on the gate the Martian server evaluates
+against the repository's `.martian/scan.yml`: 0 passed, 1 failed, 2 no result.
+With `gate.new_findings_only` in that file, a push is judged against the last
+scan of the default branch, which the action's runs on that branch provide. It needs a Scanner-enabled Cloud or Enterprise organisation
 and a token with `scan:run` and `scan:read` from the job's environment. Run it on
 pushes to protected branches, not on pull requests, and upload its SARIF to code
 scanning; [examples/scan/workflow.yml](../examples/scan/workflow.yml) does both.
-Pull requests are scanned through the Martian GitHub App. See
+Pull requests are scanned through the Martian GitHub App. To record the scan in
+the same persisted session as evals and red team, use `martian ci --scan .`
+instead ([SDK and CI](sdk-and-ci.md#cli-and-one-session-behavior)). See
 [scanning agent files](scan.md#in-github-actions).
 
 ## Evals on a pull request, with one comment

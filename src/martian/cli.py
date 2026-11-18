@@ -1547,6 +1547,15 @@ def run_ci(
     redteam_config: Annotated[
         Path | None, typer.Option("--redteam-config", exists=True, dir_okay=False, help="Required redteam YAML suite.")
     ] = None,
+    scan: Annotated[
+        Path | None,
+        typer.Option(
+            "--scan",
+            exists=True,
+            file_okay=False,
+            help="Required scan of this repository folder (martian scan, with its .martian/scan.yml).",
+        ),
+    ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Safe reports and one persisted session receipt.")
     ] = Path("results"),
@@ -1554,7 +1563,7 @@ def run_ci(
         bool, typer.Option("--require-export", help="Require configured MLflow exports to finish.")
     ] = False,
 ) -> None:
-    """Run evals, redteam, or both once in one persisted CI session."""
+    """Run evals, redteam, a scan, or any of them together once in one persisted CI session."""
     if importlib.util.find_spec("pytest") is None or importlib.util.find_spec("mlflow") is None:
         typer.echo("CI dependencies are missing; install martian-sdk[evals].", err=True)
         raise typer.Exit(code=2)
@@ -1564,6 +1573,7 @@ def run_ci(
         CiSuite(
             evals_paths=(evals_path,) if evals_path else (),
             redteam_config=redteam_config,
+            scan=scan,
             output_dir=output,
             require_export=require_export,
         )
