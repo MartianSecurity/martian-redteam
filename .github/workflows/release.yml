@@ -24,11 +24,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       PUBLISH_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
       WORKFLOW_REF: ${{ github.ref }}
+      IMAGE: ghcr.io/martiansecurity/martian-evals
     steps:
       - name: Validate version tag
         run: |
@@ -56,9 +57,9 @@ jobs:
           python3 - >> "${GITHUB_STEP_SUMMARY}" <<'PY'
           import tomllib
           ui = tomllib.load(open("pyproject.toml", "rb"))["tool"]["martian"]["ui"]
-          print(f"Evals UI: {ui['version']} from MorningHQ/MartianFrontend commit {ui['commit']}")
+          print(f"Evals UI: {ui['version']} from MartianSecurity/MartianFrontend commit {ui['commit']}")
           PY
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: "3.12"
@@ -78,12 +79,37 @@ jobs:
           uv run --all-extras ruff format --check src tests examples scripts
           uv run --all-extras ruff check src tests examples scripts
           uv run --all-extras mypy src
-          uv run --all-extras pytest -q
+          uv run --all-extras pytest -q -n auto
       - name: Build and validate distributions
         run: |
           uv build
           uv run --all-extras twine check --strict dist/*
           uv run --all-extras python scripts/check_release.py --install
+      # A licence outside scripts/licence-policy.json stops the release here, before the image is built.
+      - name: Bill of materials and licence check for the wheel
+        run: uv run --all-extras python scripts/sbom.py wheel --out-dir release-sbom
+      # The image installs the wheel just checked from dist/; the Dockerfile cannot build the package.
+      - name: Build the local edition's image from the wheel
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.version=${RELEASE_TAG#v}" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --tag "${IMAGE}:${RELEASE_TAG#v}" .
+      - name: Require the image to hold the wheel's Evals UI
+        run: |
+          set -euo pipefail
+          mkdir release-image
+          uv run --all-extras python scripts/check_image.py --image "${IMAGE}:${RELEASE_TAG#v}" \
+            --manifest release-image/image-release.json
+          docker save --output release-image/martian-evals.tar "${IMAGE}:${RELEASE_TAG#v}"
+          jq -r '"Image: \(.image) \(.id), Evals UI \(.evals_ui.version) \(.evals_ui.digest)"' \
+            release-image/image-release.json >> "${GITHUB_STEP_SUMMARY}"
+      - name: Bill of materials and licence check for the image
+        run: |
+          set -euo pipefail
+          uv run --all-extras python scripts/sbom.py image --image "${IMAGE}:${RELEASE_TAG#v}" --out-dir release-sbom
+          ls release-sbom | sed 's/^/Bill of materials: /' >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-distributions
@@ -93,6 +119,16 @@ jobs:
         with:
           name: sdk-release-checksums
           path: release-checksums.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evals-image
+          path: release-image/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sbom
+          path: release-sbom/
           if-no-files-found: error
 
   publish:
@@ -114,3 +150,40 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: dist/
+
+  # The image the build job checked, loaded from its artifact and pushed; nothing here builds one.
+  publish-image:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: [build, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: ghcr
+      url: https://github.com/orgs/MartianSecurity/packages/container/package/martian-evals
+    permissions:
+      packages: write
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      IMAGE: ghcr.io/martiansecurity/martian-evals
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evals-image
+          path: release-image/
+      - name: Load the checked image
+        run: |
+          set -euo pipefail
+          docker load --input release-image/martian-evals.tar
+          test "$(jq -r .image release-image/image-release.json)" = "${IMAGE}:${RELEASE_TAG#v}"
+          test "$(docker image inspect --format '{{.Id}}' "${IMAGE}:${RELEASE_TAG#v}")" \
+            = "$(jq -r .id release-image/image-release.json)"
+      - name: Push to GitHub Container Registry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}:${RELEASE_TAG#v}"
+          docker logout ghcr.io
+          docker image inspect --format 'Pushed: {{join .RepoDigests ", "}}' "${IMAGE}:${RELEASE_TAG#v}" \
+            >> "${GITHUB_STEP_SUMMARY}"

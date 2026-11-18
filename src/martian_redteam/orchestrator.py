@@ -14,7 +14,7 @@ from martian._errors import error_code
 from martian_redteam.callback import AsyncTarget, TargetCallback, wrap_callback
 from martian_redteam.catalog.attacks import Attack
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION, Vulnerability
-from martian_redteam.client import ClientError
+from martian_redteam.client import ClientError, UndecidedJudgment
 from martian_redteam.encoding import apply_encoding
 from martian_redteam.types import (
     EvaluatorContext,
@@ -274,6 +274,17 @@ async def _probe(
             attack=payload,
             target_output=reply_content,
             tools_called=reply_turn.tools_called,
+        )
+    except UndecidedJudgment as error:
+        # An answer that could not be read decides nothing: no score, and no error either.
+        return base.model_copy(
+            update={
+                "input": payload,
+                "actual_output": reply_content,
+                "turns": [reply_turn],
+                "reason": f"undetermined: {error}",
+                "graph_revision": revision,
+            }
         )
     except ClientError as error:
         operation = getattr(error, "operation_id", None)

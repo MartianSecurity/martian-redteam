@@ -1,12 +1,15 @@
 """The typed request and response bodies of the write routes, as the frozen evals contract has them.
 
-Each class is the schema of the same name in version 2 of ``contracts/evals-api.json`` in
-MorningHQ/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
+Each class is the schema of the same name in version 4 of ``contracts/evals-api.json`` in
+MartianSecurity/MartianBackend, field for field and with the same validation: ``EvalRunRequest`` from
 ``app/schemas.py``, the scoring, review and suite requests from ``app/evals_workbench_schema.py``,
 the project, judge, question, annotation and view requests from ``app/evals_explorer_schema.py``,
 and the dataset authoring bodies from ``app/api/evals_datasets.py``. ``tests/evals/
 test_write_contract.py`` compares them. No class has a docstring: it would become the schema's
 description, which the contract's have none of.
+
+``JudgePanelRequest`` and ``JudgePanelMember`` are the core's own, for its own route that
+registers a judge graded by a panel of judge models; the contract has no such request.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from pydantic import (
     model_validator,
 )
 
+from martian.evals.judge_settings import ENDPOINT_PATTERN, MODEL_URI_PATTERN, judge_model_problem
+from martian.evals.model import MAX_PANEL, MIN_PANEL, RunLimits
 from martian.evals.server.schemas import TraceQuery
 from martian.evals.worker.scorers import CODE_SCORERS, JUDGE_SCORERS
 
@@ -40,6 +45,37 @@ ScorerName = Literal[
     "policy",
 ]
 RESERVED_NAMES = frozenset({*CODE_SCORERS, *JUDGE_SCORERS, "human_review", "martian_triage"})
+CheckType = Literal[
+    "contains",
+    "not_contains",
+    "contains_any",
+    "contains_all",
+    "equals",
+    "starts_with",
+    "ends_with",
+    "similarity",
+    "matches",
+    "not_matches",
+    "is_json",
+    "json_schema",
+    "length",
+    "latency",
+    "cost",
+    "number_equals",
+    "sums_to",
+    "reconciles",
+    "table_equals",
+    "no_prohibited_phrases",
+    "no_personal_data",
+    "no_secrets",
+    "resists_injection",
+    "no_refusal",
+    "tool_called",
+    "tool_not_called",
+    "tool_trajectory",
+    "step_count",
+]
+MAX_CHECKS = 40
 
 
 class EvalRunRequest(BaseModel):
@@ -50,6 +86,13 @@ class EvalRunRequest(BaseModel):
     project_id: uuid.UUID | None = None
     max_items: int = Field(default=100, ge=1, le=1000)
     dataset_name: str = Field(min_length=1, max_length=200)
+    limits: RunLimits | None = None
+
+
+class ResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limits: RunLimits | None = None
 
 
 # --- scoring, reviews and suites ------------------------------------------------------------
@@ -62,6 +105,26 @@ class JudgeReference(BaseModel):
     version: int = Field(ge=1)
 
 
+class CheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: CheckType
+    name: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,59}$")
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def readable(self) -> CheckRequest:
+        # The suite file's own validation of the check, so a request cannot name what a file would refuse.
+        from martian.evals.check_options import check_scorer
+
+        check_scorer(self.type, self.name, self.options)
+        return self
+
+    @property
+    def label(self) -> str:
+        return self.name or self.type
+
+
 class ScoreRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +134,7 @@ class ScoreRequest(BaseModel):
     suite_version_id: uuid.UUID | None = None
     guidelines: str = Field(default="", max_length=4000)
     acknowledge_model_cost: bool = False
+    checks: list[CheckRequest] = Field(default_factory=list, max_length=MAX_CHECKS)
 
     @model_validator(mode="after")
     def validate_suite(self) -> ScoreRequest:
@@ -78,11 +142,17 @@ class ScoreRequest(BaseModel):
             raise ValueError("Select each scorer only once")
         names = [j.name for j in self.judges]
         if (
-            not 1 <= len(self.scorers) + len(names) <= 7
+            not len(self.scorers) + len(names) + len(self.checks) >= 1
+            or len(self.scorers) + len(names) > 7
             or len(set(names)) != len(names)
             or set(names) & {*CODE_SCORERS, *JUDGE_SCORERS}
         ):
             raise ValueError("Choose one to seven unique criteria")
+        labels = [check.label for check in self.checks]
+        if len(set(labels)) != len(labels) or set(labels) & {*self.scorers, *names}:
+            raise ValueError("Name each check once, and give it a name no other criterion has")
+        if reserved := sorted(set(labels) & RESERVED_NAMES):
+            raise ValueError(f"{', '.join(reserved)} is a reserved name; name the check something else")
         if "policy" in self.scorers and not self.guidelines.strip():
             raise ValueError("Policy scoring requires guidelines")
         if "policy" not in self.scorers and self.guidelines:
@@ -137,14 +207,19 @@ class SuiteRequest(BaseModel):
     suite_id: uuid.UUID | None = None
     expected_version: int = Field(default=0, ge=0)
     name: str = Field(min_length=1, max_length=120)
-    scorers: list[ScorerName] = Field(min_length=1, max_length=7)
+    scorers: list[ScorerName] = Field(max_length=7)
     guidelines: str = Field(default="", max_length=4000)
     policies: list[CriterionPolicy] = Field(default_factory=list, max_length=7)
+    checks: list[CheckRequest] = Field(default_factory=list, max_length=MAX_CHECKS)
 
     @model_validator(mode="after")
     def definition(self) -> SuiteRequest:
         ScoreRequest(
-            request_id=self.request_id, scorers=self.scorers, guidelines=self.guidelines, acknowledge_model_cost=True
+            request_id=self.request_id,
+            scorers=self.scorers,
+            guidelines=self.guidelines,
+            checks=self.checks,
+            acknowledge_model_cost=True,
         )
         names = [p.name for p in self.policies]
         if len(set(names)) != len(names) or not set(names).issubset(self.scorers):
@@ -233,6 +308,10 @@ class ProjectRequest(StrictRequest):
         return self
 
 
+JudgeModelUri = Annotated[str, Field(max_length=240, pattern=MODEL_URI_PATTERN)]
+JudgeEndpoint = Annotated[str, Field(max_length=500, pattern=ENDPOINT_PATTERN)]
+
+
 class JudgeVersionRequest(StrictRequest):
     request_id: uuid.UUID
     project_id: uuid.UUID | None = None
@@ -244,11 +323,15 @@ class JudgeVersionRequest(StrictRequest):
     options: list[str] = Field(default_factory=list, max_length=20)
     minimum: float = Field(default=0, allow_inf_nan=False)
     maximum: float = Field(default=1, allow_inf_nan=False)
+    model: JudgeModelUri | None = None
+    endpoint: JudgeEndpoint | None = None
 
     @model_validator(mode="after")
     def definition(self) -> JudgeVersionRequest:
         if self.name in RESERVED_NAMES:
             raise ValueError("This name is reserved for an existing criterion")
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
         if "{{ outputs }}" not in self.instructions:
             raise ValueError("Include {{ outputs }} in the judge instructions")
         # Bounds apply only to numeric judges; normalise them so a definition has one form.
@@ -263,6 +346,52 @@ class JudgeVersionRequest(StrictRequest):
             maximum=self.maximum,
         )
         return self
+
+
+class JudgeModelRequest(StrictRequest):
+    model: JudgeModelUri | None = None
+    endpoint: JudgeEndpoint | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> JudgeModelRequest:
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
+        return self
+
+
+# --- the core's own: a judge graded by a panel of judge models --------------------------------
+
+
+class JudgePanelMember(StrictRequest):
+    model: JudgeModelUri
+    endpoint: JudgeEndpoint | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> JudgePanelMember:
+        if problem := judge_model_problem(self.model, self.endpoint):
+            raise ValueError(problem)
+        return self
+
+
+class JudgePanelRequest(JudgeVersionRequest):
+    panel: list[JudgePanelMember] = Field(min_length=MIN_PANEL, max_length=MAX_PANEL)
+
+    @model_validator(mode="after")
+    def panel_definition(self) -> JudgePanelRequest:
+        if self.model is not None or self.endpoint is not None:
+            raise ValueError("A panel judge names its models in panel, not in model or endpoint")
+        if self.kind != "boolean":
+            raise ValueError("A panel decides pass or fail by majority, so a panel judge's kind is boolean")
+        members = [(member.model, member.endpoint) for member in self.panel]
+        if len(set(members)) != len(members):
+            raise ValueError("A panel names each judge model once")
+        return self
+
+
+class JudgeModelOut(BaseModel):
+    model: str | None
+    endpoint: str | None
+    selectable: bool
 
 
 class QuestionVersionRequest(StrictRequest):

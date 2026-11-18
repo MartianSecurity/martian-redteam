@@ -24,6 +24,16 @@ UI = "martian/ui/"
 STAMP = "ui-version.json"
 """The build's identity, written by the frontend's ``npm run build:evals``."""
 
+APPS = ("@martian/evals", "@martian/redteam")
+"""The apps the build must hold, which its stamp names under ``apps``: the local edition serves the
+evals and the red team routes, and the UI shows both."""
+
+
+def missing_apps(stamp: Mapping[str, object]) -> list[str]:
+    """The apps of :data:`APPS` a build's stamp does not name."""
+    apps = stamp.get("apps")
+    return [name for name in APPS if not isinstance(apps, dict) or not isinstance(apps.get(name), str)]
+
 
 def ui_digest(files: Mapping[str, bytes]) -> str:
     """The digest of a built UI: SHA-256 over one ``<sha256>  <path>`` line per file, sorted by path."""
@@ -47,6 +57,8 @@ def check_ui(files: Mapping[str, bytes], pin: Mapping[str, str], where: str) -> 
     stamp = json.loads(files[STAMP])
     if stamp.get("dirty") is not False:
         raise ValueError(f"the Evals UI in {where} was built from a frontend tree with uncommitted changes")
+    if missing_apps(stamp):
+        raise ValueError(f"the Evals UI in {where} does not hold {', '.join(missing_apps(stamp))}")
     if (stamp.get("version"), stamp.get("commit")) != (pin["version"], pin["commit"]):
         raise ValueError(
             f"the Evals UI in {where} is {stamp.get('version')} at {stamp.get('commit')}, "
@@ -91,6 +103,26 @@ def sdist_ui(archive: tarfile.TarFile) -> tuple[dict[str, bytes], bytes]:
     return files, read(pyproject)
 
 
+DATASET_SUFFIXES = (".csv", ".tsv", ".jsonl", ".parquet", ".arrow")
+DATASET_FOLDER = "martian/redteam/catalog/datasets/"
+DATASET_FOLDER_FILES = {f"{DATASET_FOLDER}__init__.py", f"{DATASET_FOLDER}register.json"}
+
+
+def dataset_rows(names: list[str]) -> list[str]:
+    """Files of the wheel that could hold dataset rows: any file with a tabular data suffix, and any
+    file in the datasets folder but its module and its licence register. The harmful-content
+    datasets are downloaded on use and never shipped (docs/catalog.md#harmful-content)."""
+    return sorted(
+        name
+        for name in names
+        if not name.endswith("/")
+        and (
+            name.lower().endswith(DATASET_SUFFIXES)
+            or (name.startswith(DATASET_FOLDER) and name not in DATASET_FOLDER_FILES)
+        )
+    )
+
+
 def validate(directory: Path) -> tuple[list[Path], dict[str, str]]:
     """Check both distributions; return them and the Evals UI pin they share."""
     wheels, sources = list(directory.glob("*.whl")), list(directory.glob("*.tar.gz"))
@@ -109,6 +141,8 @@ def validate(directory: Path) -> tuple[list[Path], dict[str, str]]:
         names = archive.namelist()
         if not required.issubset(names):
             raise ValueError("wheel is missing a public module or typed marker")
+        if shipped := dataset_rows(names):
+            raise ValueError(f"the wheel holds dataset files, which are downloaded on use: {', '.join(shipped)}")
         metadata.append(
             BytesParser().parsebytes(archive.read(next(n for n in names if n.endswith(".dist-info/METADATA"))))
         )
@@ -184,6 +218,9 @@ def serve_ui(environment: Path, work: Path, pin: Mapping[str, str]) -> None:
             bootstrap = json.loads(opener.open(base + "/v1/evals/bootstrap", timeout=5).read())
             if session["session"]["kind"] != "single_user" or bootstrap["principal"]["kind"] != "single_user":
                 raise ValueError("martian ui did not answer the session call and the bootstrap for the local user")
+            runs = json.loads(opener.open(base + "/v1/redteam/runs", timeout=5).read())
+            if runs != {"items": [], "next_cursor": None}:
+                raise ValueError("martian ui did not answer the red team runs of an empty data folder")
         finally:
             server.terminate()
             server.wait(10)

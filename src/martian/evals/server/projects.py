@@ -1,5 +1,5 @@
 """Creating and archiving projects: a port of ``POST /projects`` and ``POST /projects/{id}/archive``
-in the server's ``app/api/evals_explorer.py`` (MorningHQ/MartianBackend) onto the store.
+in the server's ``app/api/evals_explorer.py`` (MartianSecurity/MartianBackend) onto the store.
 
 A project's id is derived from the ``request_id`` that created it, so the same request again
 returns the same project. An organisation has at most 25 projects besides the default one, as on
@@ -58,7 +58,7 @@ async def archive_project(
     key = str(project_id)
     if await store.get_project(principal, key) is None:
         raise HTTPException(404, "Not found")
-    if (await records.list_runs(principal, key, states=list(ACTIVE), limit=1)).items:
+    if (await records.list_runs(principal, key, states=list(ACTIVE), limit=1, kind=None)).items:
         raise HTTPException(409, "Wait for the project's active evaluation before archiving")
     for run in await project_runs(records, principal, key):
         if any(j.state in ACTIVE for j in await records.list_scoring_jobs(principal, key, run.id)):

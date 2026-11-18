@@ -1,0 +1,431 @@
+"""The ``/v1/redteam`` routes of the red team core: read a run, its attempts, evidence, findings and
+report and the catalogue; start and stop a run; annotate a finding.
+
+Every edition serves the same routes: the local edition through ``martian ui`` and the hosted
+backend by mounting this router. Their shapes are frozen in ``contract/redteam-api-v<N>.json``, with
+the four SDK operation routes the hosted backend serves (simulate, evaluate, read and cancel an
+operation) copied unchanged from its ``contracts/redteam-operations.json``. ``docs/redteam-api.md``
+describes them; :mod:`martian.redteam.server.contract` builds and checks the file.
+
+The routes read the evals core's record store (``request.app.state.martian_evals_records``) and its
+principal, as the evals routes do. Starting and stopping a run needs a launcher
+(``request.app.state.martian_redteam_launcher``, a :class:`Launcher`); an edition without one answers
+``501``. Route functions have no docstrings: FastAPI would publish them in the contract.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Annotated, Any, Protocol
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+
+from martian.evals.server.dependencies import EntitlementsDep, PrincipalDep, RecordsDep
+from martian.evals.server.principal import Principal
+from martian.evals.server.projection import DEFAULT_PROJECT
+from martian.redteam.model import (
+    Annotation,
+    Attempt,
+    Counts,
+    Evidence,
+    Finding,
+    FindingStatus,
+    Probe,
+    RedteamRun,
+    RunSource,
+    RunState,
+    TargetRef,
+    Verification,
+)
+from martian.redteam.report import RedteamReport, build_report
+from martian.redteam.store import RedteamStore
+
+PREFIX = "/v1/redteam"
+MAX_PAGE = 200
+ENVIRONMENTS = "redteam_environments"
+"""The feature key a run in an environment needs (:mod:`martian.evals.server.entitlements`)."""
+
+router = APIRouter(prefix=PREFIX, tags=["redteam"])
+
+
+class _Out(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RunSummary(_Out):
+    """A red team run in a listing."""
+
+    id: str
+    project_id: str
+    source: RunSource
+    state: RunState
+    catalog_version: str
+    purpose: str | None = None
+    target: TargetRef | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    counts: Counts
+
+
+class RunPage(_Out):
+    items: list[RunSummary]
+    next_cursor: str | None = None
+
+
+class RunOut(RunSummary):
+    """A run without its attempts and evidence, which are read page by page."""
+
+    graph_revision: str | None = None
+    policy_revision: str | None = None
+    duration_seconds: float = 0.0
+    expected_attempts: int | None = None
+    probes: list[Probe]
+    verifications: list[Verification]
+    findings: list[Finding]
+    budget: dict[str, Any]
+    limitations: list[str]
+
+
+class AttemptPage(_Out):
+    items: list[Attempt]
+    next_cursor: str | None = None
+
+
+class FindingList(_Out):
+    items: list[Finding]
+
+
+class CatalogForm(_Out):
+    """One way to decide a probe of a catalogue entry: its checks, and what a hit proves."""
+
+    id: str
+    label: str
+    checks: list[dict[str, Any]]
+    goal: str | None = None
+    """``tool``: the run file's goal tool call is a check of this form; ``tool_with_canary``: and it
+    must carry the run's canary."""
+    level: int
+    """The highest evidence level a hit of this form reaches."""
+    deterministic: bool
+    proves: str
+    needs: str = ""
+
+
+class CatalogVulnerability(_Out):
+    name: str
+    id: str
+    label: str
+    group: str
+    objective_class: str
+    severity: str
+    """The default severity of its findings."""
+    gated: bool
+    types: list[str]
+    forms: list[CatalogForm]
+    """The first is the default."""
+    frameworks: list[str]
+    """Framework items, as ``<framework id>:<item id>``."""
+    source: str
+    licence: str
+
+
+class CatalogAttack(_Out):
+    name: str
+    id: str
+    label: str
+    kind: str
+
+
+class CatalogFrameworkItem(_Out):
+    id: str
+    title: str
+    coverage: str
+    """``covered``, ``partly`` or ``not_covered``: what the catalogue tests, never compliance."""
+    note: str
+    vulnerability_ids: list[str]
+
+
+class CatalogFramework(_Out):
+    id: str
+    label: str
+    source_revision: str
+    source: str
+    coverage: str
+    """``subset``, always: no framework is fully covered."""
+    vulnerability_ids: list[str]
+    items: list[CatalogFrameworkItem]
+    notes: str
+    disclaimer: str
+
+
+class CatalogOut(_Out):
+    version: str
+    vulnerabilities: list[CatalogVulnerability]
+    attacks: list[CatalogAttack]
+    frameworks: list[CatalogFramework]
+
+
+class RunStart(_Out):
+    """Start a run from a version 2 run file, given as its parsed mapping."""
+
+    project_id: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=200)
+    run_file: dict[str, Any]
+    request_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class AnnotationIn(_Out):
+    comment: str = Field(default="", max_length=4000)
+    status: FindingStatus | None = None
+
+
+class Launcher(Protocol):
+    """Starts and stops red team runs for an edition: the local engine, or the hosted campaign."""
+
+    async def start(self, principal: Principal, request: RunStart) -> RedteamRun: ...
+
+    async def stop(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun: ...
+
+
+def _summary(run: RedteamRun) -> RunSummary:
+    return RunSummary.model_validate(run.model_dump(include=set(RunSummary.model_fields)))
+
+
+async def _run(records: Any, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
+    run = await RedteamStore(records).get(project_id, run_id, principal=principal)
+    if run is None:
+        raise HTTPException(404, "Red team run not found")
+    return run
+
+
+def _launcher(request: Request) -> Launcher:
+    launcher: Launcher | None = getattr(request.app.state, "martian_redteam_launcher", None)
+    if launcher is None:
+        raise HTTPException(501, "This installation cannot start or stop red team runs")
+    return launcher
+
+
+ProjectQuery = Annotated[str, Query(min_length=1, max_length=200)]
+
+
+@router.get("/runs", response_model=RunPage)
+async def list_redteam_runs(
+    principal: PrincipalDep,
+    records: RecordsDep,
+    project_id: ProjectQuery = DEFAULT_PROJECT,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 50,
+    cursor: str | None = None,
+) -> RunPage:
+    page = await RedteamStore(records).list(project_id, principal=principal, limit=limit, cursor=cursor)
+    items = []
+    for record in page.items:
+        header = dict(record.provenance.get("redteam", {}))
+        header.update({"state": record.state, "finished_at": record.finished_at})
+        items.append(RunSummary.model_validate({key: header[key] for key in RunSummary.model_fields if key in header}))
+    return RunPage(items=items, next_cursor=page.next_cursor)
+
+
+@router.get("/runs/{run_id}", response_model=RunOut)
+async def get_redteam_run(
+    run_id: str, principal: PrincipalDep, records: RecordsDep, project_id: ProjectQuery = DEFAULT_PROJECT
+) -> RunOut:
+    run = await _run(records, principal, project_id, run_id)
+    return RunOut.model_validate(run.model_dump(include=set(RunOut.model_fields)))
+
+
+@router.get("/runs/{run_id}/attempts", response_model=AttemptPage)
+async def list_redteam_attempts(
+    run_id: str,
+    principal: PrincipalDep,
+    records: RecordsDep,
+    project_id: ProjectQuery = DEFAULT_PROJECT,
+    probe_id: str | None = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 50,
+) -> AttemptPage:
+    run = await _run(records, principal, project_id, run_id)
+    chosen = [attempt for attempt in run.attempts if probe_id is None or attempt.probe_id == probe_id]
+    page = chosen[offset : offset + limit]
+    more = offset + limit < len(chosen)
+    return AttemptPage(items=page, next_cursor=str(offset + limit) if more else None)
+
+
+@router.get("/runs/{run_id}/attempts/{attempt_id}", response_model=Attempt)
+async def get_redteam_attempt(
+    run_id: str,
+    attempt_id: str,
+    principal: PrincipalDep,
+    records: RecordsDep,
+    project_id: ProjectQuery = DEFAULT_PROJECT,
+) -> Attempt:
+    run = await _run(records, principal, project_id, run_id)
+    found = next((attempt for attempt in run.attempts if attempt.id == attempt_id), None)
+    if found is None:
+        raise HTTPException(404, "Attempt not found")
+    return found
+
+
+@router.get("/runs/{run_id}/evidence/{evidence_id}", response_model=Evidence)
+async def get_redteam_evidence(
+    run_id: str,
+    evidence_id: str,
+    principal: PrincipalDep,
+    records: RecordsDep,
+    project_id: ProjectQuery = DEFAULT_PROJECT,
+) -> Evidence:
+    run = await _run(records, principal, project_id, run_id)
+    found = next((item for item in run.evidence if item.id == evidence_id), None)
+    if found is None:
+        raise HTTPException(404, "Evidence not found")
+    return found
+
+
+@router.get("/runs/{run_id}/findings", response_model=FindingList)
+async def list_redteam_findings(
+    run_id: str, principal: PrincipalDep, records: RecordsDep, project_id: ProjectQuery = DEFAULT_PROJECT
+) -> FindingList:
+    run = await _run(records, principal, project_id, run_id)
+    return FindingList(items=run.findings)
+
+
+@router.get("/runs/{run_id}/report", response_model=RedteamReport)
+async def get_redteam_report(
+    run_id: str, principal: PrincipalDep, records: RecordsDep, project_id: ProjectQuery = DEFAULT_PROJECT
+) -> RedteamReport:
+    run = await _run(records, principal, project_id, run_id)
+    return build_report(run)
+
+
+@router.post("/runs/{run_id}/findings/{finding_id}/annotations", response_model=Finding)
+async def annotate_redteam_finding(
+    run_id: str,
+    finding_id: str,
+    body: AnnotationIn,
+    principal: PrincipalDep,
+    records: RecordsDep,
+    project_id: ProjectQuery = DEFAULT_PROJECT,
+) -> Finding:
+    run = await _run(records, principal, project_id, run_id)
+    finding = next((item for item in run.findings if item.id == finding_id), None)
+    if finding is None:
+        raise HTTPException(404, "Finding not found")
+    if not body.comment and body.status is None:
+        raise HTTPException(422, "An annotation has a comment, a status or both")
+    note = Annotation(author=principal.user_id, comment=body.comment, status=body.status, created_at=datetime.now(UTC))
+    changed = finding.model_copy(
+        update={"annotations": [*finding.annotations, note], "status": body.status or finding.status}
+    )
+    findings = [changed if item.id == finding_id else item for item in run.findings]
+    await RedteamStore(records).save(run.model_copy(update={"findings": findings}), principal=principal)
+    return changed
+
+
+@router.get("/catalog", response_model=CatalogOut)
+async def get_redteam_catalog(principal: PrincipalDep) -> CatalogOut:
+    from martian.redteam.catalog import ATTACKS, CATALOG_VERSION, ENTRIES, FRAMEWORKS
+
+    vulnerabilities = [
+        CatalogVulnerability(
+            name=name,
+            id=item.id,
+            label=item.label,
+            group=item.group,
+            objective_class=item.objective,
+            severity=item.severity,
+            gated=item.gated,
+            types=list(item.types),
+            forms=[CatalogForm.model_validate(form.describe()) for form in item.forms],
+            frameworks=list(item.frameworks),
+            source=item.source,
+            licence=item.licence,
+        )
+        for name, item in ENTRIES.items()
+    ]
+    attacks = [
+        CatalogAttack(name=name, id=attack.id, label=attack.label, kind=attack.kind)
+        for name, attack in ((name, make()) for name, make in ATTACKS.items())
+    ]
+    from martian_redteam.catalog.frameworks import DISCLAIMER
+
+    frameworks = [
+        CatalogFramework(
+            id=framework.id,
+            label=framework.label,
+            source_revision=framework.source_revision,
+            source=framework.source,
+            coverage=framework.coverage,
+            vulnerability_ids=list(framework.vulnerability_ids),
+            items=[
+                CatalogFrameworkItem(
+                    id=item.id,
+                    title=item.title,
+                    coverage=item.coverage,
+                    note=item.note,
+                    vulnerability_ids=list(framework.vulnerabilities_of(item.id)),
+                )
+                for item in framework.items
+            ],
+            notes=framework.notes,
+            disclaimer=DISCLAIMER,
+        )
+        for framework in FRAMEWORKS.values()
+    ]
+    return CatalogOut(version=CATALOG_VERSION, vulnerabilities=vulnerabilities, attacks=attacks, frameworks=frameworks)
+
+
+def check_run_file(mapping: dict[str, Any], entitlements: Any) -> None:
+    """Refuse a run file that is not valid (``422``, naming each problem) or that names an
+    environment the edition does not include (``403``), before any launcher runs."""
+    from pydantic import ValidationError
+
+    from martian.evals.server.dependencies import ensure_entitled
+    from martian.redteam.runfile import RunFile
+
+    try:
+        run_file = RunFile.model_validate(mapping)
+    except ValidationError as error:
+        reasons = [
+            ".".join(str(part) for part in item["loc"]) + ": " + str(item["msg"]).removeprefix("Value error, ")
+            for item in error.errors(include_input=False, include_context=False, include_url=False)
+        ]
+        raise HTTPException(422, "; ".join(reasons)) from None
+    if run_file.environment is not None:
+        ensure_entitled(entitlements, ENVIRONMENTS)
+
+
+@router.post("/runs", response_model=RunSummary, status_code=202)
+async def start_redteam_run(
+    body: RunStart, request: Request, principal: PrincipalDep, entitlements: EntitlementsDep
+) -> RunSummary:
+    check_run_file(body.run_file, entitlements)
+    run = await _launcher(request).start(principal, body)
+    return _summary(run)
+
+
+@router.post("/runs/{run_id}/stop", response_model=RunSummary)
+async def stop_redteam_run(
+    run_id: str, request: Request, principal: PrincipalDep, project_id: ProjectQuery = DEFAULT_PROJECT
+) -> RunSummary:
+    run = await _launcher(request).stop(principal, project_id, run_id)
+    return _summary(run)
+
+
+__all__ = [
+    "ENVIRONMENTS",
+    "MAX_PAGE",
+    "PREFIX",
+    "AnnotationIn",
+    "AttemptPage",
+    "CatalogForm",
+    "CatalogFramework",
+    "CatalogFrameworkItem",
+    "CatalogOut",
+    "FindingList",
+    "Launcher",
+    "RunOut",
+    "RunPage",
+    "RunStart",
+    "RunSummary",
+    "check_run_file",
+    "router",
+]

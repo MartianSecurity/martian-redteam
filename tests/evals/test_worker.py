@@ -9,7 +9,7 @@ import pytest
 
 from martian.evals.model import Case, Run, ScoringJob, StoreRef, Target
 from martian.evals.records.sql import SqlRecordStore
-from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER
+from martian.evals.server import DEFAULT_PROJECT, ENTERPRISE, SINGLE_USER, organisation_principal
 from martian.evals.store import MemoryStore, StoreError
 from martian.evals.worker import InProcessWorker, Work, Worker, execute_run, execute_scoring
 from martian.evals.worker.scorers import builtin_scorer, code_score
@@ -29,6 +29,10 @@ def test_work_names_a_job_exactly_when_it_is_scoring():
     for kind, job in (("run", "j"), ("scoring", None)):
         with pytest.raises(ValueError, match="scoring work names its job"):
             Work(kind=kind, principal=SINGLE_USER, project_id="p", run_id="r", job_id=job)  # type: ignore[arg-type]
+    # A re-check of a calibration names its re-check as its job, and no run.
+    Work(kind="recheck", principal=SINGLE_USER, project_id="p", run_id="", job_id="k")
+    with pytest.raises(ValueError, match="re-check work names no run"):
+        Work(kind="recheck", principal=SINGLE_USER, project_id="p", run_id="r", job_id="k")
 
 
 def test_both_workers_implement_the_interface(records):
@@ -47,6 +51,18 @@ async def test_the_in_process_worker_knows_only_the_agents_it_was_given(records)
         await worker.check_target(SINGLE_USER, Target(kind="agent", agent_id=str(uuid.uuid4())))
     assert (refused.value.kind, refused.value.detail) == ("not_found", "Agent not found")
     assert not worker.judges
+
+
+async def test_the_in_process_worker_runs_only_its_own_organisations_work(records):
+    worker = InProcessWorker(MemoryStore(), records, organisation_id="org-a", targets={AGENT: lambda case: None})  # type: ignore[dict-item]
+    own = organisation_principal("member-a", "org-a", frozenset({"member"}))
+    assert await worker.check_target(own, Target(kind="agent", agent_id=AGENT))
+    for other in (organisation_principal("member-b", "org-b", frozenset({"member"})), SINGLE_USER):
+        with pytest.raises(ValueError, match="one organisation's work"):
+            await worker.check_target(other, Target(kind="agent", agent_id=AGENT))
+        with pytest.raises(ValueError, match="one organisation's work"):
+            await worker.submit(Work(kind="run", principal=other, project_id=DEFAULT_PROJECT, run_id="r"))
+    await worker.drain()  # nothing was started
 
 
 def test_a_launch_and_a_scoring_request_hand_their_work_over_without_running_it(records):
@@ -74,6 +90,10 @@ def test_a_launch_and_a_scoring_request_hand_their_work_over_without_running_it(
         assert job["state"] == "queued" and inert.submitted[-1].job_id == job["id"]
 
 
+PIN = {"kind": "agent", "agent_id": AGENT}
+"""A function target's pin, as a launch records it."""
+
+
 def _run(**changes) -> Run:
     base = Run(
         id=str(uuid.uuid4()),
@@ -83,9 +103,15 @@ def _run(**changes) -> Run:
         target=Target(kind="agent", agent_id=AGENT),
         dataset_name="support-faq",
         dataset_digest="0" * 64,
+        provenance={"target": PIN},
         store=StoreRef(dataset_id="ds-missing"),
     )
     return base.model_copy(update=changes)
+
+
+async def _pinned(run: Run) -> dict[str, str]:
+    """The pin of the run's target as the worker has it now: the one it was admitted with."""
+    return PIN
 
 
 async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(records):
@@ -94,7 +120,7 @@ async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(rec
     work = lambda run: Work(kind="run", principal=SINGLE_USER, project_id=DEFAULT_PROJECT, run_id=run.id)  # noqa: E731
 
     gone = await records.create_run(SINGLE_USER, _run())
-    await execute_run(store, records, work(gone), call_for=lambda run: None, timeout_seconds=1)
+    await execute_run(store, records, work(gone), call_for=lambda run: None, pin_for=_pinned, timeout_seconds=1)
     failed = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, gone.id)
     assert (failed.state, failed.error) == ("failed", "The worker cannot call this run's target")  # type: ignore[union-attr]
 
@@ -102,12 +128,12 @@ async def test_a_run_fails_with_its_reason_and_work_not_queued_is_left_alone(rec
         return "x"
 
     changed = await records.create_run(SINGLE_USER, _run())
-    await execute_run(store, records, work(changed), call_for=lambda run: answer, timeout_seconds=1)
+    await execute_run(store, records, work(changed), call_for=lambda run: answer, pin_for=_pinned, timeout_seconds=1)
     failed = await records.get_run(SINGLE_USER, DEFAULT_PROJECT, changed.id)
     assert (failed.state, failed.error) == ("failed", "Dataset identity changed; submit a new eval run")  # type: ignore[union-attr]
 
     finished = await records.create_run(SINGLE_USER, _run(state="completed"))
-    await execute_run(store, records, work(finished), call_for=lambda run: answer, timeout_seconds=1)
+    await execute_run(store, records, work(finished), call_for=lambda run: answer, pin_for=_pinned, timeout_seconds=1)
     assert await records.get_run(SINGLE_USER, DEFAULT_PROJECT, finished.id) == finished
 
 

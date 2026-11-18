@@ -1,6 +1,10 @@
 {
   "name": "@martian/evals",
   "version": "0.1.0",
-  "commit": "78243c3f8a60b2830576c361e16e45c36035fee1",
+  "apps": {
+    "@martian/evals": "0.1.0",
+    "@martian/redteam": "0.1.0"
+  },
+  "commit": "f04619f2834bd82b4ce9db6ee86eac780ee4acba",
   "dirty": false
 }

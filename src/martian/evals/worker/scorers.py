@@ -1,7 +1,7 @@
 """The scorers the console offers by name, and the code scorers the worker runs itself.
 
 A port of ``code_score`` and ``exact_match`` in the server's ``app/evals_workbench.py`` and
-``app/evals_items.py`` (MorningHQ/MartianBackend). Code scorers read only the saved output and the
+``app/evals_items.py`` (MartianSecurity/MartianBackend). Code scorers read only the saved output and the
 case's expected text; the judge scorers need a model and go to the worker's judge.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from martian.evals._custom import INSTALLED_TYPES
 from martian.evals.model import ScorerVersion, Value
 
 CODE_SCORERS = ("exact_match", "contains_expected", "valid_json", "response_length")
@@ -36,9 +37,18 @@ def is_builtin(scorer: ScorerVersion) -> bool:
 
 
 def scorer_source(scorer: ScorerVersion) -> str:
-    """The ``source_id`` of a code score, and of a judge score that has no verdict."""
+    """The ``source_id`` of a code score, and of a judge score that has no verdict. A custom
+    Python scorer's is ``python:<name>`` and an installed check's ``installed:<name>``: the worker's
+    setup installs the function under that name. A deterministic check a request named has
+    ``martian.checks.<type>``."""
     if is_builtin(scorer):
         return f"martian.{scorer.name}:{BUILTIN_VERSION}"
+    if scorer.kind == "check":
+        return f"martian.checks.{scorer.type}"
+    if scorer.kind == "code" and scorer.type in INSTALLED_TYPES:
+        return f"installed:{scorer.name}"
+    if scorer.kind == "code":
+        return f"python:{scorer.name}"
     return f"{scorer.name}@{scorer.version}"
 
 

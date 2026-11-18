@@ -1,7 +1,10 @@
 """`martian ui`: the evals core on SQLite and the Evals UI from one local process, with no login."""
 
+import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -15,12 +18,14 @@ import martian
 from martian.cli import app as cli
 from martian.evals import local
 from martian.evals.local import LocalEditionError, create_local_app, listen, serve
+from martian.redteam.server.contract import checked_in, operations
 
 LOCAL = "http://127.0.0.1:7600"
 
 SESSION = {
     "kind": "single_user",
-    "user": {"id": "local", "email": None, "display_name": None},
+    # The local user `local`, as the API names it: a UUID derived from it.
+    "user": {"id": "bf0808be-f788-5dd7-8fc2-2d28ed350045", "email": None, "display_name": None},
     "organisation": None,
     "role": "owner",
     "platform_admin": False,
@@ -35,6 +40,7 @@ def no_telemetry(monkeypatch):
     # The container image's settings: unset unless a test sets them.
     monkeypatch.delenv(local.BIND_ENV, raising=False)
     monkeypatch.delenv(local.ALLOWED_HOSTS_ENV, raising=False)
+    monkeypatch.delenv(local.CONCURRENCY_ENV, raising=False)
 
 
 @pytest.fixture
@@ -72,6 +78,37 @@ def test_the_bootstrap_answers_from_the_sqlite_store_in_the_data_folder(tmp_path
     assert (home / "artifacts").is_dir()
 
 
+def test_a_red_team_run_kept_in_the_data_folder_is_served_with_its_findings(tmp_path, ui):
+    """`martian ui` serves the red team routes over the data folder `martian redteam run` keeps its
+    runs in (MartianSecurity/martian-notes#289); a finding's annotation is kept there across restarts."""
+    import asyncio
+
+    from martian.redteam.model.maps import from_risk_assessment
+    from martian.redteam.store import RedteamStore
+    from martian_redteam.types import RiskAssessment
+
+    home = tmp_path / "home"
+    fixture = Path(__file__).parents[1] / "redteam" / "fixtures" / "risk-assessment-0.2.json"
+    report = RiskAssessment.model_validate_json(fixture.read_text("utf-8"))
+    store = RedteamStore.local(home)
+    asyncio.run(store.save(from_risk_assessment(report, run_id="rt-local")))
+    store.records.close()
+    client = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    assert [run["id"] for run in client.get("/v1/redteam/runs").json()["items"]] == ["rt-local"]
+    run = client.get("/v1/redteam/runs/rt-local").json()
+    assert (run["counts"]["confirmed"], run["counts"]["suspected"]) == (0, 2)
+    finding = run["findings"][0]["id"]
+    note = {"comment": "Accepted for the beta", "status": "accepted"}
+    assert client.post(f"/v1/redteam/runs/rt-local/findings/{finding}/annotations", json=note).status_code == 200
+    assert client.get("/v1/redteam/catalog").status_code == 200
+    # The edition binds the engine's launcher: stopping a run it is not running answers the run as kept.
+    stopped = client.post("/v1/redteam/runs/rt-local/stop")
+    assert stopped.status_code == 200 and stopped.json()["id"] == "rt-local"
+    again = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    kept = again.get("/v1/redteam/runs/rt-local/findings").json()["items"][0]
+    assert (kept["status"], kept["annotations"][0]["comment"]) == ("accepted", "Accepted for the beta")
+
+
 def test_the_built_ui_is_served_beside_the_api(tmp_path, ui):
     client = TestClient(create_local_app(tmp_path / "home", ui), base_url=LOCAL)
     page = client.get("/")
@@ -80,6 +117,17 @@ def test_the_built_ui_is_served_beside_the_api(tmp_path, ui):
     assert "<title>Martian Evals</title>" in page.text
     assert client.get("/assets/index.js").text == "export {};"
     assert client.get("/assets/missing.js").status_code == 404
+
+
+def test_the_page_is_revalidated_and_the_hashed_build_files_are_kept(tmp_path, ui):
+    # After an SDK upgrade a cached page would name the previous build's assets, which are gone.
+    (ui / "ui-version.json").write_text("{}", encoding="utf-8")
+    client = TestClient(create_local_app(tmp_path / "home", ui), base_url=LOCAL)
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert client.get("/index.html").headers["cache-control"] == "no-cache"
+    assert client.get("/ui-version.json").headers["cache-control"] == "no-cache"
+    assert client.get("/assets/index.js").headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert "cache-control" not in client.get("/assets/missing.js").headers
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1:7600", "localhost:7600"])
@@ -202,6 +250,24 @@ def test_the_command_defaults_to_the_data_folder_in_home_and_opens_the_browser(m
     assert (tmp_path / ".martian" / "evals" / "mlflow.db").is_file()
 
 
+def test_the_concurrency_is_how_many_runs_and_scoring_jobs_may_be_in_progress_at_once(monkeypatch, tmp_path, ui):
+    served = {}
+    monkeypatch.setattr(local, "serve", lambda app, **options: served.update(options, app=app))
+    command = ["ui", "--data-dir", str(tmp_path / "home"), "--ui-dir", str(ui), "--no-open"]
+    for options, setting, expected in (([], None, 1), (["--concurrency", "3"], None, 3), ([], "2", 2)):
+        if setting is not None:
+            monkeypatch.setenv(local.CONCURRENCY_ENV, setting)
+        result = CliRunner().invoke(cli, [*command, *options])
+        assert result.exit_code == 0, result.output
+        bootstrap = TestClient(served["app"], base_url=LOCAL).get("/v1/evals/bootstrap").json()
+        assert bootstrap["edition"]["key"] == "community"
+        assert bootstrap["entitlements"]["limits"] == {"concurrent_runs": expected, "concurrent_scoring_jobs": expected}
+        assert served["app"].state.martian_evals_worker.concurrency == expected
+    monkeypatch.delenv(local.CONCURRENCY_ENV)
+    refused = CliRunner().invoke(cli, [*command, "--concurrency", "0"])
+    assert refused.exit_code == 2 and "--concurrency" in refused.output
+
+
 def test_the_image_settings_listen_on_the_named_address_keep_the_host_check_and_warn(monkeypatch, tmp_path, ui):
     # What the Dockerfile sets, and a name a user adds for a server reached by name.
     served = {}
@@ -281,3 +347,157 @@ def test_the_command_says_how_to_name_a_ui_when_the_package_has_none(monkeypatch
     assert result.exit_code == 2
     assert "there is no built Evals UI in" in result.output
     assert "has lost the Evals UI it ships: reinstall it, or pass --ui-dir" in result.output
+
+
+# A `/v1` path in a template literal of the built UI, with the method when the literal is the first
+# argument of the API client's get, post, put, patch or delete. A literal holding a nested template
+# ends at its inner backtick.
+UI_LITERAL = re.compile(r"(?:\.(get|post|put|patch|delete)\(\s*)?`(/v1/[^`]*)")
+
+# The routes the packaged UI names that the local edition does not serve, each in a view the UI leaves
+# out of the local edition. The runs page's CI sessions and API keys views and the traces export call
+# the Martian server's CI gate, API keys and trace export: the UI shows them only where the bootstrap's
+# `hostedRoutes` is not false, and the core answers false.
+HOSTED_ROUTES = {
+    ("GET", "/v1/evals/ci-sessions"),
+    ("GET", "/v1/evals/ci-sessions/{}"),
+    ("POST", "/v1/evals/ci-sessions/{}/export"),
+    ("GET", "/v1/api-keys"),
+    ("POST", "/v1/api-keys"),
+    ("GET", "/v1/api-keys/readiness"),
+    ("DELETE", "/v1/api-keys/{}"),
+    (None, "/v1/evals/traces/export"),
+}
+# The dataset drafts' admin scopes, which only the console's admin pages reach: the stand-alone app
+# has no route to them.
+ADMIN_ROUTES = {
+    (None, "/v1/admin/evals/global-dataset-drafts"),
+    (None, "/v1/admin/organisations/{}/evals/dataset-drafts"),
+    (None, "/v1/admin/organisations/{}/evals/dataset-operations"),
+}
+# The known gaps: routes the packaged UI names that the local edition does not serve and that a view
+# of the local edition calls.
+UI_ROUTES_NOT_SERVED: set[tuple[str | None, str]] = set()
+
+
+def route_of(literal: str) -> str:
+    """A literal's path, each `${...}` that is a whole path segment as `{}`. Any other `${...}`, or a
+    `?`, ends it: what follows is the query."""
+    path, at = "", 0
+    while at < len(literal) and literal[at] != "?":
+        if not literal.startswith("${", at):
+            path, at = path + literal[at], at + 1
+            continue
+        if not path.endswith("/"):
+            break
+        depth, end = 0, at + 1
+        while end < len(literal):
+            depth += {"{": 1, "}": -1}.get(literal[end], 0)
+            if depth == 0:
+                break
+            end += 1
+        path, at = path + "{}", end + 1
+    return path
+
+
+def test_every_route_the_packaged_ui_names_is_served_or_in_a_view_the_local_edition_leaves_out(tmp_path):
+    ui = local.packaged_ui()
+    named = {
+        (method.upper() or None, route_of(literal))
+        for script in (ui / "assets").glob("*.js")
+        for method, literal in UI_LITERAL.findall(script.read_text(encoding="utf-8"))
+    }
+    app = create_local_app(tmp_path / "home", ui)
+    paths = app.openapi()["paths"]
+    served = {(method.upper(), re.sub(r"\{[^}]+\}", "{}", path)) for path, item in paths.items() for method in item}
+    # And the red team routes, which the app serves and leaves out of its OpenAPI document: their own
+    # contract's, but for the hosted backend's operation routes.
+    redteam, hosted = checked_in(), operations()["paths"]
+    served |= {
+        (method.upper(), re.sub(r"\{[^}]+\}", "{}", path))
+        for path, item in redteam["paths"].items()
+        if path not in hosted
+        for method in item
+    }
+    served_paths = {path for _, path in served}
+    assert ("GET", "/v1/evals/bootstrap") in named & served
+    # A literal that is not a call's first argument names a path only: any method serves it.
+    missing = {call for call in named if (call not in served if call[0] else call[1] not in served_paths)}
+    assert missing == HOSTED_ROUTES | ADMIN_ROUTES | UI_ROUTES_NOT_SERVED
+    assert not UI_ROUTES_NOT_SERVED
+    # The build reads the bootstrap's answer, and the local edition's answer hides those views.
+    assert any("hostedRoutes" in script.read_text(encoding="utf-8") for script in (ui / "assets").glob("*.js"))
+    bootstrap = TestClient(app, base_url=LOCAL).get("/v1/evals/bootstrap")
+    assert bootstrap.json()["capabilities"]["hostedRoutes"] is False
+
+
+TRACED_APPLICATION = """
+import mlflow
+
+
+@mlflow.trace(span_type="AGENT")
+def answer(message, session, user):
+    mlflow.update_current_trace(session_id=session, user=user)
+    return "echo " + message
+
+
+answer("Where is my order?", "conversation-1", "alice")
+answer("And the invoice?", "conversation-1", "alice")
+answer("Hello", "conversation-2", "bob")
+"""
+
+
+def tracing_settings(home: Path) -> dict[str, str]:
+    """What docs/evals-core.md tells an application to set to record into the data folder."""
+    return {
+        "MLFLOW_TRACKING_URI": f"sqlite:///{home / 'mlflow.db'}",
+        "MLFLOW_ENABLE_WORKSPACES": "true",
+        "MLFLOW_WORKSPACE": "local",
+        "MLFLOW_EXPERIMENT_NAME": "default",
+    }
+
+
+def test_an_application_using_mlflow_tracing_shows_in_traces_and_sessions(tmp_path, ui):
+    home = tmp_path / "home"
+    client = TestClient(create_local_app(home, ui), base_url=LOCAL)
+    app = tmp_path / "application"
+    app.mkdir()
+    (app / "app.py").write_text(TRACED_APPLICATION, encoding="utf-8")
+    # The application in a process of its own, with only MLflow and the documented settings.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("MLFLOW_")}
+    environment.update(tracing_settings(home), MLFLOW_DISABLE_TELEMETRY="true")
+    done = subprocess.run(
+        [sys.executable, "app.py"], cwd=app, env=environment, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+
+    traces = client.post("/v1/evals/traces/search", json={"order": "oldest"}).json()["items"]
+    assert [(t["name"], t["session_id"], t["user_id"], t["state"]) for t in traces] == [
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-1", "alice", "OK"),
+        ("answer", "conversation-2", "bob", "OK"),
+    ]
+    assert traces[0]["response"] == '"echo Where is my order?"' and traces[0]["run_id"] is None
+    sessions = client.post("/v1/evals/sessions/search", json={}).json()
+    assert [(s["id"], s["turns"]) for s in sessions["items"]] == [("conversation-2", 1), ("conversation-1", 2)]
+    detail = client.get(f"/v1/evals/traces/{traces[0]['id']}").json()
+    assert [(span["name"], span["type"]) for span in detail["spans"]] == [("answer", "AGENT")]
+    assert detail["info"]["trace_metadata"]["mlflow.trace.user"] == "alice"
+    # The project's experiment existed, so MLflow kept the traces' artifacts in the data folder.
+    assert not (app / "mlruns").exists()
+
+
+def test_a_data_folder_whose_default_experiment_mlflow_created_is_refused(tmp_path, ui):
+    from martian.evals._mlflow import ServerWorkspaceContext
+    from martian.evals.server.principal import SINGLE_USER
+    from martian.evals.store.mlflow_local import MlflowStore
+
+    # What MLflow tracing leaves when an application names the experiment before the project exists.
+    home = tmp_path / "home"
+    home.mkdir()
+    store = MlflowStore(f"sqlite:///{home / 'mlflow.db'}", home / "artifacts")
+    store._workspace(SINGLE_USER)
+    with ServerWorkspaceContext("local"):
+        store._store.create_experiment("default")
+    with pytest.raises(LocalEditionError, match="cannot hold the default project: an MLflow experiment with this id"):
+        create_local_app(home, ui)

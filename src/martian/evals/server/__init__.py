@@ -12,32 +12,87 @@ things the core never imports:
   ``lambda p: entitlements_for(resolve_edition(plan=...))``. The default is Community.
 - ``worker``: a :class:`~martian.evals.worker.Worker` that runs what the write routes start, such
   as :class:`~martian.evals.worker.InProcessWorker`. Without one, a route that starts a run or a
-  scoring job answers ``503``.
+  scoring job answers ``503``. A worker that runs beside the app (``Lifecycle``, such as a
+  :class:`~martian.evals.worker.QueueWorker` serving in this process) is started when the app
+  starts serving and stopped when it stops.
+- ``agent_names``: an async function from a principal and agent ids to the agents' display
+  names, which the run routes send as ``agent_name``, such as the server's registry lookup. The
+  local edition has none, and its runs carry no agent name.
+- ``judge_settings``: :class:`~martian.evals.judge_settings.JudgeSettings`, where each
+  organisation's default judge model is kept, such as the local edition's
+  :class:`~martian.evals.judge_settings.FileJudgeSettings`. Without it there is no default, and
+  setting one answers ``503``.
 
 Routes read them through :func:`current_principal`, :func:`current_entitlements`,
 :func:`current_store`, :func:`current_records` and ``current_worker``. A route that serves a paid
 feature declares ``dependencies=[Depends(require_entitlement(key))]``, and a write route declares
-the capability it needs with ``require_capability(name)``. Every route is in the shape of the
-frozen evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
-``datasets``, and the write routes in ``launch``, ``scoring``, ``reviews``, ``suites``,
-``projects``, ``views`` and ``drafts``.
+the capability it needs with ``require_capability(name)``. Every route is in the shape of the frozen
+evals API contract: status and bootstrap here, the read routes in ``runs``, ``traces`` and
+``datasets``, the Overview and Quality issues pages' routes in ``explorer``, and the write routes in
+``launch``, ``scoring``, ``reviews``, ``suites``, ``projects``, ``views`` and ``drafts``. Beside the
+contract, ``otlp`` serves OpenTelemetry's ``POST /v1/traces``, which records an application's spans
+as traces through the store, ``audits`` audits a saved suite version and keeps the result with it,
+``cheating`` inspects a run's transcripts for signs that the agent reached its answers, tests or
+grader, and queues the flagged cases for review, ``monitors`` the monitors that score a project's
+live traces, ``thresholds`` the thresholds on their scores and on schedules' gate results, which
+send alerts, ``schedules`` the schedules that run a saved suite against a target unattended, and
+``push`` the runs another installation pushes here (``martian evals push``), written as
+:func:`~martian.evals.server.push.push_principal`. Some routes are the core's own, which the
+contract does not have: a run's attempts in ``runs``, the judges' agreement with people and people's
+agreement with each other in ``agreement``, each judge version's calibration in ``calibration``, the
+prompt versions in ``prompts``, and ``push``, under ``/v1/push``.
+
+Every edition's app also serves the red team core's ``/v1/redteam`` routes
+(:mod:`martian.redteam.server`), which read red team runs from the same record store with the same
+principal. They are left out of the app's OpenAPI document: their contract is
+``martian/redteam/server/contract/redteam-api-v1.json``. Starting and stopping a red team run needs
+a launcher the edition binds as ``app.state.martian_redteam_launcher``; without one those two routes
+answer ``501``.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from martian.evals.judge_settings import JudgeSettings
 from martian.evals.records import RecordStore
-from martian.evals.server import datasets, drafts, launch, projects, reviews, runs, scoring, suites, traces, views
+from martian.evals.server import (
+    agreement,
+    audits,
+    calibration,
+    cheating,
+    datasets,
+    drafts,
+    explorer,
+    launch,
+    monitors,
+    otlp,
+    projects,
+    prompts,
+    push,
+    reviews,
+    runs,
+    schedules,
+    scoring,
+    suites,
+    thresholds,
+    traces,
+    views,
+)
 from martian.evals.server.bootstrap import Bootstrap, build_bootstrap
 from martian.evals.server.capabilities import CAPABILITIES, Capability, capabilities_for, highest_role
 from martian.evals.server.dependencies import (
+    AgentNames,
     EntitlementsProvider,
     PrincipalProvider,
+    current_agent_names,
     current_entitlements,
+    current_judge_settings,
     current_principal,
     current_records,
     current_store,
@@ -63,7 +118,7 @@ from martian.evals.server.entitlements import (
 from martian.evals.server.principal import SINGLE_USER, Principal, organisation_principal
 from martian.evals.server.projection import DEFAULT_PROJECT, NO_AGENT, result_id, score_id
 from martian.evals.store import EvalStore, StoreError, StoreStatus
-from martian.evals.worker import Worker
+from martian.evals.worker import Lifecycle, Worker
 
 STORE_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
@@ -94,6 +149,25 @@ async def _store_error(_request: Request, error: Exception) -> JSONResponse:
     return JSONResponse({"detail": error.detail}, status_code=STORE_ERROR_STATUS[error.kind])
 
 
+def _with_worker(worker: Lifecycle, inner: Any) -> Callable[[FastAPI], AbstractAsyncContextManager[Any]]:
+    """A lifespan that starts the worker when the app starts serving and stops it when the app
+    stops, around the edition's own lifespan, if it gave one."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+        await worker.start()
+        try:
+            if inner is None:
+                yield None
+            else:
+                async with inner(app) as state:
+                    yield state
+        finally:
+            await worker.stop()
+
+    return lifespan
+
+
 def create_app(
     *,
     store: EvalStore,
@@ -101,22 +175,35 @@ def create_app(
     principal: PrincipalProvider,
     entitlements: EntitlementsProvider = lambda _principal: COMMUNITY,
     worker: Worker | None = None,
+    judge_settings: JudgeSettings | None = None,
+    agent_names: AgentNames | None = None,
     **fastapi_options: Any,
 ) -> FastAPI:
     """The evals core as an application. ``principal`` is a FastAPI dependency, so it can read the
     request (a session cookie, a header) through its own parameters. A request the store or the
-    record store refuses is answered ``404``, ``409`` or ``422`` by the ``StoreError``'s kind."""
+    record store refuses is answered ``404``, ``409`` or ``422`` by the ``StoreError``'s kind. The app
+    serves the red team core's ``/v1/redteam`` routes beside the evals routes."""
     if not isinstance(store, EvalStore):
         raise TypeError("store must implement martian.evals.store.EvalStore")
     if not isinstance(records, RecordStore):
         raise TypeError("records must implement martian.evals.records.RecordStore")
     if worker is not None and not isinstance(worker, Worker):
         raise TypeError("worker must implement martian.evals.worker.Worker")
+    if judge_settings is not None and not isinstance(judge_settings, JudgeSettings):
+        raise TypeError("judge_settings must implement martian.evals.judge_settings.JudgeSettings")
+    # Imported here: the red team routes import this package's dependencies.
+    from martian.redteam.server import router as redteam_router
+    from martian.redteam.server.push import router as redteam_push_router
+
+    if isinstance(worker, Lifecycle):
+        fastapi_options["lifespan"] = _with_worker(worker, fastapi_options.get("lifespan"))
     app = FastAPI(title="Martian Evals", **fastapi_options)
     app.state.martian_evals_store = store
     app.state.martian_evals_records = records
     app.state.martian_evals_entitlements = entitlements
     app.state.martian_evals_worker = worker
+    app.state.martian_evals_judge_settings = judge_settings
+    app.state.martian_evals_agent_names = agent_names
     app.dependency_overrides[current_principal] = principal
     app.add_exception_handler(StoreError, _store_error)
     for part in (
@@ -124,23 +211,39 @@ def create_app(
         datasets.router,
         runs.explorer,
         traces.router,
+        explorer.router,
         launch.router,
         scoring.router,
+        monitors.router,
+        thresholds.router,
+        schedules.router,
         reviews.router,
         reviews.explorer,
         suites.router,
         suites.explorer,
+        audits.router,
+        cheating.router,
+        agreement.explorer,
+        calibration.explorer,
         projects.router,
         views.router,
         drafts.router,
+        prompts.router,
+        push.router,
         runs.router,
+        otlp.router,
     ):
         app.include_router(part)
+    # Left out of this app's OpenAPI document: the red team contract is generated from the router on
+    # its own, and both cores name a schema ``Attempt``, which FastAPI would rename in this document.
+    app.include_router(redteam_router, include_in_schema=False)
+    app.include_router(redteam_push_router, include_in_schema=False)
     return app
 
 
 __all__ = [
     "CAPABILITIES",
+    "AgentNames",
     "COMMUNITY",
     "DEFAULT_PROJECT",
     "EDITIONS",
@@ -160,7 +263,9 @@ __all__ = [
     "build_bootstrap",
     "capabilities_for",
     "create_app",
+    "current_agent_names",
     "current_entitlements",
+    "current_judge_settings",
     "current_principal",
     "current_records",
     "current_store",
