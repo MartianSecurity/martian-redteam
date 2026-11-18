@@ -1,7 +1,7 @@
 name: Bug
 description: An unexpected problem or behavior.
 type: Bug
-projects: ["MorningHQ/2"]
+projects: ["MartianSecurity/2"]
 body:
   - type: markdown
     attributes:

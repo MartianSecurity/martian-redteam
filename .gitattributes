@@ -1,0 +1,3 @@
+# The Evals UI build that scripts/vendor_ui.py copies in: kept byte for byte (no line-ending
+# conversion, so its digest holds on every checkout), not diffed or merged, and marked generated.
+src/martian/ui/** binary linguist-generated

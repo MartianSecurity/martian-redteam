@@ -1,6 +1,6 @@
 # Reusable workflow for customer repositories (workflow_call).
-# Also runnable via workflow_dispatch on this repo; a missing MARTIAN_API_KEY
-# fails closed (ClientError / exit 1). Not used on pull_request here.
+# Also runnable via workflow_dispatch on this repo; a missing MARTIAN_API_TOKEN
+# fails closed (configuration error / exit 2). Not used on pull_request here.
 # Callers should pin this workflow to a tag or SHA instead of @main. The SDK
 # is installed at the same commit as this file unless sdk-ref says otherwise.
 # See docs/gate-and-ci.md.
@@ -31,7 +31,7 @@ on:
         default: 30
       sdk-ref:
         description: >
-          Git ref of MorningHQ/martian-redteam to install. Empty (default)
+          Git ref of MartianSecurity/martian-redteam to install. Empty (default)
           installs the commit this workflow file was called at
           (job.workflow_sha), so pinning the workflow to a tag or SHA pins the
           SDK too. Only letters, digits, ".", "_", "/" and "-" are accepted.
@@ -49,8 +49,8 @@ on:
         required: false
         default: ""
     secrets:
-      MARTIAN_API_KEY:
-        description: Martian Agents API key sent as X-API-Key
+      MARTIAN_API_TOKEN:
+        description: Martian Backend API token with redteam:run
         required: true
   workflow_dispatch:
 
@@ -68,7 +68,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.0"
           python-version: ${{ inputs.python-version || '3.12' }}
@@ -76,7 +76,7 @@ jobs:
       # Expressions are substituted into the script text before bash parses
       # it, so quoting cannot contain them. Every input reaches the scripts
       # below through env and is referenced as a quoted shell variable.
-      - name: Install martian-redteam
+      - name: Install martian-sdk
         env:
           MARTIAN_REDTEAM_SDK_REF: ${{ inputs.sdk-ref || job.workflow_sha }}
         run: |
@@ -94,12 +94,12 @@ jobs:
           # externally managed and uv refuses to install into it.
           uv venv "${RUNNER_TEMP}/martian-redteam"
           uv pip install --python "${RUNNER_TEMP}/martian-redteam" \
-            "martian-redteam @ git+https://github.com/MorningHQ/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
+            "martian-sdk @ git+https://github.com/MartianSecurity/martian-redteam@${MARTIAN_REDTEAM_SDK_REF}"
           echo "${RUNNER_TEMP}/martian-redteam/bin" >> "${GITHUB_PATH}"
 
       - name: Run assessment
         env:
-          MARTIAN_API_KEY: ${{ secrets.MARTIAN_API_KEY }}
+          MARTIAN_API_TOKEN: ${{ secrets.MARTIAN_API_TOKEN }}
           MARTIAN_API_URL: ${{ vars.MARTIAN_API_URL }}
           MARTIAN_REDTEAM_CONFIG: ${{ inputs.config || 'examples/config.yaml' }}
           MARTIAN_REDTEAM_OUTPUT: ${{ inputs.output || 'results' }}
@@ -113,7 +113,7 @@ jobs:
           if [ -n "$MARTIAN_REDTEAM_ATTACKS_PER_VULN" ]; then
             extra+=(-a "$MARTIAN_REDTEAM_ATTACKS_PER_VULN")
           fi
-          martian-redteam run "$MARTIAN_REDTEAM_CONFIG" -o "$MARTIAN_REDTEAM_OUTPUT" "${extra[@]}"
+          martian redteam run "$MARTIAN_REDTEAM_CONFIG" -o "$MARTIAN_REDTEAM_OUTPUT" "${extra[@]}"
 
       - name: Upload results
         if: always()

@@ -111,3 +111,44 @@ def test_save_writes_json(tmp_path: Path) -> None:
     path = RiskAssessment(catalog_version="0.1.0").save(tmp_path)
     assert path.exists()
     assert "catalog_version" in path.read_text(encoding="utf-8")
+
+
+def test_empty_assessment_does_not_pass() -> None:
+    with pytest.raises(GateFailure, match="no executed probes"):
+        evaluate_gate(RiskAssessment(catalog_version="0.1.0"))
+
+
+def test_non_finite_policy_does_not_pass() -> None:
+    assessment = RiskAssessment(
+        catalog_version="0.1.0",
+        test_cases=[
+            TestCase(
+                vulnerability="prompt_leakage",
+                vulnerability_type="system_prompt",
+                attack_method="prompt_injection",
+                score=0,
+            )
+        ],
+        vulnerability_type_results=[_gated_result(pass_rate=0, passing=0, failing=1)],
+    )
+    with pytest.raises(GateFailure, match="threshold must be finite"):
+        evaluate_gate(assessment, pass_rate_threshold=float("nan"))
+
+
+@pytest.mark.parametrize("score", [0, None])
+def test_saved_report_cannot_pass_on_a_stale_or_forged_summary(score: int | None) -> None:
+    assessment = RiskAssessment(
+        catalog_version="0.1.0",
+        test_cases=[
+            TestCase(
+                vulnerability="prompt_leakage",
+                vulnerability_type="system_prompt",
+                attack_method="prompt_injection",
+                score=score,
+                reason="probe result",
+            )
+        ],
+        vulnerability_type_results=[_gated_result(pass_rate=1.0, passing=1)],
+    )
+    with pytest.raises(GateFailure):
+        evaluate_gate(assessment)

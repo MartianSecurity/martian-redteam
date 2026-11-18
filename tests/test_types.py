@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from martian_redteam.types import EvaluatorOutput, TestCase
+from martian_redteam.types import EvaluatorOutput, SimulatorOutput, TestCase
 
 
 @pytest.mark.parametrize("score", [0, 1])
@@ -38,3 +38,10 @@ def test_non_integer_json_scores_are_rejected(raw: str) -> None:
 def test_test_case_score_may_be_null_for_errored_probes() -> None:
     case = TestCase(vulnerability="bias", vulnerability_type="race", attack_method="roleplay", error="boom")
     assert case.score is None
+
+
+def test_graph_output_requires_nonblank_attack_and_rationale() -> None:
+    with pytest.raises(ValidationError):
+        SimulatorOutput(attack="   ", attack_method="prompt_injection")
+    with pytest.raises(ValidationError):
+        EvaluatorOutput(score=1, reason="   ")

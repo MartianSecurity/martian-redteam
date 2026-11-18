@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
@@ -18,9 +19,14 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 
 from martian_redteam.integration import AssessmentSession, TraceRecorder
+from martian_redteam.runtime import RuntimeTrace
 
 ACTION_HEADER = "X-Martian-Action-Id"
 ACTION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+# A sandbox gateway can complete a tool after its upstream has responded. Keep
+# this below the customer agent's 120-second turn limit so the tool has time to
+# return an explicit outcome; an uncertain mutation is never retried here.
+MCP_REQUEST_TIMEOUT_SECONDS = 90
 
 
 @dataclass
@@ -32,10 +38,18 @@ class BoundTool:
 
 
 class BoundMCPTools:
-    def __init__(self, session: AssessmentSession, trace: TraceRecorder | None, action_id: str) -> None:
+    def __init__(
+        self,
+        session: AssessmentSession,
+        trace: TraceRecorder | None,
+        action_id: str,
+        runtime: RuntimeTrace | None = None,
+    ) -> None:
         self.session = session
         self.trace = trace
         self.action_id = action_id
+        self.runtime = runtime
+        self.runtime_parent_event_id: uuid.UUID | None = None
         self.tools: dict[str, BoundTool] = {}
 
     @property
@@ -58,32 +72,51 @@ class BoundMCPTools:
         }
         if self.trace:
             self.trace.record("tool.start", payload=arguments, **metadata)
-        try:
-            result = await tool.client.call_tool(tool.remote_name, arguments)
-            value = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-            if len(json.dumps(value).encode()) > 256000:
-                raise ValueError("MCP tool result exceeds 256 KB")
-        except Exception as exc:
-            if self.trace:
-                self.trace.record("tool.error", error_type=type(exc).__name__, **metadata)
-            raise
-        if self.trace:
-            self.trace.record(
-                "tool.end",
-                payload=value,
-                is_error=result.is_error,
-                duration_ms=round((perf_counter() - started) * 1000),
-                **metadata,
+        observation = (
+            self.runtime.guarded_call(
+                kind="tool",
+                system=tool.connection,
+                name=tool.remote_name,
+                parent_event_id=self.runtime_parent_event_id,
             )
+            if self.runtime
+            else nullcontext()
+        )
+        async with observation as span:
+            try:
+                result = await tool.client.call_tool(tool.remote_name, arguments)
+                value = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+                if len(json.dumps(value).encode()) > 256000:
+                    raise ValueError("MCP tool result exceeds 256 KB")
+            except Exception as exc:
+                if self.trace:
+                    self.trace.record("tool.error", error_type=type(exc).__name__, **metadata)
+                raise
+            if self.trace:
+                self.trace.record(
+                    "tool.end",
+                    payload=value,
+                    is_error=result.is_error,
+                    duration_ms=round((perf_counter() - started) * 1000),
+                    **metadata,
+                )
+            if span is not None:
+                span.outcome = "error" if result.is_error else "success"
+                if self.runtime is not None:
+                    span.resources = self.runtime.resources(tool.connection, tool.remote_name, value)
         return value
 
 
 @asynccontextmanager
 async def open_tools(
-    session: AssessmentSession, *, trace: TraceRecorder | None = None, action_id: str = ""
+    session: AssessmentSession,
+    *,
+    trace: TraceRecorder | None = None,
+    action_id: str = "",
+    runtime: RuntimeTrace | None = None,
 ) -> AsyncIterator[BoundMCPTools]:
     session.ensure_active()
-    bound = BoundMCPTools(session, trace, action_id)
+    bound = BoundMCPTools(session, trace, action_id, runtime)
     if trace:
         credentials = [
             value.get_secret_value() for connection in session.mcp_connections for value in connection.headers.values()
@@ -105,14 +138,14 @@ async def open_tools(
             http = await stack.enter_async_context(
                 httpx2.AsyncClient(
                     headers=headers,
-                    timeout=30,
+                    timeout=MCP_REQUEST_TIMEOUT_SECONDS,
                     follow_redirects=False,
                 )
             )
             client = await stack.enter_async_context(
                 Client(
                     streamable_http_client(connection.url, http_client=http),
-                    read_timeout_seconds=30,
+                    read_timeout_seconds=MCP_REQUEST_TIMEOUT_SECONDS,
                 )
             )
             available = {}
