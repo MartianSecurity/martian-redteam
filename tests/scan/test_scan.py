@@ -12,7 +12,7 @@ import pytest
 
 from martian.scan import EXIT_ERROR, EXIT_GATE_FAILED, EXIT_PASSED, ScanOptions, run_scan
 from tests.scan.fake_backend import TOKEN, FakeScanner
-from tests.scan.helpers import PENDING, Clock, ContractDrift, Transport, config, contract, factory
+from tests.scan.helpers import Clock, ContractDrift, Transport, config, contract, factory
 
 FIXTURE = Path(__file__).resolve().parents[2] / "examples" / "scan" / "fixture"
 
@@ -82,14 +82,16 @@ def test_a_clean_scan_passes(monkeypatch):
     }
 
 
-def test_every_route_the_client_calls_is_in_the_contract_or_named_pending(tmp_path):
+def test_every_route_the_client_calls_is_in_the_contract(tmp_path):
     transport = Transport(FakeScanner())
     _run(transport, sarif_path=tmp_path / "s.sarif", json_path=tmp_path / "s.json")
-    assert {route for _, route in transport.routes} >= {"/v1/scanner/scans", "/v1/scanner/scans/{scan_id}"}
-    paths = contract()["paths"]
-    for method, path in PENDING:
-        # Once the backend's contract holds a pending route, the client is checked against it.
-        assert method not in paths.get(path, {}), f"{path} is in the contract now: remove it from PENDING"
+    assert {route for _, route in transport.routes} == {
+        "/v1/scanner/scans",
+        "/v1/scanner/scans/{scan_id}",
+        "/v1/scanner/scans/{scan_id}/findings",
+        "/v1/scanner/scans/{scan_id}/check",
+        "/v1/scanner/scans/{scan_id}/export",
+    }
 
 
 def test_a_route_that_drifts_from_the_contract_fails():

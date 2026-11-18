@@ -94,13 +94,13 @@ The scan's `source` is `ci` when `CI` is `true` or `1` or `GITHUB_ACTIONS` is se
    /v1/scanner/scans/{id}/check` (the gate), and `GET /v1/scanner/scans/{id}/export?format=json` or
    `format=sarif` when `--json` or `--sarif` asks.
 
-The routes of steps 1 and 2 are the backend's contract: `tests/scan/contract/scanner-scans.json` is a
-copy of the customer `/v1/scanner` routes of MartianSecurity/MartianBackend, and every request the
-client sends and every answer the tests give it are held to that file, so a route that drifts fails
-`tests/scan/test_scan.py`. The findings, check and export routes of step 3 are read when the server
-has them: a server without one answers a bare `404 Not Found`, and the command says the server does
-not list findings, evaluate a gate or export; any other 404 is an error. Until the backend's contract
-holds those routes, the tests list them as pending and hold them to the shapes the backend documents.
+Every route the command calls is in the backend's contract: `tests/scan/contract/scanner-scans.json`
+is the customer `/v1/scanner` part of the OpenAPI document of MartianSecurity/MartianBackend (its
+worker routes left out), and every request the client sends and every answer the tests give it are
+held to that file, so a route that drifts fails `tests/scan/test_scan.py`. When the backend changes a
+scan route, regenerate the copy from its routes and run the tests. A server from before the findings,
+check and export routes answers them with a bare `404 Not Found`; the command then says the server
+does not list findings, evaluate a gate or export, and any other 404 is an error.
 
 Output names files, lines, rule ids, severities, evidence levels, statuses and titles. It never
 prints a finding's excerpt, which can quote the file, and it prints no server message except a
@@ -117,11 +117,10 @@ known credentials are redacted.
 
 The gate is decided on the server. The command reads `GET /scans/{id}/check`, which evaluates the
 completed scan, and exits 1 when it answers `passed: false`. The command passes no threshold, so the
-check uses the server's defaults: as the backend documents the route, any open finding blocks
-(minimum severity `S5`, evidence level 0), accepted and waived findings do not, and a bundle whose
-unpacking stopped early always falls short. The gate policy file
-(MartianSecurity/martian-notes#470) sets the threshold on the server; the command does not change.
-A server that has no check route answers by the scan's state alone: a completed scan exits 0 and the
+check uses the server's defaults: any open finding blocks (minimum severity `S5`, evidence level 0),
+accepted and waived findings do not, and a bundle whose unpacking stopped early always falls short.
+The gate policy file (MartianSecurity/martian-notes#470) is where the threshold will be set; until
+it exists the defaults apply. A server that has no check route answers by the scan's state alone: a completed scan exits 0 and the
 command says that no gate was evaluated. The exit codes match `martian redteam run` and `martian ci`.
 
 ## In GitHub Actions
@@ -154,7 +153,8 @@ the findings of a failed gate.
   is the server's: one rule per rule id with its help text, and a fingerprint per finding in
   `partialFingerprints` that does not depend on the line, so a re-run on unchanged content updates
   the same alerts instead of adding new ones. The command writes the file byte for byte.
-- **The JSON export** holds the findings with their excerpts and receipts. Keep it out of artifacts
+- **Excerpts.** Both exports quote the lines each finding is about: the SARIF shows them in code
+  scanning, and the JSON export holds them with the receipts. Keep `scan.json` out of artifacts
   that others can download if the scanned files hold anything private.
 
 This repository's CI runs the action twice against a stand-in for the backend's scan routes

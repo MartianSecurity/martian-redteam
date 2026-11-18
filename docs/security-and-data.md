@@ -553,8 +553,8 @@ it may send file contents to a model. Run `martian scan --dry-run` to see the
 exact file list first, and narrow it with `--include`. Inside a Git work tree,
 files `.gitignore` ignores are not sent; outside one, nothing is ignored. The
 command follows no symbolic link and refuses a link that points out of the
-folder. Its terminal output carries no excerpt of a file; the `--json` export
-does, so treat that file like the files scanned.
+folder. Its terminal output carries no excerpt of a file; the `--json` and
+`--sarif` exports do, so treat them like the files scanned.
 
 ## Runtime reporting data boundary
 

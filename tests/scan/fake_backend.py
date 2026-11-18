@@ -1,9 +1,9 @@
 """A stand-in for the backend's customer /v1/scanner routes, for `martian scan`'s tests and the scan
 action's smoke job. Standard library only, so CI can run it with the runner's own ``python3``.
 
-It speaks the shapes of ``tests/scan/contract/scanner-scans.json`` and, for the findings, check and
-export routes the contract does not hold yet, the shapes the backend documents for them
-(MartianSecurity/martian-notes#398, #400, #404). It holds no rule: with ``seeded`` it reports one fixed
+It speaks the shapes of ``tests/scan/contract/scanner-scans.json``; the tests hold every answer to that
+file. With ``routes`` it can leave out the findings, check and export routes, as a server from before
+them does. It holds no rule: with ``seeded`` it reports one fixed
 finding on the first ``SKILL.md`` in the archive, so a gate can be seen failing.
 
     python3 tests/scan/fake_backend.py --port-file PATH [--clean] [--token TOKEN]

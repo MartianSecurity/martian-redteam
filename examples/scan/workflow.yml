@@ -74,7 +74,7 @@ jobs:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: martian-scan
 
-      # scan.json holds the findings with their quoted excerpts; keep it out of
+      # Both exports quote the lines each finding is about. Keep scan.json out of
       # artifacts others can download if your files hold anything private.
       - name: Upload scan results
         if: always()

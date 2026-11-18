@@ -6,9 +6,10 @@ gateway status on the upload leaves its outcome unknown, and the client says so 
 again. Reads (the scan, its findings, its check and its exports) are GETs and are retried on transport
 errors and transient statuses within one deadline.
 
-The findings, check and export routes are read when the server has them. A server without one answers
-FastAPI's bare ``404 {"detail": "Not Found"}``, which the client reports as the route being absent
-(``None``); any other 404 is an error.
+``tests/scan/contract/scanner-scans.json`` is the backend's contract for these routes. A server from
+before the findings, check and export routes answers them with FastAPI's bare
+``404 {"detail": "Not Found"}``, which the client reports as the route being absent (``None``); any
+other 404 is an error.
 
 Nothing here interprets a finding. Response bodies other than the fields named below, and every
 message the server sends, stay out of the client's output except a refusal's ``detail.code`` and

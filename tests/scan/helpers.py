@@ -21,14 +21,6 @@ from tests.scan.fake_backend import TOKEN, FakeScanner
 CONTRACT_PATH = Path(__file__).parent / "contract" / "scanner-scans.json"
 API_URL = "https://backend.example"
 
-# Routes the client reads when the server has them, which the contract does not hold yet: the
-# backend's findings, check and export routes (MartianSecurity/martian-notes#398, #400, #404).
-PENDING = {
-    ("get", "/v1/scanner/scans/{scan_id}/findings"),
-    ("get", "/v1/scanner/scans/{scan_id}/check"),
-    ("get", "/v1/scanner/scans/{scan_id}/export"),
-}
-
 
 class ContractDrift(AssertionError):
     pass
@@ -52,14 +44,11 @@ def _validate(schema: dict[str, Any], body: Any, document: dict[str, Any], what:
         raise ContractDrift(f"{what} does not match the contract: {errors[0].message}")
 
 
-def check_exchange(document: dict[str, Any], request: httpx.Request, status: int, body: bytes) -> str | None:
-    """Hold one request and its answer to ``document``. Returns the route template, or None for a
-    route in ``PENDING`` that the contract does not hold."""
+def check_exchange(document: dict[str, Any], request: httpx.Request, status: int, body: bytes) -> str:
+    """Hold one request and its answer to ``document``; returns the route template."""
     method = request.method.lower()
     template = _template(document["paths"], request.url.path)
     if template is None or method not in document["paths"][template]:
-        if any(method == pending[0] and _template({pending[1]: 0}, request.url.path) for pending in PENDING):
-            return None
         raise ContractDrift(f"{request.method} {request.url.path} is not a route of the contract")
     operation = document["paths"][template][method]
     allowed = {parameter["name"] for parameter in operation.get("parameters", []) if parameter["in"] == "query"}
@@ -99,7 +88,7 @@ class Transport(httpx.BaseTransport):
     ) -> None:
         self.scanner, self.before = scanner, before
         self.document = document if document is not None else contract()
-        self.routes: list[tuple[str, str | None]] = []
+        self.routes: list[tuple[str, str]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         request.read()
