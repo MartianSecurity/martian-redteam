@@ -129,6 +129,8 @@ martian ci --evals-path tests/evals --output results
 martian ci --redteam-config redteam.yaml --output results
 # One combined persisted session:
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
+# The same with a scan of the repository's agent files as one more test (a Scanner-enabled organisation):
+martian ci --evals-path tests/evals --redteam-config redteam.yaml --scan . --output results
 # A suite file, run locally with only a model key (see the eval guide):
 martian evals run evals.yaml
 # The same, compared case by case with an earlier run's output folder and gated on the comparison:
@@ -159,14 +161,29 @@ martian redteam rejudge redteam.yaml --run RUN_ID
 martian scan --sarif results/scan.sarif
 ```
 
-`martian scan` is a thin client of the server's Scanner: it packs and uploads the
-folder's agent files, waits for the scan, prints the findings and exits 0, 1 or 2
-on the server's gate. It ships no scanner rules. See [scanning agent files](scan.md).
+`martian scan` is a thin client of the server's Scanner: it has the server check the
+repository's `.martian/scan.yml`, packs and uploads the agent files it names with
+their commit, waits for the scan, prints the findings and exits 0, 1 or 2 on the
+gate the server evaluates against that file. It ships no scanner rules. See
+[scanning agent files](scan.md).
 
 Python and `martian ci` use one runner and one pytest execution. The YAML suite
-is a pytest item in that execution. Session finalization uploads dataset runs
-and then **one** `POST /v1/evals/ci/sessions` containing dataset, checks and/or
-redteam records. The CLI no longer combines two subprocess exit codes.
+and the scan (`--scan FOLDER`, `CiSuite(scan=...)`) are pytest items in that
+execution. Session finalization uploads dataset runs and then **one**
+`POST /v1/evals/ci/sessions` containing dataset, checks, redteam and/or scan
+records. The CLI no longer combines two subprocess exit codes.
+
+A scan test is `{"name": …, "kind": "scan", "scan": {"scan_id": …, "gate_id": …}}`:
+the gate evaluation the server stored for the scan, whose verdict the server
+takes (provenance `server_evaluated_gate`). The scan must be of the session's
+commit (`MARTIAN_EVALS_GIT_SHA`, else `GITHUB_SHA`, else `HEAD`) and made with
+the session's key, which then needs `scan:run` and `scan:read` besides its
+evals capabilities; files that are not that commit refuse the scan before
+anything is uploaded. A scan that did not run or was not judged is
+`{"scan": {"scan_id"?, "error": "…"}}` and fails. `--scan` makes the scan
+required (`--martian-require-scan`): when its item does not run (deselected,
+say), the session records a failed `required scan` test. The scan writes
+`scan.sarif`, `scan.json` and `scan.log` under `results/scan/`.
 
 `martian redteam run` uses Backend generation/judging and writes a local gate/report;
 `martian ci --redteam-config` also persists it through Backend. `martian evals
@@ -228,7 +245,7 @@ it is not a successful upload. A hard kill cannot upload to Backend.
 
 `assert_redteam(assessment, threshold=1.0)` records saved probes without target
 or judge re-execution. `--martian-require-redteam` requires that gate in a
-pytest session. The YAML runner determines expected probe counts from the
+pytest session, and `--martian-require-scan` a scan. The YAML runner determines expected probe counts from the
 catalog/configuration before execution and supplies them to the adapter.
 When adapting an externally saved assessment, pass `expected={(vulnerability,
 type): count}` if the original plan is available; a saved report cannot attest
@@ -245,7 +262,8 @@ Backend computes the redteam aggregate from these rows and declared policy.
 Judgments are `client_executed_client_scored`, including judgments originally
 obtained from Agents. Inline scorer checks have the same provenance. Pinned
 dataset outputs remain `client_executed_server_scored`: Backend computes the
-canonical exact-match score. The console shows all kinds under Evals → Runs,
+canonical exact-match score. A scan test is `server_evaluated_gate`: the server
+evaluated the gate from the scan's findings and the policy file. The console shows all kinds under Evals → Runs,
 including policy and provenance, and refresh reads the persisted record.
 
 Checks/redteam tests use Backend's journaled private MLflow export: one run per

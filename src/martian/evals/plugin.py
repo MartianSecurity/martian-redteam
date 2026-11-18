@@ -40,6 +40,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Require assert_redteam to record a gate in this CI session.",
     )
+    parser.addoption(
+        "--martian-require-scan",
+        action="store_true",
+        default=False,
+        help="Require a scan (martian ci --scan) to record its gate in this CI session.",
+    )
     group = parser.getgroup("martian-evals")
     group.addoption(
         "--martian-evals-gate",

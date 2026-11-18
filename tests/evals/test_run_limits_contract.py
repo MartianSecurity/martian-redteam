@@ -43,8 +43,8 @@ def stopped_after_first_case(records, monkeypatch, called: list[str]) -> tuple[A
     return client, served, {"limits": {"max_seconds": 60}}
 
 
-def test_the_contract_is_version_4_and_names_limits_and_resume():
-    assert VERSION == "4"
+def test_the_contract_from_version_4_names_limits_and_resume():
+    assert int(VERSION) >= 4  # added in version 4, kept since
     launch = operation("post", "/v1/evals")["requestBody"]["content"]["application/json"]["schema"]
     assert launch == {"$ref": "#/components/schemas/EvalRunRequest"}
     resume = operation("post", "/v1/evals/{run_id}/resume")

@@ -1481,13 +1481,32 @@ def run_scan_command(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="List the files that would be sent and stop; needs no token.")
     ] = False,
+    policy: Annotated[
+        Path | None,
+        typer.Option(
+            "--policy",
+            dir_okay=False,
+            show_default=False,
+            help="The gate policy file. Default: .martian/scan.yml in the folder, when it exists.",
+        ),
+    ] = None,
+    default_branch: Annotated[
+        str | None,
+        typer.Option(
+            "--default-branch",
+            show_default=False,
+            help="The repository's default branch, for the baseline. Default: GitHub's event, else origin/HEAD.",
+        ),
+    ] = None,
 ) -> None:
     """Scan a folder's agent files (skills, MCP configuration, plugins, sub-agents, hooks, settings,
     rules files) with the Martian Scanner and exit on the server's gate: 0 passed, 1 failed, 2 no result.
 
-    The scan runs on the server: it needs a Scanner-enabled Martian Cloud or Enterprise organisation and
-    MARTIAN_API_URL and MARTIAN_API_TOKEN, a key with scan:run and scan:read. Inside a Git work tree,
-    files .gitignore ignores are not sent. A symbolic link out of the folder refuses the scan.
+    The scan and the gate run on the server: it needs a Scanner-enabled Martian Cloud or Enterprise
+    organisation and MARTIAN_API_URL and MARTIAN_API_TOKEN, a key with scan:run and scan:read. The server
+    reads the folder's .martian/scan.yml (what to send, the threshold, the baseline, waivers). Inside a Git
+    work tree, files .gitignore ignores are not sent and the commit is sent with the files when they are
+    all committed. A symbolic link out of the folder refuses the scan.
 
     martian scan --sarif results/scan.sarif   scan the current folder and write SARIF for code scanning
     """
@@ -1512,6 +1531,8 @@ def run_scan_command(
             json_path=json_path,
             sarif_path=sarif_path,
             dry_run=dry_run,
+            policy_path=policy,
+            default_branch=default_branch,
         ),
         echo=typer.echo,
     )
@@ -1526,6 +1547,15 @@ def run_ci(
     redteam_config: Annotated[
         Path | None, typer.Option("--redteam-config", exists=True, dir_okay=False, help="Required redteam YAML suite.")
     ] = None,
+    scan: Annotated[
+        Path | None,
+        typer.Option(
+            "--scan",
+            exists=True,
+            file_okay=False,
+            help="Required scan of this repository folder (martian scan, with its .martian/scan.yml).",
+        ),
+    ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Safe reports and one persisted session receipt.")
     ] = Path("results"),
@@ -1533,7 +1563,7 @@ def run_ci(
         bool, typer.Option("--require-export", help="Require configured MLflow exports to finish.")
     ] = False,
 ) -> None:
-    """Run evals, redteam, or both once in one persisted CI session."""
+    """Run evals, redteam, a scan, or any of them together once in one persisted CI session."""
     if importlib.util.find_spec("pytest") is None or importlib.util.find_spec("mlflow") is None:
         typer.echo("CI dependencies are missing; install martian-sdk[evals].", err=True)
         raise typer.Exit(code=2)
@@ -1543,6 +1573,7 @@ def run_ci(
         CiSuite(
             evals_paths=(evals_path,) if evals_path else (),
             redteam_config=redteam_config,
+            scan=scan,
             output_dir=output,
             require_export=require_export,
         )

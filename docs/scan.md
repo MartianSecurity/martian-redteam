@@ -1,13 +1,15 @@
 # Scanning agent files: `martian scan`
 
 `martian scan` sends a folder's agent files to the Martian Scanner (the Skills / MCP / Plugin Scanner
-of Martian Protect), waits for the scan, prints the findings and exits on the server's gate. It needs
+of Martian Protect), waits for the scan, prints the findings and exits on the gate the server evaluates
+against the repository's [policy file](#the-policy-file-martianscanyml). It needs
 a **Scanner-enabled Martian Cloud or Enterprise organisation**: the scan runs on Martian's servers, and
 the open-source Community edition has no Scanner.
 
 The command is a thin client. It chooses files by path, zips them, uploads them, polls and prints. It
-holds no rule and no detection logic and never judges a file itself; the findings, their evidence
-levels and the gate all come from the server. A test (`tests/scan/test_scan_cli.py`) fails if the
+holds no rule and no detection logic, never reads the policy file's fields itself and never judges a
+file; the findings, their evidence levels, the policy file's meaning and the gate all come from the
+server. A test (`tests/scan/test_scan_cli.py`) fails if the
 scan package imports anything beyond the standard library, httpx, pydantic and the SDK's connection
 helpers, or if a rule file or a scanner engine reaches the package.
 
@@ -16,6 +18,7 @@ martian scan                                   # the current folder's agent file
 martian scan path/to/repo --sarif results/scan.sarif --json results/scan.json
 martian scan --include 'skills/**' --include src/agent/ --kind agent_code --name support-agent
 martian scan --dry-run                         # list what would be sent; needs no token
+martian scan --policy ci/scan.yml --default-branch main
 ```
 
 ## Access
@@ -38,7 +41,16 @@ refused with 403, and the command says what it needs.
    exclude files ignore. Git runs with `core.fsmonitor` off, so a folder's own Git configuration
    cannot start a program. Outside a Git work tree, every file under the folder except `.git/`; no
    ignore file is read then, and the command says so.
-2. **The include patterns.** By default, the files coding agents and their harnesses load:
+2. **The policy file's `paths` and `include`**, as the server read them (below): only files under
+   one of `paths` are candidates, and with the default patterns only files of the add-on families
+   `include` names are sent. Each file the default patterns send belongs to one family by its path:
+   `plugins` (in a folder holding `.claude-plugin/`), `skills` (in a folder holding `SKILL.md`, or
+   under an agent folder's `skills/`), `mcp` (`.mcp.json`, `mcp.json`, `mcp_config.json`),
+   `subagents` (an agent folder's `agents/` or `chatmodes/`), else `harness-config`. `agent-code` has
+   no default path: name the agent's code with `--include`. `--include` chooses the files itself, so
+   families do not apply to it; `paths` still do. The command prints how many files `include` left
+   out (`family_of` in `src/martian/scan/files.py`).
+3. **The include patterns.** By default, the files coding agents and their harnesses load:
    `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` and `GEMINI.md` at any depth; `.mcp.json`, `mcp.json`
    and `mcp_config.json` at any depth; `.cursorrules`, `.windsurfrules` and `.clinerules`; everything
    in `.claude/`, `.agents/`, `.cursor/`, `.windsurf/`, `.gemini/`, `.codex/`, `.continue/`, `.roo/`,
@@ -51,7 +63,7 @@ refused with 403, and the command says what it needs.
    folder: one without a slash matches a name at any depth (`*.md`) and a leading `/` anchors it
    to the folder (`/AGENTS.md`); `*` matches within one folder name, `**` any number of folders
    (`skills/**`), and a trailing `/` a whole folder (`src/agent/`). A pattern with `..` is refused.
-3. **Symbolic links are never followed.** A link the patterns could reach that points out of the
+4. **Symbolic links are never followed.** A link the patterns could reach that points out of the
    folder refuses the scan (exit 2, naming the links): an agent would read the file it points at,
    which the scan cannot send. A link that stays inside the folder is not sent and is listed as
    `Not sent`; its target is sent in its own right when it is selected. A submodule or another file
@@ -74,54 +86,116 @@ entries, 10 MiB per file); a refusal prints its code and limit.
 | `--no-model-analysis` | analysis allowed | Keep file contents from any model, whatever the organisation's policy |
 | `--timeout` | 600 | Seconds to wait for the scan to end |
 | `--json PATH`, `--sarif PATH` | none | Write the server's JSON or SARIF 2.1.0 export, byte for byte |
-| `--dry-run` | off | List the files and the digest, upload nothing; needs no token |
+| `--dry-run` | off | List the files and the digest, upload nothing; needs no token (without one the policy file is not applied) |
+| `--policy PATH` | `.martian/scan.yml` in the folder | The gate policy file; the folder's is optional, a named one must exist |
+| `--default-branch NAME` | GitHub's event, else `origin/HEAD` | The repository's default branch, stated with the commit for the [baseline](#the-commit-and-the-baseline) |
 
 The scan's `source` is `ci` when `CI` is `true` or `1` or `GITHUB_ACTIONS` is set, else `cli`.
 
+## The policy file: `.martian/scan.yml`
+
+The repository's gate: what to send, the threshold by evidence level, severity and category, the least
+coverage, whether only new findings fail, and waivers with a reason and an end date. The server reads
+and checks it; this table is its format:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `version` | `1` | The file format; only `1` |
+| `paths` | `["."]` | What the command sends, relative to the repository (no absolute path, no `..`); 1 to 50 |
+| `include` | all six | The add-on families the command sends: `skills`, `mcp`, `plugins`, `subagents`, `harness-config`, `agent-code` |
+| `external.follow` | `false` | Resolve what the files point at: the gate then requires the `resolve` stage to have run |
+| `external.depth` | `1` | Hops of references to follow, 1 to 5 |
+| `gate.fail_on.evidence` | `inventory` | The least evidence level that blocks: `inventory`, `pattern`, `structural`, `resolved`, `assessed`, `observed` or `corroborated` |
+| `gate.fail_on.severity` | `info` | The least severe severity that blocks: `critical`, `high`, `medium`, `low` or `info` (or `S1` to `S5`); `high` blocks critical and high |
+| `gate.fail_on.categories` | all | Only findings of these categories block |
+| `gate.min_coverage.stages` | none | Stages that must have run: `inventory`, `parse`, `rules`, `references`, `resolve`, `fetch`, `assess`, `observe` |
+| `gate.min_coverage.levels_reached` | none | The least evidence level the stages run must reach, by name |
+| `gate.min_coverage.max_skipped_files`, `max_not_inspected_files`, `max_unresolved_references`, `max_not_attempted_references` | none | At most so many |
+| `gate.new_findings_only` | `false` | Block only on findings the [baseline](#the-commit-and-the-baseline) does not have |
+| `waivers[].rule`, `.path`, `.reason`, `.expires` | none | A finding of `rule` on exactly `path` does not block until `expires` (a date, at most a year ahead); all four required, up to 200, one per rule and path |
+
+An unknown field at any level is refused, so a misspelt threshold never passes silently. YAML anchors,
+aliases, tags beyond YAML's own and a key given twice are refused too.
+
+```yaml
+version: 1
+paths: ["."]
+include: [skills, mcp, plugins, subagents, harness-config]
+gate:
+  fail_on: {evidence: structural, severity: high}
+  new_findings_only: true
+waivers:
+  - {rule: REF-UNPINNED-PACKAGE, path: .mcp.json, reason: "Served from the internal mirror", expires: 2027-01-31}
+```
+
+The command reads the file's text (at most 64 KiB, UTF-8, a regular file: a symbolic link is refused)
+and sends it to `POST /v1/scanner/gate-policy/validate` before it packs anything. A refused file, an
+unknown field at any level among the reasons, exits 2 with each error's place and reason, and nothing
+is uploaded. Without a file the text is empty, which the server reads as the strictest gate: every open
+finding blocks. After the scan the same text goes to `POST /v1/scanner/scans/{id}/gate`, which judges
+the scan and stores the evaluation; the command prints its first line and the evaluation's id.
+
+## The commit and the baseline
+
+Inside a Git work tree the upload names the commit the files are of (the manifest's `git`): `sha`
+(`HEAD`), `ref` (`GITHUB_REF` in a GitHub Actions run of that commit, else the checked-out branch),
+`default_branch` (`--default-branch`, else the GitHub event's repository, else `origin/HEAD`),
+`repository` and `run_url` in GitHub Actions. It names it only when every file sent is that commit's:
+a changed, staged or untracked file among them leaves the commit out, and the command says how many
+files differ. A scan whose `ref` is its `default_branch` is a baseline; with `gate.new_findings_only`
+the server compares a later scan of the same subject with the newest such scan, by fingerprint, so a
+finding the default branch already had does not fail and a new one does. The command prints the
+baseline the server used, or that there was none.
+
 ## The exchange with the server
 
-1. `POST /v1/scanner/scans`, `multipart/form-data` with a `manifest` part
-   (`{"subject": {"kind", "name", "agent_id"?}, "source", "options": {"model_analysis"}}`) and then an
-   `archive` part. It is sent **once**. The server has no idempotency key for uploads yet, so a
-   repeated request would start a second scan: a transport error or a 5xx on the upload leaves its
-   outcome unknown, and the command exits 2 with the content digest to look for in the console
-   instead of sending it again.
-2. `GET /v1/scanner/scans/{id}` until the scan is `completed` or `failed`, with a growing interval
-   (1 to 10 seconds) and `--timeout` as the deadline. Reads are retried on transport errors, 429
-   (after its `Retry-After`, at most 30 seconds) and 500, 502, 503 and 504, within the deadline. A
-   scan still queued or running at the deadline is not a result (exit 2).
-3. For a completed scan, `GET /v1/scanner/scans/{id}/findings` (every page), `GET
-   /v1/scanner/scans/{id}/check` (the gate), and `GET /v1/scanner/scans/{id}/export?format=json` or
-   `format=sarif` when `--json` or `--sarif` asks.
+1. `POST /v1/scanner/gate-policy/validate` with the policy file's text. It changes nothing, and is
+   retried like the reads below.
+2. `POST /v1/scanner/scans`, `multipart/form-data` with a `manifest` part
+   (`{"subject": {"kind", "name", "agent_id"?}, "source", "options": {"model_analysis"}, "git"?}`) and
+   then an `archive` part, with an `Idempotency-Key` header: a request id the command chooses once per
+   run. On a transport error, 429 (after its `Retry-After`, at most 30 seconds) and 500, 502, 503 and
+   504, the same bytes go again under the same id, at most four times; the server answers an upload it
+   already has with the scan it created (200), so a lost answer never starts a second scan. A 409
+   `request_id_reused` is an error and is not retried. After four failed attempts the command exits 2
+   with the request id and the content digest to look for.
+3. `GET /v1/scanner/scans/{id}` until the scan is `completed` or `failed`, with a growing interval
+   (1 to 10 seconds) and `--timeout` as the deadline. Reads are retried on transport errors and the
+   same statuses within the deadline. A scan still queued or running at the deadline is not a result
+   (exit 2).
+4. For a completed scan, `GET /v1/scanner/scans/{id}/findings` (every page) and
+   `GET /v1/scanner/scans/{id}/export?format=json` or `format=sarif` when `--json` or `--sarif` asks.
+5. `POST /v1/scanner/scans/{id}/gate` with the policy file's text, once, also for a failed scan (the
+   server then answers `not_judged`).
 
 Every route the command calls is in the backend's contract: `tests/scan/contract/scanner-scans.json`
-is the customer `/v1/scanner` part of the OpenAPI document of MartianSecurity/MartianBackend (its
-worker routes left out), and every request the client sends and every answer the tests give it are
-held to that file, so a route that drifts fails `tests/scan/test_scan.py`. When the backend changes a
-scan route, regenerate the copy from its routes and run the tests. A server from before the findings,
-check and export routes answers them with a bare `404 Not Found`; the command then says the server
-does not list findings, evaluate a gate or export, and any other 404 is an error.
+is an unchanged copy of `contracts/scanner-scans.json` in MartianSecurity/MartianBackend, generated
+there from the customer `/v1/scanner` routes (the worker's are left out) and versioned. Every request
+the client sends (its headers, the manifest and the JSON bodies) and every answer the tests give it are
+held to that file, so a route that drifts fails `tests/scan/test_scan.py`. When the backend raises the
+contract's version, copy the file again unchanged and run the tests. A server without the gate routes
+answers them with a bare `404 Not Found`, and the command exits 2 before uploading; a server without
+the findings or export routes is told apart the same way.
 
-Output names files, lines, rule ids, severities, evidence levels, statuses and titles. It never
-prints a finding's excerpt, which can quote the file, and it prints no server message except a
-failed scan's reason; text from the server is put on one line without control characters, and
-known credentials are redacted.
+Output names files, lines, rule ids, severities, evidence levels, statuses and titles, marks a hunt
+finding (`gating: false`, from a rule still being tuned) that never fails the gate, and prints the
+gate's reasons. It never prints a finding's excerpt, which can quote the file, and prints no other
+server message except a failed scan's reason and a refused policy file's errors; text from the server
+is put on one line without control characters, and known credentials are redacted.
 
 ## Exit codes and the gate
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | The scan completed and the server's gate passed |
-| 1 | The scan completed and the server's gate failed: the findings and the gate's reasons are printed |
-| 2 | No result: no file to send, a symbolic link out of the folder, missing or refused credentials, a refused upload, a transport error, an invalid answer, a failed scan, the deadline, or an export that could not be written |
+| 0 | The server's gate passed |
+| 1 | The server's gate failed: blocking findings or a coverage shortfall, with the reasons printed |
+| 2 | No verdict: no file to send, a symbolic link out of the folder, a refused or unreadable policy file, missing or refused credentials, a refused upload, a transport error, an invalid answer, a failed scan (`not_judged`), the deadline, files that are not the expected commit (`martian ci`), or an export that could not be written |
 
-The gate is decided on the server. The command reads `GET /scans/{id}/check`, which evaluates the
-completed scan, and exits 1 when it answers `passed: false`. The command passes no threshold, so the
-check uses the server's defaults: any open finding blocks (minimum severity `S5`, evidence level 0),
-accepted and waived findings do not, and a bundle whose unpacking stopped early always falls short.
-The gate policy file (MartianSecurity/martian-notes#470) is where the threshold will be set; until
-it exists the defaults apply. A server that has no check route answers by the scan's state alone: a completed scan exits 0 and the
-command says that no gate was evaluated. The exit codes match `martian redteam run` and `martian ci`.
+The gate is decided on the server and the exit code is its `exit_code`. Each finding at or above the
+file's threshold is blocking, waived in the file, waived or accepted in the console, already in the
+baseline, or a hunt finding that never blocks; the coverage must meet the file's minimum. The exit
+codes match `martian redteam run` and `martian ci`. `martian ci --scan FOLDER` runs the same command as
+one test of a CI session ([SDK and CI](sdk-and-ci.md#cli-and-one-session-behavior)).
 
 ## In GitHub Actions
 

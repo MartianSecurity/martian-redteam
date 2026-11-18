@@ -419,6 +419,11 @@
             ],
             "title": "Fixed In Scan Id"
           },
+          "gating": {
+            "default": true,
+            "title": "Gating",
+            "type": "boolean"
+          },
           "history": {
             "items": {
               "$ref": "#/components/schemas/TriageEntryOut"
@@ -599,6 +604,366 @@
           "items"
         ],
         "title": "FindingPage",
+        "type": "object"
+      },
+      "GateBaseline": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scan_id",
+          "created_at",
+          "completed_at"
+        ],
+        "title": "GateBaseline",
+        "type": "object"
+      },
+      "GateFinding": {
+        "description": "A finding at or above the threshold and what the gate made of it.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "evidence_level": {
+            "title": "Evidence Level",
+            "type": "integer"
+          },
+          "finding_id": {
+            "format": "uuid",
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "line_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Start"
+          },
+          "outcome": {
+            "enum": [
+              "blocking",
+              "in_baseline",
+              "waived_in_file",
+              "waived",
+              "accepted",
+              "not_gating"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "rule_id",
+          "category",
+          "severity",
+          "evidence_level",
+          "title",
+          "path",
+          "fingerprint",
+          "outcome"
+        ],
+        "title": "GateFinding",
+        "type": "object"
+      },
+      "GatePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GateSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "GatePage",
+        "type": "object"
+      },
+      "GateScan": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
+          "on_default_branch": {
+            "default": false,
+            "title": "On Default Branch",
+            "type": "boolean"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "source",
+          "content_digest"
+        ],
+        "title": "GateScan",
+        "type": "object"
+      },
+      "GateSubject": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name"
+        ],
+        "title": "GateSubject",
+        "type": "object"
+      },
+      "GateSummary": {
+        "properties": {
+          "baseline_scan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Scan Id"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "exit_code": {
+            "title": "Exit Code",
+            "type": "integer"
+          },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "new_findings_only": {
+            "title": "New Findings Only",
+            "type": "boolean"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/GateSubject"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scan_id",
+          "subject",
+          "verdict",
+          "exit_code",
+          "new_findings_only",
+          "counts",
+          "source",
+          "policy_sha256",
+          "evaluated_at"
+        ],
+        "title": "GateSummary",
+        "type": "object"
+      },
+      "GateWaiver": {
+        "properties": {
+          "expires": {
+            "format": "date",
+            "title": "Expires",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "applied",
+              "unused",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule",
+          "path",
+          "reason",
+          "expires",
+          "state"
+        ],
+        "title": "GateWaiver",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -872,6 +1237,99 @@
         "title": "ReferencePage",
         "type": "object"
       },
+      "Refusal": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/RefusalDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "Refusal",
+        "type": "object"
+      },
+      "RefusalDetail": {
+        "description": "Why a request was refused: a stable ``code``, a message, and the limit, window or field errors when\nthere are some.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "window_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Seconds"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "RefusalDetail",
+        "type": "object"
+      },
+      "RefusalOrInvalid": {
+        "description": "A 422: a refusal with its code, or a request FastAPI could not read (its list of errors).",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RefusalDetail"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RefusalOrInvalid",
+        "type": "object"
+      },
       "ReopenIn": {
         "additionalProperties": false,
         "properties": {
@@ -988,6 +1446,18 @@
             ],
             "title": "Findings"
           },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1017,6 +1487,11 @@
                 "type": "null"
               }
             ]
+          },
+          "on_default_branch": {
+            "default": false,
+            "title": "On Default Branch",
+            "type": "boolean"
           },
           "options": {
             "additionalProperties": true,
@@ -1199,6 +1674,11 @@
               }
             ],
             "title": "Fixed In Scan Id"
+          },
+          "gating": {
+            "default": true,
+            "title": "Gating",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -1407,10 +1887,27 @@
               }
             ]
           },
+          "git": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "on_default_branch": {
+            "default": false,
+            "title": "On Default Branch",
+            "type": "boolean"
           },
           "options": {
             "additionalProperties": true,
@@ -2191,6 +2688,161 @@
         "title": "WaiverPage",
         "type": "object"
       },
+      "app__scanner_gate__GateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "maxLength": 65536,
+            "title": "Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy"
+        ],
+        "title": "GateIn",
+        "type": "object"
+      },
+      "app__scanner_gate__GateOut": {
+        "description": "One evaluation of a scan against a gate policy file.",
+        "properties": {
+          "baseline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GateBaseline"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "coverage_shortfalls": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Coverage Shortfalls",
+            "type": "array"
+          },
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "exit_code": {
+            "enum": [
+              0,
+              1,
+              2
+            ],
+            "title": "Exit Code",
+            "type": "integer"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/GateFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "new_findings_only": {
+            "title": "New Findings Only",
+            "type": "boolean"
+          },
+          "policy": {
+            "additionalProperties": true,
+            "title": "Policy",
+            "type": "object"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "scan": {
+            "$ref": "#/components/schemas/GateScan"
+          },
+          "scan_id": {
+            "format": "uuid",
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/GateSubject"
+          },
+          "verdict": {
+            "enum": [
+              "passed",
+              "failed",
+              "not_judged"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          },
+          "waivers": {
+            "items": {
+              "$ref": "#/components/schemas/GateWaiver"
+            },
+            "title": "Waivers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "scan_id",
+          "subject",
+          "verdict",
+          "exit_code",
+          "reasons",
+          "new_findings_only",
+          "coverage_shortfalls",
+          "counts",
+          "findings",
+          "waivers",
+          "scan",
+          "policy",
+          "policy_sha256",
+          "evaluated_at"
+        ],
+        "title": "GateOut",
+        "type": "object"
+      },
+      "app__scanner_gate__PolicyOut": {
+        "properties": {
+          "policy": {
+            "additionalProperties": true,
+            "title": "Policy",
+            "type": "object"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy",
+          "policy_sha256"
+        ],
+        "title": "PolicyOut",
+        "type": "object"
+      },
       "app__scanner_schema__FindingOut": {
         "properties": {
           "category": {
@@ -2261,6 +2913,11 @@
               }
             ],
             "title": "Fixed In Scan Id"
+          },
+          "gating": {
+            "default": true,
+            "title": "Gating",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -2469,9 +3126,9 @@
     }
   },
   "info": {
-    "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated from the backend's routes; do not edit by hand.",
+    "description": "The customer /v1/scanner routes of the hosted backend (not the worker's). Generated by scripts/scanner-scans-contract.py; do not edit by hand.",
     "title": "Martian Scanner scan API",
-    "version": "1"
+    "version": "2"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2677,6 +3334,229 @@
         ]
       }
     },
+    "/v1/scanner/gate-policy/validate": {
+      "post": {
+        "operationId": "validate_gate_policy_v1_scanner_gate_policy_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/app__scanner_gate__GateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__scanner_gate__PolicyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalOrInvalid"
+                }
+              }
+            },
+            "description": "`invalid_gate_policy`, with each error's `loc` and `message`"
+          }
+        },
+        "summary": "Validate Gate Policy",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/gates": {
+      "get": {
+        "operationId": "list_gates_v1_scanner_gates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scan_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scan Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "verdict",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "not_judged"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Verdict"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "console",
+                    "cli",
+                    "ci",
+                    "api"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Gates",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/gates/{gate_id}": {
+      "get": {
+        "operationId": "get_gate_v1_scanner_gates__gate_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "gate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Gate Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__scanner_gate__GateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Gate",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
     "/v1/scanner/scans": {
       "get": {
         "operationId": "list_scans_v1_scanner_scans_get",
@@ -2822,6 +3702,27 @@
       },
       "post": {
         "operationId": "upload_v1_scanner_scans_post",
+        "parameters": [
+          {
+            "description": "A request id the client chose (a UUID). The same id with the same upload answers the scan it created (200) instead of starting another",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A request id the client chose (a UUID). The same id with the same upload answers the scan it created (200) instead of starting another",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "multipart/form-data": {
@@ -2844,6 +3745,79 @@
                     "additionalProperties": false,
                     "description": "JSON, at most 16 KiB; the first part",
                     "properties": {
+                      "git": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "description": "The commit an upload is of, as the client states it (MartianSecurity/martian-notes#472). The backend\nrecords it and does not verify it.",
+                            "properties": {
+                              "default_branch": {
+                                "anyOf": [
+                                  {
+                                    "pattern": "^[\\x20-\\x7e]{1,255}$",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "title": "Default Branch"
+                              },
+                              "ref": {
+                                "anyOf": [
+                                  {
+                                    "pattern": "^[\\x20-\\x7e]{1,255}$",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "title": "Ref"
+                              },
+                              "repository": {
+                                "anyOf": [
+                                  {
+                                    "maxLength": 200,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "title": "Repository"
+                              },
+                              "run_url": {
+                                "anyOf": [
+                                  {
+                                    "maxLength": 500,
+                                    "pattern": "^https://",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "title": "Run Url"
+                              },
+                              "sha": {
+                                "pattern": "^[0-9a-fA-F]{7,64}$",
+                                "title": "Sha",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "sha"
+                            ],
+                            "title": "ScanGit",
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "options": {
                         "additionalProperties": false,
                         "properties": {
@@ -2929,6 +3903,16 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanOut"
+                }
+              }
+            },
+            "description": "The scan an earlier upload with the same Idempotency-Key and the same manifest and archive created"
+          },
           "201": {
             "content": {
               "application/json": {
@@ -2938,6 +3922,66 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "description": "`request_id_reused`: the Idempotency-Key was used for another upload"
+          },
+          "411": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "description": "`length_required`"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "description": "A limit was passed; `detail.limit` names it"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "description": "`invalid_upload`: not multipart/form-data"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalOrInvalid"
+                }
+              }
+            },
+            "description": "The manifest or the archive is refused"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "description": "`scan_allowance_exceeded`, with Retry-After"
           }
         },
         "summary": "Upload",
@@ -3475,6 +4519,59 @@
           }
         },
         "summary": "List Fixed",
+        "tags": [
+          "scanner"
+        ]
+      }
+    },
+    "/v1/scanner/scans/{scan_id}/gate": {
+      "post": {
+        "operationId": "gate_v1_scanner_scans__scan_id__gate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/app__scanner_gate__GateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__scanner_gate__GateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalOrInvalid"
+                }
+              }
+            },
+            "description": "`invalid_gate_policy`, with each error's `loc` and `message`"
+          }
+        },
+        "summary": "Gate",
         "tags": [
           "scanner"
         ]

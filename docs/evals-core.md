@@ -429,7 +429,7 @@ routes, and `tests/evals/test_blind_review.py` blind double review: a second rev
 nothing of the first answer through the routes until they answer, the answers given blind, a
 calibration's hidden labels, and the agreement on blind answers.
 `tests/evals/test_read_contract.py` checks each operation and the schemas it uses against a copy
-of the contract (`tests/evals/contracts/evals-api-v4.json`, unchanged from the server; see
+of the contract (`tests/evals/contracts/evals-api-v5.json`, unchanged from the server; see
 `tests/evals/evals_contract.py`) and validates the responses against it, with UUIDs and
 date-times checked.
 

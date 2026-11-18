@@ -175,8 +175,8 @@ def scored(served: Served, run: dict[str, Any], **body: Any) -> dict[tuple[str, 
     }
 
 
-def test_the_contract_is_version_4_and_names_checks_and_their_catalogue():
-    assert VERSION == "4"
+def test_the_contract_from_version_4_names_checks_and_their_catalogue():
+    assert int(VERSION) >= 4  # added in version 4, kept since
     for name in ("ScoreRequest", "SuiteRequest"):
         schema = CONTRACT["components"]["schemas"][name]
         assert "checks" in schema["properties"] and "checks" not in schema.get("required", [])

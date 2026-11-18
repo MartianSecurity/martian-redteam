@@ -1,27 +1,33 @@
-"""`martian scan`: a thin client for the Skills / MCP / Plugin Scanner (MartianSecurity/martian-notes#469).
+"""`martian scan`: a thin client for the Skills / MCP / Plugin Scanner (MartianSecurity/martian-notes#469, #470).
 
-It packs the agent files of a folder, uploads them to a Martian server, waits for the scan, prints the
-findings the server reports and exits on the server's gate: 0 passed, 1 failed, 2 anything else. It
-holds no rule and no detection logic and never judges a file itself (decisions A9 and S11 of
-MartianSecurity/martian-notes#387): the scan runs on the server, which needs a Scanner-enabled Cloud or
-Enterprise organisation and a key with ``scan:run`` and ``scan:read``.
+It sends the repository's ``.martian/scan.yml`` to the server to be checked, packs the agent files of a
+folder as the file says, uploads them with the commit they are of under a request id it can retry with,
+waits for the scan, prints the findings the server reports, asks the server for the gate's verdict on
+the file and exits with it: 0 passed, 1 failed, 2 anything else. It holds no rule and no detection logic,
+never reads the policy file's fields itself and never judges a file (decisions A9 and S11 of
+MartianSecurity/martian-notes#387): the scan and the gate run on the server, which needs a
+Scanner-enabled Cloud or Enterprise organisation and a key with ``scan:run`` and ``scan:read``.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import stat
+import subprocess
 import unicodedata
+import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 from martian._privacy import safe_text
 from martian.config import ConfigError, MartianConfig
-from martian.scan.client import Check, Finding, Scan, ScanApiError, ScanClient
-from martian.scan.files import DEFAULT_INCLUDE, Packed, Selection, SelectionError, collect, pack
+from martian.scan.client import Finding, Gate, Policy, PolicyRefused, Scan, ScanApiError, ScanClient
+from martian.scan.files import DEFAULT_INCLUDE, FAMILIES, Packed, Selection, SelectionError, collect, pack
 
 EXIT_PASSED = 0
 EXIT_GATE_FAILED = 1
@@ -37,13 +43,21 @@ _ACCESS_HINT = (
     "scan:run and scan:read."
 )
 
+POLICY_FILE = Path(".martian") / "scan.yml"
+MAX_POLICY_BYTES = 64 * 1024
+_SHA = re.compile(r"^[0-9a-f]{7,64}$")
+_REF = re.compile(r"^[\x20-\x7e]{1,255}$")
+
 __all__ = [
     "DEFAULT_INCLUDE",
     "EXIT_ERROR",
     "EXIT_GATE_FAILED",
     "EXIT_PASSED",
+    "POLICY_FILE",
     "ScanOptions",
+    "ScanOutcome",
     "run_scan",
+    "scan",
 ]
 
 
@@ -59,6 +73,24 @@ class ScanOptions:
     json_path: Path | None = None
     sarif_path: Path | None = None
     dry_run: bool = False
+    policy_path: Path | None = None
+    """The gate policy file; by default ``.martian/scan.yml`` in the folder, and none when it is absent."""
+    default_branch: str | None = None
+    """The repository's default branch; by default GitHub's event, else ``origin/HEAD``."""
+    expect_sha: str | None = None
+    """A commit the scan must be of (``martian ci``: the session's); another, or none, is an error."""
+
+
+@dataclass
+class ScanOutcome:
+    """What a run of the command ended with: its exit code, and the scan and gate evaluation it made."""
+
+    exit_code: int
+    scan_id: UUID | None = None
+    gate_id: UUID | None = None
+    error: str = ""
+    """Why there is no verdict, when there is none."""
+    reasons: list[str] = field(default_factory=list)
 
 
 Echo = Callable[..., None]
@@ -128,7 +160,7 @@ def _print_findings(echo: Echo, findings: list[Finding] | None) -> None:
             level += f" ({_line(finding.evidence_level_name, 20)})"
         echo(
             f"  {_line(finding.severity, 4)}  {level}  {_location(finding)}  {_line(finding.rule_id, 64)}  "
-            f"{_line(finding.status, 12)}  {_line(finding.title)}"
+            f"{_line(finding.status, 12)}  {_line(finding.title)}" + ("" if finding.gating else "  (hunt: never gates)")
         )
 
 
@@ -153,22 +185,153 @@ def _print_coverage(echo: Echo, scan: Scan) -> None:
         echo("Coverage: " + "; ".join(parts) + ".")
 
 
-def _print_gate(echo: Echo, check: Check) -> None:
-    if check.passed:
-        echo("Gate: passed.")
-        return
-    reasons = []
-    if check.blocking:
-        reasons.append(f"{len(check.blocking)} blocking finding(s)")
-    reasons.extend(_line(shortfall) for shortfall in check.coverage_shortfalls[:10])
-    echo("Gate: failed" + (": " + "; ".join(reasons) if reasons else "") + ".", err=True)
+# --- the policy file -------------------------------------------------------------------------------
 
 
-def _fail(echo: Echo, error: Exception, *, hint: str | None = None) -> int:
-    echo(f"Scan failed: {error}", err=True)
-    if hint:
-        echo(hint, err=True)
-    return EXIT_ERROR
+def _read_policy(options: ScanOptions) -> tuple[str, Path | None]:
+    """The policy file's text and where it was read; ``("", None)`` when the folder has none."""
+    path = options.policy_path or options.folder / POLICY_FILE
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        if options.policy_path is not None:
+            raise SelectionError(f"the policy file {path} does not exist") from None
+        return "", None
+    except OSError:
+        raise SelectionError(f"cannot read the policy file {path}") from None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise SelectionError(f"the policy file {path} is not a regular file (a symbolic link is not followed)")
+    data = path.read_bytes()
+    if len(data) > MAX_POLICY_BYTES:
+        raise SelectionError(f"the policy file {path} is larger than {MAX_POLICY_BYTES // 1024} KiB")
+    try:
+        return data.decode("utf-8"), path
+    except UnicodeDecodeError:
+        raise SelectionError(f"the policy file {path} is not UTF-8") from None
+
+
+def _print_policy(echo: Echo, where: Path | None, policy: Policy, options: ScanOptions) -> None:
+    found = policy.policy.get("gate")
+    gate: dict[str, Any] = found if isinstance(found, dict) else {}
+    source = str(where) if where is not None else f"no {POLICY_FILE} (the strictest gate: every open finding blocks)"
+    echo(
+        f"Policy: {_line(source)}; sha256 {_line(policy.policy_sha256, 64)[:12]}; "
+        f"new findings only: {'yes' if gate.get('new_findings_only') is True else 'no'}."
+    )
+    families = _families(policy)
+    if options.include and families != FAMILIES:
+        echo("Policy include not applied: --include chooses the files itself.")
+
+
+def _families(policy: Policy) -> tuple[str, ...]:
+    include = policy.policy.get("include")
+    if not isinstance(include, list) or not all(isinstance(name, str) for name in include):
+        raise ScanApiError("invalid_response", status=200)
+    return tuple(include)
+
+
+def _paths(policy: Policy) -> tuple[str, ...]:
+    paths = policy.policy.get("paths")
+    if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+        raise ScanApiError("invalid_response", status=200)
+    return tuple(paths)
+
+
+# --- the commit ------------------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str, raw: bool = False) -> str | None:
+    """A Git command in ``root`` with no program of the folder's own configuration; its output, or None."""
+    try:
+        done = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args],
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    text = done.stdout.decode("utf-8", "surrogateescape")
+    return text if raw else text.strip()
+
+
+def _github_default_branch() -> str | None:
+    event = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not os.environ.get("GITHUB_ACTIONS") or not event:
+        return None
+    try:
+        with open(event, encoding="utf-8") as handle:
+            branch = json.load(handle).get("repository", {}).get("default_branch")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return branch if isinstance(branch, str) else None
+
+
+def _commit(selection: Selection, options: ScanOptions) -> tuple[dict[str, str] | None, str]:
+    """The manifest's ``git``: the commit the sent files are of, stated only when every sent file is that
+    commit's (tracked and unchanged), and why when it is not stated."""
+    if not selection.git:
+        return None, "not a Git work tree"
+    sha = _git(selection.root, "rev-parse", "HEAD")
+    if not sha or not _SHA.fullmatch(sha):
+        return None, "the work tree has no commit"
+    prefix = _git(selection.root, "rev-parse", "--show-prefix")
+    status = _git(selection.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", raw=True)
+    if prefix is None or status is None:
+        return None, "git status could not compare the files with the commit"
+    changed: set[str] = set()
+    entries = iter(status.split("\0"))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        changed.add(entry[3:])
+        if entry[0] in "RC":
+            changed.add(next(entries, ""))
+    sent = {prefix + path for path in selection.files}
+    differ = sorted(changed & sent)
+    if differ:
+        return None, f"{len(differ)} of the files sent differ from commit {sha[:12]} or are not committed"
+    found: dict[str, str] = {"sha": sha}
+    ref = None
+    if os.environ.get("GITHUB_ACTIONS") and os.environ.get("GITHUB_SHA", "").lower() == sha:
+        ref = os.environ.get("GITHUB_REF") or None
+    ref = ref or _git(selection.root, "symbolic-ref", "-q", "HEAD")
+    default = options.default_branch or _github_default_branch()
+    if default is None:
+        origin = _git(selection.root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD")
+        default = origin.removeprefix("origin/") if origin else None
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    run_id, server = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    for key, value in (
+        ("ref", ref),
+        ("default_branch", default),
+        ("repository", repository[:200] or None),
+        ("run_url", f"{server}/{repository}/actions/runs/{run_id}" if repository and run_id else None),
+    ):
+        if value and _REF.fullmatch(value) and (key != "run_url" or value.startswith("https://")):
+            found[key] = value
+    return found, ""
+
+
+# --- the run ---------------------------------------------------------------------------------------
+
+
+def _print_gate(echo: Echo, gate: Gate) -> None:
+    failed = gate.verdict != "passed"
+    echo(f"Gate: {gate.verdict} (exit {gate.exit_code}); evaluation {gate.id}.", err=failed)
+    for reason in gate.reasons[:60]:
+        echo(f"  {_line(reason, 300)}", err=failed)
+    if len(gate.reasons) > 60:
+        echo(f"  and {len(gate.reasons) - 60} more reasons", err=failed)
+    if gate.new_findings_only:
+        if gate.baseline is None:
+            echo("Baseline: none: no completed scan of the default branch precedes this one.", err=failed)
+        else:
+            git = gate.baseline.git or {}
+            commit = f"{_line(git.get('ref') or 'a ref not stated', 80)} at {_line(git.get('sha') or '?', 64)[:12]}"
+            echo(f"Baseline: scan {gate.baseline.scan_id} of the default branch ({commit}).", err=failed)
 
 
 def run_scan(
@@ -178,76 +341,155 @@ def run_scan(
     config: MartianConfig | None = None,
     client_factory: Callable[[MartianConfig], ScanClient] = ScanClient,
 ) -> int:
-    """Pack, upload, wait, print and return the exit code: 0 the server's gate passed, 1 it failed,
-    2 the scan did not give a result (a setup, transport or server error, a failed scan, a timeout)."""
+    """Check the policy file, pack, upload, wait, print, ask for the gate and return its exit code: 0 the
+    gate passed, 1 it failed, 2 no verdict (a setup, transport or server error, a refused policy file, a
+    failed scan, a timeout, an export that could not be written)."""
+    return scan(options, echo=echo, config=config, client_factory=client_factory).exit_code
+
+
+def scan(
+    options: ScanOptions,
+    *,
+    echo: Echo,
+    config: MartianConfig | None = None,
+    client_factory: Callable[[MartianConfig], ScanClient] = ScanClient,
+) -> ScanOutcome:
+    """:func:`run_scan`, returning the scan and the gate evaluation it made as well (for ``martian ci``)."""
+    outcome = ScanOutcome(EXIT_ERROR)
+
+    def fail(error: object, *, hint: str | None = None) -> ScanOutcome:
+        echo(f"Scan failed: {error}", err=True)
+        if hint:
+            echo(hint, err=True)
+        outcome.exit_code, outcome.error = EXIT_ERROR, _line(error, 500)
+        return outcome
+
     if options.kind not in SUBJECT_KINDS:
-        return _fail(echo, ValueError(f"--kind must be one of {', '.join(SUBJECT_KINDS)}"))
+        return fail(ValueError(f"--kind must be one of {', '.join(SUBJECT_KINDS)}"))
     try:
-        selection = collect(options.folder, options.include or None)
-        packed = pack(selection)
+        text, where = _read_policy(options)
     except SelectionError as error:
-        return _fail(echo, error)
-    _print_selection(echo, options, selection, packed)
-    if options.dry_run:
-        for path in selection.files:
-            echo(f"  {path}")
-        echo("Dry run: nothing was uploaded.")
-        return EXIT_PASSED
-
-    try:
-        config = config or MartianConfig.from_env()
-    except ConfigError as error:
-        return _fail(echo, error, hint=_ACCESS_HINT)
-    name = (options.name or _default_name(selection)).strip()
-    subject: dict[str, object] = {"kind": options.kind, "name": name}
-    if options.agent_id is not None:
-        subject["agent_id"] = str(options.agent_id)
-    manifest = {"subject": subject, "source": _source(), "options": {"model_analysis": options.model_analysis}}
-
-    with client_factory(config) as client:
+        return fail(error)
+    if options.dry_run and config is None:
         try:
-            scan = client.upload(manifest, packed.archive)
+            config = MartianConfig.from_env()
+        except ConfigError:
+            config = None
+    elif config is None:
+        try:
+            config = MartianConfig.from_env()
+        except ConfigError as error:
+            return fail(error, hint=_ACCESS_HINT)
+
+    with client_factory(config) if config is not None else _NoClient() as client:
+        policy: Policy | None = None
+        if config is not None:
+            try:
+                policy = client.validate_policy(text)
+            except PolicyRefused as refused:
+                for loc, why in refused.errors:
+                    echo(f"  {_line(loc or 'the file', 100)}: {_line(why, 300)}", err=True)
+                return fail(f"the server refused the policy file {where or '(none: an empty policy)'}")
+            except ScanApiError as error:
+                return fail(error, hint=_ACCESS_HINT if error.status in (401, 403) else None)
+            if policy is None:
+                return fail("this server does not evaluate a gate policy file (no /v1/scanner/gate-policy route)")
+        try:
+            selection = (
+                collect(options.folder, options.include or None, paths=_paths(policy), families=_families(policy))
+                if policy is not None
+                else collect(options.folder, options.include or None)
+            )
+            packed = pack(selection)
+        except (SelectionError, ScanApiError) as error:
+            return fail(error)
+        _print_selection(echo, options, selection, packed)
+        if policy is not None:
+            _print_policy(echo, where, policy, options)
+        if selection.left_out:
+            echo(f"Left out by the policy file's include: {len(selection.left_out)} file(s).")
+        if options.dry_run:
+            for path in selection.files:
+                echo(f"  {path}")
+            if policy is None and where is not None:
+                echo(f"Not applied: {where} (set MARTIAN_API_URL and MARTIAN_API_TOKEN to have the server read it).")
+            echo("Dry run: nothing was uploaded.")
+            outcome.exit_code = EXIT_PASSED
+            return outcome
+        assert config is not None and policy is not None
+
+        name = (options.name or _default_name(selection)).strip()
+        subject: dict[str, object] = {"kind": options.kind, "name": name}
+        if options.agent_id is not None:
+            subject["agent_id"] = str(options.agent_id)
+        manifest: dict[str, Any] = {
+            "subject": subject,
+            "source": _source(),
+            "options": {"model_analysis": options.model_analysis},
+        }
+        git, why = _commit(selection, options)
+        if git is not None:
+            manifest["git"] = git
+            branch = git.get("ref", "no ref")
+            default = git.get("default_branch")
+            echo(
+                f"Commit: {git['sha'][:12]} ({_line(branch, 80)}"
+                + (f"; default branch {_line(default, 80)}" if default else "; default branch not known")
+                + ")."
+            )
+        else:
+            echo(f"Commit: not stated ({why}); this scan is no baseline for later ones.")
+        if options.expect_sha is not None and (git is None or git["sha"] != options.expect_sha.lower()):
+            return fail(f"the files sent are not commit {options.expect_sha[:12]}, the commit this run is of")
+
+        request_id = uuid.uuid4()
+        try:
+            made, replayed = client.upload(manifest, packed.archive, request_id=request_id)
         except ScanApiError as error:
             hint = _ACCESS_HINT if error.status in (401, 403) else None
-            if error.code == "connection_error" or error.status >= 500:
+            if error.code == "connection_error" or error.status >= 500 or error.status == 429:
                 hint = f"Look for a scan of {packed.content_digest} in the console before running it again."
-            return _fail(echo, error, hint=hint)
-        if scan.content_digest != packed.content_digest:
-            return _fail(
-                echo,
+            return fail(error, hint=hint)
+        outcome.scan_id = made.id
+        if made.content_digest != packed.content_digest:
+            return fail(
                 RuntimeError(
-                    f"the server reports content {scan.content_digest}, not the {packed.content_digest} that was "
-                    f"packed (scan {scan.id})"
-                ),
+                    f"the server reports content {made.content_digest}, not the {packed.content_digest} that was "
+                    f"packed (scan {made.id})"
+                )
             )
-        echo(f"Scan {scan.id} {scan.state}: {_line(scan.subject.kind, 20)} {_line(scan.subject.name)}.")
+        again = " (the server already had this upload under its request id)" if replayed else ""
+        echo(f"Scan {made.id} {made.state}: {_line(made.subject.kind, 20)} {_line(made.subject.name)}{again}.")
 
         def changed(now: Scan) -> None:
             echo(f"Scan {now.state}" + (f" ({_line(now.stage, 20)})" if now.stage else "") + ".")
 
         try:
-            scan = client.wait(scan, timeout_seconds=options.timeout_seconds, on_change=changed)
+            ended = client.wait(made, timeout_seconds=options.timeout_seconds, on_change=changed)
         except ScanApiError as error:
-            return _fail(echo, error)
-        if scan.state == "failed":
-            failure = scan.error
-            reason = f"{_line(failure.code, 64)}: {_line(failure.message or '', 300)}" if failure else "no reason given"
-            echo(f"Scan {scan.id} failed ({reason}). It is not a result.", err=True)
-            return EXIT_ERROR
-
+            return fail(error)
+        exports: list[tuple[Path, bytes | None, str]] = []
+        findings: list[Finding] | None = []
         try:
-            findings = client.findings(scan.id)
-            check = client.check(scan.id)
-            exports: list[tuple[Path, bytes | None, str]] = []
-            if options.json_path is not None:
-                exports.append((options.json_path, client.export(scan.id, "json"), "json"))
-            if options.sarif_path is not None:
-                exports.append((options.sarif_path, client.export(scan.id, "sarif"), "sarif"))
+            if ended.state == "completed":
+                findings = client.findings(ended.id)
+                if options.json_path is not None:
+                    exports.append((options.json_path, client.export(ended.id, "json"), "json"))
+                if options.sarif_path is not None:
+                    exports.append((options.sarif_path, client.export(ended.id, "sarif"), "sarif"))
+            gate = client.gate(ended.id, text)
+        except PolicyRefused:
+            return fail("the server refused the policy file it had accepted")
         except ScanApiError as error:
-            return _fail(echo, error)
+            return fail(error)
 
-    _print_findings(echo, findings)
-    _print_coverage(echo, scan)
+    if ended.state == "failed":
+        failure = ended.error
+        reason = f"{_line(failure.code, 64)}: {_line(failure.message or '', 300)}" if failure else "no reason given"
+        echo(f"Scan {ended.id} failed ({reason}). It is not a result.", err=True)
+    else:
+        _print_findings(echo, findings)
+        _print_coverage(echo, ended)
     status = EXIT_PASSED
     for target, data, form in exports:
         if data is None:
@@ -261,13 +503,22 @@ def run_scan(
             status = EXIT_ERROR
             continue
         echo(f"Wrote {target}.")
-    if check is None:
-        echo(
-            "Gate: this server does not evaluate a scan gate, so the exit code is the scan's state: completed.",
-            err=True,
-        )
-    else:
-        _print_gate(echo, check)
-    if status == EXIT_ERROR:
-        return EXIT_ERROR
-    return EXIT_GATE_FAILED if check is not None and not check.passed else EXIT_PASSED
+    if gate is None:
+        return fail("this server does not evaluate a gate policy file (no gate route)")
+    outcome.gate_id = gate.id
+    outcome.reasons = [_line(reason, 300) for reason in gate.reasons]
+    _print_gate(echo, gate)
+    outcome.exit_code = EXIT_ERROR if status == EXIT_ERROR else gate.exit_code
+    if gate.exit_code == EXIT_ERROR:
+        outcome.error = _line(gate.reasons[0] if gate.reasons else "the scan could not be judged", 500)
+    return outcome
+
+
+class _NoClient:
+    """Stands in for a client in a dry run without credentials: nothing is sent."""
+
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None

@@ -2,9 +2,12 @@
 action's smoke job. Standard library only, so CI can run it with the runner's own ``python3``.
 
 It speaks the shapes of ``tests/scan/contract/scanner-scans.json``; the tests hold every answer to that
-file. With ``routes`` it can leave out the findings, check and export routes, as a server from before
-them does. It holds no rule: with ``seeded`` it reports one fixed
-finding on the first ``SKILL.md`` in the archive, so a gate can be seen failing.
+file. With ``routes`` it can leave out the findings, export and gate routes, as a server from before
+them does. It holds no rule: with ``seeded`` it reports one fixed finding on the first ``SKILL.md`` in
+the archive, so a gate can be seen failing. It does not read YAML: every policy file validates to
+``policy`` (the defaults unless a test sets it), except one holding ``refuse-me``, which is refused. The
+gate blocks on every open finding, and with ``new_findings_only`` compares with the newest completed scan
+of the subject whose ``git`` states its default branch. An ``Idempotency-Key`` used again answers its scan.
 
     python3 tests/scan/fake_backend.py --port-file PATH [--clean] [--token TOKEN]
 """
@@ -27,8 +30,24 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 TOKEN = "mce_test_scan_key_0123456789"
-ALL_ROUTES = frozenset({"findings", "check", "export"})
+ALL_ROUTES = frozenset({"findings", "export", "gate"})
 RULE = "SKL-SEEDED-FIXTURE"
+FAMILIES = ["skills", "mcp", "plugins", "subagents", "harness-config", "agent-code"]
+
+
+def default_policy() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "paths": ["."],
+        "include": list(FAMILIES),
+        "external": {"follow": False, "depth": 1},
+        "gate": {
+            "fail_on": {"evidence": 0, "severity": "S5", "categories": None},
+            "min_coverage": {},
+            "new_findings_only": False,
+        },
+        "waivers": [],
+    }
 
 
 def _now() -> str:
@@ -73,6 +92,10 @@ class FakeScanner:
     ) -> None:
         self.token, self.routes, self.seeded, self.fail, self.polls = token, routes, seeded, fail, polls
         self.archive_limit = archive_limit
+        self.policy = default_policy()
+        self.request_ids: dict[str, tuple[str, str]] = {}
+        self.gates: list[dict[str, Any]] = []
+        self.policies: list[str] = []
         self.scans: dict[str, dict[str, Any]] = {}
         self.files: dict[str, dict[str, bytes]] = {}
         self.reads: dict[str, int] = {}
@@ -98,6 +121,10 @@ class FakeScanner:
         rest = parts[2:]
         if method == "POST" and rest == ["scans"]:
             return self._upload(headers, body)
+        if method == "POST" and rest == ["gate-policy", "validate"] and "gate" in self.routes:
+            return self._validate(body)
+        if method == "POST" and len(rest) == 3 and rest[0] == "scans" and rest[2] == "gate" and rest[1] in self.scans:
+            return self._gate(rest[1], body) if "gate" in self.routes else _not_found()
         if method != "GET" or len(rest) < 2 or rest[0] != "scans" or rest[1] not in self.scans:
             return _not_found()
         scan_id = rest[1]
@@ -106,23 +133,12 @@ class FakeScanner:
         if len(rest) != 3 or rest[2] not in self.routes:
             return _not_found()
         scan = self.scans[scan_id]
+        if rest[2] not in ("findings", "export"):
+            return _not_found()
         if rest[2] == "findings":
             return _json(200, {"items": self._findings(scan_id), "next_cursor": None})
         if scan["state"] != "completed":
             return _refused(409, "scan_not_completed", "The scan has not completed")
-        if rest[2] == "check":
-            blocking = [finding["id"] for finding in self._findings(scan_id) if finding["status"] == "open"]
-            return _json(
-                200,
-                {
-                    "scan_id": scan_id,
-                    "passed": not blocking,
-                    "coverage_shortfalls": [],
-                    "blocking": blocking,
-                    "counted": {"open": len(blocking)} if blocking else {},
-                    "evaluated_at": _now(),
-                },
-            )
         form = query.get("format", "json")
         if form == "sarif":
             return 200, {"content-type": "application/sarif+json"}, json.dumps(self._sarif(scan_id)).encode()
@@ -136,6 +152,134 @@ class FakeScanner:
                 "references": [],
             },
         )
+
+    def _policy_text(self, body: bytes) -> str | None:
+        try:
+            text = json.loads(body)["policy"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        return text if isinstance(text, str) else None
+
+    def _validate(self, body: bytes) -> tuple[int, dict, bytes]:
+        text = self._policy_text(body)
+        if text is None:
+            return _json(422, {"detail": [{"loc": ["body", "policy"], "msg": "Field required", "type": "missing"}]})
+        if "refuse-me" in text:
+            return _json(
+                422,
+                {
+                    "detail": {
+                        "code": "invalid_gate_policy",
+                        "message": "The policy file is not valid",
+                        "errors": [{"loc": "gate.fail_on.severty", "message": "Extra inputs are not permitted"}],
+                    }
+                },
+            )
+        self.policies.append(text)
+        return _json(200, {"policy": self.policy, "policy_sha256": hashlib.sha256(text.encode()).hexdigest()})
+
+    def _baseline(self, scan_id: str) -> dict[str, Any] | None:
+        scan = self.scans[scan_id]
+        earlier = [
+            other
+            for other in self.scans.values()
+            if other["id"] != scan_id
+            and other["subject"]["id"] == scan["subject"]["id"]
+            and other["state"] == "completed"
+            and other["on_default_branch"]
+            and other["created_at"] < scan["created_at"]
+        ]
+        return earlier[-1] if earlier else None
+
+    def _gate(self, scan_id: str, body: bytes) -> tuple[int, dict, bytes]:
+        text = self._policy_text(body)
+        status, _, answer = self._validate(body)
+        if status != 200 or text is None:
+            return status, {"content-type": "application/json"}, answer
+        scan = self.scans[scan_id]
+        if scan["state"] not in ("completed", "failed"):
+            return _refused(409, "scan_not_ended", "The scan has not ended")
+        new_only = bool(self.policy["gate"]["new_findings_only"])
+        baseline = self._baseline(scan_id) if new_only else None
+        known = {finding["fingerprint"] for finding in self._findings(baseline["id"])} if baseline else set()
+        findings = []
+        for finding in self._findings(scan_id) if scan["state"] == "completed" else []:
+            outcome = (
+                "not_gating"
+                if not finding["gating"]
+                else "in_baseline"
+                if finding["fingerprint"] in known
+                else "blocking"
+                if finding["status"] == "open"
+                else finding["status"]
+            )
+            findings.append(
+                {
+                    "finding_id": finding["id"],
+                    "rule_id": finding["rule_id"],
+                    "category": finding["category"],
+                    "severity": finding["severity"],
+                    "evidence_level": finding["evidence_level"],
+                    "title": finding["title"],
+                    "path": finding["path"],
+                    "line_start": finding["line_start"],
+                    "fingerprint": finding["fingerprint"],
+                    "outcome": outcome,
+                }
+            )
+        counts = {name: 0 for name in ("blocking", "in_baseline", "waived_in_file", "waived", "accepted", "not_gating")}
+        for item in findings:
+            counts[item["outcome"]] += 1
+        counts["below_threshold"] = 0
+        if scan["state"] == "failed":
+            verdict, reasons = "not_judged", [f"The scan failed ({scan['error']['code']}); it cannot be judged"]
+        else:
+            verdict = "failed" if counts["blocking"] else "passed"
+            reasons = [f"{counts['blocking']} findings block" if counts["blocking"] else "No finding blocks"]
+            if new_only:
+                reasons.append(
+                    f"Compared with baseline scan {baseline['id']}: {counts['in_baseline']} findings were already there"
+                    if baseline
+                    else "No completed scan of the default branch precedes this scan; every finding counts as new"
+                )
+            reasons += [
+                f"Blocking: {item['rule_id']} at {item['path']}" for item in findings if item["outcome"] == "blocking"
+            ]
+        gate = {
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "subject": {key: scan["subject"][key] for key in ("id", "kind", "name")},
+            "verdict": verdict,
+            "exit_code": {"passed": 0, "failed": 1, "not_judged": 2}[verdict],
+            "reasons": reasons,
+            "new_findings_only": new_only,
+            "baseline": {
+                "scan_id": baseline["id"],
+                "created_at": baseline["created_at"],
+                "completed_at": baseline["completed_at"],
+                "git": baseline["git"],
+            }
+            if baseline
+            else None,
+            "coverage_shortfalls": [],
+            "counts": counts,
+            "findings": findings,
+            "waivers": [],
+            "scan": {
+                "state": scan["state"],
+                "source": scan["source"],
+                "content_digest": scan["content_digest"],
+                "git": scan["git"],
+                "on_default_branch": scan["on_default_branch"],
+                "completed_at": scan["completed_at"],
+                "error": scan["error"],
+            },
+            "policy": self.policy,
+            "policy_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "evaluated_at": _now(),
+        }
+        self.gates.append(gate)
+        return _json(201, gate)
 
     def _upload(self, headers: dict[str, str], body: bytes) -> tuple[int, dict, bytes]:
         if "content-length" not in headers:
@@ -162,8 +306,24 @@ class FakeScanner:
                 files = {info.filename: bundle.read(info) for info in bundle.infolist() if not info.is_dir()}
         except zipfile.BadZipFile:
             return _refused(422, "not_a_zip", "The archive is not a ZIP file")
+        key = headers.get("idempotency-key")
+        digest = hashlib.sha256(parts[0].get_payload(decode=True) + b"\0" + archive).hexdigest()
+        if key is not None and key in self.request_ids:
+            first, first_digest = self.request_ids[key]
+            if first_digest != digest:
+                return _refused(409, "request_id_reused", "This request id was already used for a different upload")
+            return _json(200, self.scans[first])
         scan_id = str(uuid.uuid4())
-        self.uploads.append({"manifest": manifest, "files": sorted(files)})
+        if key is not None:
+            self.request_ids[key] = (scan_id, digest)
+        self.uploads.append({"manifest": manifest, "files": sorted(files), "request_id": key})
+        git = manifest.get("git")
+        on_default = bool(
+            git
+            and git.get("ref")
+            and git.get("default_branch")
+            and git["ref"] in (git["default_branch"], "refs/heads/" + git["default_branch"])
+        )
         self.files[scan_id] = files
         self.reads[scan_id] = 0
         self.scans[scan_id] = {
@@ -193,6 +353,8 @@ class FakeScanner:
             "counts": None,
             "error": None,
             "scanner_version": None,
+            "git": git,
+            "on_default_branch": on_default,
             "created_at": _now(),
             "started_at": None,
             "completed_at": None,
@@ -260,52 +422,52 @@ class FakeScanner:
     def _findings(self, scan_id: str) -> list[dict[str, Any]]:
         if not self.seeded:
             return []
-        skill = next((path for path in sorted(self.files[scan_id]) if path.rsplit("/", 1)[-1] == "SKILL.md"), None)
-        if skill is None:
-            return []
+        skills = [path for path in sorted(self.files[scan_id]) if path.rsplit("/", 1)[-1] == "SKILL.md"]
+        return [self._finding(scan_id, position, skill) for position, skill in enumerate(skills)]
+
+    def _finding(self, scan_id: str, position: int, skill: str) -> dict[str, Any]:
         scan = self.scans[scan_id]
         fingerprint = "sha256:" + hashlib.sha256(f"{RULE}\0{skill}".encode()).hexdigest()
-        return [
-            {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, scan_id + fingerprint)),
-                "scan_id": scan_id,
-                "subject_id": scan["subject"]["id"],
-                "position": 0,
-                "rule_id": RULE,
-                "category": "instruction_integrity",
-                "severity": "S2",
-                "reported_severity": "S2",
-                "severity_source": "scanner",
-                "evidence_level": 2,
-                "evidence_level_name": "structural",
-                "title": "Seeded finding for the scan fixture",
-                "message": "The stand-in server reports this on every SKILL.md.",
-                "path": skill,
-                "line_start": 1,
-                "line_end": 4,
-                "excerpt": None,
-                "reference_id": None,
-                "fix": "Nothing to fix: this is a test finding.",
-                "fingerprint": fingerprint,
-                "match": "new",
-                "status": "open",
-                "triage": {
-                    "accepted": False,
-                    "reason": None,
-                    "by": None,
-                    "at": None,
-                    "accepted_until": None,
-                    "waiver": None,
-                },
-                "first_seen_scan_id": scan_id,
-                "first_seen_at": scan["created_at"],
-                "last_seen_scan_id": scan_id,
-                "last_seen_at": scan["created_at"],
-                "fixed_in_scan_id": None,
-                "fixed_at": None,
-                "evidence_count": 0,
-            }
-        ]
+        return {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, scan_id + fingerprint)),
+            "scan_id": scan_id,
+            "subject_id": scan["subject"]["id"],
+            "position": position,
+            "rule_id": RULE,
+            "category": "instruction_integrity",
+            "severity": "S2",
+            "reported_severity": "S2",
+            "severity_source": "scanner",
+            "evidence_level": 2,
+            "evidence_level_name": "structural",
+            "title": "Seeded finding for the scan fixture",
+            "message": "The stand-in server reports this on every SKILL.md.",
+            "path": skill,
+            "line_start": 1,
+            "line_end": 4,
+            "excerpt": None,
+            "reference_id": None,
+            "fix": "Nothing to fix: this is a test finding.",
+            "fingerprint": fingerprint,
+            "match": "new",
+            "status": "open",
+            "triage": {
+                "accepted": False,
+                "reason": None,
+                "by": None,
+                "at": None,
+                "accepted_until": None,
+                "waiver": None,
+            },
+            "first_seen_scan_id": scan_id,
+            "first_seen_at": scan["created_at"],
+            "last_seen_scan_id": scan_id,
+            "last_seen_at": scan["created_at"],
+            "fixed_in_scan_id": None,
+            "fixed_at": None,
+            "evidence_count": 0,
+            "gating": True,
+        }
 
     def _sarif(self, scan_id: str) -> dict[str, Any]:
         findings = self._findings(scan_id)
