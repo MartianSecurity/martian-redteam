@@ -96,7 +96,7 @@ def _modules(tree: ast.AST) -> set[str]:
 
 
 def test_the_scan_client_carries_no_rules():
-    sources = sorted(SCAN_PACKAGE.rglob("*"))
+    sources = sorted(path for path in SCAN_PACKAGE.rglob("*") if "__pycache__" not in path.parts)
     assert {path.name for path in sources if path.is_file()} <= {"__init__.py", "client.py", "files.py"}
     for path in sources:
         if path.suffix != ".py":
