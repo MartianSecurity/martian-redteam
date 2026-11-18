@@ -1,3 +1,3 @@
 """Canonical distribution version, read by Hatch and compatibility imports."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

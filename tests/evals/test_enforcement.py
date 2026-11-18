@@ -51,7 +51,8 @@ class Enforcement(unittest.TestCase):
 
     def test_a_test_over_backends_row_limit_fails_before_upload(self):
         with StubBackend() as backend:
-            code, out = run("toomany", backend)
+            # Exercise the row-limit gate, not MLflow's local SQL connection pool.
+            code, out = run("toomany", backend, MLFLOW_GENAI_EVAL_MAX_WORKERS="4")
             self.assertEqual(code, 1, out)
             self.assertIn("100-row limit", out)
 

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from martian._privacy import RedactionPolicy
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.config import Settings
 from martian_redteam.protocol import (
     extract_graph_revision,
@@ -26,6 +26,13 @@ _WAIT_BACKOFF = wait_exponential(multiplier=0.5, min=0.5, max=8)
 
 class ClientError(RuntimeError):
     """Transport, HTTP, or schema failure talking to Martian Agents."""
+
+    code: str | None = None
+
+
+class UndecidedJudgment(ClientError):
+    """The judge answered, but its judgment could not be read. It decides nothing: the probe is
+    undetermined, never a pass and never an error of the target."""
 
 
 class RetryableClientError(ClientError):
@@ -58,8 +65,11 @@ def _status_error(assistant_id: str, response: httpx.Response) -> ClientError:
     else:
         message = f"{assistant_id} run failed: HTTP {response.status_code}{suffix}"
     if response.status_code in _RETRYABLE_STATUS:
-        return RetryableClientError(message, retry_after=retry_after)
-    return ClientError(message)
+        error: ClientError = RetryableClientError(message, retry_after=retry_after)
+    else:
+        error = ClientError(message)
+    error.code = f"http_{response.status_code}"
+    return error
 
 
 class Client:
@@ -143,7 +153,7 @@ class Client:
             "on_completion": "delete",
             "metadata": {
                 "sdk": "martian-redteam",
-                "catalog_version": CATALOG_VERSION,
+                "catalog_version": HOSTED_CATALOG_VERSION,
             },
         }
         try:

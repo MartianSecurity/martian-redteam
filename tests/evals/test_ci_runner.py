@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from .evals_contract import validate_request
 from .stub_backend import StubBackend
 from .test_plugin import SAMPLE
 
@@ -105,3 +106,125 @@ def test_one_session_preserves_suite_results_errors_and_failed_upload_receipt(
         ):
             assert private not in reports
         assert (tmp_path / "results/redteam/probes.jsonl").is_file() is (interface != "evals")
+
+
+def test_evals_requests_use_connection_timeout(tmp_path):
+    (tmp_path / "test_agent.py").write_text(SAMPLE)
+    (tmp_path / "runner.py").write_text(
+        "from pathlib import Path\n"
+        "import httpx\n"
+        "from martian import CiContext, MartianConfig\n"
+        "from martian.ci import CiSuite, run\n"
+        "from os import environ\n"
+        "requests = []\n"
+        "send = httpx.Client.send\n"
+        "def check_timeout(client, request, **kwargs):\n"
+        "    if request.url.path.startswith('/v1/evals/ci/'):\n"
+        "        requests.append(request.url.path)\n"
+        "        assert set(request.extensions['timeout'].values()) == {7.0}\n"
+        "    return send(client, request, **kwargs)\n"
+        "httpx.Client.send = check_timeout\n"
+        "connection = MartianConfig(\n"
+        "    environ['MARTIAN_API_URL'], environ['MARTIAN_API_TOKEN'], request_timeout_seconds=7\n"
+        ")\n"
+        "ci = CiContext(agent_id='11111111-1111-4111-8111-111111111111', git_sha='0123456789abcdef')\n"
+        "suite = CiSuite(evals_paths=(Path('test_agent.py'),), output_dir=Path('results'))\n"
+        "result = run(suite, config=connection, ci=ci)\n"
+        "assert result.exit_code == 0, result.problems\n"
+        "assert requests == ['/v1/evals/ci/datasets/support', '/v1/evals/ci/runs', '/v1/evals/ci/sessions']\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(("MARTIAN_", "MLFLOW_", "GITHUB_"))}
+    with StubBackend() as backend:
+        environment.update(SCENARIO="pass", MARTIAN_API_URL=backend.url, MARTIAN_API_TOKEN=backend.token)
+        process = subprocess.run(
+            [sys.executable, "runner.py"], cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120
+        )
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
+def _committed_repository(folder, files):
+    folder.mkdir()
+    for path, text in files.items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("config", "user.name", "Test"),
+        ("config", "user.email", "test@example.invalid"),
+        ("config", "commit.gpgsign", "false"),
+        ("add", "-A"),
+        ("commit", "-q", "-m", "files"),
+    ):
+        subprocess.run(["git", "-C", str(folder), *args], check=True, capture_output=True)
+    return subprocess.run(
+        ["git", "-C", str(folder), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("case", ["passes", "gate_fails", "other_commit", "not_run"])
+def test_one_session_records_evals_red_team_and_a_scan(tmp_path, case):
+    """MartianSecurity/martian-notes#473: `martian ci --scan` records the scan as a `scan` test naming the
+    server's gate evaluation; the session fails when the gate fails, and a required scan that did not run
+    or is not of the session's commit fails it too."""
+    from tests.scan.fake_backend import FakeScanner
+
+    (tmp_path / "test_agent.py").write_text(SAMPLE)
+    (tmp_path / "callback.py").write_text("def model_callback(prompt):\n    return 'fine'\n")
+    (tmp_path / "redteam.yml").write_text(
+        "target:\n  purpose: Safe test assistant\n  callback:\n    file: callback.py\n"
+        "vulnerabilities:\n  - name: PromptLeakage\n    types: [system_prompt]\n"
+        "attacks:\n  - name: PromptInjection\n"
+    )
+    files = {"AGENTS.md": "# Agent\n", ".martian/scan.yml": "version: 1\n"}
+    if case == "gate_fails":
+        files["skills/one/SKILL.md"] = "---\nname: one\n---\n"
+    sha = _committed_repository(tmp_path / "repo", files)
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(("MARTIAN_", "MLFLOW_", "GITHUB_", "CI"))}
+    with StubBackend() as backend:
+        backend.scanner = FakeScanner(token=backend.token)
+        environment.update(
+            SCENARIO="pass",
+            MARTIAN_API_URL=backend.url,
+            MARTIAN_API_TOKEN=backend.token,
+            MARTIAN_AGENT_ID="11111111-1111-4111-8111-111111111111",
+            MARTIAN_EVALS_GIT_SHA="f" * 40 if case == "other_commit" else sha,
+            MARTIAN_EVALS_STORE_DIR=str(tmp_path / "store"),
+        )
+        command = [sys.executable, "-m", "martian", "ci", "--evals-path", "test_agent.py",
+                   "--redteam-config", "redteam.yml", "--scan", "repo", "--output", "results"]  # fmt: skip
+        if case == "not_run":
+            # The scan test deselected by name: the session still names a required scan, and fails.
+            (tmp_path / "runner.py").write_text(
+                "from pathlib import Path\nfrom martian.ci import CiSuite, run\n"
+                "suite = CiSuite(evals_paths=(Path('test_agent.py'),), scan=Path('repo'), "
+                "output_dir=Path('results'), pytest_args=('-k', 'not martian'))\n"
+                "raise SystemExit(run(suite).exit_code)\n"
+            )
+            command = [sys.executable, "runner.py"]
+        process = subprocess.run(command, cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=180)
+        output = process.stdout + process.stderr
+        assert process.returncode == (0 if case == "passes" else 1), output
+        [session] = backend.sessions()
+        tests = session[3]["tests"]
+        scans = [test for test in tests if test["kind"] == "scan"]
+        assert len(scans) == 1, tests
+        validate_request("CiSessionRequest", session[3])  # the backend's /v1/evals contract, version 5
+        if case in ("passes", "gate_fails"):
+            assert {"dataset", "redteam", "scan"} <= {test["kind"] for test in tests}
+            [gate] = backend.scanner.gates
+            assert scans[0]["scan"] == {"scan_id": gate["scan_id"], "gate_id": gate["id"]}
+            assert gate["scan"]["git"]["sha"] == sha
+            assert gate["verdict"] == ("passed" if case == "passes" else "failed")
+            assert (tmp_path / "results/scan/scan.sarif").is_file()
+        elif case == "other_commit":
+            assert backend.scanner.uploads == []
+            assert "not commit ffffffffffff" in scans[0]["scan"]["error"]
+        else:
+            assert scans[0] == {"name": "required scan", "kind": "scan",
+                                "scan": {"error": "the required scan did not run"}}  # fmt: skip
+        receipt = json.loads((tmp_path / "results/ci-session.json").read_text())
+        scan_receipt = [test for test in receipt["tests"] if test["kind"] == "scan"]
+        assert [(test["passed"], test["provenance"]) for test in scan_receipt] == [
+            (case == "passes", "server_evaluated_gate")
+        ]
+        assert backend.token not in "\n".join(p.read_text() for p in (tmp_path / "results").rglob("*") if p.is_file())

@@ -2,18 +2,34 @@
 
 `martian-sdk` is the canonical Python 3.12+ distribution. It contains
 `martian.evals`, `martian.redteam`, the `martian` CLI, and the legacy import
-names. The source repository remains `MorningHQ/martian-redteam`. The package
-is a release candidate; it has not been published. Install the delivered wheel
-with its `evals` extra for the persisted CI runner:
+names. The source repository remains `MartianSecurity/martian-redteam`. The package
+is published on [PyPI](https://pypi.org/project/martian-sdk/). Install an exact
+released version with its `evals` extra for the persisted CI runner:
 
 ```bash
-python -m pip install '/absolute/path/martian_sdk-0.1.0-py3-none-any.whl[evals]'
+python -m pip install 'martian-sdk[evals]==<version>'
 martian --version
 ```
 
-`evals` includes MLflow-skinny **3.16.1**, matching the current Backend/store,
-and pytest. The base installation supports redteam callbacks and local reports.
+Replace `<version>` with a release listed on PyPI.
+
+`evals` includes MLflow-skinny **3.18.0** and pytest. The SDK never connects to
+the hosted MLflow server, so this pin is independent of the server's version,
+which MartianSecurity/martian-evals sets. The base installation supports redteam
+callbacks and local reports. The SDK reaches MLflow internals only through
+`src/martian/evals/_mlflow.py`, which lists each one. The exception is the process
+a function target runs in, which never imports the evals package and imports the
+two its tracing needs itself; `_mlflow.py` lists those too. Before moving the pin, run
+the [MLflow compatibility suite](development.md#mlflow-upgrades) on the
+candidate release.
 The separate `mcp` extra adds the existing customer MCP integration.
+The `postgres` extra adds the Postgres driver for the in-process evals store on Postgres
+(see [evals core](evals-core.md#the-in-process-binding)).
+
+A newer MLflow migrates a local MLflow database in place the first time it opens
+one: a suite run's `mlflow.db`, the pytest kit's store when
+`MARTIAN_EVALS_STORE_DIR` keeps it, or an `MlflowStore` database. An older SDK then refuses that database as out of date, so back up a
+store you keep before upgrading the SDK.
 
 ## Python interfaces
 
@@ -83,15 +99,17 @@ Without explicit config, only these canonical process variables are read:
 Create one API key under the console's **API Keys** settings (admin/owner),
 select only the needed capabilities and applicable restrictions, and save the
 once-shown token in your secret manager. Evals dataset reads need `evals:read`;
-redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities.
+redteam needs `redteam:run`; uploads/sessions need their evals/CI capabilities;
+`martian evals push` needs `evals:write`; `martian scan` needs `scan:run` and
+`scan:read` in an organisation with the Scanner.
 The key neither grants model entitlement nor administers the console. An
 agent-bound key supplies its immutable agent binding automatically; explicit
 `Client(agent_id=...)` attribution must match that grant. This labels/access-binds
 the operation and does not attest the local callback identity.
 Existing evals CI tokens keep their original evals/CI grants; create a new key
 with `redteam:run` to add generation/judging. Revocation stops subsequent calls.
-The source candidate still requires coordinated Backend/Agents deployment and
-service qualification; an SDK install does not enable a hosted feature.
+Hosted features require the SDK APIs to be enabled on the Backend and Agents
+services for the organisation; an SDK install does not enable a hosted feature.
 
 `EvalsConfig(api_url=..., token=..., agent_id=..., git_sha=...)` remains an
 adapter for existing evals options/attribution. It can be passed to `run`,
@@ -111,21 +129,77 @@ martian ci --evals-path tests/evals --output results
 martian ci --redteam-config redteam.yaml --output results
 # One combined persisted session:
 martian ci --evals-path tests/evals --redteam-config redteam.yaml --require-export --output results
+# The same with a scan of the repository's agent files as one more test (a Scanner-enabled organisation):
+martian ci --evals-path tests/evals --redteam-config redteam.yaml --scan . --output results
+# A suite file, run locally with only a model key (see the eval guide):
+martian evals run evals.yaml
+# The same, compared case by case with an earlier run's output folder and gated on the comparison:
+martian evals run evals.yaml --output results/pr --baseline results/main
+# A suite file's prompts as versions in the local Evals UI, which each later run names (see the eval guide):
+martian evals prompts push evals.yaml -m "Shorter greeting"
+# The Evals UI on this machine, one user and no login (see the evals core guide):
+martian ui
+# Inspect AI logs as runs in that UI (see the evals core guide):
+martian evals import inspect logs/*.eval
+# promptfoo results as runs in that UI, and a promptfoo config as suite files (see the evals core guide):
+martian evals import promptfoo results.json
+martian evals convert promptfoo promptfooconfig.yaml --target agent.py:answer --output suite
+# An MLflow tracking store copied into that UI, after a schema version check:
+martian evals import mlflow ./mlflow.db
+# All of that UI's data exported, resumably, and loaded into a fresh data folder (see data export):
+martian evals export ./evals-export
+martian evals import martian ./evals-export --data-dir ./new-data
+# That UI's finished runs pushed to a Martian server, signed in as below (see the eval guide):
+martian evals push
 # Additional existing interfaces:
 martian evals run tests/evals -q
 martian redteam validate redteam.yaml
 martian redteam run redteam.yaml -o results/redteam
+# A stored version 2 run decided again by the file's current checks, without calling the target:
+martian redteam rejudge redteam.yaml --run RUN_ID
+# The folder's agent files scanned by the Martian Scanner (a Scanner-enabled Cloud or Enterprise organisation):
+martian scan --sarif results/scan.sarif
 ```
 
+`martian scan` is a thin client of the server's Scanner: it has the server check the
+repository's `.martian/scan.yml`, packs and uploads the agent files it names with
+their commit, waits for the scan, prints the findings and exits 0, 1 or 2 on the
+gate the server evaluates against that file. It ships no scanner rules. See
+[scanning agent files](scan.md).
+
 Python and `martian ci` use one runner and one pytest execution. The YAML suite
-is a pytest item in that execution. Session finalization uploads dataset runs
-and then **one** `POST /v1/evals/ci/sessions` containing dataset, checks and/or
-redteam records. The CLI no longer combines two subprocess exit codes.
+and the scan (`--scan FOLDER`, `CiSuite(scan=...)`) are pytest items in that
+execution. Session finalization uploads dataset runs and then **one**
+`POST /v1/evals/ci/sessions` containing dataset, checks, redteam and/or scan
+records. The CLI no longer combines two subprocess exit codes.
+
+A scan test is `{"name": …, "kind": "scan", "scan": {"scan_id": …, "gate_id": …}}`:
+the gate evaluation the server stored for the scan, whose verdict the server
+takes (provenance `server_evaluated_gate`). The scan must be of the session's
+commit (`MARTIAN_EVALS_GIT_SHA`, else `GITHUB_SHA`, else `HEAD`) and made with
+the session's key, which then needs `scan:run` and `scan:read` besides its
+evals capabilities; files that are not that commit refuse the scan before
+anything is uploaded. A scan that did not run or was not judged is
+`{"scan": {"scan_id"?, "error": "…"}}` and fails. `--scan` makes the scan
+required (`--martian-require-scan`): when its item does not run (deselected,
+say), the session records a failed `required scan` test. The scan writes
+`scan.sarif`, `scan.json` and `scan.log` under `results/scan/`.
 
 `martian redteam run` uses Backend generation/judging and writes a local gate/report;
 `martian ci --redteam-config` also persists it through Backend. `martian evals
 run` forwards pytest options and supports eval-only xdist. The combined runner
 is serial. Do not also include the same redteam assessment as a pytest test.
+
+A suite file's run (`martian evals run evals.yaml`) is local and gated on its
+own exit code. With `--baseline DIR` it compares its cases with
+the earlier run in `DIR` by their `verdicts.json` and gates on the comparison:
+it fails on a change worse than noise, on any case that newly fails a
+security check, or on a failed case with no result in the baseline, not on
+cases that failed in both runs or on a few that changed within noise on other
+checks ([comparing with a baseline](evals.md#comparing-with-a-baseline)).
+The [evals action](gate-and-ci.md#compared-with-the-last-result-of-main) keeps
+`main`'s `verdicts.json` in the Actions cache and passes it on each pull
+request. The pytest gate and `martian ci` have no baseline.
 
 Success requires every required test/probe to complete and meet its policy,
 and a complete, consistent Backend session acknowledgment.
@@ -171,7 +245,7 @@ it is not a successful upload. A hard kill cannot upload to Backend.
 
 `assert_redteam(assessment, threshold=1.0)` records saved probes without target
 or judge re-execution. `--martian-require-redteam` requires that gate in a
-pytest session. The YAML runner determines expected probe counts from the
+pytest session, and `--martian-require-scan` a scan. The YAML runner determines expected probe counts from the
 catalog/configuration before execution and supplies them to the adapter.
 When adapting an externally saved assessment, pass `expected={(vulnerability,
 type): count}` if the original plan is available; a saved report cannot attest
@@ -188,7 +262,8 @@ Backend computes the redteam aggregate from these rows and declared policy.
 Judgments are `client_executed_client_scored`, including judgments originally
 obtained from Agents. Inline scorer checks have the same provenance. Pinned
 dataset outputs remain `client_executed_server_scored`: Backend computes the
-canonical exact-match score. The console shows all kinds under Evals → Runs,
+canonical exact-match score. A scan test is `server_evaluated_gate`: the server
+evaluated the gate from the scan's findings and the policy file. The console shows all kinds under Evals → Runs,
 including policy and provenance, and refresh reads the persisted record.
 
 Checks/redteam tests use Backend's journaled private MLflow export: one run per
@@ -211,6 +286,41 @@ not target bodies. Do not upload the private local MLflow SQLite store/traces
 as a public CI artifact: it contains prediction inputs, outputs and expectations.
 Backend still needs raw dataset outputs to score them, and Agents judging
 receives attack/reply text. See [the data boundary](security-and-data.md).
+
+## Reporting failures
+
+Expected API failures show a short explanation, an error code, and an operation
+ID when execution has an identity. Authentication, scope, request limits, expired
+results, and unknown execution outcomes have distinct guidance. For example:
+
+```text
+Permission denied. Check the key's capabilities, agent scope, and organisation access.
+[http_403; operation_id=11111111-1111-4111-8111-111111111111]
+```
+
+Python callers can inspect `RedteamOperationError.code`, `operation_id`, and the
+optional `reason_code` / UUID `request_id`. The existing `code` values remain
+compatible. An unknown execution outcome still requires `get_operation` with
+the same ID; the SDK does not replay the execution POST to obtain a pass.
+Eval upload failures retain their UUID request ID when one is available.
+
+Default redteam reports retain safe codes and existing operation-ID fields;
+`case.error_code` also reads the code from a reopened report. The JSON shape is
+unchanged, so earlier SDK versions can still load these reports. Raw provider
+bodies and callback exception text remain outside safe reports.
+
+The CLI groups repeated errors and limits terminal detail. Full safe per-probe
+references remain in `risk-assessment.json`; CI problems remain in
+`ci-session.json`. Setup failures exit with status 2 and show a local report ID
+matching `execution-error.json`, which includes the SDK version and controlled
+message. Gate failures continue to exit with status 1. Expected CLI failures do
+not print a traceback. Error receipts are local files, not automatic uploads.
+
+To report a problem, include the SDK version, error code, relevant operation or
+request ID, and the safe receipt (or workflow run link). A CLI setup report ID
+identifies its local receipt; it is not a Backend request ID. Successful commands
+do not emit extra diagnostics. Applications using the Python SDK retain control
+of their own logging and exception handling.
 
 ## Migration, release and qualification
 

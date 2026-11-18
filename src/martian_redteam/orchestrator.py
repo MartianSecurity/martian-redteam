@@ -10,10 +10,11 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
+from martian._errors import error_code
 from martian_redteam.callback import AsyncTarget, TargetCallback, wrap_callback
 from martian_redteam.catalog.attacks import Attack
 from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION, Vulnerability
-from martian_redteam.client import ClientError
+from martian_redteam.client import ClientError, UndecidedJudgment
 from martian_redteam.encoding import apply_encoding
 from martian_redteam.types import (
     EvaluatorContext,
@@ -92,12 +93,33 @@ async def a_red_team(
                 on_probe(case)
             return case
 
-    try:
-        cases = await asyncio.gather(*(run_one(*job) for job in jobs))
-    finally:
-        # Drain owned callbacks before a CI runner can switch tenant/tracking context.
-        # Waiting happens off-loop; callers must still bound their callback's I/O.
+    async def drain_probes() -> None:
+        # gather propagates the first exception while siblings are still live.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Join synchronous callbacks before returning ownership to the caller.
         await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
+    tasks = [asyncio.create_task(run_one(*job)) for job in jobs]
+    completed = False
+    try:
+        cases = await asyncio.gather(*tasks)
+        completed = True
+    finally:
+        cleanup = asyncio.create_task(drain_probes())
+        cancellation = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        cleanup.result()
+        # If gather already failed, the finally block lets that outcome propagate.
+        if completed and cancellation is not None:
+            raise cancellation
     return _summarize(
         list(cases),
         purpose=purpose,
@@ -206,7 +228,7 @@ async def _probe(
                 "error_kind": "infrastructure",
                 "simulation_operation_id": str(operation) if operation is not None else None,
             }
-        )
+        )._bind_error_code(error_code(getattr(error, "reason_code", None)) or getattr(error, "code", None))
 
     payload = simulated.attack
     revision = simulated.graph_revision
@@ -223,8 +245,13 @@ async def _probe(
         reply_turn = await _call_target(target, payload, target_timeout_seconds)
     except TargetTimeoutError as error:
         return base.model_copy(
-            update={"input": payload, "error": str(error), "error_kind": "target", "graph_revision": revision}
-        )
+            update={
+                "input": payload,
+                "error": str(error),
+                "error_kind": "target",
+                "graph_revision": revision,
+            }
+        )._bind_error_code("target_timeout")
     except Exception as error:  # noqa: BLE001 — target failures become case errors
         return base.model_copy(
             update={
@@ -233,7 +260,7 @@ async def _probe(
                 "error_kind": "target",
                 "graph_revision": revision,
             }
-        )
+        )._bind_error_code("target_callback_failed")
 
     reply_content = reply_turn.content
     try:
@@ -248,6 +275,17 @@ async def _probe(
             target_output=reply_content,
             tools_called=reply_turn.tools_called,
         )
+    except UndecidedJudgment as error:
+        # An answer that could not be read decides nothing: no score, and no error either.
+        return base.model_copy(
+            update={
+                "input": payload,
+                "actual_output": reply_content,
+                "turns": [reply_turn],
+                "reason": f"undetermined: {error}",
+                "graph_revision": revision,
+            }
+        )
     except ClientError as error:
         operation = getattr(error, "operation_id", None)
         return base.model_copy(
@@ -260,7 +298,7 @@ async def _probe(
                 "graph_revision": revision,
                 "evaluation_operation_id": str(operation) if operation is not None else None,
             }
-        )
+        )._bind_error_code(error_code(getattr(error, "reason_code", None)) or getattr(error, "code", None))
     return base.model_copy(
         update={
             "input": payload,

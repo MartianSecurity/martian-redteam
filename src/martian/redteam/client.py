@@ -10,9 +10,10 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError, field_validator, model_validator
 
+from martian._errors import error_code, message, reference
 from martian._privacy import RedactionPolicy
 from martian.config import ConfigError, MartianConfig
-from martian_redteam.catalog.vulnerabilities import CATALOG_VERSION
+from martian_redteam.catalog.entries import HOSTED_CATALOG_VERSION
 from martian_redteam.client import ClientError
 from martian_redteam.types import EvaluatorContext, EvaluatorOutput, SimulatorContext, SimulatorOutput
 
@@ -96,10 +97,14 @@ class RedteamOperation(_Dto):
 class RedteamOperationError(ClientError):
     """Controlled failure retaining an operation ID for explicit status recovery."""
 
-    def __init__(self, operation_id: UUID, code: str) -> None:
+    def __init__(
+        self, operation_id: UUID, code: str, *, reason_code: str | None = None, request_id: str | None = None
+    ) -> None:
         self.operation_id = str(operation_id)
         self.code = code
-        super().__init__(f"redteam operation {operation_id}: {code}")
+        self.reason_code = error_code(reason_code)
+        self.request_id = reference(request_id)
+        super().__init__(message(self.reason_code or code, operation_id=operation_id, request_id=self.request_id))
 
 
 # Import adapter only: the modern namespace cannot configure direct Agents.
@@ -165,7 +170,13 @@ class Client:
     def _parse(self, response: httpx.Response, operation_id: UUID, kind: str | None = None) -> RedteamOperation:
         if response.status_code not in (200, 202, 410):
             # Never include vendor bodies, URLs, headers, or supplied credentials.
-            raise RedteamOperationError(operation_id, f"http_{response.status_code}")
+            raise RedteamOperationError(
+                operation_id,
+                f"http_{response.status_code}",
+                request_id=reference(
+                    response.headers.get("x-request-id"), exclude=self.config.token.get_secret_value()
+                ),
+            )
         try:
             operation = RedteamOperation.model_validate(response.json())
         except (ValueError, ValidationError):
@@ -207,7 +218,7 @@ class Client:
             identifier = UUID(str(operation_id)) if operation_id is not None else uuid4()
         except ValueError:
             raise ConfigError("operation_id must be a UUID") from None
-        payload = {"operation_id": str(identifier), "catalog_version": CATALOG_VERSION, **body}
+        payload = {"operation_id": str(identifier), "catalog_version": HOSTED_CATALOG_VERSION, **body}
         if self.agent_id is not None:
             payload["agent_id"] = str(self.agent_id)
         try:
@@ -227,15 +238,29 @@ class Client:
         except (httpx.RequestError, TimeoutError):
             raise RedteamOperationError(identifier, "execution_unknown_recover_by_id") from None
         if operation.state != "succeeded" or operation.result is None:
-            raise RedteamOperationError(identifier, f"operation_{operation.state}")
+            raise RedteamOperationError(
+                identifier,
+                f"operation_{operation.state}",
+                reason_code=operation.error.code if operation.error else None,
+            )
         return operation
 
     async def simulate(
-        self, context: SimulatorContext, *, prompt: str | None = None, operation_id: UUID | str | None = None
+        self,
+        context: SimulatorContext,
+        *,
+        prompt: str | None = None,
+        operation_id: UUID | str | None = None,
+        source: Literal["reviewed_cases"] | None = None,
     ) -> SimulatorOutput:
+        """One attack from the hosted engine. ``source="reviewed_cases"`` has it written from one
+        reviewed attack case and one attack skill, server side; the answer is the attack alone. It
+        needs an edition that includes reviewed cases: a Community organisation is refused (403)."""
         body: dict[str, object] = {"context": context.model_dump(exclude_none=True)}
         if prompt is not None:
             body["prompt"] = prompt
+        if source is not None:
+            body["source"] = source
         operation = await self._execute("simulate", body, operation_id)
         assert isinstance(operation.result, SimulatorResult)
         return SimulatorOutput(**operation.result.model_dump(), operation_id=str(operation.operation_id))
