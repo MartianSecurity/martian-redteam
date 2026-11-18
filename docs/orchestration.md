@@ -42,7 +42,7 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
 3. **Target.** `model_callback(payload)` in the customer process. Sync or async, `str` or `Turn`. Exceptions become `error_kind=target`. Each call has a deadline of `target_timeout_seconds` (default 120); an await that exceeds it is cancelled and recorded as `error_kind=target` (`target callback timed out after N seconds`). The generated attack is still stored on `TestCase.input` so reports remain useful.
 4. **Evaluate.** `Client.evaluate(...)` with the **encoded** payload (what the target actually saw), the reply, and `tools_called`. Custom vulns include `criteria`.
 
-`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. The **gate** then fails the process. Any other exception is an SDK defect and propagates out of `a_red_team` rather than being blamed on the target.
+`asyncio.gather` + `Semaphore(max_concurrent)` runs probes. Each `_probe` turns `ClientError` from the hosted calls (`error_kind=infrastructure`) and exceptions or timeouts from the callback (`error_kind=target`) into the `TestCase` so one failure does not cancel siblings. A judgment the service received but could not read (`UndecidedJudgment`, which the local service raises) is neither: the case keeps no score and no error, its reason starts `undetermined:`, and the gate fails it as a probe missing an evaluator score. The **gate** then fails the process. An unexpected SDK or report callback failure cancels and joins the other probes before propagating to the caller.
 
 ## Callback adapter
 
@@ -53,14 +53,14 @@ Attack `weight` is stored on the catalog object for later sampling. Phase 1 does
 - Async callables run on the event loop; synchronous callables run in worker threads so they cannot prevent deadlines or sibling probes from progressing.
 - Await if the result is awaitable.
 - `str` → `Turn(role="ai", content=str)`.
-- `Turn` → returned as-is.
+- `Turn` → returned as-is. Its `tool_calls` hold each call's `name`, `arguments`, `call_id`, `executed` and `result`; its `tools_called`, the older names-only form, still works alone and is filled in from `tool_calls` when only those are given. The hosted evaluate step receives the names. The report keeps the calls; their arguments and results are target content and are hidden unless the report includes target content, and the Markdown report lists the calls of failed or errored probes.
 - Anything else → `TypeError`, recorded as a target error if it happens inside `_probe`.
 
 Synchronous callbacks need their own network/I/O timeouts. Cancelling an await
 cannot terminate a running Python thread. The SDK awaits owned worker cleanup
 off the event loop before returning, so another CI session cannot switch its
 tracking/tenant context while callbacks are still active. Each assessment caps sync workers at
-`max_concurrent`, including after a timeout, and cancels queued work on exit. Late replies are discarded and never judged as a pass.
+`max_concurrent`, including after a timeout, and cancels queued work on exit. Cleanup waits for already-running callbacks even if the caller cancels again. Late replies are discarded and never judged as a pass.
 Use async callbacks for cooperative cancellation and make sync callbacks safe
 for the configured concurrency (or select `max_concurrent=1`).
 

@@ -10,6 +10,9 @@ from typing import Any
 
 import httpx
 
+from martian._errors import message, reference
+from martian._privacy import safe_text
+
 RETRY_STATUS = {429, 502, 503, 504}
 MAX_RETRY_AFTER = 30
 # Backend answers this 409 when two requests raced on one upload; the retry replays or lands.
@@ -17,11 +20,24 @@ RETRY_CONFLICT = "conflicted with a concurrent request"
 
 
 class BackendError(RuntimeError):
-    def __init__(self, status: int, detail: str, retry_after: float = 0.0) -> None:
-        super().__init__(f"Backend returned {status}: {detail}" if status else detail)
+    def __init__(
+        self,
+        status: int,
+        detail: str,
+        retry_after: float = 0.0,
+        *,
+        request_id: str | None = None,
+        code: str | None = None,
+    ) -> None:
         self.status = status
         self.detail = detail
         self.retry_after = retry_after
+        self.code = code or (f"http_{status}" if status else "invalid_response")
+        self.request_id = reference(request_id)
+        # Status-zero messages originate in the SDK's local receipt validators,
+        # not in HTTP/provider bodies. Keep their useful integrity explanation.
+        detail_message = safe_text(detail) + " " if not status and code is None else ""
+        super().__init__("Evals: " + detail_message + message(self.code, request_id=self.request_id))
 
 
 class Backend:
@@ -50,19 +66,33 @@ class Backend:
 
     def _send(self, method: str, path: str, *, json: dict[str, Any] | None = None, attempts: int = 1) -> dict[str, Any]:
         last = BackendError(0, "no Backend request attempted")
+        credential = self._client.headers["Authorization"].removeprefix("Bearer ")
         for attempt in range(attempts):
+            request_id = reference(json.get("request_id"), exclude=credential) if json else None
             try:
                 response = self._client.request(method, path, json=json)
             except httpx.TransportError as exc:
-                last = BackendError(0, f"could not reach Backend ({type(exc).__name__})")
+                last = BackendError(
+                    0, f"could not reach Backend ({type(exc).__name__})", code="connection_error", request_id=request_id
+                )
             else:
                 if 200 <= response.status_code < 300:
                     try:
                         body = response.json()
                     except ValueError:
-                        raise BackendError(response.status_code, "unexpected response body") from None
+                        raise BackendError(
+                            response.status_code,
+                            "unexpected response body",
+                            code="invalid_response",
+                            request_id=request_id,
+                        ) from None
                     if not isinstance(body, dict):
-                        raise BackendError(response.status_code, "unexpected response body")
+                        raise BackendError(
+                            response.status_code,
+                            "unexpected response body",
+                            code="invalid_response",
+                            request_id=request_id,
+                        )
                     return body
                 detail = ""
                 with suppress(ValueError):
@@ -75,7 +105,12 @@ class Backend:
                 if not math.isfinite(retry_after):
                     retry_after = 0.0
                 # Validation/error bodies may echo submitted target content or credentials.
-                last = BackendError(response.status_code, response.reason_phrase, retry_after)
+                last = BackendError(
+                    response.status_code,
+                    response.reason_phrase,
+                    retry_after,
+                    request_id=reference(response.headers.get("x-request-id"), exclude=credential) or request_id,
+                )
                 retryable = response.status_code in RETRY_STATUS or (
                     response.status_code == 409 and RETRY_CONFLICT in detail
                 )
@@ -103,3 +138,17 @@ class Backend:
         from uuid import UUID
 
         return self._send("GET", f"/v1/evals/ci/sessions/{UUID(session_id)}", attempts=3)
+
+    # A push (martian.evals.push) is idempotent on the server, so each request may be sent again.
+    def push_target(self) -> dict[str, Any]:
+        return self._send("GET", "/v1/push", attempts=3)
+
+    def push_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from uuid import UUID
+
+        return self._send("PUT", f"/v1/push/runs/{UUID(run_id)}", json=payload, attempts=3)
+
+    def push_cases(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from uuid import UUID
+
+        return self._send("POST", f"/v1/push/runs/{UUID(run_id)}/cases", json=payload, attempts=3)

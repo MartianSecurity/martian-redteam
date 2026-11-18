@@ -1,0 +1,271 @@
+# Run one eval suite file and report it on the pull request, in one comment
+# that every push edits. Callers check out their repository first.
+# `martian evals run` runs locally: a suite of deterministic checks or stored
+# replies needs no Martian account and no secret. The job needs
+# `contents: read` and `pull-requests: write`. Pull requests from forks and
+# from Dependabot get a read-only token: the report then goes to the job
+# summary only, with a warning. Use `pull_request`, never
+# `pull_request_target`: the suite runs the pull request's code.
+# The action fails with the suite's exit code after reporting. It does not
+# upload artifacts; the caller should upload the output folder with
+# if: always(). Walks up from github.action_path to pyproject.toml (package
+# root) and installs the SDK from there, like .github/actions/validate.
+# With baseline-branch, a push to that branch keeps the run's verdicts.json
+# (no inputs, replies or judge reasons) in the repository's Actions cache, and
+# a pull request is compared with the last one kept: `martian evals run
+# --baseline` gates on the comparison. The cache needs no permission and no
+# paid service.
+# With redteam, the action also runs a version 2 red team run file with
+# `martian redteam run`, locally on the run file's own models, and adds its
+# result to the same comment. That step clears MARTIAN_API_URL and
+# MARTIAN_API_TOKEN, so it needs no Martian token and never reaches Martian;
+# the model key comes from the step's env. Give suite, redteam or both.
+# See docs/gate-and-ci.md.
+name: Martian Evals
+description: Run a Martian eval suite file, a red team run file or both, and keep one pull-request comment with the result
+
+inputs:
+  suite:
+    description: Path to the suite file (evals.yaml), relative to the caller workspace. Give it, redteam, or both
+    required: false
+    default: ""
+  output:
+    description: >
+      Folder for results.jsonl, summary.json and junit.xml, relative to the
+      caller workspace. Give each suite its own folder.
+    required: false
+    default: results/evals
+  github-token:
+    description: Token that writes the comment; it needs pull-requests write
+    required: false
+    default: ${{ github.token }}
+  comment-key:
+    description: >
+      Names the comment this run keeps up to date. Empty uses the suite path.
+      Give each job its own key when several jobs run the same suite on one
+      pull request. A suite's own matrix needs no key: its combinations share
+      one comment and one baseline.
+    required: false
+    default: ""
+  comment-author:
+    description: >
+      Login that writes the comment. Change it only when github-token is not
+      the workflow token.
+    required: false
+    default: github-actions[bot]
+  redteam:
+    description: >
+      Path to a version 2 red team run file (redteam.yaml), relative to the
+      caller workspace. It runs locally with the models it names; its result
+      joins the comment. Empty runs no red team.
+    required: false
+    default: ""
+  redteam-output:
+    description: >
+      Folder for the red team reports (redteam-report.json, redteam.sarif,
+      redteam-junit.xml and the rest), relative to the caller workspace.
+    required: false
+    default: results/redteam
+  baseline-branch:
+    description: >
+      Branch whose last result a pull request is compared with, usually the
+      default branch. A push to it keeps the run's result; a pull request is
+      compared with the last result kept and fails on a change worse than
+      noise, on any case that newly fails a security check, or on a failed case
+      with no result to compare with. Empty turns the comparison off and gates
+      every run on its own.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Check the inputs
+      shell: bash
+      env:
+        MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
+        MARTIAN_REDTEAM_RUN_FILE: ${{ inputs.redteam }}
+      run: |
+        if [ -z "$MARTIAN_EVALS_SUITE" ] && [ -z "$MARTIAN_REDTEAM_RUN_FILE" ]; then
+          echo "::error title=Martian Evals::Give suite, redteam or both."
+          exit 2
+        fi
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        version: "0.10.0"
+        python-version: "3.12"
+
+    - name: Install martian-sdk
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo_root="${GITHUB_ACTION_PATH}"
+        while [ ! -f "${repo_root}/pyproject.toml" ]; do
+          parent="$(cd "${repo_root}/.." && pwd)"
+          if [ "${parent}" = "${repo_root}" ]; then
+            echo "could not find pyproject.toml above ${GITHUB_ACTION_PATH}" >&2
+            exit 1
+          fi
+          repo_root="${parent}"
+        done
+        # A second use of this action in the same job reuses the environment.
+        uv venv --allow-existing "${RUNNER_TEMP}/martian-evals"
+        uv pip install --python "${RUNNER_TEMP}/martian-evals" "${repo_root}[evals]"
+        echo "root=${repo_root}" >> "${GITHUB_OUTPUT}"
+
+    # Inputs reach the scripts through env and are referenced as quoted shell
+    # variables, never by expression substitution, so a crafted input cannot
+    # inject commands.
+    # A push to baseline-branch keeps its result ("keep"); a pull request is
+    # compared with the last one kept ("compare"). Each suite (comment-key)
+    # has its own cache entries, saved only on baseline-branch, so a pull
+    # request's own runs never become its baseline: a cache saved by a pull
+    # request run is scoped to that pull request, and none is saved here.
+    - name: Find the baseline
+      id: baseline
+      if: inputs.suite != ''
+      shell: bash
+      env:
+        MARTIAN_EVALS_BASELINE_BRANCH: ${{ inputs.baseline-branch }}
+        MARTIAN_EVALS_COMMENT_KEY: ${{ inputs.comment-key || inputs.suite }}
+      run: |
+        set -euo pipefail
+        mode=""
+        if [ -n "$MARTIAN_EVALS_BASELINE_BRANCH" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            mode=compare
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/${MARTIAN_EVALS_BASELINE_BRANCH}" ]; then
+            mode=keep
+          fi
+        fi
+        suite_key="$(printf '%s' "$MARTIAN_EVALS_COMMENT_KEY" | sha256sum | cut -c1-16)"
+        {
+          echo "mode=${mode}"
+          echo "dir=${RUNNER_TEMP}/martian-evals-baseline/${suite_key}"
+          echo "key=martian-evals-baseline-v1-${suite_key}-"
+        } >> "${GITHUB_OUTPUT}"
+
+    # The primary key never exists; the prefix restores the newest entry kept
+    # on this branch's base or the default branch.
+    - name: Restore the baseline
+      if: steps.baseline.outputs.mode == 'compare'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.baseline.outputs.dir }}
+        key: ${{ steps.baseline.outputs.key }}none
+        restore-keys: ${{ steps.baseline.outputs.key }}
+
+    - name: Run suite
+      id: run
+      if: inputs.suite != ''
+      shell: bash
+      env:
+        MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_BASELINE_MODE: ${{ steps.baseline.outputs.mode }}
+        MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
+      run: |
+        set -uo pipefail
+        # Every run that finishes rewrites these: summary.json, or matrix.json
+        # for a suite with a matrix. Removing them first means a run that stops
+        # early cannot be reported, or kept, with an earlier result.
+        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/matrix.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json"
+        baseline=()
+        if [ "$MARTIAN_EVALS_BASELINE_MODE" = "compare" ] && [ -f "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json" ]; then
+          baseline=(--baseline "$MARTIAN_EVALS_BASELINE_DIR")
+          commit="$(head -c 64 "${MARTIAN_EVALS_BASELINE_DIR}/commit" 2>/dev/null | tr -cd '0-9a-f')"
+          echo "baseline-commit=${commit}" >> "${GITHUB_OUTPUT}"
+        fi
+        status=0
+        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --output "$MARTIAN_EVALS_OUTPUT" "${baseline[@]}" || status=$?
+        echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+
+    # Only a run in which every case has a verdict (exit 0 or 1) is kept.
+    - name: Prepare the baseline
+      id: keep
+      if: steps.baseline.outputs.mode == 'keep' && (steps.run.outputs.exit-code == '0' || steps.run.outputs.exit-code == '1')
+      shell: bash
+      env:
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$MARTIAN_EVALS_BASELINE_DIR"
+        cp "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json"
+        printf '%s\n' "$GITHUB_SHA" > "${MARTIAN_EVALS_BASELINE_DIR}/commit"
+
+    - name: Keep the baseline
+      if: steps.keep.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.baseline.outputs.dir }}
+        key: ${{ steps.baseline.outputs.key }}${{ github.run_id }}-${{ github.run_attempt }}
+
+    # The red team run is local: the run file's models generate and judge
+    # the attacks with the key in the step's env. The Martian connection
+    # variables are cleared, so a token set on the job is never needed or
+    # read here. Its exit code is 0 (the gate passed, with or without
+    # warnings), 1 (it failed) or 2 (the run could not start).
+    - name: Run red team
+      id: redteam
+      if: inputs.redteam != ''
+      shell: bash
+      env:
+        MARTIAN_REDTEAM_RUN_FILE: ${{ inputs.redteam }}
+        MARTIAN_REDTEAM_OUTPUT: ${{ inputs.redteam-output }}
+        MARTIAN_API_URL: ""
+        MARTIAN_API_TOKEN: ""
+      run: |
+        set -uo pipefail
+        # A run that stops early must not be reported with an earlier result.
+        rm -f "${MARTIAN_REDTEAM_OUTPUT}/redteam-report.json"
+        status=0
+        "${RUNNER_TEMP}/martian-evals/bin/martian" redteam run "$MARTIAN_REDTEAM_RUN_FILE" --output "$MARTIAN_REDTEAM_OUTPUT" --no-store --format sarif,junit,html || status=$?
+        echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+
+    - name: Report on the pull request
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        MARTIAN_EVALS_ROOT: ${{ steps.install.outputs.root }}
+        MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
+        MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
+        MARTIAN_EVALS_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        MARTIAN_EVALS_COMMENT_KEY: ${{ inputs.comment-key }}
+        MARTIAN_EVALS_COMMENT_AUTHOR: ${{ inputs.comment-author }}
+        MARTIAN_EVALS_PR_NUMBER: ${{ github.event.pull_request.number }}
+        MARTIAN_EVALS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        MARTIAN_EVALS_BASELINE_BRANCH: ${{ steps.baseline.outputs.mode == 'compare' && inputs.baseline-branch || '' }}
+        MARTIAN_EVALS_BASELINE_SHA: ${{ steps.run.outputs.baseline-commit }}
+        MARTIAN_REDTEAM_RUN_FILE: ${{ inputs.redteam }}
+        MARTIAN_REDTEAM_OUTPUT: ${{ inputs.redteam-output }}
+        MARTIAN_REDTEAM_EXIT_CODE: ${{ steps.redteam.outputs.exit-code }}
+      run: '"${RUNNER_TEMP}/martian-evals/bin/python" "${MARTIAN_EVALS_ROOT}/scripts/evals_pr_comment.py"'
+
+    # The suite's exit code is the gate: 0 passed, 1 a case failed, 2 a case
+    # has no verdict or the suite file is invalid. Compared with a baseline,
+    # 1 is a change worse than noise, a case that newly fails a security
+    # check, or a failed case with no result to compare with. The red team
+    # run's exit code joins it: the action fails with 2 when either did not
+    # finish, else with 1 when either failed.
+    - name: Apply the result
+      if: always() && (steps.run.outputs.exit-code != '' || steps.redteam.outputs.exit-code != '')
+      shell: bash
+      env:
+        MARTIAN_EVALS_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        MARTIAN_REDTEAM_EXIT_CODE: ${{ steps.redteam.outputs.exit-code }}
+      run: |
+        status=0
+        for code in "$MARTIAN_EVALS_EXIT_CODE" "$MARTIAN_REDTEAM_EXIT_CODE"; do
+          if [ -z "$code" ] || [ "$code" = "0" ]; then
+            continue
+          elif [ "$code" = "1" ]; then
+            [ "$status" = "0" ] && status=1
+          else
+            status="$code"
+          fi
+        done
+        exit "$status"

@@ -34,14 +34,14 @@ jobs:
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
-          wheel = Path("ci/vendor/martian_sdk-0.1.0-py3-none-any.whl")
+          wheel = Path("ci/vendor/martian_sdk-0.1.1-py3-none-any.whl")
           manifest = json.loads(Path("ci/vendor/release-checksums.json").read_text())
           if hashlib.sha256(wheel.read_bytes()).hexdigest() != manifest[wheel.name]:
               raise SystemExit("SDK artifact checksum mismatch")
           PY
           uv venv .venv
           uv pip install --python .venv \
-            'ci/vendor/martian_sdk-0.1.0-py3-none-any.whl[evals]' \
+            'ci/vendor/martian_sdk-0.1.1-py3-none-any.whl[evals]' \
             -r requirements.txt
       - name: Require evals and redteam to complete and pass
         env:

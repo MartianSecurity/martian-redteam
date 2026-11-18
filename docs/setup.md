@@ -1,15 +1,16 @@
 # Setup
 
-Use Python 3.12+ and the unpublished reviewed SDK artifacts described in
-[release preparation](releasing.md). A source checkout can use
-`uv sync --locked --extra evals`; the base installation supports standalone
-redteam, while the `evals` extra adds pytest/MLflow and persisted CI.
+Use Python 3.12+. Install the published package with
+`python -m pip install 'martian-sdk[evals]'`, pinning an exact version in CI. A
+source checkout can use `uv sync --locked --extra evals`. The base installation
+supports standalone redteam, while the `evals` extra adds pytest/MLflow and
+persisted CI.
 
 Configure one approved **Backend origin** and one organisation API token.
 Create a key under the console's API Keys settings with the needed evals/CI
 capabilities and `redteam:run`; save its once-shown value in a secret manager.
 Existing evals-only tokens do not acquire the new capability automatically.
-The coordinated service candidate must be deployed/enabled before hosted use.
+The SDK APIs must be enabled for the organisation before hosted use.
 
 ```bash
 # Inject these values from your approved secret manager/environment.

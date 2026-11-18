@@ -1,4 +1,4 @@
-"""Built-in vulnerability ids, types, and gate policy."""
+"""Built-in vulnerability ids, types, and gate policy, from the catalogue entries (:mod:`.entries`)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CATALOG_VERSION = "0.2.0"
+from martian_redteam.catalog.entries import CATALOG_VERSION as CATALOG_VERSION
+from martian_redteam.catalog.entries import ENTRIES, CatalogEntry
 
 
 class Vulnerability(BaseModel):
@@ -31,94 +32,34 @@ def _vuln(id: str, label: str, allowed: tuple[str, ...], *, gated: bool = False)
     return Vulnerability(id=id, label=label, allowed_types=allowed, gated=gated, types=allowed)
 
 
-def PromptLeakage(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "prompt_leakage",
-        "Prompt leakage",
-        ("system_prompt", "instructions", "credentials"),
-        gated=True,
-    ).with_types(types)
+def from_entry(entry: CatalogEntry, types: Sequence[str] | None = None) -> Vulnerability:
+    """The catalogue entry as the vulnerability a probe runs, with ``types`` selected (all by default)."""
+    return _vuln(entry.id, entry.label, entry.types, gated=entry.gated).with_types(types)
 
 
-def ExcessiveAgency(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "excessive_agency",
-        "Excessive agency",
-        ("functionality", "permissions", "autonomy"),
-        gated=True,
-    ).with_types(types)
+def _factory(name: str) -> Callable[..., Vulnerability]:
+    item = ENTRIES[name]
+
+    def make(types: Sequence[str] | None = None) -> Vulnerability:
+        return from_entry(item, types)
+
+    make.__name__ = make.__qualname__ = name
+    make.__doc__ = f"{item.label}: the catalogue entry ``{item.id}``."
+    return make
 
 
-def Toxicity(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln("toxicity", "Toxicity", ("insults", "profanity", "hate")).with_types(types)
-
-
-def IllegalActivity(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "illegal_activity",
-        "Illegal activity",
-        ("violent_crimes", "cybercrime", "fraud"),
-    ).with_types(types)
-
-
-def PIILeakage(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "pii_leakage",
-        "PII leakage",
-        ("direct_disclosure", "session_leak", "database_access"),
-    ).with_types(types)
-
-
-def Bias(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln("bias", "Bias", ("religion", "politics", "gender", "race")).with_types(types)
-
-
-def Misinformation(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "misinformation",
-        "Misinformation",
-        ("factual_errors", "unsupported_claims", "expertize_misrepresentation"),
-    ).with_types(types)
-
-
-def RBAC(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "rbac",
-        "RBAC",
-        ("role_bypass", "privilege_escalation", "unauthorized_role_assumption"),
-        gated=True,
-    ).with_types(types)
-
-
-def SSRF(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "ssrf",
-        "SSRF",
-        ("internal_service_access", "cloud_metadata_access", "port_scanning"),
-        gated=True,
-    ).with_types(types)
-
-
-def SQLInjection(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "sql_injection",
-        "SQL injection",
-        ("blind_sql_injection", "union_based_injection", "error_based_injection"),
-        gated=True,
-    ).with_types(types)
-
-
-def ShellInjection(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln(
-        "shell_injection",
-        "Shell injection",
-        ("command_injection", "system_command_execution", "shell_escape_sequences"),
-        gated=True,
-    ).with_types(types)
-
-
-def Robustness(types: Sequence[str] | None = None) -> Vulnerability:
-    return _vuln("robustness", "Robustness", ("input_overreliance", "hijacking")).with_types(types)
+PromptLeakage = _factory("PromptLeakage")
+ExcessiveAgency = _factory("ExcessiveAgency")
+Toxicity = _factory("Toxicity")
+IllegalActivity = _factory("IllegalActivity")
+PIILeakage = _factory("PIILeakage")
+Bias = _factory("Bias")
+Misinformation = _factory("Misinformation")
+RBAC = _factory("RBAC")
+SSRF = _factory("SSRF")
+SQLInjection = _factory("SQLInjection")
+ShellInjection = _factory("ShellInjection")
+Robustness = _factory("Robustness")
 
 
 def CustomVulnerability(
@@ -145,25 +86,13 @@ def CustomVulnerability(
     )
 
 
-VULNERABILITIES: dict[str, Callable[..., Vulnerability]] = {
-    "PromptLeakage": PromptLeakage,
-    "ExcessiveAgency": ExcessiveAgency,
-    "Toxicity": Toxicity,
-    "IllegalActivity": IllegalActivity,
-    "PIILeakage": PIILeakage,
-    "Bias": Bias,
-    "Misinformation": Misinformation,
-    "RBAC": RBAC,
-    "SSRF": SSRF,
-    "SQLInjection": SQLInjection,
-    "ShellInjection": ShellInjection,
-    "Robustness": Robustness,
-}
+VULNERABILITIES: dict[str, Callable[..., Vulnerability]] = {name: _factory(name) for name in ENTRIES}
+"""A factory for every catalogue entry, by YAML name. Each takes ``types`` (all by default)."""
 
 _VULNERABILITY_LOOKUP: dict[str, Callable[..., Vulnerability]] = {}
-for _name, _factory in VULNERABILITIES.items():
-    _VULNERABILITY_LOOKUP[_name.lower()] = _factory
-    _VULNERABILITY_LOOKUP[_factory().id] = _factory
+for _name, _make in VULNERABILITIES.items():
+    _VULNERABILITY_LOOKUP[_name.lower()] = _make
+    _VULNERABILITY_LOOKUP[ENTRIES[_name].id] = _make
 
 
 def get_vulnerability(

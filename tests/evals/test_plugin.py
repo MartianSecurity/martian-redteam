@@ -1,4 +1,4 @@
-"""The kit end to end: real pytest, real MLflow 3.16.1 local store, loopback Backend stand-in."""
+"""The kit end to end: real pytest, real MLflow local store, loopback Backend stand-in."""
 
 import json
 import os
@@ -81,12 +81,22 @@ class Plugin(unittest.TestCase):
             self.assertIn("verdict=passed", out)
 
     def test_agent_calls_are_made_once_per_item(self):
-        # SKIP_TRACE_VALIDATION is set by the plugin, so the first row is not predicted twice.
-        with StubBackend() as backend:
-            code, out = run_pytest("pass", backend)
+        sample = SAMPLE.replace(
+            "def _agent(message):",
+            'def _agent(message):\n    with open(os.environ["CALL_LOG"], "a") as handle:\n'
+            '        handle.write(message + "\\n")',
+        )
+        with tempfile.TemporaryDirectory() as work, StubBackend() as backend:
+            log = Path(work, "calls")
+            code, out = run_pytest(
+                "pass",
+                backend,
+                sample=sample,
+                CALL_LOG=str(log),
+                MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION="false",
+            )
             self.assertEqual(code, 0, out)
-            rows = backend.uploads()[0][3]["rows"]
-            self.assertEqual(len(rows), 3)
+            self.assertCountEqual(log.read_text().splitlines(), [row["prompt"] for row in ITEMS])
 
     def test_failing_row_fails_the_job_and_is_still_recorded(self):
         with StubBackend() as backend:

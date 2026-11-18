@@ -9,8 +9,8 @@
 # system_config.max_concurrent at 2 or 1 unless your granted limits support more.
 #
 # Pin third-party actions to SHAs (already done below). Pin
-# MorningHQ/martian-redteam to a release tag or a full commit SHA; replace
-# v0.1.0 below with the release you depend on. @main moves under you.
+# MartianSecurity/martian-redteam to a release tag or a full commit SHA; replace
+# v0.1.1 below with the release you depend on. @main moves under you.
 #
 # For the reusable-workflow style, see examples/reusable-workflow.yml.
 
@@ -33,9 +33,9 @@ jobs:
           persist-credentials: false
 
       - name: Run Martian redteam
-        uses: MorningHQ/martian-redteam@v0.1.0 # or a full commit SHA
+        uses: MartianSecurity/martian-redteam@v0.1.1 # or a full commit SHA
         # Dogfood only, never in production:
-        # uses: MorningHQ/martian-redteam@main
+        # uses: MartianSecurity/martian-redteam@main
         with:
           config: examples/config.yaml
           output: results

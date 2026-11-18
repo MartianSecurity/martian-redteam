@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from martian._errors import concise_problems
 from martian._privacy import safe_text
 from martian.evals.client import Backend, BackendError
 from martian.evals.config import KitConfig, current_config
@@ -156,7 +157,10 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
         None
         if kit.offline
         else Backend(
-            kit.connection.api_url, kit.connection.token.get_secret_value(), trust_env=kit.connection.trust_env
+            kit.connection.api_url,
+            kit.connection.token.get_secret_value(),
+            timeout=kit.connection.request_timeout_seconds,
+            trust_env=kit.connection.trust_env,
         )
     )
     tests: list[dict[str, Any]] = []
@@ -252,7 +256,7 @@ def finish(session: pytest.Session, exitstatus: int) -> None:
                 f"martian-evals: session {receipt.session_id} verdict={receipt.verdict} "
                 f"tests={response.get('passed_count')}/{response.get('test_count')}"
             )
-        for problem in problems:
+        for problem in concise_problems(problems):
             terminal.write_line("martian-evals: FAIL " + safe_text(problem))
         terminal.write_line(f"martian-evals: local store {STATE.store_dir}")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
