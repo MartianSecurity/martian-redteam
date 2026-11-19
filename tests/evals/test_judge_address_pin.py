@@ -403,6 +403,8 @@ def test_a_provider_that_cannot_be_pinned_is_refused_not_called_without_the_pin(
         ("fe80::1%eth0", False),
         ("::ffff:10.1.2.3", False),  # a private address written as an IPv6 one
         ("::ffff:127.0.0.1", False),
+        ("224.0.0.1", False),
+        ("ff02::1", False),
         ("not an address", False),
     ],
 )

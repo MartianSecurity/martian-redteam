@@ -58,12 +58,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
 from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.staticfiles import StaticFiles
-from starlette.types import Scope
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from martian.evals import local_runs, local_targets
 from martian.evals.judge_settings import FileJudgeSettings
@@ -235,6 +235,45 @@ class UiFiles(StaticFiles):
         return response
 
 
+def _same_origin_write(request: Request) -> bool:
+    # Native clients (including OTLP collectors) ordinarily send neither browser header.
+    sites = request.headers.getlist("sec-fetch-site")
+    if sites and sites not in (["same-origin"], ["none"]):
+        return False
+    origins = request.headers.getlist("origin")
+    if not origins:
+        return True
+    url = request.url
+    try:
+        port = url.port
+    except ValueError:
+        return False
+    authority = url.hostname
+    if authority is None:
+        return False
+    if port is not None and port != (443 if url.scheme == "https" else 80):
+        authority = f"{authority}:{port}"
+    return origins == [f"{url.scheme}://{authority}"]
+
+
+class _BrowserWrites:
+    """Refuse cross-origin browser writes before the local app grants its owner identity."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["method"] not in {"GET", "HEAD", "OPTIONS"}
+            and not _same_origin_write(Request(scope))
+        ):
+            response = JSONResponse({"detail": "Local Evals only accepts same-origin browser writes"}, status_code=403)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS, *, concurrency: int = 1) -> FastAPI:
     """The local edition as an application: the core on SQLite in ``home`` for the single local
     user, with a worker that serves the folder's queue beside the app and runs each run in a
@@ -287,6 +326,7 @@ def create_local_app(home: Path, ui: Path, hosts: Sequence[str] = ALLOWED_HOSTS,
     app.include_router(local_runs.router)
     app.include_router(local_redteam.router)
     app.mount("/", UiFiles(directory=ui, html=True), name="ui")
+    app.add_middleware(_BrowserWrites)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
     return app
 

@@ -55,7 +55,7 @@ The root [composite action](../action.yml) and [reusable workflow](../.github/wo
 run **`martian redteam run`**, a local report/gate through Backend. They do not
 persist a CI session. Both require a Backend URL and token with `redteam:run`.
 For a red team run on your own models with no Martian token, use the evals
-action's `redteam` input ([below](#red-team-results-in-the-comment)).
+action's `redteam` input ([below](#red-team-results-in-the-job-summary)).
 The action accepts YAML path, output, `max-concurrent` and `attacks-per-vuln`.
 Use `martian ci` for console session history/export requirements.
 
@@ -65,16 +65,18 @@ refs/environments for credential access, contents-read checkout and
 code. Validate configuration without secrets first. The callback has its own
 provider/key setup; it is executed locally and can have side effects.
 
-## Evals on a pull request, with one comment
+<a id="evals-on-a-pull-request-with-one-comment"></a>
+
+## Evals checks and job summaries on pull requests
 
 The [evals action](../.github/actions/evals/action.yml) runs one
-[suite file](evals.md#run-a-suite-file-locally) with `martian evals run` and
-reports it on the pull request. Reference it as
+[suite file](evals.md#run-a-suite-file-locally) with `martian evals run --fresh` and
+writes the result to the Actions job summary. Reference it as
 `MartianSecurity/martian-redteam/.github/actions/evals@<tag or full SHA>` after
 `actions/checkout`. [examples/github-action](../examples/github-action/) holds
 a [workflow](../examples/github-action/workflow.yml), a passing suite and a
 failing one that is the passing suite with two replies broken, and the
-comments they produce: [passed](../examples/github-action/comments/passed.md),
+summaries they produce: [passed](../examples/github-action/comments/passed.md),
 [failed](../examples/github-action/comments/failed.md),
 [compared](../examples/github-action/comments/compared.md), the failing suite
 compared with a result of the passing one, as a pull request that broke two
@@ -87,25 +89,16 @@ prompts.
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `suite` | empty | The suite file, relative to the workspace. Give `suite`, `redteam` or both |
-| `redteam` | empty | A version 2 [red team run file](redteam-run-file.md), relative to the workspace; see [red team results in the comment](#red-team-results-in-the-comment) |
+| `redteam` | empty | A version 2 [red team run file](redteam-run-file.md), relative to the workspace; see [red team results in the job summary](#red-team-results-in-the-job-summary) |
 | `redteam-output` | `results/redteam` | Folder for the red team reports |
 | `output` | `results/evals` | Folder for `results.jsonl`, `summary.json`, `junit.xml` and `verdicts.json`; one per suite |
-| `github-token` | the workflow token | Writes the comment |
-| `comment-key` | the suite path | Names the comment and the suite's baseline; give each job its own key when several jobs run one suite on a pull request. A suite's own [matrix](evals.md#a-matrix-of-prompts-and-models) needs none: its combinations share one comment and one baseline |
-| `comment-author` | `github-actions[bot]` | Login that writes the comment; change it only with another token |
+| `comment-key` | the suite path | Identifies the suite's baseline when several jobs run the same suite on a pull request |
 | `baseline-branch` | empty: off | Branch whose last result a pull request is compared with, usually the default branch; see [compared with the last result of main](#compared-with-the-last-result-of-main) |
 
 - **No Martian account.** The run is local, as on a laptop. A suite that grades
   stored replies with deterministic checks needs no secret at all. An LLM judge
   or a URL target reads its provider key or agent credential from the step's
   `env`.
-- **One comment per suite.** The comment starts with a hidden marker,
-  `<!-- martian-evals-comment: <key> -->`. Each run looks through the pull
-  request's comments for that marker on a comment by `comment-author`, edits
-  it, and creates one only when there is none. A comment by anyone else that
-  quotes the marker is left alone. Give the job a `concurrency` group per pull
-  request and suite, as the example does, so two quick pushes cannot both
-  create it.
 - **What it says.** The headline follows the exit code: passed (0), failed (1),
   or did not finish (2, a case without a verdict, a run that stopped at one of its
   [limits](evals.md#run-a-suite-file-locally) or an invalid suite file). A run
@@ -136,67 +129,36 @@ prompts.
   baseline, and how it ended; then, for up to ten combinations, their cases
   that went from pass to fail, failed or have no verdict, five of each by
   name. Inputs, replies and judge reasons stay
-  out of the comment; a case without a verdict shows only the SDK's own
+  out of the summary; a case without a verdict shows only the SDK's own
   target-failure wording. A run that stops before writing results says so
-  instead of repeating an earlier result. The same text goes to the job summary
-  on every event, and the comment is written only for `pull_request` events.
+  and the job summary records that result for the current run.
 - **The exit code is the gate.** The action fails with the suite's exit code
   after reporting; compared with a baseline, that is the comparison's gate
   (below). It uploads nothing; upload `summary.json`, `junit.xml`,
-  `verdicts.json` and `comparison.json` with `if: always()`, and keep
+  `verdicts.json` and `comparison.json` when `results-written` is `true`, including on
+  failed gates. Keep
   `results.jsonl` and `mlflow.db` out of shared artifacts, because they hold
   prompts and replies.
-- **Permissions.** The job needs `contents: read` and `pull-requests: write`,
-  nothing more. Pull requests from forks and from Dependabot get a read-only
-  token: GitHub refuses the comment with 403, the action prints a warning, and
-  the result is in the job summary only. Any other GitHub API failure fails the
-  step. Trigger on `pull_request`, never `pull_request_target`: the suite runs
-  the pull request's code, and `pull_request_target` would give that code a
-  write token and the repository's secrets.
+- **Permissions.** Give the workflow `contents: read` and check out with
+  `persist-credentials: false` on `pull_request`. The action writes the job
+  summary without an API token. Remove `pull-requests: write`, `github-token`
+  and `comment-author` from workflows migrating from the comment-based action.
+  Keep provider credentials on reviewed refs or jobs with approval.
 
-### Red team results in the comment
+<a id="red-team-results-in-the-comment"></a>
 
-With `redteam`, the action also runs that version 2 run file with
-`martian redteam run --no-store --format sarif,junit,html` and adds its result
-to the same comment. [examples/github-action](../examples/github-action/)
-holds a [sample run file](../examples/github-action/redteam/redteam.yaml), a
-deliberately weak [agent](../examples/github-action/redteam/agent.py), the
-`redteam` job of the [workflow](../examples/github-action/workflow.yml), and
-the [comment](../examples/github-action/comments/redteam.md) they produce.
+### Red team results in the job summary
 
-- **No Martian token.** The run is local: the run file's `models` generate and
-  judge the attacks with your own key, read from the step's `env` (such as
-  `OPENAI_API_KEY`). The step clears `MARTIAN_API_URL` and `MARTIAN_API_TOKEN`,
-  so a token set on the job is neither needed nor read, and nothing reaches
-  Martian. A run file without `models` cannot run here. The pull request's
-  code runs in the step and can read the model key, so use a key kept for red
-  team runs; GitHub gives no secrets to pull requests from forks.
-- **What it says.** The headline follows the run's exit code: passed, passed
-  with warnings, failed, or did not finish (exit 2, or no report). Below it
-  are the attempts by outcome, the service, attacker and judge models and
-  attack methods, the budget and what was spent, the attacker's refusal rate,
-  the confirmed and suspected finding counts with the success rate per attempt
-  and its 95% interval (an upper bound when nothing succeeded), up to 25
-  confirmed findings by vulnerability, type, attack method, label, level,
-  severity and verification, the suspected count, errors by kind, and the
-  gate's failures and warnings. It is read from `redteam-report.json`
-  ([red team reports](redteam-reports.md)), which holds no attack or reply
-  text, so neither does the comment.
-- **The key.** With a suite, the comment is keyed by `comment-key` or the
-  suite path; with a red team run file only, by `comment-key` or the run
-  file's path.
-- **The exit code.** The action fails with 2 when the suite or the red team
-  run did not finish, else with 1 when either failed, else it passes.
-- **The reports.** The step writes `redteam-report.json`, `redteam-report.md`,
-  `redteam-report.html`, `redteam.sarif` and `redteam-junit.xml` to
-  `redteam-output`. Upload them with `if: always()`. To show findings in code
-  scanning, upload `redteam.sarif` with `github/codeql-action/upload-sarif`,
-  which needs `security-events: write`.
+The shared renderer includes an existing red team result when the action has
+one. Its gate status and counts appear in the same job summary. The
+[red team report guide](redteam-reports.md) describes the fields. The composite
+returns 2 if either run did not finish, 1 if either gate failed, or 0 if both
+passed.
 
 ### Compared with the last result of main
 
 On its own, a run fails on any failed case, so a case that already fails on
-`main` fails every pull request, and the comment cannot say what the pull
+`main` fails every pull request, and the summary cannot say what the pull
 request changed. With `baseline-branch: main`, and the workflow triggered on
 `push` to `main` as well as on `pull_request`, the action compares each pull
 request with the last result of `main`, case by case:

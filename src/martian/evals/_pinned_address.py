@@ -60,8 +60,8 @@ def public_addresses_only(host: str, address: str) -> bool:
     except ValueError:
         return False
     if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-        return parsed.ipv4_mapped.is_global
-    return parsed.is_global
+        return parsed.ipv4_mapped.is_global and not parsed.ipv4_mapped.is_multicast
+    return parsed.is_global and not parsed.is_multicast
 
 
 def _open(family: int, proto: int, address: Any, timeout: object, source_address: Any, options: Any) -> socket.socket:

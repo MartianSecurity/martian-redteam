@@ -55,6 +55,7 @@ from martian.redteam.engine.service import ServiceSelectionError
 from martian.redteam.model import RedteamRun
 from martian.redteam.runfile import RunFile
 from martian.redteam.server import RunStart
+from martian.redteam.server.push import CLIENT_EXECUTED
 from martian.redteam.store import RedteamStore, finished
 from martian.redteam.verify.canary import planted_run_file
 
@@ -287,7 +288,11 @@ class LocalLauncher:
             if earlier is None:
                 raise HTTPException(404, "Red team run not found")
             launch = earlier.provenance.get("launch")
-            if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
+            if (
+                earlier.provenance.get("execution") == CLIENT_EXECUTED
+                or not isinstance(launch, dict)
+                or not isinstance(launch.get("run_file"), dict)
+            ):
                 raise HTTPException(
                     409,
                     "This run was not started here, so its run file is not kept: "

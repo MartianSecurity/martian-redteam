@@ -27,9 +27,8 @@ the server's contract does not have.
   is the route a schedule of re-checks calls; the core keeps no schedule.
 - ``GET /v1/evals/judge-rechecks/{recheck_id}`` is one re-check: its state, counts, error and the
   calibration it saved.
-- A calibration's labelled items are people's answers. An item of a review queue with blind double
-  review that the reader has not answered themselves has its ``label`` as ``null``, as the review
-  routes hide it (:mod:`martian.evals.server.blind`).
+- Calibration responses project their labelled items and statistics to answers the reader may
+  see. Re-checks require access to the full set they re-grade.
 
 Route functions have no docstrings: FastAPI would publish one as the operation's description.
 """
@@ -44,7 +43,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from martian.evals._digits import ascii_digits
-from martian.evals.agreement import MINIMUM_LABELLED, JudgeAgreement
+from martian.evals.agreement import KINDS, MINIMUM_LABELLED, JudgeAgreement, comparable, compare, value_kind
 from martian.evals.calibration import (
     NOT_CALIBRATED,
     calibratable,
@@ -114,24 +113,47 @@ def recheck_id_for(request_id: str) -> str:
     return str(derived_id("judge-recheck", request_id))
 
 
-def _item_out(item: LabelledItem, judge: str, hidden: set[tuple[str, str, str]]) -> dict[str, Any]:
-    found = item.model_dump(mode="json")
-    if item.run_id is not None and (item.run_id, item.case_id or "", judge) in hidden:
-        found["label"] = None
-    return found
+def _item_is_hidden(item: LabelledItem, judge: str, hidden: set[tuple[str, str, str]]) -> bool:
+    return (item.run_id or "", item.case_id or "", judge) in hidden
 
 
 async def hidden_labels(
     records: RecordStore, principal: Principal, key: str, calibrations: list[JudgeCalibration]
 ) -> set[tuple[str, str, str]]:
-    """The labelled items of the calibrations whose label the principal may not read: answers in a
-    blind queue to an item they have not answered, by run, case and question."""
-    runs = {item.run_id for calibration in calibrations for item in calibration.items if item.run_id}
-    return await hidden_of_runs(records, principal, key, runs) if runs else set()
+    """Find unreadable answers for these judges, including answers counted as incomparable in
+    older saved reports. Those answers have no labelled-item entry."""
+    names = {calibration.judge for calibration in calibrations}
+    return {item for item in await hidden_of_runs(records, principal, key) if item[2] in names} if names else set()
 
 
 def calibration_out(calibration: JudgeCalibration, hidden: set[tuple[str, str, str]] | None = None) -> dict[str, Any]:
-    """A calibration as the routes answer it, without the labels in ``hidden``."""
+    """Project a saved report to the comparable pairs the reader can see."""
+    items = calibration.items
+    labelled = calibration.labelled
+    report = calibration.report
+    if hidden and any(criterion == calibration.judge for _, _, criterion in hidden):
+        items = [item for item in items if not _item_is_hidden(item, calibration.judge, hidden)]
+        kind = report.get("kind")
+        if kind not in KINDS:
+            kind = (value_kind(items[0].label) if items else None) or "boolean"
+        pairs = [
+            (item.verdict, item.label)
+            for item in items
+            if comparable(kind, item.verdict) and comparable(kind, item.label)
+        ]
+        agreement = compare(pairs, kind)
+        labelled = agreement.labelled
+        report = JudgeAgreement(
+            judge=calibration.judge,
+            version=calibration.version,
+            models=tuple(member.model for member in calibration.panel)
+            if calibration.panel
+            else ((calibration.model,) if calibration.model else ()),
+            judged=sum(item.verdict is not None for item in items),
+            incomparable=0,
+            agreement=agreement,
+            panel=bool(calibration.panel),
+        ).as_dict()
     return {
         "id": calibration.id,
         "project_id": project_out(calibration.project_id),
@@ -141,15 +163,26 @@ def calibration_out(calibration: JudgeCalibration, hidden: set[tuple[str, str, s
         "endpoint": calibration.endpoint,
         "panel": [member.model_dump(mode="json") for member in calibration.panel],
         "definition": calibration.definition,
-        "labelled": calibration.labelled,
-        "items": [_item_out(item, calibration.judge, hidden or set()) for item in calibration.items],
+        "labelled": labelled,
+        "items": [item.model_dump(mode="json") for item in items],
         "traces_examined": calibration.traces_examined,
         "traces_truncated": calibration.traces_truncated,
-        "report": calibration.report,
+        "report": report,
         "recheck_of": calibration.recheck_of,
         "actor_id": user_out(calibration.created_by) if calibration.created_by else None,
         "created_at": calibration.created_at,
     }
+
+
+async def _require_recheck_items(
+    records: RecordStore, principal: Principal, key: str, calibration: JudgeCalibration | None
+) -> None:
+    if calibration is None:
+        raise HTTPException(404, "Not found")
+    runs = {item.run_id for item in calibration.items if item.run_id is not None}
+    hidden = await hidden_of_runs(records, principal, key, runs) if runs else set()
+    if any(_item_is_hidden(item, calibration.judge, hidden) for item in calibration.items):
+        raise HTTPException(403, "This re-check requires access to all its labelled items")
 
 
 def recheck_out(recheck: CalibrationRecheck) -> dict[str, Any]:
@@ -294,6 +327,9 @@ async def admit_recheck(
     if existing := await records.get_recheck(principal, key, recheck_id):
         if (existing.judge, existing.version) != (name, version):
             raise StoreError("conflict", "request_id belongs to another re-check")
+        await _require_recheck_items(
+            records, principal, key, await records.get_calibration(principal, key, existing.calibration_id)
+        )
         return existing, False
     if project.archived_at is not None:
         raise StoreError("conflict", "This evaluation project is archived or unavailable")
@@ -307,6 +343,7 @@ async def admit_recheck(
         raise StoreError("not_found", "This judge version has no calibration to re-check")
     if not latest.items:
         raise StoreError("invalid", "This calibration records no labelled items to grade again; save a new one")
+    await _require_recheck_items(records, principal, key, latest)
     running = await records.list_rechecks(principal, key, judge=name)
     if any(each.version == version and each.state in ACTIVE for each in running):
         raise StoreError("conflict", "A re-check of this judge version is already queued or running")
@@ -452,9 +489,13 @@ async def judge_recheck(
     records: RecordsDep,
     project_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    found = await records.get_recheck(principal, project_key(project_id), str(recheck_id))
+    key = project_key(project_id)
+    found = await records.get_recheck(principal, key, str(recheck_id))
     if found is None:
         raise HTTPException(404, "Not found")
+    await _require_recheck_items(
+        records, principal, key, await records.get_calibration(principal, key, found.calibration_id)
+    )
     return recheck_out(found)
 
 
