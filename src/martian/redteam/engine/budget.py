@@ -39,6 +39,10 @@ class BudgetExhausted(Exception):
         self.limit: BudgetLimit = limit
 
 
+class ResumeError(ValueError):
+    """The saved record cannot be resumed as an execution run."""
+
+
 class Ledger:
     """Spending of one run against ``budget``. Not thread-safe: the engine reserves on its event loop,
     where nothing runs between the check and the count."""
@@ -136,7 +140,9 @@ class Ledger:
         return spend if math.isfinite(spend.cost_usd) else None
 
     def restore(self, earlier: RedteamRun) -> None:
-        """Restore the earlier session's cumulative spend once, including work that will run again."""
+        """Restore cumulative spend, refusing a resume if a requested cap cannot be verified."""
+        if "rejudged_from" in earlier.provenance or earlier.budget.keys() & {"rejudge", "rejudge_budget"}:
+            raise ResumeError("A re-judged run keeps separate usage. Resume with the original run ID.")
         summary = self._saved_spend(earlier.budget.get("spent"))
         if summary is not None:
             self.spent = summary
@@ -164,6 +170,7 @@ class Ledger:
             elif self.spent.model_calls:
                 self.usage[key] = None
         self._stop_for_missing_usage()
+        self.check()
 
     def limitations(self) -> list[str]:
         notes: list[str] = []
@@ -197,4 +204,4 @@ class Ledger:
         }
 
 
-__all__ = ["BudgetExhausted", "CallKind", "Ledger"]
+__all__ = ["BudgetExhausted", "CallKind", "Ledger", "ResumeError"]

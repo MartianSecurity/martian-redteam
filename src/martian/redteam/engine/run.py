@@ -349,10 +349,6 @@ class Engine:
         """Run every planned attempt. A run with a receipt check starts the receipt listener first,
         and one with a ``web_page`` route the page server; both stop when the run ends, however it
         ends."""
-        if self.ledger.stopped_by is not None:
-            stopped = self.snapshot("stopped")
-            await self._save(stopped)
-            return stopped
         listens = any(check.kind == "receipt" for planned in self.planned for check in planned.probe.checks)
         routes = {p.attack_method.delivery.route for p in self.planned if p.attack_method.delivery is not None}
         try:

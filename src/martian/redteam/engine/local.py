@@ -61,10 +61,11 @@ DEFAULT_GENERATION_REQUEST = "Write the attack now."
 class LocalServiceError(ClientError):
     """A model call of the local service failed. ``kind`` names the model, ``code`` the reason."""
 
-    def __init__(self, message: str, *, kind: ServiceStage, code: str) -> None:
+    def __init__(self, message: str, *, kind: ServiceStage, code: str, usage: ModelUsage | None = None) -> None:
         super().__init__(message)
         self.kind: ServiceStage = kind
         self.code = code
+        self.usage = usage
 
 
 class EmptyGeneration(LocalServiceError):
@@ -184,7 +185,7 @@ class LocalService:
     ) -> tuple[Any, ModelUsage]:
         from mlflow.types.llm import ChatMessage
 
-        from martian.evals._judge_transport import invoke_structured
+        from martian.evals._judge_transport import StructuredReplyError, invoke_structured
 
         caller, setting = (ATTACKER, "models.attacker") if stage == "attacker" else (JUDGE, "models.judge")
         # No credential reaches a model: not ours, and not one a target leaked into its reply.
@@ -207,7 +208,8 @@ class LocalService:
             code = _code(error, f"{stage}_failed")
             if code in _UNREADABLE:
                 unreadable = EmptyGeneration if stage == "attacker" else UnreadableJudgment
-                raise unreadable(str(error), kind=stage, code=code) from None
+                usage = _usage(error.metadata) if isinstance(error, StructuredReplyError) else None
+                raise unreadable(str(error), kind=stage, code=code, usage=usage) from None
             raise LocalServiceError(str(error), kind=stage, code=code) from None
         return parsed, _usage(metadata)
 
@@ -226,7 +228,9 @@ class LocalService:
             _Attack,
         )
         if not parsed.attack.strip():
-            raise EmptyGeneration(f"{ATTACKER} wrote an empty attack [attacker_empty]", kind="attacker", code="empty")
+            raise EmptyGeneration(
+                f"{ATTACKER} wrote an empty attack [attacker_empty]", kind="attacker", code="empty", usage=usage
+            )
         return SimulatorOutput(
             attack=parsed.attack,
             attack_method=parsed.attack_method.strip() or context.attack_method,
@@ -246,7 +250,7 @@ class LocalService:
         parsed, usage = await self._call("judge", self.judge, evaluator_system_prompt(context), human, _Judgment)
         if not parsed.reason.strip():
             raise UnreadableJudgment(
-                f"{JUDGE} gave no reason [judge_unreadable]", kind="judge", code="judge_unreadable"
+                f"{JUDGE} gave no reason [judge_unreadable]", kind="judge", code="judge_unreadable", usage=usage
             )
         return EvaluatorOutput(
             score=parsed.score,

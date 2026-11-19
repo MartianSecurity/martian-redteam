@@ -172,6 +172,7 @@ class EngineJudge:
         return self._scorer
 
     async def verify(self, check: Check, seen: Observation, meter: Meter | None = None) -> CheckResult:
+        from martian.evals._judge_transport import StructuredReplyError
         from martian.redteam.engine.hostile import scrub_secrets, secret_values
         from martian.redteam.engine.local import _usage
 
@@ -186,9 +187,14 @@ class EngineJudge:
         expectations = {"rubric": rubric_of(seen.probe, check.spec.get("criteria"))}
         try:
             async with meter_model_call(meter, "judge") as reported:
-                feedback = await asyncio.to_thread(
-                    self._judge(), inputs=inputs, outputs=reply, expectations=expectations
-                )
+                try:
+                    feedback = await asyncio.to_thread(
+                        self._judge(), inputs=inputs, outputs=reply, expectations=expectations
+                    )
+                except StructuredReplyError as error:
+                    if meter is not None:
+                        reported(_usage(error.metadata))
+                    raise
                 metadata = dict(feedback.metadata or {})
                 if meter is not None:
                     reported(_usage(metadata))

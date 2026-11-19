@@ -318,6 +318,7 @@ admitting the next. The last model call may cross the limit. When a call's requi
 missing, including a timeout or cancellation whose usage could not be read, the budget is
 unverifiable. The run stops admitting calls and the gate fails with
 `budget_usage_unavailable`, even if all checks passed or the gate allows undetermined attempts.
+A reply that cannot be read still counts its reported usage.
 A measured zero is valid. Missing price only stops a run that sets a dollar cap, and missing
 tokens only stop a run that sets a token cap. With a spend cap, the CLI and local UI disable
 local model retries after transport errors and throttling. A request failure with unreported
@@ -328,9 +329,10 @@ it can start.
 An attempt the budget stopped before it was decided is reported `stopped`. The run's budget stats
 and [reports](redteam-reports.md#what-attacked) keep recorded spend and missing usage separately.
 Resume restores cumulative spend, including for failed and stopped attempts that will be retried.
-A checkpoint left running after process interruption may omit calls. A spend-capped resume stops
-when historical usage cannot be verified, including older run records with model calls and no
-usage completeness data.
+A checkpoint left running after process interruption may omit calls. A spend-capped resume is
+refused before target or model setup when historical usage cannot be verified, including older
+run records with model calls and no usage completeness data. The saved run is preserved. A
+re-judged record has a separate ledger. Use the original execution run ID to resume.
 
 ## How a run works
 

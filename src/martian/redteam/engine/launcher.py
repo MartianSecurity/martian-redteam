@@ -36,6 +36,7 @@ from fastapi import HTTPException
 from martian.config import ConfigError
 from martian.evals.local_targets import KEY_REFERENCE, LocalTargets
 from martian.evals.server.principal import Principal
+from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
 from martian.redteam.engine.memory import StrategyLibraryError
 from martian.redteam.engine.plan import PlanError
 from martian.redteam.engine.report import for_report
@@ -132,6 +133,9 @@ class LocalLauncher:
             raise HTTPException(422, "; ".join(missing))
         stack = AsyncExitStack()
         try:
+            if earlier is not None:
+                # Refuse before opening sessions or replacing any part of the stored run.
+                Ledger(run_file.budget).restore(earlier)
             service, provenance = build_service(
                 run_file, stack, self.environ if self.environ is not None else os.environ
             )
@@ -167,6 +171,9 @@ class LocalLauncher:
         except HTTPException:
             await stack.aclose()
             raise
+        except (BudgetExhausted, ResumeError) as error:
+            await stack.aclose()
+            raise HTTPException(409, str(error)) from None
         except (
             ServiceSelectionError,
             TargetUnavailable,

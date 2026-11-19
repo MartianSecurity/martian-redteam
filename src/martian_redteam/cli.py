@@ -308,6 +308,7 @@ def _run_version_2(
     """Run a version 2 file with the red team engine, write its reports, keep it and apply its gate."""
     from contextlib import AsyncExitStack
 
+    from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
     from martian.redteam.engine.memory import StrategyLibraryError
     from martian.redteam.engine.plan import PlanError, plan
     from martian.redteam.engine.report import for_report, write_reports
@@ -383,6 +384,8 @@ def _run_version_2(
 
     async def go() -> Any:
         nonlocal admitted
+        if earlier is not None:
+            Ledger(run_file.budget).restore(earlier)
         async with AsyncExitStack() as stack:
             service, provenance = build_service(run_file, stack)
             planted = planted_run_file(run_file, canary)
@@ -422,6 +425,8 @@ def _run_version_2(
     try:
         run, service = asyncio.run(go())
     except (
+        BudgetExhausted,
+        ResumeError,
         ServiceSelectionError,
         TargetUnavailable,
         ConfigError,

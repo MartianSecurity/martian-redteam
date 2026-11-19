@@ -76,6 +76,14 @@ class NotAChatCompletion(Exception):
     """A successful reply that is not an OpenAI chat completion: the address is not a chat endpoint."""
 
 
+class StructuredReplyError(ValueError):
+    """A received completion failed validation but may still report billable usage."""
+
+    def __init__(self, message: str, metadata: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
 def _retry_after(headers: Mapping[str, str]) -> float | None:
     """Seconds a provider asked the caller to wait: ``retry-after-ms`` (OpenAI), or ``Retry-After``
     as seconds or an HTTP date. None when absent or unreadable."""
@@ -578,50 +586,6 @@ def invoke_structured[Reply: BaseModel](
             _sleep(wait)
             retries += 1
 
-    if not completion.choices:
-        raise ValueError(f"{caller} returned no choices [judge_invalid_response]")
-    choice = completion.choices[0]
-    message = choice.message
-    if (
-        message.tool_calls
-        or getattr(message, "function_call", None)
-        or choice.finish_reason
-        in {
-            "tool_calls",
-            "function_call",
-            "tool_use",
-        }
-    ):
-        raise ValueError(
-            f"{caller} returned a tool call [judge_unexpected_tool_call]. "
-            f"Use a {setting}.model whose endpoint returns structured output as message text."
-        )
-
-    # A reply cut off at max_tokens is the likeliest reason for missing or incomplete JSON.
-    cut_off = (
-        f" It was cut off: raise {setting}.inference_params.max_tokens." if choice.finish_reason == "length" else ""
-    )
-    content = message.content
-    if isinstance(content, list):
-        content = "\n".join(part.text for part in content if getattr(part, "text", None))
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError(f"{caller} returned no text [judge_invalid_response].{cut_off}")
-    content = content.strip()
-    # Allow a single enclosing fence from JSON-in-text providers, with no surrounding prose.
-    fence, _, body = content.partition("\n")
-    if fence.strip().lower() in {"```", "```json"} and body.endswith("\n```"):
-        content = body.removesuffix("\n```")
-    try:
-        reply = response_format.model_validate_json(content)
-    except ValidationError:
-        hint = cut_off or (
-            f" The endpoint may ignore structured output (response_format): check {setting}.model."
-            if structured
-            else " The endpoint declined structured output, and the reply without it was not the JSON asked for: "
-            f"use a {setting}.model that supports response_format or follows the JSON instructions."
-        )
-        raise ValueError(f"{caller} reply failed schema validation [judge_invalid_schema].{hint}") from None
-
     metadata: dict[str, Any] = {
         PROVIDER_RETRIES_KEY: retries,
         RESPONSE_FORMAT_KEY: "json_schema" if structured else "none",
@@ -642,4 +606,51 @@ def invoke_structured[Reply: BaseModel](
             and (cost := _price(model_uri, prompt_tokens, completion_tokens)) is not None
         ):
             metadata[AssessmentMetadataKey.JUDGE_COST] = cost
+
+    if not completion.choices:
+        raise StructuredReplyError(f"{caller} returned no choices [judge_invalid_response]", metadata)
+    choice = completion.choices[0]
+    message = choice.message
+    if (
+        message.tool_calls
+        or getattr(message, "function_call", None)
+        or choice.finish_reason
+        in {
+            "tool_calls",
+            "function_call",
+            "tool_use",
+        }
+    ):
+        raise StructuredReplyError(
+            f"{caller} returned a tool call [judge_unexpected_tool_call]. "
+            f"Use a {setting}.model whose endpoint returns structured output as message text.",
+            metadata,
+        )
+
+    # A reply cut off at max_tokens is the likeliest reason for missing or incomplete JSON.
+    cut_off = (
+        f" It was cut off: raise {setting}.inference_params.max_tokens." if choice.finish_reason == "length" else ""
+    )
+    content = message.content
+    if isinstance(content, list):
+        content = "\n".join(part.text for part in content if getattr(part, "text", None))
+    if not isinstance(content, str) or not content.strip():
+        raise StructuredReplyError(f"{caller} returned no text [judge_invalid_response].{cut_off}", metadata)
+    content = content.strip()
+    # Allow a single enclosing fence from JSON-in-text providers, with no surrounding prose.
+    fence, _, body = content.partition("\n")
+    if fence.strip().lower() in {"```", "```json"} and body.endswith("\n```"):
+        content = body.removesuffix("\n```")
+    try:
+        reply = response_format.model_validate_json(content)
+    except ValidationError:
+        hint = cut_off or (
+            f" The endpoint may ignore structured output (response_format): check {setting}.model."
+            if structured
+            else " The endpoint declined structured output, and the reply without it was not the JSON asked for: "
+            f"use a {setting}.model that supports response_format or follows the JSON instructions."
+        )
+        raise StructuredReplyError(
+            f"{caller} reply failed schema validation [judge_invalid_schema].{hint}", metadata
+        ) from None
     return reply, metadata

@@ -29,6 +29,7 @@ from martian.redteam.verify.rules import (
     text_check,
     tool_call_check,
 )
+from martian_redteam.client import ClientError
 from martian_redteam.types import ModelUsage
 
 RULE = "rule"
@@ -82,6 +83,10 @@ async def meter_model_call(
 
         try:
             yield reported
+        except ClientError as error:
+            if isinstance(returned := getattr(error, "usage", None), ModelUsage):
+                reported(returned)
+            raise
         finally:
             if meter is not None:
                 meter.record(usage)
