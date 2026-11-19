@@ -276,10 +276,9 @@ limits:
   run that stops in the middle of a case's attempts leaves that case not run
   ([limits and repeats](#limits-and-repeats)).
 
-**On a pull request.** The evals GitHub Action runs a suite file on each push and keeps one
-comment on the pull request with the result, still with no Martian account, and can compare each
-pull request with the last result of `main`. See
-[gate and CI](gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
+**On a pull request.** The evals GitHub Action runs a suite file on each push and writes the result
+to the Actions job summary. It can compare each pull request with the last result of `main`. See
+[gate and CI](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests).
 
 A finished case is reused only while nothing that produced its verdict has changed: the checks
 and their criteria, the judge model and its `inference_params`, the target, the case's own
@@ -722,7 +721,7 @@ Every attempt is recorded:
 | `results.jsonl` | The case's `passed` and `checks` are the attempts combined, and each check's `rationale` says how the attempts went and what its rule asks, such as `4 of 5 attempts passed, 1 failed (all: every attempt must pass)`. `attempts` lists every attempt in order: its `number`, `passed`, `checks` (each with its own verdict, rationale and error), `output` and `error`. The case's `output` and `error` are those of its first attempt with the case's verdict, else of its first attempt: under `all`, a failed case shows an attempt that failed |
 | `summary.json` | `repeats`: the attempts of each case (`attempts`), the suite's rule (`combine`), and each check's rule with where it came from (`checks.<label>.combine` and `from`: `check`, `security` or `suite`). `attempts`: the attempts' own counts, `total`, `passed`, `failed` and `errors`, and the same per check under `checks.<label>.attempts`. `reliability`: the [reliability and the flaky cases](#reliability-and-flaky-cases). `target_errors` and `check_errors` count attempts |
 | `junit.xml` | The `repeats` property and each check's rule, `check.<label>.combine` |
-| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The attempts of each case, each check's rule, the reliability under the pass rate, and the flaky cases |
+| The printed table and the [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | The attempts of each case, each check's rule, the reliability under the pass rate, and the flaky cases |
 | The local Evals UI's data folder | The case result holds every attempt, each with its own trace, named `<run> <case> attempt <n>` and carrying that attempt's verdicts; the case's trace is that of the attempt that shows its reply. The run's `provenance` holds `repeats` as `summary.json` has it. [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) returns both, with the reliability and each case's `flaky` |
 
 A run without repeats writes and records exactly what it did before: no `attempts`, no `repeats`,
@@ -747,14 +746,14 @@ another failed. `martian.evals.repeats` computes both from the attempts' own ver
   for case groups in `summary.json` and treating cases as independent in the evals core
   ([pass rates and intervals](#pass-rates-and-confidence-intervals)).
 - **Only with repeats.** A run without repeats measures no reliability: `summary.json`, the
-  printed table and the pull-request comment leave it out, the core's attempts route answers
+  printed table and the Actions job summary leave it out, the core's attempts route answers
   `reliability: null`, and the Evals UI's run page says **Not measured**.
 
 | Where | What |
 | --- | --- |
 | `summary.json` | `reliability`: `passed` (cases that passed every attempt), `failed` (cases that failed an attempt), `errors` (cases left open), `pass_rate` and `confidence_95`, and `flaky`, the ids of the flaky cases in data order |
 | The printed table | A **Reliability** row under **All checks**, combined by `every attempt`, then the flaky cases, at most five by name, or `No flaky cases` |
-| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
+| The [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | A **Reliability** (every attempt) row under **All checks**, then the flaky cases, at most five by name |
 | [`GET /v1/evals/{run_id}/attempts`](evals-core.md#read-routes) | `reliability` as in `summary.json`, and each case's `flaky`; `flaky=true` keeps only the flaky cases |
 | The Evals UI's run page | A **Reliability** tile next to **Pass rate**, and a **Flaky cases only** filter on the results |
 
@@ -843,7 +842,7 @@ target that stands in for the model, so it runs with no key:
 | `<output>/matrix.json` | `axes`, each axis's `name` and its values' names in the file's order; `combinations`, in run order, each with its `id`, `values` (each axis's value name), `folder`, `gate` (`passed`, `failed` or `error`, below), `summary` (its `summary.json`) and `comparison` (its `comparison.json`, `null` when it was not compared); `seconds_this_run` and `output` |
 | `<output>/verdicts.json` | Every combination's `verdicts.json` under `combinations`, by id (format `martian-evals-matrix-verdicts/1`): what a later run of the matrix compares with |
 | The printed table | One row per combination: its counts and pass rate with its 95% interval, with repeats its reliability, and with `--baseline` its label and gate. Under it, each combination's flaky cases, false refusals, errors and comparison, each line starting with the combination's id |
-| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
+| The [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | The same rows, then each combination's cases that went from pass to fail, failed or have no verdict |
 | The local Evals UI | One run per combination, named `<suite>[<id>]-<n>` where `n` counts that combination's runs, such as `evals[model=gpt-4o-mini,prompt=terse]-1`. Its `provenance.matrix` holds `id`, `values`, `axes` as in `matrix.json`, and `invocation`, an id the runs of one `martian evals run` share. Value names only: a mapped value's text stays in the suite file. A value that is a [registered prompt version](#prompt-versions)'s text is named in `provenance.prompts` |
 
 - **The gate.** A combination's `gate` is `error` when a case has no verdict, or when it stopped
@@ -1015,7 +1014,7 @@ for a fresh one:
 | `summary.json` | `cache`: `folder`, `ttl_seconds`, `functions`, and for `target` and for `judge` this run's `hits` (replies from the cache), `calls` (requests sent to the model) and `stored` (replies written to the cache), or `null` when the suite makes no such call that the cache holds. A run without the cache has no `cache` |
 | `matrix.json` | Each combination's own counts in its `summary.cache` |
 | The printed table | `Cache: 3 of 3 target calls and 3 of 3 judge calls replayed replies stored by an earlier run; 0 model calls made.` under the table; for a matrix, over every combination |
-| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The same line, in bold, under the headline |
+| The [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | The same line, in bold, under the headline |
 | The local Evals UI's data folder | The run's `provenance.cache`: `on`, the folder, time to live and `functions` from the start, and the counts as in `summary.json` once the run ends, whether it finished, stopped at a limit or was cancelled. The Evals UI's run routes show only `on` and the counts, never the folder |
 | `mlflow.db` | A replayed judgment's assessment metadata holds `martian.cache: hit`, and no provider retries, token counts or cost. A judge that reviews its draft is marked only when both stages were replayed; its tokens are those of the stage that made a call. A panel is marked only when every member was replayed; its tokens are those of the members that made a call |
 
@@ -1174,7 +1173,7 @@ Every turn is recorded:
 | --- | --- |
 | `results.jsonl` | The case's `passed` and `checks` are the conversation's verdicts. `session_id` is its conversation's id, and `turns` lists every turn sent: its `number`, `inputs`, `passed`, `checks` (each check that grades it, with its verdict, rationale and error), `output` and `error`. The case's `output` is the conversation as messages, and it has no `inputs`. With repeats, each attempt has its own `session_id` and `turns`, and the case's are those of the attempt that shows its reply |
 | `summary.json` | `conversations`: the conversation cases (`cases`, `passed`, `failed`, `errors`) and their turns (`turns`: `total`, `passed`, `failed`, `errors`, over every attempt with repeats). Each check has its `scope`, and a turn check its turns' counts under `turns`. A check's own counts leave out the conversations it grades nothing in |
-| The printed table and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | A **Turns** row under **All checks**, a line saying how many cases are conversations and what their verdict means, and, for a failed conversation, the turns that failed |
+| The printed table and the [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | A **Turns** row under **All checks**, a line saying how many cases are conversations and what their verdict means, and, for a failed conversation, the turns that failed |
 | The local Evals UI's data folder | A trace per turn, named `<run> <case> turn <n>` (`<run> <case> attempt <a> turn <n>` with repeats), tagged `martian.turn` and carrying that turn's verdicts and the conversation's session id, so **Sessions** shows each conversation as one session. The case result holds the session id and every turn; its trace is that of its first turn with the conversation's verdict, else of its first turn, and its latency the turns' added up. Its scores, the conversation's verdicts, are on no trace. The run's `provenance` holds `conversations`, how many of its cases are conversations. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) returns each conversation with its verdict on each check, its session id and its turns |
 | The Evals UI's run page | A conversation's row shows its last reply and how many of its turns passed. **Inspect** shows the conversation's verdict and each check's verdict on it, then each turn's user message, reply and check verdicts with their reasons, with **Open trace** on each turn and **Open session** for the conversation |
 
@@ -1268,7 +1267,7 @@ only the last call, the one after the budget is spent, fails, the goal alone has
 | `results.jsonl` | `simulated: true` on the case, `goal_reached` among its `checks`, and the turns the simulator wrote, each with its `inputs`, as a scripted turn has them |
 | `summary.json` | `simulator`: the setup, `model`, `parameters` (its `inference_params`), the simulator's instruction `version` and `personas`, the persona source (`data`, the data file as the suite names it, and `digest`, the dataset's digest the run's provenance has); then how many `cases` it played, their `passed`, `failed` and `errors`, and their `pass_rate` with its `confidence_95`. `goal_reached` is among the `checks`, with scope `conversation`. `tokens_this_run` has the simulator's tokens, `simulator`, beside the judges' |
 | The printed table | The title counts the simulated cases (`evals.yaml: 3 cases, 2 simulated`), a **Simulated** row under **All checks** has their counts and pass rate, a `goal_reached` row, and a line saying how many conversations have a simulated user and which model played them |
-| The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
+| The [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | The headline counts the simulated cases (`3 cases (2 simulated)`), a **Simulated** row has their counts and pass rate, a `goal_reached` row, the line naming the model, and `(simulated)` beside each simulated case among the failed cases and those without a verdict |
 | The local Evals UI's data folder | The run's `provenance.simulator` (`model`, `parameters`, `version`); `goal_reached` among the run's scorers, an LLM judge of the conversation whose model is the simulator's, so each goal score names that model; the case result's `simulated`; each turn's trace tagged `martian.simulated`. [`GET /v1/evals/{run_id}/turns`](evals-core.md#read-routes) gives each conversation's `simulated` |
 | The Evals UI | A **Simulated** badge on a run with simulated users, in Runs and on its page, and on each simulated conversation's row and in its **Inspect** drawer, which names the simulator model. Single-turn and scripted conversation cases have none |
 
@@ -1456,7 +1455,7 @@ rather than the ungrouped `50% (21–79%)`.
 
 | Where | Interval |
 | --- | --- |
-| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) | Wilson for each check's pass rate, the run's and, with repeats, its [reliability](#reliability-and-flaky-cases), grouped when the data names groups |
+| `martian evals run`: the printed table, `summary.json`, `junit.xml` and the [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) | Wilson for each check's pass rate, the run's and, with repeats, its [reliability](#reliability-and-flaky-cases), grouped when the data names groups |
 | The evals core's scorecards (run detail, Compare, Monitoring) and its attempts route | `confidence_95`, Wilson, for a boolean scorer's pass rate and for a repeated run's reliability; `mean_confidence_95`, Student t, for a numeric scorer's mean ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Runs, run detail, Compare and Overview | Wilson from the counts each response carries, ungrouped |
 
@@ -1513,7 +1512,7 @@ a group, such as paraphrases of one attack, the label can overstate the evidence
 | `GET /v1/evals/compare` on the evals core | `significance` for the exact-match verdicts. With both scoring jobs, also `criteria_significance`, one per scorer ([read routes](evals-core.md#read-routes)) |
 | The Evals UI's Compare page | A Better, Worse or Within noise badge with the p-value and the numbers, taken from the response. The Martian server's comparison does not have the label yet, so against the server the page shows no badge |
 | `martian evals run --baseline DIR` | The label for the cases' verdicts, under the table and in `comparison.json`, and the gate follows it ([comparing with a baseline](#comparing-with-a-baseline)) |
-| The evals action's [pull-request comment](gate-and-ci.md#compared-with-the-last-result-of-main) | The label against the last result of `main`, and each case that went from pass to fail |
+| The evals action's [Actions job summary](gate-and-ci.md#compared-with-the-last-result-of-main) | The label against the last result of `main`, and each case that went from pass to fail |
 
 ### Comparing with a baseline
 
@@ -1897,8 +1896,9 @@ a queue is blind from the start and stays so. Every queue the routes answer with
   with no complete answer of their own to it reads only its queue's pending review and their own
   reviews of it, on every route that returns reviews or what they leave: `GET /v1/evals/reviews`, a
   run's workbench (its review history, current reviews and the human scores among its
-  assessments), a conversation run's turns, and a judge calibration's labelled items, whose
-  `label` they get as `null`. Once they have answered, they read every answer to it.
+  assessments) and a conversation run's turns. Judge and reviewer agreement and saved
+  calibration reports count only answers the reader may already see. Once readers have
+  answered an item, they can see the other answers and those answers contribute to their reports.
 - **Answering.** The review drawer sends the review it showed as `previous_id`, as for any queue;
   in a blind queue the answer is added after the item's newest review, which may be another
   reviewer's, so the item keeps one chain and its current review is still the newest answer.
@@ -1908,8 +1908,7 @@ a queue is blind from the start and stays so. Every queue the routes answer with
 - **Given blind.** A reviewer's first complete answer to an item is recorded with `blind: true`;
   any later answer of theirs, given once they could read the others', and every answer in a queue
   that is not blind, has `blind: false`. Reviews carry `blind` on every route.
-- **What it does not hide.** A queue's progress (how many items have answers) and the agreement
-  reports, which give counts over items rather than an item's answers. The record store keeps the
+- **Queue progress.** A queue still shows how many items have answers. The record store keeps the
   queue's blind mode (`BlindQueue`, migration `0014`), not the queue's store, so every store
   binding keeps it, and deleting its run deletes it. A [data export](data-export.md) carries the
   mode and every answer, as the organisation's own copy of its data: it is a command and a function
@@ -2545,14 +2544,14 @@ The rate shows in three places:
   and the `rate`, refused over benign, or `null` with no benign case.
 - `martian evals run` prints it under the table:
   `False refusals: 1 of 3 benign cases refused (33.3%).`
-- The [pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) prints
+- The [Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) prints
   the same line under its headline.
 
 With [repeats](#repeated-attempts) the rate counts cases, by each case's `no_refusal` verdict
 over its attempts combined. `no_refusal` takes the suite's rule, so under the default `all` a
 benign case refused on one attempt of five counts as refused; under `any` it counts as refused
 only when every attempt refused. The other policy checks are security checks and combine by
-`all` unless they name their own rule. The printed table and the pull-request comment show the
+`all` unless they name their own rule. The printed table and the Actions job summary show the
 false-refusal line and the **Reliability** row together.
 
 A suite with a policy check and no `no_refusal` check reports that the rate is not measured,
@@ -3299,7 +3298,7 @@ any model call. Feedback metadata records `martian.judge.version` (`task-complet
 **Where the verdicts show.** A conversation judge is a conversation check, so its verdict on each
 conversation, with the rationale naming the turn, is in `results.jsonl` under the case's `checks`,
 in `summary.json` with `scope: conversation`, in the printed table, in the
-[pull-request comment](gate-and-ci.md#evals-on-a-pull-request-with-one-comment) (its counts, and its
+[Actions job summary](gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests) (its counts, and its
 name among a failed case's checks; the comment never carries a rationale), in the
 [`/turns`](evals-core.md#read-routes) route's `checks` for the conversation, and in the core's read
 routes as a score of source `llm_judge` whose `source_id` is the judge model.

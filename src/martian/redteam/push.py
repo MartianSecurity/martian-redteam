@@ -47,7 +47,7 @@ async def push_run(
             async with asyncio.timeout(config.request_timeout_seconds):
                 response = await client.put(
                     f"{PUSH}/{run.id}",
-                    json={"run": run.model_dump(mode="json")},
+                    json={"run": run.without_local_launch().model_dump(mode="json")},
                     headers={"Authorization": f"Bearer {config.token.get_secret_value()}"},
                 )
         except (httpx.HTTPError, TimeoutError) as error:
@@ -57,7 +57,11 @@ async def push_run(
             detail = response.json().get("detail")
         except (ValueError, AttributeError):
             detail = None
-        reason = safe_text(detail)[:300] if isinstance(detail, str) and detail else f"HTTP {response.status_code}"
+        reason = (
+            safe_text(detail, policy=config.redaction_policy)[:300]
+            if isinstance(detail, str) and detail
+            else f"HTTP {response.status_code}"
+        )
         raise PushError(f"the Martian server did not take the run: {reason}")
     try:
         found = response.json()

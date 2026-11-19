@@ -22,4 +22,4 @@ Failed cases: `hours` (`brief`), `warranty` (`states_the_fact`), `payment` (`sta
 
 Failed cases: `hours` (`brief`).
 
-Commit `0123456` · [Workflow run](https://github.com/example/agent/actions/runs/1) · Updated on every push
+Commit `0123456` · [Workflow run](https://github.com/example/agent/actions/runs/1)

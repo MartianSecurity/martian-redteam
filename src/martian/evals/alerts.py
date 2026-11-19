@@ -46,7 +46,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import ipaddress
 import json
 import logging
 import smtplib
@@ -63,6 +62,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from martian.evals._digits import ascii_digits
+from martian.evals._pinned_address import AddressRefused, pinned_session, public_addresses_only
 from martian.evals.records import Alert, RecordStore
 
 if TYPE_CHECKING:
@@ -354,18 +354,6 @@ class AlertSender:
     async def _post(self, settings: WebhookSettings, url: str, alert: Alert, secret: str) -> None:
         if (problem := webhook_url_problem(url)) is not None:
             raise Undeliverable(problem)
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        if not settings.private_addresses:
-            port = parts.port or (443 if parts.scheme == "https" else 80)
-            for info in await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM):
-                address = ipaddress.ip_address(str(info[4][0]).split("%")[0])
-                mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
-                if not (mapped or address).is_global:
-                    raise Undeliverable(
-                        "The webhook's host resolves to an address that is not public, which this "
-                        "installation's webhook settings do not allow (private_addresses)"
-                    )
         body = json.dumps(alert.payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         timestamp = str(int(time.time()))
         headers = {
@@ -375,12 +363,32 @@ class AlertSender:
             TIMESTAMP_HEADER: timestamp,
             SIGNATURE_HEADER: sign(secret, timestamp, body),
         }
-        async with httpx.AsyncClient(
-            timeout=settings.timeout_seconds, follow_redirects=False, trust_env=False
-        ) as client:
-            response = await client.post(url, content=body, headers=headers)
-        if not 200 <= response.status_code < 300:
-            raise Refused(response.status_code)
+        if settings.private_addresses:
+            async with (
+                httpx.AsyncClient(timeout=settings.timeout_seconds, follow_redirects=False, trust_env=False) as client,
+                client.stream("POST", url, content=body, headers=headers) as response,
+            ):
+                status = response.status_code
+        else:
+            status = await asyncio.to_thread(self._post_public, settings, url, body, headers)
+        if not 200 <= status < 300:
+            raise Refused(status)
+
+    @staticmethod
+    def _post_public(settings: WebhookSettings, url: str, body: bytes, headers: dict[str, str]) -> int:
+        try:
+            with (
+                pinned_session(public_addresses_only) as client,
+                client.post(
+                    url, data=body, headers=headers, timeout=settings.timeout_seconds, verify=True, stream=True
+                ) as response,
+            ):
+                return response.status_code
+        except AddressRefused:
+            raise Undeliverable(
+                "The webhook's host resolves to an address that is not public, which this "
+                "installation's webhook settings do not allow (private_addresses)"
+            ) from None
 
     @staticmethod
     def _mail(settings: EmailSettings, to: Sequence[str], alert: Alert) -> None:

@@ -97,7 +97,11 @@ class CampaignClient:
                 detail = response.json().get("detail")
             except (ValueError, AttributeError):
                 detail = None
-            reason = safe_text(detail)[:300] if isinstance(detail, str) and detail else f"HTTP {response.status_code}"
+            reason = (
+                safe_text(detail, policy=self.config.redaction_policy)[:300]
+                if isinstance(detail, str) and detail
+                else f"HTTP {response.status_code}"
+            )
             raise CampaignError(reason)
         try:
             return Campaign.read(response.json())

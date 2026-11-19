@@ -14,10 +14,9 @@
 # pull requests from forks get no secrets. Pull requests are scanned through
 # the Martian GitHub App instead.
 #
-# The action writes the server's SARIF and JSON exports to `output` and
-# uploads nothing; upload the SARIF to code scanning with
-# github/codeql-action/upload-sarif and `if: always()` (see
-# examples/scan/workflow.yml). Walks up from github.action_path to
+# The action copies fresh exports to `output`. Publish artifacts using
+# the paths in the action's outputs, which identify this scan's fresh files.
+# See examples/scan/workflow.yml. Walks up from github.action_path to
 # pyproject.toml and installs the SDK from there, like the evals action.
 # See docs/scan.md.
 name: Martian Scan
@@ -58,8 +57,11 @@ outputs:
     description: The exit code of martian scan (0 passed, 1 the gate failed, 2 no result)
     value: ${{ steps.scan.outputs.exit-code }}
   sarif:
-    description: Path of the SARIF file, when the scan wrote one
+    description: Path to the current scan's SARIF file, when written
     value: ${{ steps.scan.outputs.sarif }}
+  json:
+    description: Path to the current scan's JSON file, when written
+    value: ${{ steps.scan.outputs.json }}
 
 runs:
   using: composite
@@ -100,8 +102,9 @@ runs:
         MARTIAN_SCAN_TIMEOUT: ${{ inputs.timeout }}
         MARTIAN_SCAN_MODEL_ANALYSIS: ${{ inputs.model-analysis }}
       run: |
-        set -uo pipefail
-        args=(--json "${MARTIAN_SCAN_OUTPUT}/scan.json" --sarif "${MARTIAN_SCAN_OUTPUT}/scan.sarif" --timeout "${MARTIAN_SCAN_TIMEOUT}")
+        set -euo pipefail
+        stage="$(mktemp -d "${RUNNER_TEMP}/martian-scan-exports.XXXXXXXX")"
+        args=(--json "$stage/scan.json" --sarif "$stage/scan.sarif" --timeout "${MARTIAN_SCAN_TIMEOUT}")
         while IFS= read -r pattern; do
           pattern="${pattern#"${pattern%%[![:space:]]*}"}"
           pattern="${pattern%"${pattern##*[![:space:]]}"}"
@@ -120,8 +123,28 @@ runs:
         status=0
         "${RUNNER_TEMP}/martian-scan/bin/martian" scan "${MARTIAN_SCAN_PATH}" "${args[@]}" || status=$?
         echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
-        if [ -f "${MARTIAN_SCAN_OUTPUT}/scan.sarif" ]; then
-          echo "sarif=${MARTIAN_SCAN_OUTPUT}/scan.sarif" >> "${GITHUB_OUTPUT}"
+        if [ "$status" = 0 ] || [ "$status" = 1 ]; then
+          if ! "${RUNNER_TEMP}/martian-scan/bin/python" - "$stage" "$MARTIAN_SCAN_OUTPUT" <<'PY'
+        from pathlib import Path
+        import sys
+
+        from martian.scan import write_export
+
+        stage, output = map(Path, sys.argv[1:])
+        for name in ("scan.sarif", "scan.json"):
+            report = stage / name
+            if report.is_file():
+                write_export(output / name, report.read_bytes())
+        PY
+          then
+            echo "::error title=Martian Scan::Could not save the fresh scan exports."
+            exit 2
+          fi
+          for format in sarif json; do
+            if [ -f "$stage/scan.$format" ]; then
+              printf '%s=%s\n' "$format" "$stage/scan.$format" >> "$GITHUB_OUTPUT"
+            fi
+          done
         fi
         case "${status}" in
           0) ;;

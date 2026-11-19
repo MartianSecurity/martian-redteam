@@ -75,8 +75,9 @@ def test_a_symlink_out_of_the_folder_exits_2(backend, tmp_path):
 # What the scan client may import: the standard library, httpx and pydantic, and the SDK's own
 # connection, error and privacy helpers. A rule engine or a scanner package would be a new import.
 ALLOWED_IMPORTS = {
-    "__future__", "collections", "dataclasses", "fnmatch", "hashlib", "io", "json", "math", "os", "pathlib", "re",
-    "stat", "subprocess", "time", "typing", "unicodedata", "uuid", "zipfile",
+    "__future__", "collections", "contextlib", "dataclasses", "fnmatch", "hashlib", "io", "json",
+    "math", "os", "pathlib", "re",
+    "stat", "subprocess", "tempfile", "time", "typing", "unicodedata", "uuid", "zipfile",
     "httpx", "pydantic",
     "martian._errors", "martian._privacy", "martian.config", "martian.scan", "martian.scan.client",
     "martian.scan.files",

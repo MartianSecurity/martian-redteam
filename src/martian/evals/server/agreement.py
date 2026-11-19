@@ -46,13 +46,14 @@ from martian.evals.agreement import (
     MINIMUM_LABELLED,
     JudgeAgreement,
     Kind,
+    item_of,
     judge_agreement,
     question_agreement,
     queue_agreement,
 )
 from martian.evals.model import Review, ReviewQueue, Score, TraceQuery
 from martian.evals.records import RecordStore
-from martian.evals.server.blind import blind_queue_ids
+from martian.evals.server.blind import blind_queue_ids, hidden_project_items
 from martian.evals.server.dependencies import PrincipalDep, RecordsDep, StoreDep, require_entitlement
 from martian.evals.server.principal import Principal
 from martian.evals.server.projection import DEFAULT_PROJECT, project_key, project_out
@@ -83,7 +84,7 @@ def is_label(score: Score) -> bool:
 async def _from_records(
     records: RecordStore, principal: Principal, key: str
 ) -> tuple[list[Score], list[Review], dict[str, tuple[str, str]]]:
-    """Every run's judge scores and complete current reviews, and each case result's trace."""
+    """Every run's judge scores and review chains, and each case result's trace."""
     verdicts: list[Score] = []
     reviews: list[Review] = []
     case_traces: dict[str, tuple[str, str]] = {}
@@ -92,7 +93,7 @@ async def _from_records(
             if result.store.trace_id:
                 case_traces[result.store.trace_id] = (run.id, result.case_id)
         verdicts += [s for s in await records.list_scores(principal, key, run.id) if s.source == "llm_judge"]
-        reviews += [r for r in await records.list_reviews(principal, key, run.id) if r.state == "complete"]
+        reviews += await records.list_reviews(principal, key, run.id, current_only=False)
     return verdicts, reviews, case_traces
 
 
@@ -142,26 +143,41 @@ async def agreement_reports(
     """Each judge version's report of a project that exists, by its store id, or of one judge's
     versions, with the items each compared, and how many traces were read and whether there were
     more."""
-    verdicts, reviews, case_traces = await _from_records(records, principal, key)
+    verdicts, chains, case_traces = await _from_records(records, principal, key)
+    blind = await blind_queue_ids(records, principal, key)
+    hidden = hidden_project_items(chains, blind, principal.user_id)
+    replaced = {(review.run_id, review.previous_id) for review in chains if review.previous_id is not None}
     traced, annotations, examined, truncated = await _from_traces(store, principal, key, case_traces)
     kinds = await _registered(store, principal, key, name)
     found = [v for v in [*verdicts, *traced] if name is None or v.scorer == name]
-    reports = judge_agreement(found, [*reviews, *annotations], case_traces=case_traces, kinds=kinds, versions=kinds)
+    labels: list[Review | Score] = [
+        review
+        for review in chains
+        if review.state == "complete"
+        and (review.run_id, review.id) not in replaced
+        and (review.run_id, review.case_id, review.criterion) not in hidden
+    ]
+    for score in annotations:
+        item = item_of(score, case_traces)
+        if item is None or item[0] != "case" or (item[1], item[2], score.scorer) not in hidden:
+            labels.append(score)
+    reports = judge_agreement(found, labels, case_traces=case_traces, kinds=kinds, versions=kinds)
     return reports, examined, truncated
 
 
 async def queue_reviews(
     store: EvalStore, records: RecordStore, principal: Principal, key: str
 ) -> tuple[list[ReviewQueue], list[Review]]:
-    """Every review queue of the project's runs, newest first, and every link of each run's review
-    chains."""
+    """Every review queue of the project's runs, newest first, and their visible review chains."""
     queues: list[ReviewQueue] = []
     reviews: list[Review] = []
     for run in await project_runs(records, principal, key):
         queues += await run_queues(store, records, principal, run)
         reviews += await records.list_reviews(principal, key, run.id, current_only=False)
+    blind = await blind_queue_ids(records, principal, key)
+    hidden = hidden_project_items(reviews, blind, principal.user_id)
     queues.sort(key=lambda queue: (queue.created_at or EPOCH, queue.id), reverse=True)
-    return queues, reviews
+    return queues, [r for r in reviews if (r.run_id, r.case_id, r.criterion) not in hidden]
 
 
 async def project_agreement(

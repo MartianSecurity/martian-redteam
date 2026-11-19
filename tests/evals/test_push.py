@@ -38,7 +38,7 @@ from martian.evals.client import Backend, BackendError
 from martian.evals.data_export import FORMAT, VERSION, export_line, export_local, run_records, score_key
 from martian.evals.inspect_import import import_inspect_logs
 from martian.evals.local import create_local_app, open_stores
-from martian.evals.model import CaseResult, Counts, Project, Run, Score, ScoringJob, StoreRef, Trace, TraceQuery
+from martian.evals.model import CaseResult, Counts, Project, Run, Score, ScoringJob, StoreRef, Target, Trace, TraceQuery
 from martian.evals.push import PushError, PushSummary, push_local
 from martian.evals.records import RecordStore
 from martian.evals.records.sql import SqlRecordStore
@@ -551,6 +551,85 @@ def test_pushing_twice_or_every_request_twice_adds_nothing(home, server):
     assert_identical(home, server, ADMIN_A)
 
 
+def test_export_and_push_mask_http_settings_and_known_echoes_without_changing_the_store(server, tmp_path, monkeypatch):
+    home = tmp_path / "private"
+    store, records = open_stores(home)
+    header, query, env_value = "fixture-header-value", "fixture-query-value", "fixture-environment-value"
+    monkeypatch.setenv("FIXTURE_TARGET_VALUE", env_value)
+    target = Target(
+        kind="http",
+        url=f"https://target.example.test/v1/answer?parameter={query}",
+        headers={"X-Custom": header, "Authorization": "Bearer ${FIXTURE_TARGET_VALUE}"},
+        body={"client_secret": "private-template", "message": "{{message}}"},
+    )
+    output = f"The reply referenced {header}, {query}, and {env_value}."
+    run_id = str(uuid.uuid4())
+    trace_id = "tr-" + uuid.uuid4().hex
+    password = "fixture-tracking-password"
+
+    async def seed():
+        run = Run(
+            id=run_id,
+            project_id="default",
+            source="local",
+            state="completed",
+            target=target,
+            created_at=T0,
+            code=f"run-for-{header}",
+            provenance={"mlflow": {"source": f"postgresql://user:{password}@tracking.example.test/evals"}},
+        )
+        await records.create_run(SINGLE_USER, await store.start_run(SINGLE_USER, run))
+        await store.record_trace(
+            SINGLE_USER,
+            Trace(id=trace_id, project_id="default", run_id=run_id, state="ok", response=output, request_time=T0),
+        )
+        await records.put_results(
+            SINGLE_USER,
+            "default",
+            [
+                CaseResult(
+                    run_id=run_id,
+                    case_id="c1",
+                    status="passed",
+                    output=output,
+                    store=StoreRef(trace_id=trace_id),
+                )
+            ],
+        )
+
+    asyncio.run(seed())
+    try:
+        exported = tmp_path / "shared"
+        export_local(home, exported)
+        summary, wire = push(home, server)
+        [sent] = summary.pushed
+        assert sent.created and sent.sent == 1
+        again, _ = push(home, server)
+        assert not again.pushed[0].created and again.pushed[0].sent == 0
+
+        [run_line] = wire.bodies("PUT")
+        assert run_line["run"]["run"]["target"] == {
+            **target.model_dump(mode="json"),
+            "url": "https://target.example.test/v1/answer",
+            "headers": {},
+            "body": {"client_secret": "[redacted]", "message": "{{message}}"},
+        }
+        wire_text = json.dumps(wire.sent)
+        exported_text = "".join((exported / name).read_text(encoding="utf-8") for name in LINE_FILES)
+        for text in (wire_text, exported_text):
+            assert not any(value in text for value in (header, query, env_value, "private-template", password))
+            assert "The reply referenced [redacted], [redacted], and [redacted]." in text
+
+        data = asyncio.run(records.get_run(SINGLE_USER, "default", run_id))
+        assert data is not None and data.target == target
+        page = asyncio.run(records.list_results(SINGLE_USER, "default", run_id))
+        assert page.items[0].output == output
+        trace = asyncio.run(store.get_trace(SINGLE_USER, "default", trace_id))
+        assert trace is not None and trace.response == output
+    finally:
+        records.close()
+
+
 def test_a_scoring_job_that_finishes_after_the_push_goes_with_the_next(home, server):
     store, records = open_stores(home)
     run = next(
@@ -666,6 +745,23 @@ def test_the_server_refuses_what_it_cannot_take(server):
     elsewhere = {**body, "run": done}
     assert server.client.put(f"/v1/push/runs/{uuid.uuid4()}", json=elsewhere, headers=headers).status_code == 422
     cases = {"format": FORMAT, "version": VERSION, "run": done}
+    private = {
+        **done["run"],
+        "target": {
+            "kind": "http",
+            "url": "https://target.example.test",
+            "headers": {"X-Fixture": "placeholder"},
+            "body": {"message": "{{message}}"},
+        },
+    }
+    unsanitized = {**done, "run": private}
+    refused = server.client.put(url, json={**elsewhere, "run": unsanitized}, headers=headers)
+    assert refused.status_code == 422 and "private transport settings" in refused.text
+    non_eval = run.model_copy(update={"state": "completed", "kind": "redteam"})
+    for field in ("run", "store_run"):
+        wrong_kind = {**done, field: non_eval.model_dump(mode="json")}
+        assert server.client.put(url, json={**elsewhere, "run": wrong_kind}, headers=headers).status_code == 422
+        assert server.client.post(f"{url}/cases", json={**cases, "run": wrong_kind}, headers=headers).status_code == 422
     assert server.client.post(f"{url}/cases", json=cases, headers=headers).status_code == 409  # not pushed yet
     assert server.client.put(url, json=elsewhere, headers=headers).status_code == 200
     # One id is one run: the same id in another project is refused, as the run routes find a run by id.

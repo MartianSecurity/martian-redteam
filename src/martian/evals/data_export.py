@@ -48,6 +48,7 @@ from typing import IO, TYPE_CHECKING, Any
 from pydantic import BaseModel, ValidationError
 
 from martian._version import __version__
+from martian.evals._sharing import ShareRedaction
 from martian.evals.model import (
     MODEL_VERSION,
     Case,
@@ -275,6 +276,9 @@ WRITE_BATCH = 500
 
 UNFINISHED = ("queued", "running")
 
+SHARING_POLICY = 1
+"""A progress plan also pins the outbound credential policy. Older raw exports must start over."""
+
 RECHECK_INTERRUPTED = (
     "Interrupted: this re-check was queued or running when its data was exported, and nothing works on it "
     "in the install it was imported into; ask for it again"
@@ -404,6 +408,8 @@ def _start(folder: Path, principal: Principal) -> tuple[dict[str, Any], dict[str
             raise ExportError(f"the export in progress in {folder} cannot be read; start a new export") from None
         if (plan.get("format"), plan.get("version")) != (FORMAT, VERSION):
             raise ExportError(f"{folder} holds an export in another format; start a new export")
+        if plan.get("sharing_policy") != SHARING_POLICY:
+            raise ExportError(f"{folder} was started with a different credential policy; choose a new export folder")
         if plan.get("organisation_id") != principal.organisation_id:
             raise ExportError(f"the export in progress in {folder} is another organisation's")
         return plan, progress
@@ -429,6 +435,7 @@ async def _plan(store: EvalStore, records: RecordStore, principal: Principal) ->
     return {
         "format": FORMAT,
         "version": VERSION,
+        "sharing_policy": SHARING_POLICY,
         "organisation_id": principal.organisation_id,
         "started_at": datetime.now(UTC).isoformat(),
         "projects": projects,
@@ -476,8 +483,11 @@ async def export_data(store: EvalStore, records: RecordStore, principal: Princip
             kind, project_id, item = steps[progress["step"]]
             if kind == "traces":
                 cursor = progress["cursor"]
+                trace_redactions: dict[str | None, ShareRedaction] = {None: ShareRedaction()}
                 while True:
-                    cursor = await _traces(store, principal, files, project_id, cursor, runs[project_id])
+                    cursor = await _traces(
+                        store, records, principal, files, project_id, cursor, runs[project_id], trace_redactions
+                    )
                     if cursor is None:
                         break
                     files.commit()
@@ -526,14 +536,16 @@ async def _project(
     files.write("projects.jsonl", export_line(project_id, project=project))
     for latest in await store.list_scorers(principal, project_id):
         for scorer in await store.scorer_versions(principal, project_id, latest.name):
-            files.write("scorers.jsonl", export_line(project_id, scorer=scorer))
+            data = scorer.model_dump(mode="json")
+            files.write("scorers.jsonl", export_line(project_id, scorer=ShareRedaction.from_config(data).scorer(data)))
     for question in await store.list_questions(principal, project_id):
         files.write("questions.jsonl", export_line(project_id, question=question))
     for latest_suite in await records.list_suites(principal, project_id):
         for version in range(1, latest_suite.version + 1):
             suite = await records.get_suite(principal, project_id, latest_suite.id, version=version)
             if suite is not None:
-                files.write("suites.jsonl", export_line(project_id, suite=suite))
+                data = suite.model_dump(mode="json")
+                files.write("suites.jsonl", export_line(project_id, suite=ShareRedaction.from_config(data).suite(data)))
     for draft in await records.list_drafts(principal, project_id):
         files.write("drafts.jsonl", export_line(project_id, draft=draft))
         offset = 0
@@ -549,9 +561,14 @@ async def _project(
     for view in await records.list_views(principal, project_id):
         files.write("views.jsonl", export_line(project_id, view=view))
     for calibration in await records.list_calibrations(principal, project_id):
-        files.write("calibrations.jsonl", export_line(project_id, calibration=calibration))
+        data = calibration.model_dump(mode="json")
+        data = ShareRedaction.from_config(data).fields(data, (), ("endpoint", "panel"))
+        files.write("calibrations.jsonl", export_line(project_id, calibration=data))
     for recheck in await records.list_rechecks(principal, project_id):
-        files.write("rechecks.jsonl", export_line(project_id, recheck=recheck))
+        data = recheck.model_dump(mode="json")
+        redaction = ShareRedaction.from_config(data["scorer"])
+        data["scorer"] = redaction.scorer(data["scorer"])
+        files.write("rechecks.jsonl", export_line(project_id, recheck=redaction.fields(data, ("error",))))
 
 
 async def _dataset(store: EvalStore, principal: Principal, files: _Files, project_id: str, dataset_id: str) -> None:
@@ -591,6 +608,8 @@ async def run_records(
     write: Callable[[str, dict[str, Any]], None],
     project_id: str,
     run_id: str,
+    *,
+    redaction: ShareRedaction | None = None,
 ) -> Run | None:
     """Write the lines of the run itself, as the record store and the store hold it, and of its
     case results, scores and scoring jobs: ``write(file name, line)`` for each, in the files'
@@ -600,19 +619,27 @@ async def run_records(
     if run is None:
         raise ExportError(f"run {run_id} of project {project_id} is no longer in the record store")
     native = await store.get_run(principal, project_id, run_id)
-    write("runs.jsonl", export_line(project_id, run=run, store_run=native))
+    if redaction is None:
+        redaction = ShareRedaction()
+    line = export_line(project_id, run=run, store_run=native)
+    redaction.collect(line["run"], line["store_run"])
+    line["run"] = redaction.run(line["run"])
+    if native is not None:
+        line["store_run"] = redaction.run(line["store_run"])
+    write("runs.jsonl", line)
     offset = 0
     while True:
         page = await records.list_results(principal, project_id, run_id, offset=offset, limit=PAGE)
         for result in page.items:
-            write("case_results.jsonl", export_line(project_id, result=result))
+            data = redaction.result(result.model_dump(mode="json"))
+            write("case_results.jsonl", export_line(project_id, result=data))
         if page.next_cursor is None:
             break
         offset += PAGE
     for score in await records.list_scores(principal, project_id, run_id):
-        write("scores.jsonl", export_line(project_id, score=score))
+        write("scores.jsonl", export_line(project_id, score=redaction.score(score.model_dump(mode="json"))))
     for job in await records.list_scoring_jobs(principal, project_id, run_id):
-        write("scoring_jobs.jsonl", export_line(project_id, job=job))
+        write("scoring_jobs.jsonl", export_line(project_id, job=redaction.job(job.model_dump(mode="json"))))
     return native
 
 
@@ -621,10 +648,12 @@ async def _run(
 ) -> None:
     """The run in the record store and in the store, its case results, scores, scoring jobs,
     reviews, review queues and artifacts."""
-    native = await run_records(store, records, principal, files.write, project_id, run_id)
+    redaction = ShareRedaction()
+    native = await run_records(store, records, principal, files.write, project_id, run_id, redaction=redaction)
     reviews = _chain_order(await records.list_reviews(principal, project_id, run_id, current_only=False))
     for review in reviews:
-        files.write("reviews.jsonl", export_line(project_id, review=review))
+        data = redaction.fields(review.model_dump(mode="json"), ("comment", "value"))
+        files.write("reviews.jsonl", export_line(project_id, review=data))
     # The store cannot list queues: a run's queues are the ones its reviews name.
     for queue_id in dict.fromkeys(r.queue_id for r in reviews if r.queue_id is not None):
         queue = await store.get_queue(principal, project_id, queue_id)
@@ -635,12 +664,18 @@ async def _run(
         files.write("blind_queues.jsonl", export_line(project_id, blind_queue=blind))
     if native is not None:
         for name in await store.list_artifacts(principal, project_id, run_id):
-            data = await store.get_artifact(principal, project_id, run_id, name)
-            if data is None:
+            artifact = await store.get_artifact(principal, project_id, run_id, name)
+            if artifact is None:
                 raise ExportError(f"artifact {name} of run {run_id} is no longer in the store")
-            sha = files.artifact(data)
+            try:
+                content = artifact.decode("utf-8")
+            except UnicodeDecodeError:
+                pass  # Binary artifacts are opaque, as on restore.
+            else:
+                artifact = redaction.text(content).encode("utf-8")
+            sha = files.artifact(artifact)
             files.write(
-                "artifacts.jsonl", export_line(project_id, run_id=run_id, name=name, sha256=sha, size=len(data))
+                "artifacts.jsonl", export_line(project_id, run_id=run_id, name=name, sha256=sha, size=len(artifact))
             )
 
 
@@ -666,14 +701,19 @@ async def _monitoring(
         progress = await records.monitor_progress(principal, project_id, monitor.id)
         if progress is None:
             raise ExportError(f"monitor {monitor.id} of project {project_id} is no longer in the record store")
-        files.write("monitors.jsonl", export_line(project_id, monitor=monitor, progress=progress))
+        data = monitor.model_dump(mode="json")
+        redaction = ShareRedaction.from_config(data)
+        data["scorers"] = [redaction.scorer(scorer) for scorer in data["scorers"]]
+        files.write("monitors.jsonl", export_line(project_id, monitor=data, progress=progress))
         async for taken in _listed(records.list_monitored_traces, principal, project_id, monitor.id):
             files.write("monitored_traces.jsonl", export_line(project_id, trace=taken))
     for schedule in await records.list_schedules(principal, project_id):
         schedule_progress = await records.schedule_progress(principal, project_id, schedule.id)
         if schedule_progress is None:
             raise ExportError(f"schedule {schedule.id} of project {project_id} is no longer in the record store")
-        files.write("schedules.jsonl", export_line(project_id, schedule=schedule, progress=schedule_progress))
+        data = schedule.model_dump(mode="json")
+        data = ShareRedaction.from_config(data).run(data)
+        files.write("schedules.jsonl", export_line(project_id, schedule=data, progress=schedule_progress))
         async for entry in _listed(records.list_scheduled_runs, principal, project_id, schedule.id):
             if entry.run_id is not None and entry.run_id not in runs:
                 raise ExportError(
@@ -691,7 +731,14 @@ async def _monitoring(
 
 
 async def _traces(
-    store: EvalStore, principal: Principal, files: _Files, project_id: str, cursor: str | None, runs: set[str]
+    store: EvalStore,
+    records: RecordStore,
+    principal: Principal,
+    files: _Files,
+    project_id: str,
+    cursor: str | None,
+    runs: set[str],
+    redactions: dict[str | None, ShareRedaction],
 ) -> str | None:
     """One page of the project's traces, oldest first, each with its spans and scores. Returns the
     cursor of the next page. A trace of a run the export does not cover stops it: an import could
@@ -707,7 +754,14 @@ async def _traces(
                 f"trace {trace.id} belongs to run {trace.run_id}, which started after this export did. "
                 "Export again into a new folder once no run is in progress"
             )
-        files.write("traces.jsonl", export_line(project_id, trace=trace))
+        run_id = trace.run_id
+        if run_id is not None and run_id not in redactions:
+            run = await records.get_run(principal, project_id, run_id)
+            if run is None:
+                raise ExportError(f"trace {trace.id} belongs to a run no longer in the record store")
+            redactions[run_id] = ShareRedaction.from_config(run.model_dump(mode="json"))
+        data = redactions[run_id].trace(trace.model_dump(mode="json"))
+        files.write("traces.jsonl", export_line(project_id, trace=data))
     return page.next_cursor
 
 
@@ -738,6 +792,7 @@ def _finish(folder: Path, plan: dict[str, Any], files: _Files) -> dict[str, Any]
     manifest = {
         "format": FORMAT,
         "version": VERSION,
+        "sharing_policy": SHARING_POLICY,
         "model_version": MODEL_VERSION,
         "sdk_version": __version__,
         "organisation_id": plan["organisation_id"],

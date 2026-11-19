@@ -44,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from mlflow.entities import Feedback, ViewType
 from mlflow.exceptions import MlflowException
@@ -56,6 +56,7 @@ from martian.evals._mlflow import (
     ReadOnlyTrackingStore,
     has_every_table,
     load_dataset_records,
+    local_trace_path,
     schema_head,
     schema_history,
     trace_artifact_file,
@@ -149,7 +150,10 @@ def source_url(source: str) -> str:
     """The SQLAlchemy URL of ``source``: a database URL as given (``postgresql://`` read with
     psycopg, the driver ``martian-sdk[postgres]`` installs), or a SQLite database file's path.
     Raises :class:`MlflowSourceError` for anything else."""
-    scheme = urlsplit(source).scheme.lower()
+    try:
+        scheme = urlsplit(source).scheme.lower()
+    except ValueError:
+        raise MlflowSourceError("give a valid MLflow database URL or filename") from None
     if scheme in ("http", "https", "databricks"):
         raise MlflowSourceError(
             f"{_without_password(source)} is an MLflow server: copying over its REST API is not supported. "
@@ -185,7 +189,7 @@ def read_only_engine(url: str) -> Engine:
     if parsed.get_backend_name() == "sqlite":
         database = parsed.database or ""
         if database in ("", ":memory:") or database.startswith("file:"):
-            raise MlflowSourceError(f"{url}: give the path of a SQLite database file")
+            raise MlflowSourceError(f"{_shown(url)}: give the path of a SQLite database file")
         path = Path(database).resolve()
         if not path.is_file():
             raise MlflowSourceError(f"there is no file {path}")
@@ -258,19 +262,20 @@ def check_source(engine: Engine, url: str) -> SourceCheck:
 
 def _without_password(url: str) -> str:
     parts = urlsplit(url)
-    if parts.password is None:
-        return url
-    return parts._replace(netloc=parts.netloc.replace(f":{parts.password}@", ":***@", 1)).geturl()
+    userinfo, separator, host = parts.netloc.rpartition("@")
+    netloc = f"{userinfo.partition(':')[0]}:***@{host}" if separator and ":" in userinfo else parts.netloc
+    return parts._replace(netloc=netloc, query="", fragment="").geturl()
 
 
 def _shown(url: str) -> str:
     from sqlalchemy import make_url
 
-    return make_url(url).render_as_string(hide_password=True)
+    return make_url(url).set(query={}).render_as_string(hide_password=True)
 
 
 def _reason(error: Exception) -> str:
-    return str(getattr(error, "orig", None) or error).splitlines()[0][:300]
+    # A driver error can echo the original DSN, including connection parameters.
+    return type(getattr(error, "orig", None) or error).__name__
 
 
 # --- what the copy holds -------------------------------------------------------------------------
@@ -344,7 +349,10 @@ def read_mlflow_store(source: str, *, experiments: list[str] | None = None) -> P
 
     os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
     url = source_url(source)
-    engine = read_only_engine(url)
+    try:
+        engine = read_only_engine(url)
+    except (SQLAlchemyError, ValueError) as error:
+        raise MlflowSourceError(f"cannot open the source database ({type(error).__name__})") from None
     try:
         check = check_source(engine, url)
         try:
@@ -477,8 +485,8 @@ class _Reader:
             mlflow_trace = self.store.get_trace(info.trace_id, allow_partial=True)
         else:
             mlflow_trace = trace_from_file(info, '{"spans": []}')
-            local = Path(unquote(urlsplit(path).path)) if path.startswith("file:") else Path(path)
-            if path and local.is_absolute() and local.is_file():
+            local = local_trace_path(path)
+            if local is not None and local.is_file():
                 try:
                     mlflow_trace = trace_from_file(info, local.read_text(encoding="utf-8"))
                 except (OSError, ValueError, KeyError, TypeError) as error:
@@ -486,7 +494,7 @@ class _Reader:
                         f"trace {info.trace_id}: cannot read its spans in {local}: {error}"
                     ) from None
             elif note:
-                where = f"in {path}, which is not a file on this machine" if path else "in no artifact location"
+                where = "at an unavailable or nonlocal artifact location" if path else "in no artifact location"
                 self._skip("trace", info.trace_id, f"copied without its spans: MLflow keeps them {where}")
         found = trace_from_mlflow(mlflow_trace, project_id)
         trace_id = info.trace_id if _MLFLOW_TRACE_ID.match(info.trace_id) else "tr-" + digest(info.trace_id)[:32]

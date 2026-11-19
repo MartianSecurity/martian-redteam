@@ -81,7 +81,8 @@ def test_martian_redteam_push_sends_a_run_once(server, tmp_path, monkeypatch):
 
     app, records = server
     path = tmp_path / "redteam-run.json"
-    path.write_text(local_run().model_dump_json())
+    run = local_run(provenance={"launch": {"run_file": {"target": {"name": "local-only"}}}, "tag": "kept"})
+    path.write_text(run.model_dump_json())
     loopback = LoopbackServer(app)
     loop = asyncio.new_event_loop()
     import threading
@@ -107,6 +108,9 @@ def test_martian_redteam_push_sends_a_run_once(server, tmp_path, monkeypatch):
     assert refused.exit_code == 2 and "has not finished" in " ".join(refused.output.split())
     listed = asyncio.run(RedteamStore(records).list("default"))
     assert [item.id for item in listed.items] == ["redteam-0123456789ab"]
+    held = asyncio.run(RedteamStore(records).get("default", run.id))
+    assert held is not None and held.provenance == {"tag": "kept", "execution": CLIENT_EXECUTED}
+    assert json.loads(path.read_text())["provenance"] == run.provenance
 
 
 def test_a_push_without_a_connection_stops(tmp_path, monkeypatch):

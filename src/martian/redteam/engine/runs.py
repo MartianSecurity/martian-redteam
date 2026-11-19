@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ class TargetUnavailable(ValueError):
 
 
 class SessionHandoverError(ValueError):
-    """The agent's session API did not take the tool session. The message names the setting."""
+    """The tool session could not be written or accepted by the agent's session API."""
 
 
 SESSION_FILE = "tool-session.json"
@@ -105,12 +106,30 @@ async def hand_session(
     removed when ``stack`` closes, and post it to ``session_api``'s ``/sessions`` when one is named."""
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / SESSION_FILE
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
-    stack.callback(path.unlink, missing_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=folder, prefix=".tool-session-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle)
+            info = os.fstat(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    stack.callback(_remove_session_file, path, info.st_dev, info.st_ino)
     if session_api is not None:
         await hand_over(session_api, payload)
+
+
+def _remove_session_file(path: Path, device: int, inode: int) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return
+    if (current.st_dev, current.st_ino) == (device, inode):
+        path.unlink(missing_ok=True)
 
 
 @dataclass

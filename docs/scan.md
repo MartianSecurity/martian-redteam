@@ -69,6 +69,9 @@ refused with 403, and the command says what it needs.
    `Not sent`; its target is sent in its own right when it is selected. A submodule or another file
    that is not a regular file is listed the same way.
 
+The Scanner requires a filesystem API that can open paths relative to a directory without following
+links. Use Linux, macOS, or WSL. An unsupported platform refuses to read the scan folder.
+
 The archive is a ZIP of regular file entries only, sorted, with a fixed time and mode and deflate
 compression, so the same files give the same bytes. The command prints the file count, sizes and the
 **content digest**: SHA-256 over each file's path, a NUL, the file's SHA-256 in hex and a newline, in
@@ -128,7 +131,8 @@ waivers:
   - {rule: REF-UNPINNED-PACKAGE, path: .mcp.json, reason: "Served from the internal mirror", expires: 2027-01-31}
 ```
 
-The command reads the file's text (at most 64 KiB, UTF-8, a regular file: a symbolic link is refused)
+The default policy is read from inside the scan folder. An explicit `--policy` can select a regular
+file elsewhere. The command reads the file's text (at most 64 KiB, UTF-8, a regular file)
 and sends it to `POST /v1/scanner/gate-policy/validate` before it packs anything. A refused file, an
 unknown field at any level among the reasons, exits 2 with each error's place and reason, and nothing
 is uploaded. Without a file the text is empty, which the server reads as the strictest gate: every open
@@ -140,9 +144,10 @@ the scan and stores the evaluation; the command prints its first line and the ev
 Inside a Git work tree the upload names the commit the files are of (the manifest's `git`): `sha`
 (`HEAD`), `ref` (`GITHUB_REF` in a GitHub Actions run of that commit, else the checked-out branch),
 `default_branch` (`--default-branch`, else the GitHub event's repository, else `origin/HEAD`),
-`repository` and `run_url` in GitHub Actions. It names it only when every file sent is that commit's:
-a changed, staged or untracked file among them leaves the commit out, and the command says how many
-files differ. A scan whose `ref` is its `default_branch` is a baseline; with `gate.new_findings_only`
+`repository` and `run_url` in GitHub Actions. It names the commit only when each archived file's
+bytes match a regular blob at that path in the commit. An untracked file or a checkout conversion
+that changes the bytes leaves the commit out. A scan whose `ref` is its `default_branch` is a baseline.
+With `gate.new_findings_only`
 the server compares a later scan of the same subject with the newest such scan, by fingerprint, so a
 finding the default branch already had does not fail and a new one does. The command prints the
 baseline the server used, or that there was none.
@@ -214,7 +219,9 @@ it scans on pushes to `main`, fails the job on the gate and uploads the SARIF to
 | `timeout` | `600` | Seconds to wait |
 | `model-analysis` | `true` | `false` keeps file contents from any model |
 
-Its outputs are `exit-code` and `sarif` (the SARIF's path, when written). The step fails with the
+Its outputs are `exit-code`, `sarif` and `json`. The two paths refer to files staged for the
+current invocation and are set for reports produced by a passing or failing gate. The action
+copies those files into `output` for local use. The step fails with the
 command's exit code after writing both files, so a following step with `if: always()` still uploads
 the findings of a failed gate.
 

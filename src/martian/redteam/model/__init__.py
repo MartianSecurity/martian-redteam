@@ -454,6 +454,14 @@ class RedteamRun(_Object):
                 raise ValueError("a finding names a probe the run does not have")
         return self
 
+    def without_local_launch(self) -> RedteamRun:
+        """Drop the private configuration that lets the originating process resume the run."""
+        if "launch" not in self.provenance:
+            return self
+        return self.model_copy(
+            update={"provenance": {key: value for key, value in self.provenance.items() if key != "launch"}}
+        )
+
     def probe(self, probe_id: str) -> Probe:
         return next(probe for probe in self.probes if probe.id == probe_id)
 

@@ -281,10 +281,9 @@ jobs:
     name: Action smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # The evals action comments on this repository's pull requests; nothing else is written.
+    # The action smoke job runs the pull request checkout with a read-only token.
     permissions:
       contents: read
-      pull-requests: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -296,7 +295,7 @@ jobs:
         with:
           config: examples/config.yaml
 
-      # The two sample suites need no secret: each keeps its own comment on the pull request.
+      # The two sample suites need no secret and write their results to the job summary.
       # The passing sample keeps its result on main and compares each pull request with it.
       - name: Evals action on the passing sample
         uses: ./.github/actions/evals
@@ -375,6 +374,34 @@ jobs:
           jq -e '.version == "2.1.0" and (.runs[0].results | length) == 1' "$SEEDED_SARIF"
           jq -e '.runs[0].results[0].partialFingerprints["martianScannerFinding/v1"] | length == 64' "$SEEDED_SARIF"
           jq -e '.runs[0].results | length == 0' results/scan-clean/scan.sarif
+
+      - name: Prepare a previous scan's output
+        run: |
+          mkdir -p results/scan-no-result
+          cp results/scan-seeded/scan.{json,sarif} results/scan-no-result/
+
+      - name: Scan action without a result
+        id: missing-scan
+        continue-on-error: true
+        uses: ./.github/actions/scan
+        env:
+          MARTIAN_API_URL: ${{ steps.scan-backend.outputs.url }}
+          MARTIAN_API_TOKEN: mce_test_scan_key_0123456789
+        with:
+          path: examples/scan/missing
+          output: results/scan-no-result
+
+      - name: Require an unsuccessful scan to publish no previous report
+        env:
+          MISSING_OUTCOME: ${{ steps.missing-scan.outcome }}
+          MISSING_EXIT: ${{ steps.missing-scan.outputs.exit-code }}
+          MISSING_JSON: ${{ steps.missing-scan.outputs.json }}
+          MISSING_SARIF: ${{ steps.missing-scan.outputs.sarif }}
+        run: |
+          test "$MISSING_OUTCOME" = failure
+          test "$MISSING_EXIT" = 2
+          test -z "$MISSING_JSON"
+          test -z "$MISSING_SARIF"
 
   ci:
     name: CI

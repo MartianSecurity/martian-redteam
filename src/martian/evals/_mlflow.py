@@ -19,11 +19,13 @@ import json
 import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import mlflow
 from mlflow.entities import Trace as MlflowTrace
 from mlflow.entities import TraceData
+from mlflow.exceptions import MlflowException
 from mlflow.gateway.constants import MLFLOW_GATEWAY_CALLER_HEADER, GatewayCaller
 from mlflow.genai.evaluation.entities import EvaluationResult
 from mlflow.genai.judges.adapters.gateway_adapter import GatewayAdapter
@@ -41,6 +43,7 @@ from mlflow.metrics.genai.model_utils import _get_provider_instance as provider_
 from mlflow.metrics.genai.model_utils import _parse_model_uri as parse_model_uri
 from mlflow.ml_package_versions import FLAVOR_TO_MODULE_NAME
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
+from mlflow.store.artifact.local_artifact_repo import LocalArtifactRepository
 from mlflow.store.db.utils import _all_tables_exist, _get_alembic_config, _get_latest_schema_revision
 from mlflow.store.model_registry.sqlalchemy_workspace_store import (
     WorkspaceAwareSqlAlchemyStore as WorkspaceAwareRegistryStore,
@@ -50,8 +53,13 @@ from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
 from mlflow.store.tracking.sqlalchemy_workspace_store import WorkspaceAwareSqlAlchemyStore
 from mlflow.store.workspace.sqlalchemy_store import SqlAlchemyStore as WorkspaceSqlAlchemyStore
 from mlflow.tracing.constant import AssessmentMetadataKey, SpansLocation, TraceTagKey
-from mlflow.tracing.utils.artifact_utils import TRACE_DATA_FILE_NAME, get_artifact_uri_for_trace
+from mlflow.tracing.utils.artifact_utils import (
+    TRACE_DATA_FILE_NAME,
+    get_archive_uri_for_trace,
+    get_artifact_uri_for_trace,
+)
 from mlflow.tracking import fluent as _fluent
+from mlflow.utils.file_utils import get_local_path_or_none
 from mlflow.utils.providers import _fetch_remote_provider as _configured_model_prices
 from mlflow.utils.search_utils import SearchTraceUtils
 from mlflow.utils.workspace_context import ServerWorkspaceContext, get_request_workspace
@@ -63,6 +71,7 @@ if TYPE_CHECKING:
 PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.entities", "Trace"),  # public, imported here to build a trace from its artifact file
     ("mlflow.entities", "TraceData.from_dict"),
+    ("mlflow.exceptions", "MlflowException"),
     ("mlflow.gateway.constants", "MLFLOW_GATEWAY_CALLER_HEADER"),
     ("mlflow.gateway.constants", "GatewayCaller"),
     ("mlflow.genai.evaluation.entities", "EvaluationResult"),
@@ -84,6 +93,7 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.prompt.constants", "IS_PROMPT_TAG_KEY"),
     ("mlflow.pytest.decorator", "MLFLOW_TEST_ATTR"),
     ("mlflow.pytest.plugin", ""),  # loaded by name as a pytest plugin
+    ("mlflow.store.artifact.local_artifact_repo", "LocalArtifactRepository.download_archived_trace_data"),
     ("mlflow.store.db.utils", "_all_tables_exist"),
     ("mlflow.store.db.utils", "_get_alembic_config"),
     ("mlflow.store.db.utils", "_get_latest_schema_revision"),
@@ -96,8 +106,10 @@ PRIVATE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("mlflow.tracing.trace_manager", "InMemoryTraceManager.get_trace"),
     ("mlflow.tracing.trace_manager", "InMemoryTraceManager.pop_trace"),
     ("mlflow.tracing.utils.artifact_utils", "TRACE_DATA_FILE_NAME"),
+    ("mlflow.tracing.utils.artifact_utils", "get_archive_uri_for_trace"),
     ("mlflow.tracing.utils.artifact_utils", "get_artifact_uri_for_trace"),
     ("mlflow.tracking.fluent", "_active_experiment_id"),
+    ("mlflow.utils.file_utils", "get_local_path_or_none"),
     ("mlflow.utils.providers", "_fetch_remote_provider"),
     ("mlflow.utils.workspace_context", "get_request_workspace"),
     ("mlflow.utils.workspace_context", "ServerWorkspaceContext"),
@@ -280,6 +292,31 @@ class ReadOnlyTrackingStore(SqlAlchemyStore):
     def _initialize_store_state(self) -> None:
         """MLflow checks the workspaces and creates the default experiment here; the importer
         checks the workspaces itself, and a store that is only read needs no default experiment."""
+
+    def _get_spans_with_trace_info(self, trace_info: Any, spans: Any, allow_partial: bool = True) -> Any:
+        # MLflow can reread metadata after archival. Check the final trace info at dispatch.
+        if trace_info.tags.get(TraceTagKey.SPANS_LOCATION) == SpansLocation.ARCHIVE_REPO.value:
+            path = local_trace_path(get_archive_uri_for_trace(trace_info))
+            if path is None:
+                raise MlflowException("Trace archives must be absolute paths on this machine")
+            return LocalArtifactRepository(path.as_uri()).download_archived_trace_data().spans
+        return super()._get_spans_with_trace_info(trace_info, spans, allow_partial=allow_partial)
+
+
+def local_trace_path(uri: str) -> Path | None:
+    """Translate an absolute local artifact path, excluding UNC and remote URI locations."""
+    filename = uri
+    if uri.startswith("file:"):
+        try:
+            filename = get_local_path_or_none(uri)  # type: ignore[no-untyped-call]
+        except ValueError:
+            return None
+    if not filename or filename.startswith(("//", "\\\\")):
+        return None
+    path = Path(filename)
+    if path.drive and (len(path.drive) != 2 or not path.drive.endswith(":")):
+        return None
+    return path if path.is_absolute() else None
 
 
 def trace_artifact_file(info: Any) -> str | None:

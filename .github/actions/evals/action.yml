@@ -1,15 +1,12 @@
-# Run one eval suite file and report it on the pull request, in one comment
-# that every push edits. Callers check out their repository first.
+# Run an eval suite file and report the result in the Actions job summary.
+# Callers check out their repository first.
 # `martian evals run` runs locally: a suite of deterministic checks or stored
-# replies needs no Martian account and no secret. The job needs
-# `contents: read` and `pull-requests: write`. Pull requests from forks and
-# from Dependabot get a read-only token: the report then goes to the job
-# summary only, with a warning. Use `pull_request`, never
+# replies needs no Martian account and no secret. Give the job
+# `contents: read`. Use `pull_request`, never
 # `pull_request_target`: the suite runs the pull request's code.
-# The action fails with the suite's exit code after reporting. It does not
-# upload artifacts; the caller should upload the output folder with
-# if: always(). Walks up from github.action_path to pyproject.toml (package
-# root) and installs the SDK from there, like .github/actions/validate.
+# The action fails with the suite's exit code after reporting. Callers can
+# publish selected result files when results-written is true. The action
+# installs the SDK from the package root above github.action_path.
 # With baseline-branch, a push to that branch keeps the run's verdicts.json
 # (no inputs, replies or judge reasons) in the repository's Actions cache, and
 # a pull request is compared with the last one kept: `martian evals run
@@ -17,12 +14,12 @@
 # paid service.
 # With redteam, the action also runs a version 2 red team run file with
 # `martian redteam run`, locally on the run file's own models, and adds its
-# result to the same comment. That step clears MARTIAN_API_URL and
+# result to the same summary. That step clears MARTIAN_API_URL and
 # MARTIAN_API_TOKEN, so it needs no Martian token and never reaches Martian;
 # the model key comes from the step's env. Give suite, redteam or both.
 # See docs/gate-and-ci.md.
 name: Martian Evals
-description: Run a Martian eval suite file, a red team run file or both, and keep one pull-request comment with the result
+description: Run a Martian eval suite file, a red team run file or both, and write the result to the job summary
 
 inputs:
   suite:
@@ -35,29 +32,19 @@ inputs:
       caller workspace. Give each suite its own folder.
     required: false
     default: results/evals
-  github-token:
-    description: Token that writes the comment; it needs pull-requests write
-    required: false
-    default: ${{ github.token }}
   comment-key:
     description: >
-      Names the comment this run keeps up to date. Empty uses the suite path.
+      Identifies the suite's baseline. Empty uses the suite path.
       Give each job its own key when several jobs run the same suite on one
       pull request. A suite's own matrix needs no key: its combinations share
-      one comment and one baseline.
+      one baseline.
     required: false
     default: ""
-  comment-author:
-    description: >
-      Login that writes the comment. Change it only when github-token is not
-      the workflow token.
-    required: false
-    default: github-actions[bot]
   redteam:
     description: >
       Path to a version 2 red team run file (redteam.yaml), relative to the
       caller workspace. It runs locally with the models it names; its result
-      joins the comment. Empty runs no red team.
+      joins the job summary. Empty runs no red team.
     required: false
     default: ""
   redteam-output:
@@ -76,6 +63,11 @@ inputs:
       every run on its own.
     required: false
     default: ""
+
+outputs:
+  results-written:
+    description: True when the current suite produced a summary or matrix report
+    value: ${{ steps.run.outputs.results-written }}
 
 runs:
   using: composite
@@ -168,20 +160,26 @@ runs:
         MARTIAN_EVALS_BASELINE_MODE: ${{ steps.baseline.outputs.mode }}
         MARTIAN_EVALS_BASELINE_DIR: ${{ steps.baseline.outputs.dir }}
       run: |
-        set -uo pipefail
+        set -euo pipefail
         # Every run that finishes rewrites these: summary.json, or matrix.json
         # for a suite with a matrix. Removing them first means a run that stops
         # early cannot be reported, or kept, with an earlier result.
-        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/matrix.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json"
+        rm -f "${MARTIAN_EVALS_OUTPUT}/summary.json" "${MARTIAN_EVALS_OUTPUT}/matrix.json" "${MARTIAN_EVALS_OUTPUT}/verdicts.json" "${MARTIAN_EVALS_OUTPUT}/comparison.json" "${MARTIAN_EVALS_OUTPUT}/junit.xml"
         baseline=()
         if [ "$MARTIAN_EVALS_BASELINE_MODE" = "compare" ] && [ -f "${MARTIAN_EVALS_BASELINE_DIR}/verdicts.json" ]; then
           baseline=(--baseline "$MARTIAN_EVALS_BASELINE_DIR")
-          commit="$(head -c 64 "${MARTIAN_EVALS_BASELINE_DIR}/commit" 2>/dev/null | tr -cd '0-9a-f')"
-          echo "baseline-commit=${commit}" >> "${GITHUB_OUTPUT}"
+          if [ -f "${MARTIAN_EVALS_BASELINE_DIR}/commit" ]; then
+            commit="$(head -c 64 "${MARTIAN_EVALS_BASELINE_DIR}/commit" | tr -cd '0-9a-f')"
+            echo "baseline-commit=${commit}" >> "${GITHUB_OUTPUT}"
+          fi
         fi
         status=0
-        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --output "$MARTIAN_EVALS_OUTPUT" "${baseline[@]}" || status=$?
+        # Evaluate this invocation's cases without resuming a workspace checkpoint.
+        "${RUNNER_TEMP}/martian-evals/bin/martian" evals run "$MARTIAN_EVALS_SUITE" --fresh --output "$MARTIAN_EVALS_OUTPUT" "${baseline[@]}" || status=$?
         echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+        if [ -f "${MARTIAN_EVALS_OUTPUT}/summary.json" ] || [ -f "${MARTIAN_EVALS_OUTPUT}/matrix.json" ]; then
+          echo "results-written=true" >> "${GITHUB_OUTPUT}"
+        fi
 
     # Only a run in which every case has a verdict (exit 0 or 1) is kept.
     - name: Prepare the baseline
@@ -226,17 +224,14 @@ runs:
         "${RUNNER_TEMP}/martian-evals/bin/martian" redteam run "$MARTIAN_REDTEAM_RUN_FILE" --output "$MARTIAN_REDTEAM_OUTPUT" --no-store --format sarif,junit,html || status=$?
         echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
 
-    - name: Report on the pull request
+    - name: Write the job summary
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.github-token }}
         MARTIAN_EVALS_ROOT: ${{ steps.install.outputs.root }}
         MARTIAN_EVALS_SUITE: ${{ inputs.suite }}
         MARTIAN_EVALS_OUTPUT: ${{ inputs.output }}
         MARTIAN_EVALS_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
         MARTIAN_EVALS_COMMENT_KEY: ${{ inputs.comment-key }}
-        MARTIAN_EVALS_COMMENT_AUTHOR: ${{ inputs.comment-author }}
-        MARTIAN_EVALS_PR_NUMBER: ${{ github.event.pull_request.number }}
         MARTIAN_EVALS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         MARTIAN_EVALS_BASELINE_BRANCH: ${{ steps.baseline.outputs.mode == 'compare' && inputs.baseline-branch || '' }}
         MARTIAN_EVALS_BASELINE_SHA: ${{ steps.run.outputs.baseline-commit }}
