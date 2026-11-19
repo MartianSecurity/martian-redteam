@@ -184,13 +184,15 @@ class EngineJudge:
             "context": f"Tools the target called: {tools}",
         }
         reply = scrub_secrets(seen.reply, hidden)
+        if not reply.strip():
+            undecided = result(self, check, seen, None, source=source)
+            return undecided.model_copy(update={"error": "the judgment could not be read [judge_unreadable]"})
         expectations = {"rubric": rubric_of(seen.probe, check.spec.get("criteria"))}
         try:
+            scorer = self._judge()
             async with meter_model_call(meter, "judge") as reported:
                 try:
-                    feedback = await asyncio.to_thread(
-                        self._judge(), inputs=inputs, outputs=reply, expectations=expectations
-                    )
+                    feedback = await asyncio.to_thread(scorer, inputs=inputs, outputs=reply, expectations=expectations)
                 except StructuredReplyError as error:
                     if meter is not None:
                         reported(_usage(error.metadata))

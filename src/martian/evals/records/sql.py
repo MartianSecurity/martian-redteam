@@ -319,7 +319,14 @@ class SqlRecordStore:
 
         return await self._run(principal, work)
 
-    async def update_run(self, principal: Principal, run: Run, *, expected_state: RunState | None = None) -> Run:
+    async def update_run(
+        self,
+        principal: Principal,
+        run: Run,
+        *,
+        expected_state: RunState | None = None,
+        expected_checkpoint: Run | None = None,
+    ) -> Run:
         def work(connection: Connection, space: str) -> Run:
             stored = self._one(connection, runs, space, run.project_id, id=run.id)
             if stored is None:
@@ -330,6 +337,11 @@ class SqlRecordStore:
             )
             if expected_state is not None:
                 statement = statement.where(runs.c.state == expected_state)
+            if expected_checkpoint is not None:
+                statement = statement.where(
+                    runs.c.state == expected_checkpoint.state,
+                    runs.c.record["finished_at"].as_string() == _json(expected_checkpoint)["finished_at"],
+                )
             changed = connection.execute(statement.values(state=run.state, record=_json(saved))).rowcount
             if changed == 0:
                 raise StoreError("conflict", "the run is no longer in the expected state")

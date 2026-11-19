@@ -26,6 +26,8 @@ from martian.evals.model import Counts as EvalCounts
 from martian.evals.records import RecordStore, RedteamRecords
 from martian.evals.server.principal import SINGLE_USER, Principal
 from martian.evals.server.projection import DEFAULT_PROJECT
+from martian.evals.store import StoreError
+from martian.redteam.engine.budget import ResumeError
 from martian.redteam.model import (
     Attempt,
     AttemptOutcome,
@@ -183,8 +185,6 @@ class RedteamStore:
             await self.records.create_run(principal, record)
         else:
             if existing.kind != "redteam":
-                from martian.evals.store import StoreError
-
                 raise StoreError("conflict", "an eval run already has this id")
             await self.records.update_run(principal, record.model_copy(update={"created_at": existing.created_at}))
         results = [as_case_result(run.id, position, attempt) for position, attempt in enumerate(run.attempts)]
@@ -207,6 +207,28 @@ class RedteamStore:
             ),
         )
         return run
+
+    async def claim_resume(self, earlier: RedteamRun, *, principal: Principal = SINGLE_USER) -> None:
+        """Durably mark the verified checkpoint as running before any resumed model work."""
+        conflict = "The saved run changed before it could resume. Read its current state and try again."
+        saved = await self.records.get_run(principal, earlier.project_id, earlier.id)
+        if (
+            saved is None
+            or saved.kind != "redteam"
+            or saved.state != earlier.state
+            or saved.finished_at != earlier.finished_at
+        ):
+            raise ResumeError(conflict)
+        try:
+            await self.records.update_run(
+                principal,
+                saved.model_copy(update={"state": "running", "finished_at": None}),
+                expected_checkpoint=saved,
+            )
+        except StoreError as error:
+            if error.kind not in {"conflict", "not_found"}:
+                raise
+            raise ResumeError(conflict) from None
 
     async def get(self, project_id: str, run_id: str, *, principal: Principal = SINGLE_USER) -> RedteamRun | None:
         """The red team run, rebuilt from its records; ``None`` when there is none of this id."""

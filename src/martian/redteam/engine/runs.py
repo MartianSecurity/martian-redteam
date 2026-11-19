@@ -306,6 +306,11 @@ async def execute(
         canary=canary,
         world=world,
     )
+    if store is not None and resume is not None:
+        if principal is None:
+            await store.claim_resume(resume)
+        else:
+            await store.claim_resume(resume, principal=principal)
     return await engine.run()
 
 

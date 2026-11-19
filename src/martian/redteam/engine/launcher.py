@@ -79,6 +79,7 @@ class LocalLauncher:
         self.environ = environ
         self.targets = targets
         self.tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._resuming: set[tuple[str, str]] = set()
 
     def _environ(self, target_id: str | None, run_file: RunFile) -> Mapping[str, str]:
         """Where ``${NAME}`` in the target is read from: the launcher's environment and, for a run
@@ -168,9 +169,16 @@ class LocalLauncher:
                 resume=earlier,
                 canary=canary,
             )
-        except HTTPException:
-            await stack.aclose()
-            raise
+            key = (engine.project_id, engine.run_id)
+            if key in self.tasks or (
+                earlier is None and await self.store.get(request.project_id, engine.run_id, principal=principal)
+            ):
+                raise HTTPException(409, "A red team run already has this id")
+            first = engine.snapshot("running")
+            if earlier is None:
+                await keep(first)
+            else:
+                await self.store.claim_resume(earlier, principal=principal)
         except (BudgetExhausted, ResumeError) as error:
             await stack.aclose()
             raise HTTPException(409, str(error)) from None
@@ -188,20 +196,15 @@ class LocalLauncher:
         except (FileNotFoundError, ImportError, AttributeError):
             await stack.aclose()
             raise HTTPException(422, "Could not load the target: check its file and function") from None
-        if (engine.project_id, engine.run_id) in self.tasks or (
-            earlier is None and await self.store.get(request.project_id, engine.run_id, principal=principal)
-        ):
+        except BaseException:
             await stack.aclose()
-            raise HTTPException(409, "A red team run already has this id")
-        first = engine.snapshot("running")
-        await keep(first)
+            raise
 
         async def go() -> None:
             async with stack:
                 await engine.run()
 
         task = asyncio.create_task(go())
-        key = (engine.project_id, engine.run_id)
         self.tasks[key] = task
         task.add_done_callback(lambda _: self.tasks.pop(key, None))
         return first
@@ -214,14 +217,15 @@ class LocalLauncher:
         return mapping
 
     async def stop(self, principal: Principal, project_id: str, run_id: str) -> RedteamRun:
-        task = self.tasks.get((project_id, run_id))
+        key = (project_id, run_id)
+        task = self.tasks.get(key)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         run = await self.store.get(project_id, run_id, principal=principal)
         if run is None:
             raise HTTPException(404, "Red team run not found")
-        if self._orphan(run):
+        if key not in self._resuming and self._orphan(run):
             run = run.model_copy(
                 update={
                     "state": "cancelled",
@@ -239,22 +243,29 @@ class LocalLauncher:
         """Go on with a stopped, cancelled or failed run with the run file and local target it was
         started with. Each finished attempt whose fingerprint is unchanged is kept, and the rest run
         again; what the earlier session spent still counts against the budget."""
-        earlier = await self.store.get(project_id, run_id, principal=principal)
-        if earlier is None:
-            raise HTTPException(404, "Red team run not found")
-        launch = earlier.provenance.get("launch")
-        if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
-            raise HTTPException(
-                409,
-                "This run was not started here, so its run file is not kept: "
-                f"resume it with martian redteam run FILE --resume {run_id}",
-            )
-        if earlier.state not in RESUMABLE and not self._orphan(earlier):
-            raise HTTPException(
-                409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
-            )
-        request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
-        return await self.start(principal, request, target_id=launch.get("target_id"), earlier=earlier)
+        key = (project_id, run_id)
+        if key in self.tasks or key in self._resuming:
+            raise HTTPException(409, "This red team run already has an active session")
+        self._resuming.add(key)
+        try:
+            earlier = await self.store.get(project_id, run_id, principal=principal)
+            if earlier is None:
+                raise HTTPException(404, "Red team run not found")
+            launch = earlier.provenance.get("launch")
+            if not isinstance(launch, dict) or not isinstance(launch.get("run_file"), dict):
+                raise HTTPException(
+                    409,
+                    "This run was not started here, so its run file is not kept: "
+                    f"resume it with martian redteam run FILE --resume {run_id}",
+                )
+            if earlier.state not in RESUMABLE and not self._orphan(earlier):
+                raise HTTPException(
+                    409, f"Only a stopped, cancelled or failed run can be resumed; this one is {earlier.state}"
+                )
+            request = RunStart(project_id=project_id, run_file=launch["run_file"], request_id=run_id)
+            return await self.start(principal, request, target_id=launch.get("target_id"), earlier=earlier)
+        finally:
+            self._resuming.remove(key)
 
     async def close(self) -> None:
         """Cancel every run still going."""

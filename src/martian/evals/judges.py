@@ -18,6 +18,7 @@ from martian.evals._judge_transport import (
     DEFAULT_RATE_LIMIT_WAIT_SECONDS,
     MAX_RATE_LIMIT_WAIT_SECONDS,
     PROVIDER_RETRIES_KEY,
+    StructuredReplyError,
     invoke_response_judge,
 )
 from martian.evals.cache import HIT_KEY
@@ -283,6 +284,15 @@ def _resolve_rubrics(
         )
     checks, citations = _resolve_citations(mapped, len(rubrics), response)
     return checks, citations, [v.model_dump() for v in sorted(verdicts, key=lambda v: v.rubric_index)]
+
+
+def _resolve_rubric_feedback(
+    feedback: Feedback, rubrics: list[str], response: str
+) -> tuple[list[_Check], list[dict[str, Any]], list[dict[str, Any]]]:
+    try:
+        return _resolve_rubrics(feedback.value, rubrics, response)
+    except ValueError as error:
+        raise StructuredReplyError(str(error), dict(feedback.metadata or {})) from None
 
 
 def _resolve_conditions(
@@ -732,7 +742,7 @@ def _response_judge(
         if mode == "conditions":
             checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
         elif mode == "rubrics":
-            checks, citations, rubric_verdicts = _resolve_rubrics(feedback.value, rubrics, outputs)
+            checks, citations, rubric_verdicts = _resolve_rubric_feedback(feedback, rubrics, outputs)
         else:
             checks, citations = _resolve_citations(feedback.value, len(criteria), outputs)
         draft: dict[str, Any] = {
@@ -764,7 +774,7 @@ def _response_judge(
             if mode == "conditions":
                 checks, citations, condition_answers = _resolve_conditions(feedback.value, conditions, outputs)
             elif mode == "rubrics":
-                checks, citations, rubric_verdicts = _resolve_rubrics(feedback.value, rubrics, outputs)
+                checks, citations, rubric_verdicts = _resolve_rubric_feedback(feedback, rubrics, outputs)
             else:
                 checks, citations = _resolve_citations(feedback.value, len(criteria), outputs)
         else:

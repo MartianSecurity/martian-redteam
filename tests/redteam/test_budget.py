@@ -1,8 +1,10 @@
 """Model-call accounting fixtures. None of these opens a target or model connection."""
 
 import asyncio
+import json
 import xml.etree.ElementTree as ET
 from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +13,12 @@ from pydantic import BaseModel
 
 from martian.evals import _judge_transport
 from martian.evals.server.principal import SINGLE_USER
-from martian.redteam.engine.budget import BudgetExhausted, Ledger
+from martian.evals.store import StoreError
+from martian.redteam.engine.budget import BudgetExhausted, Ledger, ResumeError
 from martian.redteam.engine.launcher import LocalLauncher
 from martian.redteam.engine.local import LocalService, UnreadableJudgment
 from martian.redteam.engine.run import _Spending
-from martian.redteam.engine.runs import build_service
+from martian.redteam.engine.runs import build_service, execute
 from martian.redteam.engine.service import ServiceSelectionError
 from martian.redteam.gate import evaluate
 from martian.redteam.model import BUDGET_USAGE_UNAVAILABLE, Attempt, Check, Evidence, Probe, RedteamRun, Spend
@@ -125,14 +128,24 @@ async def test_interrupted_provider_call_is_settled_as_unknown():
             pytest.fail("the second call was admitted")
 
 
-@pytest.mark.parametrize("adapter", ["local-service", "rubric-verifier"])
-async def test_unreadable_replies_keep_reported_usage(monkeypatch, adapter):
+@pytest.mark.parametrize(
+    ("adapter", "invalid_citation"), [("local-service", False), ("rubric-verifier", False), ("rubric-verifier", True)]
+)
+async def test_unreadable_replies_keep_reported_usage(monkeypatch, adapter, invalid_citation):
     class Shipment(BaseModel):
         status: str
 
+    content = '{"status":'
+    if invalid_citation:
+        content = json.dumps(
+            {"result": [{"rubric_index": 1, "reason": "States the status.", "verdict": "pass", "evidence_ids": [2]}]}
+        )
     completion = SimpleNamespace(
         choices=[
-            SimpleNamespace(message=SimpleNamespace(content='{"status":', tool_calls=None), finish_reason="length")
+            SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None),
+                finish_reason="stop" if invalid_citation else "length",
+            )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
     )
@@ -151,10 +164,27 @@ async def test_unreadable_replies_keep_reported_usage(monkeypatch, adapter):
         check = Check(id="status", kind="judge", spec={"criteria": "States the shipment status."})
         seen = Observation(attempt_id="fixture", probe=PROBE, attack="Where is my shipment?", reply="In transit.")
         result = await EngineJudge(model, spend_capped=True).verify(check, seen, meter)
-        assert result.hit is None and "judge_invalid_schema" in (result.error or "")
+        error = "judge_unreadable" if invalid_citation else "judge_invalid_schema"
+        assert result.hit is None and error in (result.error or "")
 
     assert ledger.spent == Spend(judge_calls=1, input_tokens=10, output_tokens=5, cost_usd=0.005)
     assert ledger.usage == {"calls_without_token_usage": 0, "calls_without_cost": 0}
+    ledger.check()
+
+
+async def test_a_blank_reply_takes_no_model_reservation(monkeypatch):
+    judge = EngineJudge(ModelConfig(model="openai:/fixture"), spend_capped=True)
+
+    def unexpected_scorer():
+        pytest.fail("the blank reply reached model setup")
+
+    monkeypatch.setattr(judge, "_judge", unexpected_scorer)
+    ledger = Ledger(Budget(tokens=20))
+    check = Check(id="status", kind="judge", spec={"criteria": "States the shipment status."})
+    seen = Observation(attempt_id="fixture", probe=PROBE, attack="Where is my shipment?", reply=" \t")
+    result = await judge.verify(check, seen, _Spending(ledger, PROBE.id))
+    assert result.hit is None and "judge_unreadable" in (result.error or "")
+    assert ledger.spent.model_calls == 0
     ledger.check()
 
 
@@ -271,6 +301,75 @@ async def test_refused_resume_preserves_the_stored_attempt_and_evidence(monkeypa
         assert not launcher.tasks
     finally:
         store.close()
+
+
+async def test_a_resume_has_one_durable_claim_before_the_engine_runs(monkeypatch, tmp_path):
+    ledger = Ledger(Budget(tokens=20))
+    ledger.reserve("judge", PROBE.id)
+    ledger.record(PROBE.id, ModelUsage(input_tokens=10, output_tokens=5))
+    earlier = RedteamRun(
+        id="fixture-claim",
+        catalog_version="fixture",
+        state="failed",
+        finished_at=datetime.now(UTC),
+        budget=ledger.summary(),
+    )
+    first, second = RedteamStore.local(tmp_path), RedteamStore.local(tmp_path)
+    try:
+        await first.save(earlier)
+        old = await first.records.get_run(SINGLE_USER, earlier.project_id, earlier.id)
+        assert old is not None
+        concurrent = asyncio.Barrier(2)
+        dispatched = []
+
+        class PassiveEngine:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def run(self):
+                active = await first.get(earlier.project_id, earlier.id)
+                assert active is not None and active.state == "running" and active.budget == earlier.budget
+                dispatched.append(active)
+                return active
+
+        def coordinate(update):
+            async def claim(*args, **kwargs):
+                await concurrent.wait()
+                return await update(*args, **kwargs)
+
+            return claim
+
+        run_file = RunFile.model_construct(version=2, attacks=[], budget=ledger.budget)
+        with monkeypatch.context() as patch:
+            patch.setattr("martian.redteam.engine.runs.Engine", PassiveEngine)
+            for store in (first, second):
+                patch.setattr(store.records, "update_run", coordinate(store.records.update_run))
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        execute(run_file, service=LocalService(), target=object(), store=store, resume=earlier)
+                        for store in (first, second)
+                    ),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+
+        assert len(dispatched) == 1 and dispatched[0] in outcomes
+        assert sum(isinstance(outcome, ResumeError) for outcome in outcomes) == 1
+        # No terminal checkpoint was saved, as when a process is killed.
+        with pytest.raises(BudgetExhausted, match=BUDGET_USAGE_UNAVAILABLE):
+            Ledger(ledger.budget).restore(dispatched[0])
+
+        ended = earlier.model_copy(update={"finished_at": datetime.now(UTC)})
+        await first.save(ended)
+        with pytest.raises(StoreError, match="expected state"):
+            await second.records.update_run(
+                SINGLE_USER, old.model_copy(update={"state": "running"}), expected_checkpoint=old
+            )
+    finally:
+        first.close()
+        second.close()
 
 
 def test_unverifiable_budget_fails_the_gate_and_ci_reports_even_with_a_decided_attempt():
