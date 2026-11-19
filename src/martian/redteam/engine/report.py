@@ -53,7 +53,7 @@ def for_report(run: RedteamRun, *, include_content: bool = False, policy: Redact
     """A copy safe to write and keep: content as digests unless asked for, credentials redacted."""
     policy = policy or RedactionPolicy()
     include = include_content
-    data = redact_data(run.model_dump(mode="json"), policy=policy)
+    data = redact_data(run.without_local_launch().model_dump(mode="json"), policy=policy)
     data["purpose"] = _text(run.purpose, _INPUTS, include, policy)
     if data.get("target"):
         data["target"]["purpose"] = _text(run.target.purpose if run.target else "", _INPUTS, include, policy) or ""

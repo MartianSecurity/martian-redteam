@@ -1,44 +1,9 @@
-# Example customer workflow: run an eval suite file on every pull request,
-# keep one comment per suite with its result, and compare each pull request
-# with the last result of main. Copy into .github/workflows/ in your
-# repository and replace the suite paths with yours. See docs/gate-and-ci.md.
+# Run deterministic eval suites on pull requests and write job summaries.
+# A push to main saves verdicts for comparison. The sample suites need no credential.
+# Copy this workflow and replace its suite paths and the SDK commit SHA.
 #
-# As written it runs the two sample suites next to this file: `passing` exits 0
-# and `failing` exits 1, so one job is green and one red, each with its own
-# comment. comments/passed.md and comments/failed.md show the two comments.
-#
-# With baseline-branch, each push to main keeps its result in this
-# repository's Actions cache (case ids and verdicts only: no input, reply or
-# judge reason), and a pull request is compared with the last one kept, case
-# by case. Its job then fails on a change worse than noise, on any case that
-# newly fails a security check, or on a failed case main has no result for,
-# and its comment names each case that went from pass to fail. So once main
-# has kept a result, `failing` passes a pull request that leaves it as it is,
-# and fails one that adds a failing case. comments/compared.md shows `failing`
-# compared with a result of `passing`, as if a pull request had broken two of
-# its cases: both newly leak, so it fails. Until a push to main has kept
-# a result, the comment says there is no baseline yet and the job is gated on
-# its own. Remove baseline-branch to gate every run on its own.
-#
-# Both suites grade stored replies with deterministic checks, so the job needs
-# no Martian account, no model key and no secret, only the workflow token. A
-# suite with an LLM judge or a URL target reads its provider key or agent
-# credential from the step's env, as `martian evals run` does on your machine.
-#
-# The redteam job runs redteam/redteam.yaml with the same action: a red team
-# run on your own attacker and judge models, against redteam/agent.py, which
-# is weak on purpose. It needs no Martian account or token, only the model
-# key in the step's env; comments/redteam.md shows its comment. The pull
-# request's code runs in that step and can read the key, so use a key kept
-# for red team runs. GitHub gives no secrets to pull requests from forks, so
-# their red team run cannot call the models and fails.
-#
-# Use `pull_request`, never `pull_request_target`: the suite runs the pull
-# request's code. Pull requests from forks and from Dependabot get a read-only
-# token, and the result then goes to the job summary only.
-#
-# Pin MartianSecurity/martian-redteam to a release tag or a full commit SHA that has
-# .github/actions/evals; replace the placeholder SHA below. @main moves under you.
+# The passing suite exits 0 and failing exits 1 before main has a baseline.
+# See the Markdown examples in comments/ and docs/gate-and-ci.md.
 
 name: Evals
 
@@ -49,7 +14,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write # the comment; nothing else is written
 
 jobs:
   evals:
@@ -59,8 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         suite: [passing, failing]
-    # One run per pull request (or branch) and suite at a time, so two quick
-    # pushes cannot both create the comment.
+    # Cancel superseded runs of the same suite.
     concurrency:
       group: evals-${{ github.event.pull_request.number || github.ref }}-${{ matrix.suite }}
       cancel-in-progress: true
@@ -69,7 +32,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run evals and comment
+      - name: Run evals
+        id: evals
         uses: MartianSecurity/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
         with:
           suite: examples/github-action/${{ matrix.suite }}/evals.yaml
@@ -79,7 +43,7 @@ jobs:
       # results.jsonl and mlflow.db hold prompts and replies in clear text, so
       # this keeps only the counts, the JUnit report and the verdicts.
       - name: Upload results
-        if: always()
+        if: always() && steps.evals.outputs.results-written == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evals-${{ matrix.suite }}
@@ -88,36 +52,4 @@ jobs:
             results/${{ matrix.suite }}/junit.xml
             results/${{ matrix.suite }}/verdicts.json
             results/${{ matrix.suite }}/comparison.json
-          if-no-files-found: ignore
-
-  redteam:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    concurrency:
-      group: redteam-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Red team and comment
-        uses: MartianSecurity/martian-redteam/.github/actions/evals@0000000000000000000000000000000000000000 # replace: release tag or full commit SHA
-        with:
-          redteam: examples/github-action/redteam/redteam.yaml
-          redteam-output: results/redteam
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
-      # The reports hold digests of the attacks and replies, not the text.
-      - name: Upload red team reports
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: redteam
-          path: |
-            results/redteam/redteam-report.json
-            results/redteam/redteam-report.html
-            results/redteam/redteam.sarif
-            results/redteam/redteam-junit.xml
           if-no-files-found: ignore

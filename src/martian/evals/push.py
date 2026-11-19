@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from martian.evals._sharing import ShareRedaction
 from martian.evals.client import BackendError
 from martian.evals.data_export import FORMAT, UNFINISHED, VERSION, export_line, run_records
 from martian.evals.model import Project, Run, TraceQuery
@@ -174,12 +175,12 @@ def _trace_ids(result: dict[str, Any], scores: list[dict[str, Any]]) -> set[str]
 async def _runs(
     store: EvalStore, records: RecordStore, principal: Principal, wanted: Sequence[str]
 ) -> list[tuple[Project, Run]]:
-    """The runs to push, oldest first: every run, or those ``wanted`` names by id or code."""
+    """The eval runs to push, oldest first: all or those ``wanted`` names by id or code."""
     found: dict[str, tuple[Project, Run]] = {}
     for project in await store.list_projects(principal):
         cursor = None
         while True:
-            page = await records.list_runs(principal, project.id, limit=500, cursor=cursor)
+            page = await records.list_runs(principal, project.id, limit=500, cursor=cursor, kind="eval")
             found.update((run.id, (project, run)) for run in page.items)
             if (cursor := page.next_cursor) is None:
                 break
@@ -211,8 +212,15 @@ async def _push_run(
     store: EvalStore, records: RecordStore, principal: Principal, server: Server, project: Project, run: Run
 ) -> PushedRun:
     lines: dict[str, list[dict[str, Any]]] = {}
+    redaction = ShareRedaction()
     await run_records(
-        store, records, principal, lambda name, line: lines.setdefault(name, []).append(line), project.id, run.id
+        store,
+        records,
+        principal,
+        lambda name, line: lines.setdefault(name, []).append(line),
+        project.id,
+        run.id,
+        redaction=redaction,
     )
     [run_line] = lines["runs.jsonl"]
     # A scoring job still queued or running is left here with its scores; a later push sends them.
@@ -244,7 +252,7 @@ async def _push_run(
             trace = await store.get_trace(principal, project.id, trace_id)
             # A trace another run recorded is pushed with that run.
             if trace is not None and trace.run_id in (None, run.id):
-                found.append(export_line(project.id, trace=trace))
+                found.append(export_line(project.id, trace=redaction.trace(trace.model_dump(mode="json"))))
         return found
 
     def add(results: list[dict[str, Any]], case_scores: list[dict[str, Any]], traces: list[dict[str, Any]]) -> None:
@@ -287,7 +295,7 @@ async def _push_run(
 async def push_data(
     store: EvalStore, records: RecordStore, principal: Principal, server: Server, runs: Sequence[str] = ()
 ) -> PushSummary:
-    """Push every finished run the store and the record store hold for ``principal``, or the runs
+    """Push every finished eval run the store and the record store hold for ``principal``, or the runs
     ``runs`` names by id or code, to ``server``. A run still queued or running is left for a later
     push; a run the server refuses is named in the summary, and the push goes on with the next.
     Any other failure stops the push with :class:`~martian.evals.client.BackendError`; pushing

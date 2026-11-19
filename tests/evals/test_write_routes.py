@@ -709,6 +709,28 @@ def test_new_runs_wait_while_a_dataset_is_being_published(memory: Served):
     assert refused == {"detail": PAUSED}
 
 
+def test_an_add_at_the_draft_limit_leaves_the_draft_unchanged(memory: Served, monkeypatch):
+    from martian.evals.server import drafts
+
+    monkeypatch.setattr(drafts, "MAX_RECORDS", 1)
+    draft = memory.call("POST", "/v1/evals/dataset-drafts", 201, json={"name": "Capped draft"})
+    path = f"/v1/evals/dataset-drafts/{draft['id']}"
+    first = memory.call(
+        "POST",
+        f"{path}/records",
+        201,
+        json={"base_revision": draft["revision"], "record": {"id": "r1", "input": "First"}},
+    )
+    revision = first["revision"]
+    memory.call(
+        "POST", f"{path}/records", 422, json={"base_revision": revision, "record": {"id": "r2", "input": "Next"}}
+    )
+    current = memory.call("GET", path, 200)
+    assert (current["revision"], current["record_count"]) == (revision, 1)
+    assert [row["id"] for row in memory.call("GET", f"{path}/records", 200)["items"]] == ["r1"]
+    memory.call("PATCH", f"{path}/records/r1", 200, json={"base_revision": revision, "changes": {"input": "Edited"}})
+
+
 def test_a_draft_is_edited_published_and_run(memory: Served):
     draft = memory.call("POST", "/v1/evals/dataset-drafts", 201, json={"name": "Refunds"})
     assert (draft["revision"], draft["record_count"], draft["state"], draft["scope"]) == (1, 0, "editing", "org")

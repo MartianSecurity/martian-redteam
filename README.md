@@ -46,9 +46,9 @@ from a cache instead of calling them again (`--cache`), and can be stopped and r
 guide: data formats, every check, provider setup and results.
 
 On GitHub, the evals action (`.github/actions/evals`) runs a suite file on each pull-request
-push and keeps one comment with the result, also without a Martian account. It can compare each
+push and writes the result to the Actions job summary, also without a Martian account. It can compare each
 pull request with the last result of `main` and name the cases that went from pass to fail. See
-[gate and CI](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/gate-and-ci.md#evals-on-a-pull-request-with-one-comment).
+[gate and CI](https://github.com/MartianSecurity/martian-redteam/blob/main/docs/gate-and-ci.md#evals-checks-and-job-summaries-on-pull-requests).
 
 ## What is in the package
 

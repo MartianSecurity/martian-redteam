@@ -129,19 +129,15 @@ function it names, never the config's providers.
 
 `martian evals import mlflow` copies an MLflow tracking store into the same folder. It opens the
 store so that it cannot write it (SQLite read-only, Postgres with read-only transactions) and never
-migrates it, and reads the trace files the store names on this machine only. A Postgres URL's
-password is not printed or stored: the report and each copied run's provenance keep the URL
-without it. The folder then holds a copy of the store's traces, inputs, outputs and assessments.
+migrates it. Source trace archives must use absolute paths on this machine. Reports and copied-run
+provenance mask the Postgres URL password and omit connection options. The folder holds a copy
+of the store's traces, inputs, outputs and assessments.
 See [copied MLflow stores](evals-core.md#copied-mlflow-stores).
 
-`martian evals export` writes everything the data folder's store and record store hold into the
-folder it names: every case's inputs and outputs, traces with their spans, scores, reasons and
-reviews, run artifacts, and monitors, schedules and thresholds with their history (alert payloads
-and webhook URLs and email recipients among them). It holds no credentials: the local targets and
-their keys (`targets.json`, `target-keys.json`) and `settings.json` are not exported, nor is a
-threshold's webhook secret, and a target's `${NAME}` references stay unexpanded, as the store
-keeps them. Treat an export as you treat the
-data folder. See [data export](data-export.md).
+`martian evals export` produces portable records. The SDK projects HTTP transport settings and
+masks known run credentials in related evidence. Local key files and webhook signing secrets
+stay with the operator. Exported datasets, traces, outputs, reviews and artifacts still require
+the same access controls as the data folder. See [data export](data-export.md).
 
 ### The cache of model calls
 
@@ -396,9 +392,8 @@ policy to `sdk_judge(address_policy=...)`
 ([the worker's judge](evals-core.md#the-workers-judge)): the judge then connects to the address
 its policy allowed, which it resolved when the connection opened, and to no other. The core sets no
 policy by itself: a local run calls the endpoint its user named, which may be on the same machine.
-The core's other outbound calls are not pinned: a URL target (`martian evals run` and the worker's
-HTTP targets) and a webhook of a [threshold alert](#threshold-alerts), whose address check resolves
-the name once and the HTTP client again.
+The worker connects to a checked address for public-only threshold webhooks. Evals HTTP
+targets use the endpoint selected by their configuration.
 
 A red team run that sends a [harmful-content dataset](catalog.md#harmful-content) downloads it once,
 from the address its licence register pins (`raw.githubusercontent.com`), with no redirect followed,
@@ -425,12 +420,9 @@ What leaves once a channel is configured:
   member with the `score` capability chooses. It carries the threshold's definition and name, the
   monitor's id, the scorer, and the window's count, estimate and interval: no trace, prompt,
   response, rationale or user. The URL is `https`, or `http` only to `localhost`; redirects are not
-  followed and proxy settings from the environment are not used. Before each attempt the host is
-  resolved, and a loopback, private, link-local or reserved address is refused unless the
-  installation sets `WebhookSettings(private_addresses=True)`, so on an installation that does not,
-  a member cannot aim alerts at the worker's own network. A name that resolves to another address
-  between that check and the connection is not caught; where that matters, run the worker where it
-  cannot reach internal services.
+  followed and proxy settings from the environment are ignored. Public-only delivery checks all
+  resolved addresses and connects to one of those addresses while preserving the TLS hostname.
+  Operators can opt in to private receivers with `WebhookSettings(private_addresses=True)`.
 - **An email** carries the same content as plain text to the threshold's recipients, through the
   SMTP server the operator names, with STARTTLS by default.
 
@@ -468,7 +460,9 @@ answer, log line or alert holds the secret, and that failures are logged without
 that reaches its port can read and change all of its data, and send it traces over OpenTelemetry
 (`POST /v1/traces`) without credentials. On a laptop it listens on 127.0.0.1
 and answers only the `Host` names `127.0.0.1` and `localhost`, so another machine cannot reach it
-and a web page cannot reach it through a name that resolves to the laptop. The container image
+and a web page cannot reach it through a name that resolves to the laptop. Browser writes require
+the local app's own scheme, host and port. Native clients can send requests without browser
+headers. The container image
 listens on the container's interfaces, keeps the same `Host` check and prints a warning when it
 starts. Publish its port on 127.0.0.1 only and reach it from elsewhere through an SSH tunnel.
 Never expose it publicly. See [the local edition in a container](evals-core.md#the-local-edition-in-a-container).

@@ -15,14 +15,14 @@ import sqlite3
 import subprocess
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from martian.cli import app
-from martian.evals._mlflow import schema_head, schema_history
+from martian.evals._mlflow import local_trace_path, schema_head, schema_history
 from martian.evals.local import create_local_app, open_stores
 from martian.evals.mlflow_import import (
     PROJECT_LIMIT,
@@ -30,6 +30,7 @@ from martian.evals.mlflow_import import (
     MlflowSourceError,
     Plan,
     SourceCheck,
+    _shown,
     assessment_score,
     copy_mlflow_store,
     import_mlflow_store,
@@ -507,6 +508,30 @@ def test_source_paths_and_urls(tmp_path):
     (tmp_path / "other.db").write_bytes(b"not sqlite at all")
     with pytest.raises(MlflowSourceError, match="cannot read"):
         read_mlflow_store(str(tmp_path / "other.db"))
+
+
+def test_source_diagnostics_omit_connection_options():
+    url = "postgresql+psycopg://reader:dummy-inline@db.example.invalid/evals?password=dummy-query&sslmode=require"
+    assert source_url(url) == url
+    assert _shown(url) == "postgresql+psycopg://reader:***@db.example.invalid/evals"
+    with pytest.raises(MlflowSourceError) as error:
+        source_url("https://reader:dummy-inline@mlflow.example.invalid/?token=dummy-query")
+    assert "dummy-" not in str(error.value)
+
+
+def test_local_artifact_paths_preserve_literal_percent_escapes(tmp_path):
+    path = tmp_path / "literal%20name"
+    assert local_trace_path(str(path)) == path
+    assert local_trace_path(path.as_uri()) == path
+    assert local_trace_path("file://example.invalid/shared/trace") is None
+
+
+def test_local_artifact_paths_refuse_native_windows_network_drives(monkeypatch):
+    from martian.evals import _mlflow
+
+    monkeypatch.setattr(_mlflow, "Path", PureWindowsPath)
+    assert local_trace_path("C:/traces/local") == PureWindowsPath("C:/traces/local")
+    assert local_trace_path(r"/\example.invalid/share/trace") is None
 
 
 def test_the_organisation_project_limit_is_checked_before_anything_is_written(tmp_path):

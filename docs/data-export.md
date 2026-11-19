@@ -1,7 +1,7 @@
 # Data export
 
-An organisation can take all of its evals data out, and load it into a fresh install with nothing
-lost. `martian.evals.data_export` does both through the evals core's two store interfaces,
+An organisation can export its evals records and load them into a fresh install.
+`martian.evals.data_export` does both through the evals core's two store interfaces,
 `EvalStore` and `RecordStore` ([evals core](evals-core.md)), so it works on every binding: the
 local edition's data folder, and any install that runs the core in its own process.
 
@@ -32,8 +32,8 @@ imported.references["dataset_id"]  # each source dataset version id and the rece
 
 ## What an export holds
 
-Everything the store and the record store hold for the principal's organisation (or the single
-local user), and nothing of another organisation's: the organisation's
+An export covers the principal's organisation or the single local user's records. It includes
+the organisation's
 [prompts](evals-core.md#prompt-versions) with every version, each with its number, author and
 time, which a run's `provenance.prompts` names; and every project the store lists, and in each
 
@@ -93,7 +93,22 @@ describe, and what the two stores do not hold:
   configuration, given again where the fresh install's worker runs.
 - The local edition's files beside the stores: its targets and their keys (`targets.json`,
   `target-keys.json`) and its settings (`settings.json`, the default judge model). An export holds
-  no credentials; define the targets and the default judge model again in the fresh data folder.
+  no target or provider key files. Define the targets and the default judge model again in the
+  fresh data folder.
+
+Exported run, suite and schedule records omit HTTP target headers and mask known
+credential values in request templates.
+The projection strips URL user information, query parameters and fragments from transport
+settings and removes judge and simulator header maps. Known credential values from a run's
+configuration are masked in its case results, scores, linked traces and UTF-8 artifacts.
+The export strips connection credentials from older MLflow provenance and private launch
+settings from shared Red Team run summaries.
+The source stores retain the evidence used for grading. Reconfigure HTTP transport settings
+before running a restored suite or schedule.
+
+Datasets, prompts, opaque artifacts and other free-form evidence can still contain private
+material or historical secrets the SDK cannot identify. Review an export before sharing it.
+An export interrupted before the credential projection was introduced needs a new destination.
 
 `martian.evals.data_export` names what it covers: `EXPORTED_TABLES` maps each table of the record
 store it carries to its file and `EXPORTED_KINDS` each kind of object (model class) the store

@@ -1153,6 +1153,13 @@ async def test_what_an_export_and_an_import_refuse(tmp_path):
     (folder / PROGRESS).write_text("{}", encoding="utf-8")
     with pytest.raises(ExportError, match="is not finished"):
         await import_data(*fresh, ORG_A, folder)
+    # A version 7 export in progress from before transport projection needs a clean destination.
+    (folder / data_export.PLAN).write_text(
+        json.dumps({"format": found["format"], "version": found["version"], "organisation_id": ORG_A.organisation_id}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ExportError, match="different credential policy"):
+        await export_data(store, records, ORG_A, folder)
     # Nothing was written to the fresh install.
     assert await fresh[0].list_projects(ORG_A) == []
     records.close()

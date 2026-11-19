@@ -52,6 +52,7 @@ class RedteamHeld(BaseModel):
 
 def labelled(run: RedteamRun) -> RedteamRun:
     """``run`` as the server keeps a pushed run: labelled as executed by the client."""
+    run = run.without_local_launch()
     return run.model_copy(update={"provenance": {**run.provenance, "execution": CLIENT_EXECUTED}})
 
 
@@ -77,7 +78,7 @@ async def push_redteam_run(
     store = RedteamStore(records)
     stored = await store.get(run.project_id, run.id, principal=principal)
     if stored is not None:
-        if stored.model_dump(mode="json") != pushed.model_dump(mode="json"):
+        if stored.without_local_launch().model_dump(mode="json") != pushed.model_dump(mode="json"):
             raise HTTPException(409, "The server holds this red team run with other content")
         return RedteamHeld(run_id=run.id, project_id=run.project_id, created=False)
     await store.save(pushed, principal=principal)

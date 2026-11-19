@@ -49,6 +49,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from martian.evals._sharing import ShareRedaction
 from martian.evals.data_export import FORMAT, UNFINISHED, VERSION, References, score_key
 from martian.evals.model import (
     Attempt,
@@ -208,8 +209,16 @@ def _checked(run_id: uuid.UUID, line: RunLine) -> RunLine:
         raise HTTPException(422, "The run line names another run or project")
     if native is not None and (native.id != run.id or native.project_id != run.project_id):
         raise HTTPException(422, "The run line's store run is another run's")
+    if run.kind != "eval" or (native is not None and native.kind != "eval"):
+        raise HTTPException(422, "Only an eval run is accepted by the Evals push route")
     if run.state in UNFINISHED:
         raise HTTPException(422, "Only a finished run is pushed")
+    projection = ShareRedaction()
+    for record in (run, native):
+        if record is not None:
+            data = record.model_dump(mode="json")
+            if projection.run(data) != data:
+                raise HTTPException(422, "Run contains private transport settings. Push with an updated SDK.")
     return line
 
 
@@ -360,11 +369,15 @@ async def push_run(
     _may_push(principal)
     line = _checked(run_id, body.run)
     project_id, run = line.project_id, line.run
+    projection = ShareRedaction()
     for job_line in body.scoring_jobs:
         if job_line.project_id != project_id or job_line.job.run_id != run.id:
             raise HTTPException(422, "A scoring job line names another run or project")
         if job_line.job.state in UNFINISHED:
             raise HTTPException(422, "Only a finished scoring job is pushed")
+        data = job_line.job.model_dump(mode="json")
+        if projection.job(data) != data:
+            raise HTTPException(422, "Scoring job contains private transport settings. Push with an updated SDK.")
     project = await _project(store, principal, body.project, project_id)
     # The run routes find a run by its id alone: one id is one run, in one project.
     stored = await lookup_run(store, records, principal, run.id)

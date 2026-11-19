@@ -289,10 +289,10 @@ def parse_upload(fmt: str, *, content: str | None = None, dataset: Any = None) -
 
 
 async def _limit_body(request: Request) -> None:
-    """Refuse an oversized upload from its Content-Length before the body is read."""
-    length = request.headers.get("content-length")
-    # JSON string escaping can grow a 20 MiB file; allow headroom, parse_upload enforces the limit.
-    if length and ascii_digits(length) and int(length) > MAX_UPLOAD_BYTES * 2:
+    """Check the declared envelope size. Hosted ASGI middleware also bounds the actual body."""
+    length = request.headers.get("content-length", "").lstrip("0")
+    limit = str(MAX_UPLOAD_BYTES * 2)
+    if length and ascii_digits(length) and (len(length), length) > (len(limit), limit):
         raise HTTPException(413, "Uploads are limited to 20 MiB")
 
 
@@ -417,6 +417,8 @@ async def create(body: DraftCreateIn, principal: PrincipalDep, store: StoreDep, 
         while True:
             page = await store.read_cases(principal, DEFAULT_PROJECT, dataset.id, offset=offset, limit=PAGE)
             cases.extend(page.items)
+            if len(cases) > MAX_RECORDS:
+                raise HTTPException(422, f"Datasets are limited to {MAX_RECORDS:,} records")
             offset += len(page.items)
             if page.next_cursor is None:
                 break
@@ -532,8 +534,6 @@ async def _write(
     updated = await records.put_draft_cases(
         principal, DEFAULT_PROJECT, draft.id, [to_case(item) for item in items], expected_revision=draft.revision
     )
-    if updated.case_count > MAX_RECORDS:
-        raise HTTPException(422, f"Datasets are limited to {MAX_RECORDS:,} records")
     return updated, await all_cases(records, principal, draft.id)
 
 
@@ -554,6 +554,8 @@ async def add(draft_id: uuid.UUID, body: RecordIn, principal: PrincipalDep, reco
     draft = await editable(records, principal, draft_id, body.base_revision)
     if any(case.id == item["id"] for case in await all_cases(records, principal, draft.id)):
         raise HTTPException(409, "A record with this id already exists; edit it instead")
+    if draft.case_count >= MAX_RECORDS:
+        raise HTTPException(422, f"Datasets are limited to {MAX_RECORDS:,} records")
     updated, cases = await _write(records, principal, draft, [item])
     return {"revision": updated.revision, "record": _record(cases, item["id"], updated)}
 

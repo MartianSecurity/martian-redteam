@@ -1,12 +1,9 @@
-"""Report a `martian evals run` result, a `martian redteam run` result or both on their pull request,
-in one comment kept up to date.
+"""Write a Martian run report to the GitHub Actions job summary.
 
 The evals composite action (.github/actions/evals) runs this after the suite. It reads the
-output folder, writes the report to the job summary, and on a pull request edits the comment
-that carries this suite's hidden marker, creating it only when there is none. Standard library
-only, so it runs on the action's Python without further installs.
+output folder and appends Markdown to GITHUB_STEP_SUMMARY. It needs only the standard library.
 
-The comment holds counts, pass rates with their intervals, check names, case ids and turn
+The summary holds counts, pass rates with their intervals, check names, case ids and turn
 numbers, never inputs, replies or judge reasons. When the action compares the run with the last
 result of the baseline branch, it also says how the run compares (comparison.json, written by
 `martian evals run --baseline`), names first each case that newly failed a security check, which
@@ -17,10 +14,10 @@ says that there is no baseline yet. A suite with a matrix gets one row per combi
 combination that went from pass to fail, failed or have no verdict. A run with the cache of
 model calls on says so under the headline, with how many replies came from the cache.
 
-When the action also ran a red team run file, the comment has a red team section
+When the action also ran a red team run file, the summary has a red team section
 (scripts/redteam_comment.py, read from redteam-report.json): the gate's result, the attacker, the
 budget, the confirmed findings, the suspected count and the success rates. A job may run either or
-both; the comment key is then the suite path, else the run file's.
+both; the summary covers both.
 """
 
 from __future__ import annotations
@@ -31,8 +28,6 @@ import math
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -40,18 +35,11 @@ from pathlib import Path
 from typing import Any
 
 MARKER = "<!-- martian-evals-comment: {key} -->"
-DEFAULT_AUTHOR = "github-actions[bot]"
 MAX_ROWS = 25
 NOT_RUN = "not run: "
 """How junit.xml's error for a case the run stopped before starts (``martian.evals.runner.write_junit``)."""
 # Combinations of a matrix whose cases the comment names, each with up to five per list.
 MAX_DETAILED = 10
-PER_PAGE = 100
-READ_ONLY = (
-    "The workflow token cannot write pull-request comments, so the result is in the job summary only. "
-    "Pull requests from forks and from Dependabot get a read-only token; otherwise grant the job "
-    "`pull-requests: write`."
-)
 
 
 @dataclass(frozen=True)
@@ -309,7 +297,6 @@ def _footer(sha: str | None, run_url: str | None) -> str:
         footer.append(f"Commit `{sha[:7]}`")
     if run_url:
         footer.append(f"[Workflow run]({run_url})")
-    footer.append("Updated on every push")
     return " · ".join(footer)
 
 
@@ -664,85 +651,6 @@ def _reason(case: dict[str, Any]) -> str:
     return "No verdict from " + _names([name for name, check in case["checks"].items() if check.get("passed") is None])
 
 
-class GitHubError(Exception):
-    def __init__(self, status: int, method: str, path: str) -> None:
-        self.status = status
-        what = f"HTTP {status}" if status else "no response"
-        super().__init__(f"GitHub {method} {path.split('?')[0]} failed: {what}")
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """A redirect would carry the token to another address, so it is an error instead."""
-
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
-class GitHub:
-    """The three issue-comment calls the report needs, with the workflow token."""
-
-    def __init__(self, api_url: str, repository: str, token: str, *, timeout: float = 30.0) -> None:
-        self.api_url = api_url.rstrip("/")
-        self.repository = repository
-        self._token = token
-        self._timeout = timeout
-        self._opener = urllib.request.build_opener(_NoRedirect)
-
-    def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        request = urllib.request.Request(
-            self.api_url + path,
-            data=None if body is None else json.dumps(body).encode("utf-8"),
-            method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type": "application/json",
-                "User-Agent": "martian-evals-action",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with self._opener.open(request, timeout=self._timeout) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            raise GitHubError(error.code, method, path) from None
-        except (urllib.error.URLError, TimeoutError):
-            raise GitHubError(0, method, path) from None
-
-    def comments(self, number: int) -> list[dict[str, Any]]:
-        found: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            path = f"/repos/{self.repository}/issues/{number}/comments?per_page={PER_PAGE}&page={page}"
-            batch = self._call("GET", path)
-            found.extend(batch)
-            if len(batch) < PER_PAGE:
-                return found
-            page += 1
-
-    def create(self, number: int, body: str) -> dict[str, Any]:
-        result: dict[str, Any] = self._call(
-            "POST", f"/repos/{self.repository}/issues/{number}/comments", {"body": body}
-        )
-        return result
-
-    def update(self, comment_id: int, body: str) -> dict[str, Any]:
-        result: dict[str, Any] = self._call(
-            "PATCH", f"/repos/{self.repository}/issues/comments/{comment_id}", {"body": body}
-        )
-        return result
-
-
-def upsert(github: GitHub, number: int, body: str, *, key: str, author: str) -> tuple[str, dict[str, Any]]:
-    """Edit this suite's comment by ``author``, found by its first line, or create it."""
-    wanted = marker(key)
-    for comment in github.comments(number):
-        first = str(comment.get("body") or "").split("\n", 1)[0].strip()
-        if first == wanted and (comment.get("user") or {}).get("login") == author:
-            return "updated", github.update(int(comment["id"]), body)
-    return "created", github.create(number, body)
-
-
 def _redteam() -> Any:
     """``scripts/redteam_comment.py``, beside this script, which renders the red team section."""
     spec = importlib.util.spec_from_file_location("redteam_comment", Path(__file__).with_name("redteam_comment.py"))
@@ -769,7 +677,7 @@ def with_redteam(
     if body is None:
         lines, footer = [marker(key)], _footer(sha, run_url)
     else:
-        lines = body.rstrip("\n").split("\n")
+        lines = body.removesuffix("\n").split("\n")
         footer = lines.pop()
         if lines[-1] != "":
             lines.append("")
@@ -801,31 +709,14 @@ def main(environ: Mapping[str, str] = os.environ) -> int:
             run_url=run_url,
         )
     if body is None:
-        print("::error title=Martian evals comment::The action ran neither a suite nor a red team run file.")
+        print("::error title=Martian Evals::The action ran neither a suite nor a red team run file.")
         return 1
-    if environ.get("GITHUB_STEP_SUMMARY"):
-        with open(environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
-            handle.write(body + "\n")
-    number = environ.get("MARTIAN_EVALS_PR_NUMBER", "")
-    if not number:
-        print("Not a pull-request event: the result is in the job summary and no comment was written.")
-        return 0
-    github = GitHub(
-        environ.get("GITHUB_API_URL") or "https://api.github.com",
-        environ["GITHUB_REPOSITORY"],
-        environ.get("GITHUB_TOKEN", ""),
-    )
-    try:
-        action, comment = upsert(
-            github, int(number), body, key=key, author=environ.get("MARTIAN_EVALS_COMMENT_AUTHOR") or DEFAULT_AUTHOR
-        )
-    except GitHubError as error:
-        if error.status == 403:
-            print(f"::warning title=Martian evals comment::{READ_ONLY}")
-            return 0
-        print(f"::error title=Martian evals comment::{error}")
+    summary = environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        print("::error title=Martian Evals::GITHUB_STEP_SUMMARY is missing.")
         return 1
-    print(f"The pull-request comment was {action}: {comment.get('html_url', '')}")
+    with open(summary, "a", encoding="utf-8") as handle:
+        handle.write(body + "\n")
     return 0
 
 

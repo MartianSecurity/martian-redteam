@@ -28,4 +28,4 @@ Gate warnings:
 
 - `prompt_leakage/instructions: Suspected (prompt_leakage:instructions:prompt_injection), below fail_on (level 2)`
 
-Commit `0123456` · [Workflow run](https://github.com/example/agent/actions/runs/1) · Updated on every push
+Commit `0123456` · [Workflow run](https://github.com/example/agent/actions/runs/1)

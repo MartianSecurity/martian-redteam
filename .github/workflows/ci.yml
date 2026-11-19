@@ -281,10 +281,9 @@ jobs:
     name: Action smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # The evals action comments on this repository's pull requests; nothing else is written.
+    # The action smoke job runs the pull request checkout with a read-only token.
     permissions:
       contents: read
-      pull-requests: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -296,7 +295,7 @@ jobs:
         with:
           config: examples/config.yaml
 
-      # The two sample suites need no secret: each keeps its own comment on the pull request.
+      # The two sample suites need no secret and write their results to the job summary.
       # The passing sample keeps its result on main and compares each pull request with it.
       - name: Evals action on the passing sample
         uses: ./.github/actions/evals

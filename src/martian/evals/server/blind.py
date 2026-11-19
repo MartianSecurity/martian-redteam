@@ -15,9 +15,8 @@ reach, would overstate how well people agree. So:
   reviews of it, only its chain's first review, the pending one the queue added, and their own
   (:func:`hidden_items`, :func:`visible_reviews`). That holds on every route that returns
   reviews or the human scores they leave: the reviews list, a run's workbench (its review history,
-  current reviews and assessments), a conversation's turns, and a judge calibration's labelled
-  items, whose labels such a reader gets as ``null``. Once they have answered, they read the
-  others' answers too.
+  current reviews and assessments), a conversation's turns, agreement reports, and a judge
+  calibration's labelled items. Once they have answered, they read the others' answers too.
 - **One chain still.** An item keeps one chain of reviews, so the current review is still its
   newest answer. A reader answering after the review they were shown has their answer added
   after the chain's newest review, which they may not read; the request is checked against what
@@ -29,8 +28,8 @@ reach, would overstate how well people agree. So:
   with ``Review.blind``: given before they could read anyone else's. Their later answers are not.
   The reviewers' agreement of a blind queue compares the answers given blind.
 
-What is not hidden: who answered how many items (a queue's progress), and the agreement reports,
-which give counts over items rather than an item's answers.
+A queue's progress still counts who has answered how many items. Agreement reports use only
+answers the reader can see.
 """
 
 from __future__ import annotations
@@ -57,9 +56,14 @@ async def blind_queue_ids(
 def hidden_items(reviews: Iterable[Review], blind: set[str], user_id: str) -> set[Item]:
     """The items of blind queues, among the reviews of one run, that ``user_id`` has given no
     complete answer to: those whose other reviews they may not read."""
+    return {(case, criterion) for _, case, criterion in hidden_project_items(reviews, blind, user_id)}
+
+
+def hidden_project_items(reviews: Iterable[Review], blind: set[str], user_id: str) -> set[tuple[str, str, str]]:
+    """Unreadable answers for a batch of review chains, qualified by run, case and question."""
     reviews = list(reviews)
-    asked = {(r.case_id, r.criterion) for r in reviews if r.queue_id in blind}
-    answered = {(r.case_id, r.criterion) for r in reviews if r.reviewer == user_id and r.state == "complete"}
+    asked = {(r.run_id, r.case_id, r.criterion) for r in reviews if r.queue_id in blind}
+    answered = {(r.run_id, r.case_id, r.criterion) for r in reviews if r.reviewer == user_id and r.state == "complete"}
     return asked - answered
 
 
@@ -96,7 +100,7 @@ async def hidden_of_run(
 
 
 async def hidden_of_runs(
-    records: RecordStore, principal: Principal, project_id: str, run_ids: Iterable[str]
+    records: RecordStore, principal: Principal, project_id: str, run_ids: Iterable[str] | None = None
 ) -> set[tuple[str, str, str]]:
     """The items of the given runs' blind queues that the principal has not answered, each as its
     run id, case id and question."""
@@ -104,7 +108,8 @@ async def hidden_of_runs(
     for queue in await records.list_blind_queues(principal, project_id):
         by_run.setdefault(queue.run_id, set()).add(queue.id)
     found: set[tuple[str, str, str]] = set()
-    for run_id in sorted(set(by_run) & set(run_ids)):
+    relevant = set(by_run) if run_ids is None else set(by_run) & set(run_ids)
+    for run_id in sorted(relevant):
         hidden = await hidden_of_run(records, principal, project_id, run_id, by_run[run_id])
         found |= {(run_id, case, question) for case, question in hidden}
     return found
@@ -114,6 +119,7 @@ __all__ = [
     "Item",
     "blind_queue_ids",
     "hidden_items",
+    "hidden_project_items",
     "hidden_of_run",
     "hidden_of_runs",
     "queue_with",
