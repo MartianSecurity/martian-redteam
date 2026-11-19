@@ -394,12 +394,17 @@ async def push_run(
     native = await _store_run(store, principal, line)
     if stored is None:
         refs = _references(line, project, native)
-        await records.create_run(
+        canonical = await records.create_run(
             principal, run.model_copy(update={"store": _Mapping(principal, refs).store(run.store)})
         )
+        # Reconcile a run committed by another writer before attaching its jobs.
+        if not _same(canonical, run):
+            raise HTTPException(409, "The server holds this run with other content")
     for job_line in body.scoring_jobs:
         if job_line.job.id not in jobs:
-            await records.create_scoring_job(principal, project_id, job_line.job)
+            canonical_job = await records.create_scoring_job(principal, project_id, job_line.job)
+            if not _same(canonical_job, job_line.job):
+                raise HTTPException(409, "The server holds a scoring job of this run with other content")
     return RunHeld(run_id=run.id, created=stored is None, cases=await _held(records, principal, project_id, run.id))
 
 

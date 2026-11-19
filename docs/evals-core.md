@@ -1171,10 +1171,11 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   and holds it for `lease_seconds`, renewing it every third of the lease while the work runs. A
   claim moves a row only while the row is still claimable, in one statement; on Postgres it also
   locks the row it read and skips rows another claim has locked (`FOR UPDATE SKIP LOCKED`). So two
-  workers never hold one piece of work. Every change to a claimed row names the claim's token, so
-  a worker whose lease ran out changes nothing any more, and a worker that finds its claim taken
-  stops the work at its next renewal. Lease times are each worker's own clock in UTC: the hosts of
-  workers that share a queue need clocks within a small part of the lease.
+  workers never hold one piece of work. A worker stops when renewal is refused or its last
+  confirmed lease runs out. Record transactions and queue changes lock the current claim and
+  check its token and expiry before committing progress. A target request already delivered
+  to an external system may finish there after the worker stops. Hosts that share a queue
+  need UTC clocks within a small part of the lease.
 - **Fair between organisations.** The row a claim takes is the oldest of the organisation with the
   fewest rows running, counted in the same query on SQLite and on Postgres: a row is running while
   a claim whose lease has not run out holds it, a recording included, across every worker of the
@@ -1194,7 +1195,8 @@ app = create_app(store=store, records=records, principal=lambda: SINGLE_USER, wo
   ends `failed` stays failed: nothing retries a target or a judge.
 - **Runs recorded outside the queue.** A process that records a run itself, as `martian evals run`
   does in the local edition, holds the run in the queue with a `recording` claim that it renews
-  (`SqlWorkQueue.hold`). No worker runs one: once its lease runs out, the process recording it is
+  (`SqlWorkQueue.hold`). Losing the claim signals the CLI to stop and blocks further record
+  writes. No worker runs one: once its lease runs out, the process recording it is
   gone, and the worker that claims it finishes the run, `failed`, or `cancelled` when a stop was
   asked, with the `error` "Interrupted: the process working on this run stopped before it
   finished".

@@ -72,6 +72,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -99,6 +100,7 @@ from martian.evals.model import (
 )
 from martian.evals.panel import panel_source
 from martian.evals.prompts import PROVENANCE_KEY, matched_prompts
+from martian.evals.records.lease import WorkLeaseLost
 from martian.evals.repeats import representative
 from martian.evals.server.principal import SINGLE_USER
 from martian.evals.server.projection import DEFAULT_PROJECT
@@ -283,9 +285,10 @@ class RunRecorder:
         )
         # Held before the run is recorded, so no process ever finds it running and not held.
         self._hold = await RunHold.take(self.home, run.id)
-        run = await self.store.start_run(SINGLE_USER, run)
-        self.run = await self.records.create_run(SINGLE_USER, run)
-        await self._write(reused, traces=False)
+        with self._hold.guard():
+            run = await self.store.start_run(SINGLE_USER, run)
+            self.run = await self.records.create_run(SINGLE_USER, run)
+            await self._write(reused, traces=False)
         return self.run
 
     async def _code(self) -> str:
@@ -306,7 +309,9 @@ class RunRecorder:
 
     def graded(self, cases: list[GradedCase]) -> None:
         """Record a batch of graded cases, with their traces, and the run's counts so far."""
-        _wait(self._write(cases, traces=True))
+        assert self._hold is not None
+        with self._hold.guard():
+            _wait(self._write(cases, traces=True))
 
     def finish(self) -> Run:
         """Record that every case has a result."""
@@ -330,11 +335,14 @@ class RunRecorder:
         """An event set once someone asks, in ``martian ui``, to stop the run: a thread reads the
         run's record every :data:`CANCEL_POLL_SECONDS` until the run ends."""
         asked = threading.Event()
-        assert self.run is not None
-        run = self.run
+        assert self.run is not None and self._hold is not None
+        run, hold = self.run, self._hold
 
         def watch() -> None:
             while not self._watching.wait(CANCEL_POLL_SECONDS):
+                if hold.lost.is_set():
+                    asked.set()
+                    return
                 try:
                     found = asyncio.run(self.records.get_run(SINGLE_USER, run.project_id, run.id))
                 except Exception:  # noqa: BLE001 - the database is busy; read again at the next poll
@@ -357,10 +365,11 @@ class RunRecorder:
         try:
             self._end_watch()
             if error is not None and self.run is not None and not self._ended:
-                if isinstance(error, KeyboardInterrupt):
-                    _wait(self._end("cancelled", ""))
-                else:
-                    _wait(self._end("failed", f"the run stopped early: {type(error).__name__}"))
+                with suppress(WorkLeaseLost):  # the queue owns interrupted-run cleanup after expiry
+                    if isinstance(error, KeyboardInterrupt):
+                        _wait(self._end("cancelled", ""))
+                    else:
+                        _wait(self._end("failed", f"the run stopped early: {type(error).__name__}"))
         finally:
             if self._hold is not None:
                 self._hold.release()
@@ -378,22 +387,28 @@ class RunRecorder:
         return found if found is not None else self.run
 
     async def _end(self, state: RunState, error: str, *, stopped: dict[str, Any] | None = None) -> Run:
-        assert self.run is not None
+        assert self.run is not None and self._hold is not None
         self._end_watch()
         self._ended = True
-        counts = self._counts()
-        current = await self._current()
-        changes: dict[str, Any] = {"state": state, "counts": counts, "error": error, "finished_at": datetime.now(UTC)}
-        provenance = dict(current.provenance)
-        if stopped is not None:
-            provenance["stopped"] = stopped
-        if self._cache_used is not None:
-            provenance["cache"] = {"on": True, **self._cache_used}
-        if provenance != current.provenance:
-            changes["provenance"] = provenance
-        finished = current.model_copy(update=changes)
-        self.run = await self.records.update_run(SINGLE_USER, finished, expected_state="running")
-        await self.store.finish_run(SINGLE_USER, DEFAULT_PROJECT, finished.id, state=state, counts=counts)
+        with self._hold.guard():
+            counts = self._counts()
+            current = await self._current()
+            changes: dict[str, Any] = {
+                "state": state,
+                "counts": counts,
+                "error": error,
+                "finished_at": datetime.now(UTC),
+            }
+            provenance = dict(current.provenance)
+            if stopped is not None:
+                provenance["stopped"] = stopped
+            if self._cache_used is not None:
+                provenance["cache"] = {"on": True, **self._cache_used}
+            if provenance != current.provenance:
+                changes["provenance"] = provenance
+            finished = current.model_copy(update=changes)
+            self.run = await self.records.update_run(SINGLE_USER, finished, expected_state="running")
+            await self.store.finish_run(SINGLE_USER, DEFAULT_PROJECT, finished.id, state=state, counts=counts)
         return self.run
 
     def _counts(self) -> Counts:
@@ -410,6 +425,7 @@ class RunRecorder:
 
     async def _write(self, cases: list[GradedCase], *, traces: bool) -> None:
         assert self.run is not None
+        await self._current()  # check the claim before writing non-transactional trace data
         results: list[CaseResult] = []
         scores: list[Score] = []
         traced: list[str] = []

@@ -45,10 +45,12 @@ from martian.evals.records.sql import SqlRecordStore
 from martian.evals.runner import run_suite
 from martian.evals.server import SINGLE_USER, create_app
 from martian.evals.server.principal import Principal, organisation_principal
-from martian.evals.server.push import pushed_trace_id
+from martian.evals.server.projection import DEFAULT_PROJECT
+from martian.evals.server.push import ProjectLine, RunLine, RunPush, ScoringJobLine, push_run, pushed_trace_id
 from martian.evals.state import STATE
-from martian.evals.store import EvalStore, StoreError
+from martian.evals.store import EvalStore, MemoryStore, StoreError
 from martian.evals.store.mlflow_local import MlflowStore
+from martian.evals.worker.scorers import builtin_scorer
 from tests.evals.test_data_export import INSPECT, T0, populate
 
 POSTGRES_URL = os.environ.get("MARTIAN_TEST_POSTGRES_URL")
@@ -626,6 +628,35 @@ def test_export_and_push_mask_http_settings_and_known_echoes_without_changing_th
         assert page.items[0].output == output
         trace = asyncio.run(store.get_trace(SINGLE_USER, "default", trace_id))
         assert trace is not None and trace.response == output
+    finally:
+        records.close()
+
+
+async def test_a_push_reconciles_the_committed_run_before_adding_scoring_jobs(tmp_path, monkeypatch):
+    records = SqlRecordStore(f"sqlite:///{tmp_path / 'records.db'}")
+    store = MemoryStore()
+    run_id = uuid.uuid4()
+    run = Run(id=str(run_id), project_id=DEFAULT_PROJECT, source="local", state="completed", dataset_name="Dataset A")
+    committed = run.model_copy(update={"dataset_name": "Dataset B"})
+    job = ScoringJob(id=str(uuid.uuid4()), run_id=run.id, state="completed", scorers=[builtin_scorer("exact_match")])
+    body = RunPush(
+        format=FORMAT,
+        version=VERSION,
+        project=ProjectLine(project_id=DEFAULT_PROJECT, project=Project(id=DEFAULT_PROJECT, name="Default")),
+        run=RunLine(project_id=DEFAULT_PROJECT, run=run),
+        scoring_jobs=[ScoringJobLine(project_id=DEFAULT_PROJECT, job=job)],
+    )
+    create = records.create_run
+
+    async def reconcile(principal, _record):
+        return await create(principal, committed)
+
+    monkeypatch.setattr(records, "create_run", reconcile)
+    try:
+        with pytest.raises(HTTPException) as conflict:
+            await push_run(run_id, body, ADMIN_A, store, records)
+        assert conflict.value.status_code == 409
+        assert await records.list_scoring_jobs(ADMIN_A, DEFAULT_PROJECT, run.id) == []
     finally:
         records.close()
 

@@ -61,6 +61,7 @@ from typing import Any
 from martian.evals.alerts import AlertSettings
 from martian.evals.model import RunLimits, Target
 from martian.evals.records import RecordStore
+from martian.evals.records.lease import WorkLease, current_work_lease
 from martian.evals.server.principal import Principal
 from martian.evals.store import EvalStore
 from martian.evals.store.mlflow_local import workspace_name
@@ -281,6 +282,7 @@ class ProcessWorker:
                 "setup": self._setup,
                 "options": self._options,
                 "work": dump_work(work),
+                "lease": dataclasses.asdict(lease) if (lease := current_work_lease.get()) is not None else None,
                 "targets": await self._named_target(work),
                 "tied": tied,
             }
@@ -356,5 +358,9 @@ def main() -> int:
     services = _resolve(request["setup"])(**request["options"])
     if not isinstance(services, WorkerServices):
         raise TypeError("the worker's setup must return WorkerServices")
-    asyncio.run(_run_work(services, work, http))
+    active = current_work_lease.set(WorkLease(**request["lease"]) if request.get("lease") is not None else None)
+    try:
+        asyncio.run(_run_work(services, work, http))
+    finally:
+        current_work_lease.reset(active)
     return 0

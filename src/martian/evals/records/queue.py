@@ -44,11 +44,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from sqlalchemy import Connection, and_, delete, func, or_, select, text, update
+from sqlalchemy import Connection, Delete, Update, and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import DataError, IntegrityError
 
 from martian.evals._sql import database_refusal, is_postgres, operation_name
 from martian.evals.records.events import space_of
+from martian.evals.records.lease import WorkLease, lock_current_lease
 from martian.evals.records.sql import engine_for, upgrade
 from martian.evals.records.tables import work_queue
 from martian.evals.store import StoreError
@@ -77,6 +78,9 @@ class Claim:
     work: dict[str, Any]
     token: str
     attempt: int
+
+    def ownership(self) -> WorkLease:
+        return WorkLease(self.space, self.project_id, self.id, self.token)
 
 
 class AlreadyHeld(StoreError):
@@ -215,7 +219,7 @@ class SqlWorkQueue:
                     work_queue.c.state == QUEUED,
                     or_(work_queue.c.available_at.is_(None), work_queue.c.available_at <= now),
                 ),
-                and_(work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at < now),
+                and_(work_queue.c.state == CLAIMED, work_queue.c.lease_expires_at <= now),
             )
             other = work_queue.alias("running")
             running = (
@@ -224,7 +228,7 @@ class SqlWorkQueue:
                 .where(
                     other.c.space == work_queue.c.space,
                     other.c.state == CLAIMED,
-                    other.c.lease_expires_at >= now,
+                    other.c.lease_expires_at > now,
                 )
                 .correlate(work_queue)
                 .scalar_subquery()
@@ -270,61 +274,59 @@ class SqlWorkQueue:
         return await self._run(None, claim)
 
     async def renew(self, claim: Claim, lease_seconds: float) -> bool:
-        """Hold the claimed work for another ``lease_seconds`` from now; False when the claim no
-        longer holds it, because another worker took it after its lease ran out."""
-        return bool(
-            await self._run(
-                claim.space,
-                lambda connection: (
-                    connection.execute(
-                        update(work_queue)
-                        .where(self._key(claim), work_queue.c.state == CLAIMED)
-                        .values(lease_expires_at=_now() + timedelta(seconds=lease_seconds))
-                    ).rowcount
-                ),
+        """Extend a current claim. Expired claims cannot be revived."""
+
+        def renew(connection: Connection) -> bool:
+            if not lock_current_lease(connection, claim.ownership(), _now):
+                return False
+            connection.execute(
+                update(work_queue)
+                .where(self._key(claim))
+                .values(lease_expires_at=_now() + timedelta(seconds=lease_seconds))
             )
-        )
+            return True
+
+        return await self._run(claim.space, renew)
+
+    async def _finish(self, claim: Claim, statement: Delete | Update) -> bool:
+        def finish(connection: Connection) -> bool:
+            if not lock_current_lease(connection, claim.ownership(), _now):
+                return False
+            connection.execute(statement.where(self._key(claim)))
+            return True
+
+        return await self._run(claim.space, finish)
 
     async def release(self, claim: Claim) -> None:
         """Give the work back unfinished, for the next worker to take at once, without counting
         this attempt: the worker is stopping, not failing. Does nothing once the claim no longer
         holds it."""
-        await self._run(
-            claim.space,
-            lambda connection: connection.execute(
-                update(work_queue)
-                .where(self._key(claim))
-                .values(state=QUEUED, token=None, lease_expires_at=None, attempts=work_queue.c.attempts - 1)
+        await self._finish(
+            claim,
+            update(work_queue).values(
+                state=QUEUED, token=None, lease_expires_at=None, attempts=work_queue.c.attempts - 1
             ),
         )
 
     async def done(self, claim: Claim) -> None:
         """Remove the work, which has ended. Does nothing once the claim no longer holds it."""
-        await self._run(claim.space, lambda connection: connection.execute(delete(work_queue).where(self._key(claim))))
+        await self._finish(claim, delete(work_queue))
 
     async def reschedule(self, claim: Claim, available_at: datetime) -> bool:
         """Give back work that has ended for now and comes back, such as a monitor's next pass: it
         is queued again, with no attempt counted, and no claim takes it before ``available_at``;
         it then waits behind the work queued before that time. False when the claim no longer
         holds it."""
-        return bool(
-            await self._run(
-                claim.space,
-                lambda connection: (
-                    connection.execute(
-                        update(work_queue)
-                        .where(self._key(claim))
-                        .values(
-                            state=QUEUED,
-                            token=None,
-                            lease_expires_at=None,
-                            attempts=0,
-                            available_at=available_at,
-                            created_at=available_at,
-                        )
-                    ).rowcount
-                ),
-            )
+        return await self._finish(
+            claim,
+            update(work_queue).values(
+                state=QUEUED,
+                token=None,
+                lease_expires_at=None,
+                attempts=0,
+                available_at=available_at,
+                created_at=available_at,
+            ),
         )
 
     async def held(self, principal: Principal, project_id: str, entry_id: str) -> bool:
@@ -338,7 +340,7 @@ class SqlWorkQueue:
                     work_queue.c.project_id == project_id,
                     work_queue.c.id == entry_id,
                     work_queue.c.state == CLAIMED,
-                    work_queue.c.lease_expires_at >= _now(),
+                    work_queue.c.lease_expires_at > _now(),
                 )
             ).first()
             return found is not None
